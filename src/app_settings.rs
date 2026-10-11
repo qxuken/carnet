@@ -785,6 +785,10 @@ impl Carnet {
                         &EditOptions {
                             style: TextStyle::new(Type::UI.size).color(t.fg),
                             placeholder: Some(hint.into()),
+                            // kui's password field: bullets, never copied,
+                            // read out as a password, the keyboard kept from
+                            // other apps while it has focus.
+                            secure: secret && !shown,
                             ..Default::default()
                         },
                         NodeSpec::row().grow_width().min_width(0.0).label(hint),
@@ -864,10 +868,10 @@ impl Carnet {
                         if reset {
                             ui.set_edit_text(k, &email);
                         }
-                        let shown = masked(&self.sync_password, self.sync_show_password);
-                        let k = field(self, ui, "sync-password", &shown, "Password", Field::SyncPassword);
-                        if std::mem::take(&mut self.sync_mask_reset) || reset {
-                            ui.set_edit_text(k, &shown);
+                        let password = self.sync_password.clone();
+                        let k = field(self, ui, "sync-password", &password, "Password", Field::SyncPassword);
+                        if reset {
+                            ui.set_edit_text(k, &password);
                         }
                     } else {
                         let code = self.sync_code.clone();
@@ -1122,11 +1126,7 @@ impl Carnet {
                                     self.focus_req = None;
                                 }
                             }
-                            let shown = masked(&password, self.sync_show_password);
-                            let k = field(self, ui, "pw-new", &shown, "A password, 8 letters or more", Field::PasswordNew);
-                            if std::mem::take(&mut self.sync_mask_reset) {
-                                ui.set_edit_text(k, &shown);
-                            }
+                            let k = field(self, ui, "pw-new", &password, "A password, 8 letters or more", Field::PasswordNew);
                             if self.focus_req == Some(Field::PasswordNew) {
                                 ui.focus(k);
                                 self.focus_req = None;
@@ -1764,11 +1764,6 @@ fn icon_pill(ui: &mut Ui<'_>, l: &Look, key: &str, g: Icon, word: &str, main: bo
 /// How many days the server keeps what a snapshot sets aside (the
 /// server's `hub::KEEP`, docs/SYNC.md §6).
 const KEEP_DAYS: u64 = 30;
-
-/// A password as its field shows it: dots, unless asked to show it.
-fn masked(password: &str, show: bool) -> String {
-    if show { password.to_string() } else { std::iter::repeat_n(super::DOT, password.chars().count()).collect() }
-}
 
 /// Bytes as people say them: "340 KB", "1.2 GB".
 pub(super) fn size_words(n: u64) -> String {

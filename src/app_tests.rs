@@ -3419,17 +3419,26 @@ fn settings_sync_says_what_is_wrong_in_place() {
     remove_test_dir(dir);
 }
 
-/// A password field shows dots; what's typed or pasted among them, and
-/// what's taken off its ends, is the password.
+/// The password field is kui's own: read out as a password, never its
+/// letters, and shown as the plain words it holds once the eye is open.
 #[test]
-fn a_password_field_of_dots_keeps_what_is_typed() {
-    let d = |n: usize| std::iter::repeat_n(super::DOT, n).collect::<String>();
-    assert_eq!(super::unmask("", "a"), "a");
-    assert_eq!(super::unmask("ab", &format!("{}c", d(2))), "abc", "typed at the end");
-    assert_eq!(super::unmask("abc", &d(2)), "ab", "a backspace");
-    assert_eq!(super::unmask("abc", &format!("{}XY{}", d(1), d(2))), "aXYbc", "pasted in the middle");
-    assert_eq!(super::unmask("abc", "new"), "new", "all of it chosen and typed over");
-    assert_eq!(super::unmask("abc", ""), "");
+fn the_password_field_is_a_password_field_until_shown() {
+    let (store, dir) = temp_store("pw-secure");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings_open = true;
+    app.sync_how = 2;
+    app.sync_password = "hunter22".into();
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    let fields = |d: &mut Drive| d.core.access_tree().nodes.iter().filter(|n| n.role == kui_native::Role::PasswordInput).map(|n| n.name.clone()).collect::<Vec<_>>();
+    assert_eq!(fields(&mut d), [Some("Password".to_string())], "one password field, by its name");
+    assert!(!d.core.access_tree().nodes.iter().any(|n| n.name.as_deref().is_some_and(|t| t.contains("hunter22"))), "its letters are never read out");
+    app.on_plain(Msg::SyncShowPassword);
+    d_frame_twice(&mut app, &mut d);
+    assert!(fields(&mut d).is_empty(), "shown: a plain field");
+    assert_eq!(app.sync_password, "hunter22", "showing it changes nothing");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// A new device comes in by an email and password set on another, through

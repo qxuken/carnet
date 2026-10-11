@@ -693,9 +693,6 @@ pub struct Carnet {
     pub sync_password: String,
     /// The password fields show their text, not dots.
     pub sync_show_password: bool,
-    /// A password field's dots stand for new text: it is to be drawn as
-    /// dots again.
-    sync_mask_reset: bool,
     /// The account's password being set: its email and password fields.
     pub pw_edit: Option<(String, String)>,
     /// Taking the password away was asked once.
@@ -946,7 +943,6 @@ impl Carnet {
             sync_email: String::new(),
             sync_password: String::new(),
             sync_show_password: false,
-            sync_mask_reset: false,
             pw_edit: None,
             pw_remove_armed: false,
             delete_account_armed: false,
@@ -2792,7 +2788,6 @@ impl Carnet {
             }
             Msg::SyncShowPassword => {
                 self.sync_show_password = !self.sync_show_password;
-                self.sync_mask_reset = true;
             }
             Msg::SyncStart => {
                 let code = self.sync_code.clone();
@@ -3342,12 +3337,10 @@ impl Carnet {
                 self.sync_email = text;
             }
             Field::SyncPassword => {
-                let real = if self.sync_show_password { text } else { unmask(&self.sync_password, &text) };
-                if real != self.sync_password {
+                if text != self.sync_password {
                     self.sync.error = None;
-                    self.sync_mask_reset |= !self.sync_show_password;
                 }
-                self.sync_password = real;
+                self.sync_password = text;
             }
             Field::PasswordEmail => {
                 if let Some((email, _)) = self.pw_edit.as_mut() {
@@ -3355,13 +3348,8 @@ impl Carnet {
                 }
             }
             Field::PasswordNew => {
-                let show = self.sync_show_password;
                 if let Some((_, password)) = self.pw_edit.as_mut() {
-                    let real = if show { text } else { unmask(password, &text) };
-                    if real != *password {
-                        self.sync_mask_reset |= !show;
-                    }
-                    *password = real;
+                    *password = text;
                 }
             }
         }
@@ -3930,20 +3918,3 @@ fn gap(ui: &mut Ui<'_>, w: f32) {
 #[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
-
-/// What a password field is shown as: a dot a letter.
-pub const DOT: char = '\u{2022}';
-
-/// The password a field of dots now stands for: `real` was the text, and
-/// `shown` is what the field holds after an edit. Dots at either end are
-/// the letters kept; what isn't a dot was typed or pasted between them.
-/// A letter taken out of the middle can't be told from one at the end
-/// (dots are all alike): Show reveals the text for that.
-pub fn unmask(real: &str, shown: &str) -> String {
-    let old: Vec<char> = real.chars().collect();
-    let new: Vec<char> = shown.chars().collect();
-    let head = new.iter().take_while(|&&c| c == DOT).count().min(old.len());
-    let tail = new[head..].iter().rev().take_while(|&&c| c == DOT).count().min(old.len() - head);
-    let typed: String = new[head..new.len() - tail].iter().filter(|&&c| c != DOT).collect();
-    old[..head].iter().chain(typed.chars().collect::<Vec<_>>().iter()).chain(old[old.len() - tail..].iter()).collect()
-}
