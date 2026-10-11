@@ -341,36 +341,30 @@ impl Carnet {
                 );
             });
             rule(ui, l);
-            let tall = match s.initial_lines {
-                2 => "two",
-                4 => "four",
-                _ => "three",
-            };
-            let note = format!("The note's first paragraph opens with a letter as tall as its lines, up to {tall}");
-            setting(ui, l, "First letter", Some(&note), |ui| {
+            // Plain or dropped: each note's first paragraph's. Any other
+            // paragraph drops its own from the toolbar; the rows under
+            // this style every dropped letter.
+            setting(ui, l, "First letters", Some("Each note's first paragraph; any other, from the toolbar"), |ui| {
                 let cur = if s.initial { 1 } else { 0 };
                 segmented(ui, l, "initial", &["Plain", "Dropped"], cur, |to| Msg::SetInitial { to });
             });
-            // The dropped letter's own styles, only while there is one.
-            if s.initial {
-                subgroup(ui, l, "initial-styles", "The dropped letter", |ui| {
-                    sub_setting(ui, l, "Up to", |ui| {
-                        let cur = (s.initial_lines - crate::settings::INITIAL_LINES.start()) as usize;
-                        segmented(ui, l, "height", &["2 lines", "3 lines", "4 lines"], cur, |to| Msg::SetInitialLines { to });
-                    });
-                    let name = if s.initial_font.is_empty() { default_font_name(2).to_string() } else { s.initial_font.clone() };
-                    sub_setting(ui, l, "Font", |ui| {
-                        font_pill(ui, l, "font-initial", &name, l.initial, self.font_pick == Some(2), Msg::FontMenu { which: 2 });
-                    });
-                    if self.font_pick == Some(2) {
-                        self.font_list(ui, l, 2, &s.initial_font);
-                    }
-                    sub_setting(ui, l, "Colour", |ui| {
-                        let cur = if s.initial_accent { 0 } else { 1 };
-                        segmented(ui, l, "colour", &["Accent", "Text"], cur, |to| Msg::SetInitialColor { to });
-                    });
+            subgroup(ui, l, "initial-styles", "Every dropped letter", |ui| {
+                sub_setting(ui, l, "Up to", |ui| {
+                    let cur = (s.initial_lines - crate::settings::INITIAL_LINES.start()) as usize;
+                    segmented(ui, l, "height", &["2 lines", "3 lines", "4 lines"], cur, |to| Msg::SetInitialLines { to });
                 });
-            }
+                let name = if s.initial_font.is_empty() { default_font_name(2).to_string() } else { s.initial_font.clone() };
+                sub_setting(ui, l, "Font", |ui| {
+                    font_pill(ui, l, "font-initial", &name, l.initial, self.font_pick == Some(2), Msg::FontMenu { which: 2 });
+                });
+                if self.font_pick == Some(2) {
+                    self.font_list(ui, l, 2, &s.initial_font);
+                }
+                sub_setting(ui, l, "Colour", |ui| {
+                    let cur = if s.initial_accent { 0 } else { 1 };
+                    segmented(ui, l, "colour", &["Accent", "Text"], cur, |to| Msg::SetInitialColor { to });
+                });
+            });
             rule(ui, l);
             setting(ui, l, "Fonts", Some("A pairing, or choose each below"), |ui| {
                 let names: Vec<&str> = design::PAIRINGS.iter().map(|p| p.0).collect();
@@ -418,22 +412,18 @@ impl Carnet {
                 let body = l.page_type(Type::BODY).family(l.body).color(t.fg);
                 let words = "Lists, tables and pictures, kept as plain Markdown files you own. \
                              Nothing moves unless you move it. Write a line, a page or a book; \
-                             fold a section away under its heading, pin the notes you come back to, \
+                             colour a word, drop a paragraph's first letter, pin the notes you come back to, \
                              and find any of them again by a word in it. Every note is a file in \
                              your folder, readable by any other app, today and in twenty years, \
                              whatever happens to this one.";
-                if s.initial {
-                    // The first letter as the note's: dropped, in its face
-                    // and ink.
-                    let (cap, rest) = words.split_at(1);
-                    let ink = if s.initial_accent { l.c.accent_ink } else { t.fg };
-                    ui.rich_text(
-                        &[Span::new(cap).family(l.initial).color(ink), Span::new(rest)],
-                        body.initial_letter(s.initial_lines),
-                    );
-                } else {
-                    ui.text(words, body);
-                }
+                // The first letter dropped, in its face and ink: as the
+                // note's, or as any paragraph's from the toolbar.
+                let (cap, rest) = words.split_at(1);
+                let ink = if s.initial_accent { l.c.accent_ink } else { t.fg };
+                ui.rich_text(
+                    &[Span::new(cap).family(l.initial).color(ink), Span::new(rest)],
+                    body.initial_letter(s.initial_lines),
+                );
             },
         );
 

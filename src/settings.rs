@@ -57,10 +57,28 @@ pub enum Divider {
     Stars,
     Asterism,
     Flourish,
+    /// A printer's leaf, the hedera (❧).
+    Fleuron,
+    /// Three small diamonds in a row: a dinkus of lozenges.
+    Diamonds,
+    /// A short rule each side of a diamond.
+    Lozenge,
+    /// A swung dash (⁓): one wave.
+    Wave,
 }
 
 impl Divider {
-    pub const ALL: [Divider; 5] = [Divider::Dots, Divider::Line, Divider::Stars, Divider::Asterism, Divider::Flourish];
+    pub const ALL: [Divider; 9] = [
+        Divider::Dots,
+        Divider::Line,
+        Divider::Stars,
+        Divider::Asterism,
+        Divider::Flourish,
+        Divider::Fleuron,
+        Divider::Diamonds,
+        Divider::Lozenge,
+        Divider::Wave,
+    ];
 
     pub fn key(self) -> &'static str {
         match self {
@@ -69,6 +87,10 @@ impl Divider {
             Divider::Stars => "stars",
             Divider::Asterism => "asterism",
             Divider::Flourish => "flourish",
+            Divider::Fleuron => "fleuron",
+            Divider::Diamonds => "diamonds",
+            Divider::Lozenge => "lozenge",
+            Divider::Wave => "wave",
         }
     }
 
@@ -84,6 +106,10 @@ impl Divider {
             Divider::Stars => "Three stars",
             Divider::Asterism => "Stars in a triangle",
             Divider::Flourish => "A flourish",
+            Divider::Fleuron => "A printer's leaf",
+            Divider::Diamonds => "Three diamonds",
+            Divider::Lozenge => "A diamond between lines",
+            Divider::Wave => "A wave",
         }
     }
 }
@@ -416,5 +442,18 @@ mod tests {
         assert_eq!(s.colors, vec![0xc0504dff]);
         assert_eq!(s.dir.as_deref(), Some(Path::new("/notes")));
         assert_eq!(s.file.as_deref(), Some(Path::new("/c/settings.txt")));
+    }
+
+    /// Each divider is kept by its own word, the first five as ever, so a
+    /// settings file from before the newer ones reads the same.
+    #[test]
+    fn every_divider_is_kept_by_its_word() {
+        for d in Divider::ALL {
+            let s = Settings { divider: d, ..Settings::default() };
+            assert_eq!(Settings::parse(&s.to_text()).divider, d);
+        }
+        let words = ["dots", "line", "stars", "asterism", "flourish"];
+        assert_eq!(words.map(|w| Divider::from_key(w).map(Divider::key)), words.map(Some));
+        assert_eq!(Settings::parse("divider = fleuron\n").divider, Divider::Fleuron);
     }
 }

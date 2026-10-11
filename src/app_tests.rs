@@ -247,6 +247,42 @@ fn a_selection_runs_across_blocks_and_copies_as_markdown() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A checklist item's words chosen whole copy with the box, so a paste
+/// elsewhere is a checklist item again; a numbered one with its number.
+#[test]
+fn a_whole_checklist_item_copies_as_one() {
+    let (mut app, mut d, dir) = body("copy-item");
+    type_in(&mut app, &mut d, "[] milk");
+    key_with(&mut app, &mut d, "home", SHIFT);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("- [ ] milk\n"));
+    // Ticked, and chosen with Ctrl+A (the block's text): the tick too.
+    key_with(&mut app, &mut d, "enter", CTRL);
+    key_with(&mut app, &mut d, "a", CTRL);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("- [x] milk\n"));
+    // A word of it: the word.
+    key(&mut app, &mut d, "end");
+    key_with(&mut app, &mut d, "left", SHIFT);
+    key_with(&mut app, &mut d, "left", SHIFT);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("lk"));
+    // Pasted on an empty line: a checklist item.
+    key(&mut app, &mut d, "end");
+    key(&mut app, &mut d, "enter");
+    key(&mut app, &mut d, "enter");
+    app.edit(Step::Other, |doc, c| page::paste(doc, c, "- [x] milk\n"));
+    assert_eq!(texts(&app)[..2], ["[x]milk", "[x]milk"], "{:?}", texts(&app));
+    // A numbered item, with its number.
+    let (mut app, mut d, dir2) = body("copy-number");
+    type_in(&mut app, &mut d, "1. first");
+    key_with(&mut app, &mut d, "home", SHIFT);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("1. first\n"));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
 #[test]
 fn a_drag_in_the_margin_selects_blocks() {
     let (mut app, mut d, dir) = body("margin");
@@ -849,8 +885,17 @@ fn settings_open_change_the_page_and_close() {
     d.frame(&mut app);
     assert_eq!(app.settings.theme, ThemePref::Dark);
     assert_eq!(d.core.theme().appearance, kui_native::Appearance::Dark);
-    // The font list opens with the default first.
+    // The font list opens with the default first: its pill scrolled up
+    // into the window, past the letters' rows.
     let pill = d.key_of("font-body").expect("the text font");
+    for _ in 0..20 {
+        if d.rect_of(pill).is_some_and(|r| r.y < 400.0) {
+            break;
+        }
+        d.wheel(&mut app, 700.0, 400.0, 0.0, -120.0);
+        d.frame(&mut app);
+    }
+    assert!(d.rect_of(pill).is_some_and(|r| r.y < 400.0), "{:?}", d.rect_of(pill));
     d.click_key(&mut app, pill);
     d.frame(&mut app);
     assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("System")));
@@ -1860,6 +1905,50 @@ fn a_picture_is_carried_between_lines_and_beside_another() {
     row.sort_by(|p, q| p.x.total_cmp(&q.x));
     row.dedup_by(|p, q| (p.x - q.x).abs() < 1.0);
     assert!(row.len() >= 2 && row[0].x + row[0].w + 10.0 <= row[1].x, "the pictures themselves apart: {row:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Two pictures at the left edge, one on a line of its own under them: a
+/// divider put in after the second goes between, with no empty line made
+/// under it, and is drawn across the page under the pictures — not in a
+/// column beside them, where the pictures' height showed as a gap.
+#[test]
+fn a_divider_after_pictures_at_the_edge_has_no_gap_under_it() {
+    let (mut app, mut d, dir) = body("rule-floats");
+    for shade in [200u8, 90, 120] {
+        let rgba: Vec<u8> = (0..300 * 200).flat_map(|_| [shade, 120, 150, 255]).collect();
+        app.paste_picture(300, 200, &rgba);
+        d.frame(&mut app);
+    }
+    let pics: Vec<u64> = blocks(&app).iter().filter(|b| matches!(b.kind, Kind::Image { .. })).map(|b| b.id).collect();
+    assert_eq!(pics.len(), 3, "{:?}", texts(&app));
+    for &id in &pics[..2] {
+        app.edit(Step::Other, |doc, _| page::set_image_float(doc, id, Float::Left) && page::set_image_width(doc, id, Some(160)));
+    }
+    let i = app.doc().index_of(pics[1]).unwrap();
+    app.caret = page::select_blocks(app.doc(), i, i);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    app.on_plain(Msg::InsertDivider);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let kinds: Vec<String> = blocks(&app)
+        .iter()
+        .map(|b| match &b.kind {
+            Kind::Image { .. } => "picture".to_string(),
+            Kind::Divider => "---".to_string(),
+            _ => format!("text:{}", b.text_ref().unwrap_or("")),
+        })
+        .collect();
+    let at = kinds.iter().position(|k| k == "---").expect("a divider");
+    assert_eq!(kinds[at - 2..at + 2], ["picture", "picture", "---", "picture"], "{kinds:?}");
+    let rect = |id: u64| app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).unwrap();
+    let (first, rule, below) = (rect(pics[0]), rect(blocks(&app)[at].id), rect(pics[2]));
+    assert!(rule.y >= first.y + first.h - 1.0, "under the pictures: {first:?} {rule:?}");
+    assert!((rule.x - first.x).abs() < 2.0, "across the page, from its left: {first:?} {rule:?}");
+    assert!(below.y - (rule.y + rule.h) < 40.0, "no gap under it: {rule:?} {below:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -4115,6 +4204,75 @@ fn the_first_letter_drops_three_lines_and_the_paragraph_is_written_as_ever() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Any paragraph drops its first letter from the toolbar (or ⌥⌘8, or the
+/// page's menu), the note's first paragraph not unless the settings say:
+/// as tall as the lines it fills. The file keeps it as a tag around the
+/// letter, which the note reads back; the letter coloured from the
+/// toolbar is written with its colour in that tag, and drops in it.
+#[test]
+fn any_paragraph_drops_its_first_letter_from_the_toolbar() {
+    let (mut app, mut d, dir) = body("drop-any");
+    d.core.set_inspect(true);
+    let words = "Once upon a time there was a lighthouse on a rock at the edge of the map, and a keeper who \
+                 wrote down every ship that passed, one line each, with the hour and the colour of the sea, \
+                 for years and years and years.";
+    type_in(&mut app, &mut d, "A first paragraph, as it was.");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, words);
+    let slot = app.caret.head.slot;
+    d_frame_twice(&mut app, &mut d);
+    let at = |app: &Carnet, d: &Drive, b: usize| app.rect_at(&d.core, slot, b).unwrap();
+    let lh = at(&app, &d, 1).h;
+    assert_eq!(at(&app, &d, 0).h, lh, "not dropped yet");
+    let tool = d.key_of("t-initial").expect("the toolbar's Drop the first letter");
+    d.click_key(&mut app, tool);
+    d_frame_twice(&mut app, &mut d);
+    assert!(blocks(&app)[1].initial && !blocks(&app)[0].initial);
+    let (o, after) = (at(&app, &d, 0), at(&app, &d, 1));
+    assert!((o.h - 3.0 * lh).abs() < 1.0, "three lines: {o:?}, a line {lh}");
+    assert!(after.x > o.x + 20.0);
+    let first = app.doc().blocks()[0].id;
+    let r = app.rect_at(&d.core, Slot::block(first), 0).unwrap();
+    assert_eq!(r.h, lh, "the note's first paragraph as it was");
+    assert_eq!(texts(&app)[1], words, "the words as they were");
+    let file = |app: &Carnet| std::fs::read_to_string(app.store.notes[app.current].path.clone().unwrap()).unwrap();
+    app.store.notes[app.current].title = "Drops".into();
+    app.save_current();
+    let md = file(&app);
+    assert!(md.contains("\n\n<span class=\"initial\">O</span>nce upon a time"), "{md}");
+    let (_, back) = carnet_core::doc::from_markdown(&md);
+    assert!(back.blocks()[1].initial && back.blocks()[1].text_ref() == Some(words));
+
+    // The letter given a colour from the toolbar: in the tag, and its own.
+    app.caret = Caret { anchor: Pos { slot, byte: 0 }, head: Pos { slot, byte: 1 } };
+    app.on_plain(Msg::Tint { ink: 1, color: 0xC0553FFF });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app)[1], format!("<span style=\"color: #C0553F\">O</span>{}", &words[1..]));
+    assert!((at(&app, &d, 0).h - 3.0 * lh).abs() < 1.0, "still dropped");
+    app.save_current();
+    assert!(file(&app).contains("<span class=\"initial\" style=\"color: #C0553F\">O</span>nce"), "{}", file(&app));
+
+    // ⌥⌘8 (Ctrl+Alt+8) takes it off again; the page's menu puts it back.
+    app.caret = Caret::at(Pos { slot, byte: 5 });
+    key_with(&mut app, &mut d, "8", CTRL_ALT);
+    assert!(!blocks(&app)[1].initial);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(at(&app, &d, 0).h, lh);
+    let item = app.page_menu().into_iter().find(|m| m.label == "Drop the first letter").expect("in the page's menu");
+    assert!(item.enabled);
+    app.page_action("initial");
+    assert!(blocks(&app)[1].initial);
+    // On a heading there is none to drop: the tool is off.
+    app.caret = Caret::at(Pos { slot: Slot::block(first), byte: 0 });
+    app.on_plain(Msg::Turn { to: TURN_H2 });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(page::initial_at(app.doc(), app.caret), None, "nothing to drop in a heading");
+    assert!(!app.page_menu().into_iter().find(|m| m.label == "Drop the first letter").unwrap().enabled);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A short first paragraph gets a short letter: set to drop four lines,
 /// a sentence of one line drops none and one of two lines drops two, so
 /// no tall letter stands beside a line or two of words.
@@ -4145,8 +4303,8 @@ fn the_first_letter_drops_no_more_lines_than_the_paragraph_fills() {
 /// The dropped letter's styles: two lines tall or four, the caret before
 /// it as tall and as many rows moved in past it, the rest at the page's
 /// left; a letter font chosen from the list is kept in the settings and
-/// the letter drawn in it. Its rows show in the settings only while the
-/// letter is dropped.
+/// the letter drawn in it. Its rows show in the settings whether or not
+/// every note's first letter drops.
 #[test]
 fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
     let (mut app, mut d, dir) = body("drop-cap-styles");
@@ -4190,7 +4348,7 @@ fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
     app.on_settings(Msg::SetInitialColor { to: 1 });
     assert!(!Settings::parse(&app.settings.to_text()).initial_accent);
     app.on_settings(Msg::SetInitial { to: 0 });
-    assert!(!drawn(&mut d, &mut app, "Up to"), "plain: no letter to style");
+    assert!(drawn(&mut d, &mut app, "Up to"), "plain: still there, for a paragraph's dropped from the toolbar");
     app.on_settings(Msg::SetInitial { to: 1 });
     app.settings_open = false;
     d_frame_twice(&mut app, &mut d);
@@ -4263,56 +4421,10 @@ fn the_page_follows_the_text_size_down_to_12px() {
         d_frame_twice(&mut app, &mut d);
         assert!(row(&app, 1).h > 10.0);
     }
-    assert_eq!(app.settings.divider, crate::settings::Divider::Flourish);
+    assert_eq!(app.settings.divider, crate::settings::Divider::Wave);
     assert!(app.settings.initial);
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn a_heading_collapses_what_is_under_it_on_the_page_only() {
-    let (mut app, mut d, dir) = body("fold");
-    d.core.set_inspect(true);
-    for (i, s) in ["## First", "one", "two", "## Second", "three"].iter().enumerate() {
-        if i > 0 {
-            key(&mut app, &mut d, "enter");
-        }
-        type_in(&mut app, &mut d, s);
-    }
-    let md = app.store.notes[app.current].markdown();
-    let ids: Vec<u64> = app.doc().blocks().iter().map(|b| b.id).collect();
-    let drawn = |app: &Carnet| app.row_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-    d_frame_twice(&mut app, &mut d);
-    assert!(drawn(&app).contains(&ids[1]));
-    // From the page's menu on the heading.
-    app.caret = Caret::at(page::end(app.doc(), Slot::block(ids[0])));
-    d.frame(&mut app);
-    assert!(app.page_menu().iter().any(|m| m.label == "Collapse section"));
-    app.page_action("fold");
-    d_frame_twice(&mut app, &mut d);
-    assert_eq!(drawn(&app)[..2], [ids[0], ids[3]], "the paragraphs under it are out of sight");
-    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("2 more blocks")));
-    assert_eq!(app.store.notes[app.current].markdown(), md, "the file is as it was");
-    // ↓ from the heading steps over them, to the next heading.
-    key(&mut app, &mut d, "down");
-    assert_eq!(app.caret.head.slot.block, ids[3]);
-    assert!(app.folded.contains(&ids[0]), "still collapsed");
-    // A caret that goes in (here, ↑ then ← from the second heading's
-    // start, into the end of "two") opens it.
-    key(&mut app, &mut d, "home");
-    key(&mut app, &mut d, "left");
-    d_frame_twice(&mut app, &mut d);
-    assert_eq!(app.caret.head.slot.block, ids[2]);
-    assert!(!app.folded.contains(&ids[0]), "opened");
-    assert!(drawn(&app).contains(&ids[1]));
-    // The pill shows them again too.
-    app.fold(ids[0]);
-    d_frame_twice(&mut app, &mut d);
-    let pill = d.key_of("folded").expect("how much is hidden");
-    d.click_key(&mut app, pill);
-    d_frame_twice(&mut app, &mut d);
-    assert!(app.folded.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
 

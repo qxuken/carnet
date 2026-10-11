@@ -12,6 +12,8 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::inline;
+
 /// Ids are process-unique and never reused: an editor's buffer is keyed by
 /// the block's id, so a fresh id is a fresh editor.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -245,11 +247,16 @@ impl Kind {
 pub struct Block {
     pub id: u64,
     pub kind: Kind,
+    /// A paragraph whose first letter drops, a few lines tall. Kept in
+    /// the file as a tag around the letter (`<span class="initial">T</span>`,
+    /// see [`inline::put_initial`]), out of the words while they are
+    /// edited. Only a paragraph's (`Kind::Text`) is drawn and written.
+    pub initial: bool,
 }
 
 impl Block {
     pub fn new(kind: Kind) -> Self {
-        Self { id: new_id(), kind }
+        Self { id: new_id(), kind, initial: false }
     }
 
     pub fn text(s: impl Into<String>) -> Self {
@@ -593,6 +600,10 @@ pub fn to_markdown(title: Option<&str>, doc: &Doc) -> String {
                     out.push('\n');
                     continue;
                 }
+                // A dropped first letter goes on before the lines are
+                // escaped: a line opening with its tag reads as no list or
+                // heading, and needs no backslash.
+                let t = if b.initial { inline::put_initial(t) } else { t.clone() };
                 for line in t.split('\n') {
                     out.push_str(&escape_line(line));
                     out.push('\n');
@@ -1173,7 +1184,13 @@ fn parse(src: &str, whole_note: bool) -> (Option<String>, Vec<Block>) {
             para.iter_mut().for_each(|l| *l = "\\".into());
         }
         if !para.is_empty() {
-            blocks.push(Block::text(para.join("\n")));
+            let text = para.join("\n");
+            // A dropped first letter: the paragraph's, out of its words.
+            let b = match inline::take_initial(&text) {
+                Some(words) => Block { initial: true, ..Block::text(words) },
+                None => Block::text(text),
+            };
+            blocks.push(b);
             para.clear();
         }
     };

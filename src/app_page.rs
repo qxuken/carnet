@@ -43,8 +43,6 @@ struct Cx {
     lone: bool,
     /// Focus: the block being written, while the rest steps back.
     focus: Option<u64>,
-    /// Each collapsed heading, and how many blocks it hides.
-    folds: HashMap<u64, usize>,
 }
 
 fn hash(s: &str) -> u64 {
@@ -425,39 +423,25 @@ impl Carnet {
         self.shown.clear();
         // Pointers, not text: the blocks stay shared with the note.
         let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
-        let mut under = self.sections(&blocks);
-        // A caret that went into a collapsed section (undo, a search, the
-        // arrows across it) opens it.
-        let into = |b: u64| under.iter().filter(move |(_, hid)| hid.contains(&b)).map(|(h, _)| *h).collect::<Vec<_>>();
-        let mut opened = into(self.caret.head.slot.block);
-        opened.extend(into(self.caret.anchor.slot.block));
-        if !opened.is_empty() {
-            for h in opened {
-                self.folded.remove(&h);
-            }
-            under = self.sections(&blocks);
-        }
-        // A heading with nothing left under it is not collapsed.
-        for (h, hid) in &under {
-            if hid.is_empty() {
-                self.folded.remove(h);
-            }
-        }
-        self.hidden = under.iter().flat_map(|(_, hid)| hid.iter().copied()).collect();
-        let folds: HashMap<u64, usize> = under.iter().filter(|(_, hid)| !hid.is_empty()).map(|(h, hid)| (*h, hid.len())).collect();
         let drop_at = self.drop_index;
-        // The first letter dropped, when the settings ask: of the note's
-        // first paragraph, past the headings (and front matter) at its top.
-        self.initial = self
+        // First letters dropped: of each paragraph that asks for it, and,
+        // when the settings ask, of the note's first paragraph, past the
+        // headings (and front matter) at its top.
+        let first = self
             .settings
             .initial
             .then(|| blocks.iter().find(|b| !matches!(&b.kind, Kind::Heading { .. }) && !matches!(&b.kind, Kind::Raw(t) if t.starts_with("---\n"))))
             .flatten()
+            .map(|b| b.id);
+        self.initial = blocks
+            .iter()
+            .filter(|b| b.initial || Some(b.id) == first)
             .filter(|b| matches!(&b.kind, Kind::Text(t) if !t.trim().is_empty()))
-            .map(|b| Slot::block(b.id));
+            .map(|b| Slot::block(b.id))
+            .collect();
         let lone = blocks.len() == 1;
         let focus = (self.focus_on() && self.in_flow()).then_some(self.caret.head.slot.block);
-        let mut cx = Cx { cov, slash, numbers: Vec::new(), body, lone, focus, folds };
+        let mut cx = Cx { cov, slash, numbers: Vec::new(), body, lone, focus };
         let mut bi = 0;
         while bi < blocks.len() {
             if drop_at == Some(bi) {
@@ -482,9 +466,7 @@ impl Carnet {
                 bi = end;
                 continue;
             }
-            if !self.hidden.contains(&blocks[bi].id) {
-                self.block(ui, l, &blocks[bi], &mut cx);
-            }
+            self.block(ui, l, &blocks[bi], &mut cx);
             bi += 1;
         }
         if drop_at.is_some_and(|i| i >= blocks.len()) {
@@ -493,67 +475,11 @@ impl Carnet {
         self.picture_ghost(ui, l);
     }
 
-    /// Each collapsed heading and the blocks it hides: everything under
-    /// it up to the next heading of its level or a higher one. A collapsed
-    /// heading inside a collapsed section hides nothing more of its own.
-    fn sections(&self, blocks: &[Rc<Block>]) -> Vec<(u64, std::collections::HashSet<u64>)> {
-        let mut out: Vec<(u64, std::collections::HashSet<u64>)> = Vec::new();
-        let mut open: Option<(u8, usize)> = None;
-        for b in blocks {
-            if let Kind::Heading { level, .. } = &b.kind {
-                if open.is_some_and(|(l, _)| *level <= l) {
-                    open = None;
-                }
-                if open.is_none() && self.folded.contains(&b.id) {
-                    out.push((b.id, Default::default()));
-                    open = Some((*level, out.len() - 1));
-                    continue;
-                }
-            }
-            if let Some((_, k)) = open {
-                out[k].1.insert(b.id);
-            }
-        }
-        // The empty line kept at the note's end stays, to type on.
-        if let (Some(last), Some((_, k))) = (blocks.last(), open)
-            && matches!(&last.kind, Kind::Text(t) if t.is_empty())
-        {
-            out[k].1.remove(&last.id);
-        }
-        out
-    }
-
-    /// Whether heading `id` has anything under it to collapse.
-    fn would_fold(&self, id: u64) -> bool {
-        let doc = self.doc();
-        let Some(i) = doc.index_of(id) else { return false };
-        let Kind::Heading { level, .. } = &doc.blocks()[i].kind else { return false };
-        doc.blocks()[i + 1..]
-            .iter()
-            .take_while(|b| !matches!(&b.kind, Kind::Heading { level: l, .. } if l <= level))
-            .any(|b| !matches!(&b.kind, Kind::Text(t) if t.is_empty()))
-    }
-
-    /// Heading `id`'s section collapsed, or shown again. A caret inside
-    /// what goes out of sight comes up to the heading's end.
-    pub(super) fn fold(&mut self, id: u64) {
-        if self.folded.remove(&id) {
-            return;
-        }
-        self.folded.insert(id);
-        let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
-        let gone = self.sections(&blocks).into_iter().find(|(h, _)| *h == id).map(|(_, hid)| hid).unwrap_or_default();
-        if gone.contains(&self.caret.head.slot.block) || gone.contains(&self.caret.anchor.slot.block) {
-            let end = page::end(self.doc(), Slot::block(id));
-            self.move_to(Caret::at(end));
-        }
-    }
-
     /// Where a floated picture's row ends, for one at block `i`: its
     /// pictures (`i..k`, side by side), and the blocks that run beside
     /// them (`k..end`) — as many as it takes, by last frame's heights, to
     /// pass the tallest picture's foot. A picture on a line of its own
-    /// ends it.
+    /// ends it, and so does a divider.
     fn float_group(&self, blocks: &[Rc<Block>], i: usize, prev: &HashMap<u64, Rect>) -> Option<(usize, usize)> {
         let floated = |b: &Block| matches!(b.kind, Kind::Image { float, .. } if float != Float::None);
         if !floated(&blocks[i]) {
@@ -572,7 +498,9 @@ impl Carnet {
         let mut end = k;
         let mut beside = 0.0;
         while end < blocks.len() && beside < tall - 8.0 {
-            if matches!(blocks[end].kind, Kind::Image { .. }) {
+            // A divider ends a part of the note: it goes across the page,
+            // under the pictures, not in a column beside them.
+            if matches!(blocks[end].kind, Kind::Image { .. } | Kind::Divider) {
                 break;
             }
             beside += prev.get(&blocks[end].id).map_or(30.0, |r| r.h);
@@ -710,55 +638,13 @@ impl Carnet {
                     2 => (l.page_type(Type::H2).family(l.serif), 22.0),
                     _ => (l.page_type(Type::H3).family(l.serif), 16.0),
                 };
-                let hidden = cx.folds.get(&id).copied();
-                let folded = hidden.is_some();
                 ui.with(
                     NodeSpec::row()
                         .grow_width()
-                        .gap(8.0)
-                        .cross_align(Align::Center)
                         .padding(Edges { l: 0.0, r: 0.0, t: l.air(top), b: l.air(6.0) }),
                     |ui| {
                         let hint = empty_here.then_some("Heading");
                         self.slot_line(ui, l, Slot::block(id), text, style.color(t.fg), hint, false, cov);
-                        // In the margin, a chevron that collapses what is
-                        // under the heading: there while the pointer is
-                        // over it, and while it is collapsed.
-                        let over = self.row_rects.iter().find(|(b, _)| *b == id).is_some_and(|(_, r)| {
-                            ui.core().cursor().is_some_and(|p| p.y >= r.y && p.y < r.y + r.h && p.x >= r.x - 40.0 && p.x < r.x + r.w)
-                        });
-                        if folded || (over && self.would_fold(id)) {
-                            let size = 20.0;
-                            ui.with_keyed(
-                                "fold",
-                                NodeSpec::row()
-                                    .size(size, size)
-                                    .radius(radius::TIGHT)
-                                    .center()
-                                    .hover_bg(t.hover)
-                                    .float(FloatConfig::parent().offset(-size - 10.0, l.air(top) + (style.line_height - size) / 2.0))
-                                    .on_click(Msg::Fold { id })
-                                    .label(if folded { "Expand section" } else { "Collapse section" })
-                                    .tooltip(if folded { "Show what is under this heading" } else { "Hide what is under this heading" }),
-                                |ui| icons::icon(ui, if folded { Glyph::ChevronRight } else { Glyph::ChevronDown }, t.muted, 16.0, false),
-                            );
-                        }
-                        // Collapsed: how much is out of sight, a click away.
-                        if let Some(n) = hidden.filter(|_| folded) {
-                            ui.text_in_keyed(
-                                "folded",
-                                NodeSpec::row()
-                                    .pad_xy(8.0, 2.0)
-                                    .radius(radius::CONTROL)
-                                    .bg(t.sunken)
-                                    .hover_bg(t.hover)
-                                    .on_click(Msg::Fold { id })
-                                    .label(format!("Show {n} hidden"))
-                                    .tooltip("Show what is under this heading"),
-                                &if n == 1 { "1 more block".to_string() } else { format!("{n} more blocks") },
-                                TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
-                            );
-                        }
                     },
                 );
             }
@@ -1291,8 +1177,8 @@ impl Carnet {
         // The dropped first letter: where it is in the source, with any
         // opening quote before it. Not while a composition stands in
         // front of it, which would be dropped in its place.
-        let cap = (self.initial == Some(slot) && !code_block)
-            .then(|| initial_letter(text))
+        let cap = (self.initial.contains(&slot) && !code_block)
+            .then(|| inline::initial_letter(text))
             .flatten()
             .filter(|&(f, _)| !(preedit.is_some() && byte <= f));
         let (dark, page_bg) = (l.c.dark, t.bg);
@@ -1300,8 +1186,10 @@ impl Carnet {
         ui.with(row, |ui| {
             let key = ui.child_key_indexed(0);
             let mut spans: Vec<Span<'_>> = Vec::new();
-            // The span holding the first letter, if it may drop.
+            // The span holding the first letter, if it may drop, and
+            // whether the letter has a colour of its own.
             let mut letter: Option<usize> = None;
+            let mut letter_own = false;
             if text.is_empty() && preedit.is_none() {
                 // An empty line still has a line's height, and a place for
                 // the caret; its placeholder floats over it, easing in.
@@ -1385,6 +1273,7 @@ impl Carnet {
                     if cap.is_some_and(|(f, to)| a >= f && b <= to) {
                         // Styled below, once it's known to drop.
                         letter = Some(spans.len());
+                        letter_own |= !s.marker && s.ink != 0;
                     }
                     if part.is_some_and(|(f, to)| a >= f && b <= to) {
                         sp = sp.bg(t.selection).bg_radius(4.0);
@@ -1408,11 +1297,12 @@ impl Carnet {
             let style = match drop {
                 Some((i, n)) => {
                     // In its face (the headings', unless one is chosen), in
-                    // the accent deepened for text or the words' own; kui
-                    // sizes it to the lines it drops through. Undropped,
-                    // it's a letter like the rest.
+                    // its own colour if it was given one, else the accent
+                    // deepened for text or the words'; kui sizes it to the
+                    // lines it drops through. Undropped, it's a letter
+                    // like the rest.
                     let mut sp = spans[i].family(l.initial);
-                    if cap_accent {
+                    if cap_accent && !letter_own {
                         sp = sp.color(l.c.accent_ink);
                     }
                     spans[i] = sp;
@@ -1658,11 +1548,13 @@ impl Carnet {
             ] {
                 items.push(item(label, &format!("turn:{to}")).accel(spec).enabled(convertible));
             }
-            let here = self.caret.head.slot.block;
-            if matches!(doc.get(here).map(|b| &b.kind), Some(Kind::Heading { .. })) && (self.folded.contains(&here) || self.would_fold(here)) {
-                items.push(MenuItem::separator());
-                items.push(item(if self.folded.contains(&here) { "Expand section" } else { "Collapse section" }, "fold"));
-            }
+            let initial = page::initial_at(doc, self.caret);
+            items.push(
+                item("Drop the first letter", "initial")
+                    .accel(keys::INITIAL)
+                    .enabled(initial.is_some())
+                    .checked(initial == Some(true)),
+            );
             items.extend([
                 MenuItem::separator(),
                 item("Insert table", "table").accel(keys::TABLE),
@@ -1760,10 +1652,7 @@ impl Carnet {
             "remove" => self.on_plain(Msg::DeleteBlock),
             "table" => self.on_plain(Msg::InsertTable),
             "rule" => self.on_plain(Msg::InsertDivider),
-            "fold" => {
-                let id = self.caret.head.slot.block;
-                self.fold(id);
-            }
+            "initial" => self.on_plain(Msg::ToggleInitial),
             a => {
                 if let Some(n) = a.strip_prefix("style:").and_then(|n| n.parse().ok()) {
                     self.on_plain(Msg::Style { which: n });
@@ -1982,6 +1871,7 @@ impl Carnet {
                 };
                 self.on_plain(Msg::Turn { to });
             }
+            KeyCode::Char('8') if chord && m.alt => self.on_plain(Msg::ToggleInitial),
             KeyCode::Char('t') if chord && m.alt => self.on_plain(Msg::InsertTable),
             KeyCode::Char('-') if chord && m.alt => self.on_plain(Msg::InsertDivider),
             KeyCode::Char('d') if chord => {
@@ -2510,18 +2400,11 @@ impl Carnet {
         }
         // Of a table row, the cell under the caret's x.
         let left_of = |s: &Slot| self.rect_at(core, *s, 0).is_some_and(|o| o.x <= x + 1.0);
-        let mut pick = if cands.len() == 1 {
+        let pick = if cands.len() == 1 {
             cands[0]
         } else {
             cands.iter().rev().find(|s| left_of(s)).copied().unwrap_or(cands[0])
         };
-        // Past what a collapsed heading hides.
-        while self.hidden.contains(&pick.block) {
-            match page::vertical(doc, pick, up).first() {
-                Some(&next) => pick = next,
-                None => return p,
-            }
-        }
         if !self.slot_keys.contains_key(&pick) {
             return page::start(pick);
         }
@@ -2848,28 +2731,6 @@ fn marker(ui: &mut Ui<'_>, l: &Look, id: u64, style: ListStyle, done: bool, n: u
 /// line.
 fn drop_lines(most: u32, lines: u32) -> Option<u32> {
     Some(most.min(lines)).filter(|&n| n >= 2)
-}
-
-/// The first letter of a paragraph's words, with any opening quote or
-/// bracket before it: its range in the source, marks left out — the
-/// letter kui drops (`TextStyle::initial_letter`), which takes the same
-/// openers.
-fn initial_letter(text: &str) -> Option<(usize, usize)> {
-    let v = inline::Visible::of(text);
-    let words = v.text(text);
-    let mut chars = words.char_indices().skip_while(|(_, c)| c.is_whitespace()).peekable();
-    let (start, _) = *chars.peek()?;
-    let (at, ch) = chars.find(|(_, c)| {
-        !matches!(
-            c,
-            '"' | '\'' | '(' | '[' | '{' | '¿' | '¡' | '\u{201c}' | '\u{2018}' | '\u{201e}' | '\u{201a}' | '\u{ab}' | '\u{2039}'
-        )
-    })?;
-    if !ch.is_alphanumeric() {
-        return None;
-    }
-    let end = v.source(at) + ch.len_utf8();
-    Some((v.source(start), end))
 }
 
 /// What colour words are drawn in. The colour the reader gave them, on

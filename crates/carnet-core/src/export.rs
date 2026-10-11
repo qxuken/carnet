@@ -85,6 +85,18 @@ fn render(blocks: &[Block], image_url: impl Fn(&str, bool) -> String, viewer: bo
         match &b.kind {
             // The empty line the editor keeps at the end draws nothing.
             Kind::Text(t) if viewer && t.trim().is_empty() => {}
+            // A dropped first letter: the paragraph's class, for the page's
+            // styles to drop (`::first-letter`); `own` when the letter has
+            // a colour of its own, which the styles then leave it.
+            Kind::Text(t) if b.initial && inline::initial_letter(t).is_some() => {
+                let own = inline::initial_letter(t).is_some_and(|(f, to)| {
+                    let st = inline::styles(t);
+                    (f..to).any(|i| !st[i].marker && st[i].ink != 0)
+                });
+                out.push_str(if own && viewer { "<p class=\"initial own\">" } else { "<p class=\"initial\">" });
+                out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
+                out.push_str("</p>");
+            }
             Kind::Text(t) => {
                 out.push_str("<p>");
                 out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
@@ -228,6 +240,18 @@ mod tests {
         assert!(h.contains("<ol><li>one</li></ol>"), "{h}");
         assert!(h.contains("<tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr>"), "{h}");
         assert!(h.contains("<img src=\"file:///C:/n/attachments/p.png\" alt=\"pic\">"), "{h}");
+    }
+
+    /// A dropped first letter is the paragraph's class, in a copy and in
+    /// the viewer; a letter of its own colour says so, for the viewer.
+    #[test]
+    fn a_dropped_first_letter_is_a_class_of_its_paragraph() {
+        let md = "<span class=\"initial\">O</span>nce upon a time.\n\n<span class=\"initial\" style=\"color: #C0553F\">T</span>he end.\n\nPlain.";
+        let h = html(md, |s, _| s.to_string());
+        assert!(h.starts_with("<p class=\"initial\">Once upon a time.</p><p class=\"initial\">The end.</p><p>Plain.</p>"), "{h}");
+        let v = viewer(md, |s, _| s.to_string());
+        assert!(v.contains("<p class=\"initial\">Once"), "{v}");
+        assert!(v.contains("<p class=\"initial own\"><span class=\"ink\" style=\"--ink:#c0553fff\">T</span>he end.</p>"), "{v}");
     }
 
     #[test]

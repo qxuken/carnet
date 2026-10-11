@@ -13,6 +13,11 @@
 //! and `**b**`, are joined again ([`merge`]). The caret sits after a word's
 //! last letter and before its closing marks ([`Visible::at`]), so what is
 //! typed takes the style of what is before it, as in a word processor.
+//!
+//! A paragraph's dropped first letter is written as other apps show a
+//! plain one, `<span class="initial">T</span>he…`, but is no style of the
+//! words: [`take_initial`] reads it off as the paragraph is read, and
+//! [`put_initial`] puts it back as it is written (`doc`).
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Style {
@@ -449,6 +454,20 @@ fn html_tint(text: &str, at: usize) -> Option<HtmlTint> {
     Some((ink, mark, at + gt + 1, (close, close + closer.len())))
 }
 
+/// Whether a tag's `class` attribute names `initial`.
+fn has_initial_class(tag: &str) -> bool {
+    let lower = tag.to_ascii_lowercase();
+    let Some(k) = lower.find("class") else { return false };
+    let after = lower[k + 5..].trim_start();
+    let Some(after) = after.strip_prefix('=') else { return false };
+    let after = after.trim_start();
+    let Some(q) = after.chars().next().filter(|c| matches!(c, '"' | '\'')) else {
+        return false;
+    };
+    let body = &after[1..];
+    body[..body.find(q).unwrap_or(body.len())].split_whitespace().any(|w| w == "initial")
+}
+
 /// The `prop: value` pairs of a tag's `style` attribute, props lowercased.
 fn style_props(attrs: &str) -> Vec<(String, String)> {
     let lower = attrs.to_ascii_lowercase();
@@ -570,6 +589,84 @@ pub fn plain(text: &str) -> String {
         .filter(|r| !r.2.marker)
         .map(|(a, b, _)| &text[a..b])
         .collect()
+}
+
+// ------------------------------------------------------------ the first letter
+
+/// What may stand before a dropped first letter and drop with it: an
+/// opening quote or bracket, as kui's `TextStyle::initial_letter` takes.
+const OPENERS: [char; 13] = [
+    '"', '\'', '(', '[', '{', '¿', '¡', '\u{201c}', '\u{2018}', '\u{201e}', '\u{201a}', '\u{ab}', '\u{2039}',
+];
+
+/// The first letter of a paragraph's words: where it starts with any
+/// openers before it, where the letter itself starts, and where it ends,
+/// in the source, marks left out. None where the words start with no
+/// letter or digit, or in code.
+fn initial_parts(text: &str) -> Option<(usize, usize, usize)> {
+    let v = Visible::of(text);
+    let words = v.text(text);
+    let mut chars = words.char_indices().skip_while(|(_, c)| c.is_whitespace()).peekable();
+    let (start, _) = *chars.peek()?;
+    let (at, ch) = chars.find(|(_, c)| !OPENERS.contains(c))?;
+    if !ch.is_alphanumeric() {
+        return None;
+    }
+    let (s, l) = (v.source(start), v.source(at));
+    let e = l + ch.len_utf8();
+    let st = styles(text);
+    if st[l..e].iter().any(|s| s.code) {
+        return None;
+    }
+    Some((s, l, e))
+}
+
+/// The first letter of a paragraph's words, with any opening quote or
+/// bracket before it: its range in the source, marks left out — the
+/// letter that drops.
+pub fn initial_letter(text: &str) -> Option<(usize, usize)> {
+    initial_parts(text).map(|(s, _, e)| (s, e))
+}
+
+/// A paragraph's words with its first letter marked to drop, as the file
+/// keeps it: `<span class="initial">T</span>he…`, which any Markdown
+/// viewer shows as a plain T. A letter given a colour of its own carries
+/// the class in its colour's tag: `<span class="initial" style="color:
+/// #C0553F">T</span>`. As it was where there is no letter to drop.
+pub fn put_initial(text: &str) -> String {
+    let Some((s, l, e)) = initial_parts(text) else { return text.to_string() };
+    let st = styles(text);
+    // The openers drop with the letter, inside the tag, unless a mark
+    // stands between them: then the letter alone.
+    let s = if (s..e).any(|i| st[i].marker) { l } else { s };
+    let own = tints(text)
+        .into_iter()
+        .find(|t| t.open.1 == s && t.close.0 == e && text[t.open.0..t.open.1].starts_with("<span"));
+    match own {
+        Some(t) => format!("{}<span class=\"initial\"{}", &text[..t.open.0], &text[t.open.0 + 5..]),
+        None => format!("{}<span class=\"initial\">{}</span>{}", &text[..s], &text[s..e], &text[e..]),
+    }
+}
+
+/// A paragraph's words with the mark of a dropped first letter taken off,
+/// a colour it had kept: what `put_initial` writes, read back. None when
+/// there is no such mark at the paragraph's start.
+pub fn take_initial(text: &str) -> Option<String> {
+    let t = tints(text)
+        .into_iter()
+        .find(|t| text[t.open.0..t.open.1].starts_with("<span") && has_initial_class(&text[t.open.0..t.open.1]))?;
+    let v = Visible::of(text);
+    let words = v.text(text);
+    let (a, b) = (v.drawn(t.open.1), v.drawn(t.close.0));
+    let lead = words.get(..a)?;
+    if a >= b || !lead.chars().all(|c| c.is_whitespace() || OPENERS.contains(&c)) {
+        return None;
+    }
+    let (o, c) = tags_around(t.ink, t.mark, &text[t.open.1..t.close.0]);
+    let mut out = text.to_string();
+    out.replace_range(t.close.0..t.close.1, &c);
+    out.replace_range(t.open.0..t.open.1, &o);
+    Some(out)
 }
 
 // ------------------------------------------------------------ the words
@@ -1219,6 +1316,41 @@ pub fn switch_at(text: &str, at: usize, kind: Kind) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dropped first letter is written as a tag around the letter and
+    /// read back off it, the words as they were — styled, coloured, after
+    /// a quote — and a tag anywhere but the start is left alone.
+    #[test]
+    fn a_dropped_first_letter_is_written_and_read_back() {
+        for (words, file) in [
+            ("The rest", "<span class=\"initial\">T</span>he rest"),
+            ("**Bold** start", "**<span class=\"initial\">B</span>old** start"),
+            ("\u{201c}Quoted,\u{201d} she said", "<span class=\"initial\">\u{201c}Q</span>uoted,\u{201d} she said"),
+            (
+                "<span style=\"color: #C0553F\">T</span>he rest",
+                "<span class=\"initial\" style=\"color: #C0553F\">T</span>he rest",
+            ),
+            (
+                "<span style=\"color: #C0553F\">The rest</span>",
+                "<span style=\"color: #C0553F\"><span class=\"initial\">T</span>he rest</span>",
+            ),
+            ("==Lit== up", "==<span class=\"initial\">L</span>it== up"),
+            ("Ёлка", "<span class=\"initial\">Ё</span>лка"),
+        ] {
+            assert_eq!(put_initial(words), file, "{words}");
+            assert_eq!(take_initial(file).as_deref(), Some(words), "{file}");
+            assert_eq!(plain(file), plain(words), "other apps show the letter plain");
+        }
+        // Nothing to drop: no letter first, or code.
+        for words in ["— a dash", "`code` first", ""] {
+            assert_eq!(put_initial(words), words);
+        }
+        // Not at the start: a tag like any other.
+        assert_eq!(take_initial("Some <span class=\"initial\">x</span> here"), None);
+        assert_eq!(take_initial("<span class=\"other\">T</span>he"), None);
+        // Another app's way of writing it, in single quotes, among others.
+        assert_eq!(take_initial("<span class='lead initial'>O</span>nce").as_deref(), Some("Once"));
+    }
 
     /// Found by the property tests: a run of colour inside another
     /// (`<mark>…==…==…</mark>`) had its tags written again first, and the

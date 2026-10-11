@@ -113,6 +113,7 @@ impl Carnet {
                 page("Bulleted List", keys::BULLETS),
                 page("Numbered List", keys::NUMBERS),
                 page("Quote", keys::QUOTE),
+                page("Drop the First Letter", keys::INITIAL),
                 MenuItem::separator(),
                 page("Bold", keys::BOLD),
                 page("Italic", keys::ITALIC),
