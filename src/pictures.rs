@@ -1,7 +1,8 @@
 //! Pictures between devices (docs/SYNC.md §4): the files in the notes
-//! folder's `attachments/`, and any other a note shows (one beside its
-//! note), each a sealed blob on the server by its id, and the vault doc
-//! saying which picture is at which path.
+//! folder's `attachments/`, Carnet's own, each a sealed blob on the server
+//! by its id, and the vault doc saying which picture is at which path. Any
+//! other picture a note shows is the user's, and stays on its device
+//! (store_owned.rs).
 //!
 //! A picture here and not in the vault is offered; the server says
 //! whether it lacks it, and if so it is sent. Only once the server has it
@@ -24,6 +25,10 @@
 //! them is on that server yet. So the index says whose ids it holds, and
 //! one made under another key is started again: every picture hashed
 //! anew, offered, and named in the vault by its new id.
+//!
+//! A Carnet before this one synced the pictures beside notes too. What it
+//! named of those in the vault is let go (dropped there, so the server
+//! may drop it); the files stay where they are, the user's.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -34,7 +39,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use carnet_sync::crypto::{BlobId, MAX_BLOB, Random};
 use carnet_sync::session::{Event, Session};
 
-use crate::store::{ATTACHMENTS, Store};
+use crate::store::{Store, is_owned};
 
 /// The index's first line: whose ids it holds ([`Pictures::mark`]).
 const UNDER: &str = "under\t";
@@ -67,6 +72,8 @@ pub struct Pictures {
     /// Dropped pictures a note shows again (a version brought back),
     /// asked for by the id they had: the paths each goes back to.
     reviving: HashMap<BlobId, Vec<String>>,
+    /// The vault's pictures that aren't Carnet's let go this run.
+    let_go: bool,
     /// Pictures written here from another device since last asked: the
     /// app shows them.
     pub arrived: bool,
@@ -132,38 +139,30 @@ impl Pictures {
         }
     }
 
-    /// The pictures in the notes folder: their paths from it (`/` between
-    /// parts), with their size and modified time. Those in the attachments
-    /// folder, and those among the notes that a note shows or the vault
-    /// names (`named`, [`Store::pictures_among_notes`]).
-    fn scan(store: &Store, named: &BTreeSet<String>) -> Vec<(String, PathBuf, u64, u64)> {
-        let mut out = Vec::new();
-        let mut stack = vec![(store.dir.join(ATTACHMENTS), ATTACHMENTS.to_string(), 0)];
-        while let Some((dir, rel, depth)) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') || name.ends_with(".tmp-carnet") {
-                    continue;
-                }
-                let path = e.path();
-                let Ok(meta) = e.metadata() else { continue };
-                if meta.is_dir() {
-                    if depth < 4 {
-                        stack.push((path, format!("{rel}/{name}"), depth + 1));
-                    }
-                } else if meta.len() as usize <= MAX_BLOB {
-                    out.push((format!("{rel}/{name}"), path, meta.len(), meta.modified().map_or(0, millis)));
-                }
-            }
-        }
-        for rel in store.pictures_among_notes(named) {
-            let path = store.dir.join(&rel);
-            let Ok(meta) = fs::metadata(&path) else { continue };
-            if meta.is_file() && meta.len() as usize <= MAX_BLOB {
-                out.push((rel, path, meta.len(), meta.modified().map_or(0, millis)));
-            }
-        }
+    /// The pictures in the attachments folder: their paths from the notes
+    /// folder (`/` between parts), with their size and modified time.
+    fn scan(store: &Store) -> Vec<(String, PathBuf, u64, u64)> {
+        store
+            .attachments()
+            .into_iter()
+            .filter_map(|(rel, path)| {
+                let meta = fs::metadata(&path).ok()?;
+                (meta.len() as usize <= MAX_BLOB).then(|| (rel, path, meta.len(), meta.modified().map_or(0, millis)))
+            })
+            .collect()
+    }
+
+    /// Whether pictures are on their way, up or down: the sweep waits.
+    pub fn busy(&self) -> bool {
+        let now = Instant::now();
+        !self.waiting.is_empty() || !self.reviving.is_empty() || self.asked.values().any(|at| now.duration_since(*at) < RETRY)
+    }
+
+    /// The pictures being sent, or wanted back: paths from the notes
+    /// folder.
+    pub fn busy_paths(&self) -> BTreeSet<String> {
+        let mut out: BTreeSet<String> = self.index.iter().filter(|(_, k)| self.waiting.contains(&k.id)).map(|(p, _)| p.clone()).collect();
+        out.extend(self.reviving.values().flatten().cloned());
         out
     }
 
@@ -199,10 +198,22 @@ impl Pictures {
         let dropped = replica.vault().dropped_pictures();
         let mut changed_index = false;
 
+        // Named by an earlier Carnet, which synced the pictures beside
+        // notes too: the user's, let go in the vault, once a run (one such
+        // Carnet still running would name them again). Their files stay.
+        let mut wrote = false;
+        let before = self.index.len();
+        self.index.retain(|p, _| is_owned(p));
+        changed_index |= self.index.len() != before;
+        if !std::mem::replace(&mut self.let_go, true) {
+            for rel in vault.keys().filter(|p| !is_owned(p)) {
+                wrote |= store.unname(rel);
+            }
+        }
+
         // Dropped on another device: gone here, or, shown by a note here,
         // offered again.
-        let named: BTreeSet<String> = vault.keys().chain(&dropped).cloned().collect();
-        let mut here = Self::scan(store, &named);
+        let mut here = Self::scan(store);
         if here.iter().any(|(rel, ..)| dropped.contains(rel)) {
             let used = store.pictures_in_use();
             here.retain(|(rel, path, ..)| {
@@ -236,7 +247,6 @@ impl Pictures {
 
         // Here and not (or not so) in the vault: in it if the server has
         // it, else offered.
-        let mut wrote = false;
         let mut offer = Vec::new();
         for (rel, k) in &self.index {
             if vault.get(rel).is_some_and(|v| *v == hex(&k.id)) {
@@ -254,7 +264,8 @@ impl Pictures {
         // In the vault and not here: asked for.
         let now = Instant::now();
         for (rel, id) in &vault {
-            if present.contains(rel.as_str()) {
+            // One beside a note is the user's, on the device that has it.
+            if present.contains(rel.as_str()) || !is_owned(rel) {
                 continue;
             }
             let Some(id) = unhex(id) else { continue };
@@ -276,7 +287,7 @@ impl Pictures {
     pub fn want_back(&mut self, store: &Store, session: &mut Session, paths: &std::collections::BTreeSet<String>) {
         let Some(replica) = store.replica.as_ref() else { return };
         for path in paths {
-            if store.dir.join(path).exists() {
+            if !is_owned(path) || store.dir.join(path).exists() {
                 continue;
             }
             let Some(id) = replica.vault().dropped_id(path).and_then(|h| unhex(&h)) else { continue };
@@ -323,7 +334,7 @@ impl Pictures {
                 self.asked.remove(id);
                 // Brought back: written where it was, and named again.
                 let mut wrote = false;
-                for rel in self.reviving.remove(id).unwrap_or_default() {
+                for rel in self.reviving.remove(id).unwrap_or_default().into_iter().filter(|p| is_owned(p)) {
                     let path = store.dir.join(&rel);
                     if !path.exists() {
                         if let Some(dir) = path.parent() {
@@ -340,8 +351,7 @@ impl Pictures {
                 }
 
                 let vault = store.replica.as_ref().map(|r| r.vault().pictures()).unwrap_or_default();
-                for (rel, v) in vault.iter().filter(|(_, v)| unhex(v) == Some(*id)) {
-                    let _ = v;
+                for rel in vault.iter().filter(|(p, v)| unhex(v) == Some(*id) && is_owned(p)).map(|(p, _)| p) {
                     let path = store.dir.join(rel);
                     if path.exists() {
                         continue;

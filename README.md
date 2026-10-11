@@ -150,6 +150,7 @@ On a narrow window it is one thing at a time: the note, with a back arrow to the
 - **Ctrl+V** with a picture on the clipboard (a screenshot, an image copied in a browser) puts it in at the caret. Picture files copied in Explorer or Finder, or dragged onto the page, go in the same way.
 - A picture is a block of its own: click to select it, then drag a handle to resize it. Right-click it to copy it, size it, place it at the left or right of the text, or show its file.
 - A picture at the left or right edge has the text run beside it. It is written `![alt|right|300](src)`, Obsidian's width with a side before it.
+- **Carnet's pictures and yours.** The pictures Carnet keeps are the ones in the notes folder's `attachments/` folder, where a paste, a drop or an import puts them. Those sync, and Carnet tidies them up: one no note has shown for a week, in any version of a note, a note in Deleted included, goes to the notes folder's `.trash/attachments/`, where you can still find it. Any other picture a note shows (beside the note, elsewhere in the folder, or outside it) is your own file: Carnet shows it faint, with a small phone in its corner, never syncs it, and never moves or deletes it. Select it to see why, and to **Move into Carnet** (the file goes to `attachments/` and every note showing it follows; the notice's Undo moves it back) or **Copy into Carnet** (a copy for this note alone; your file stays where it is). On the web such a picture is a grey card saying it's only on the device that has it.
 
 ### Settings
 

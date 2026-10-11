@@ -99,11 +99,23 @@ Each note is one `LoroText` holding the file's Markdown, exactly as Carnet write
 | A note's text (title included, as its `# ` line) | a Loro doc per note (`LoroText`) | character by character |
 | A note's folder, file name, pinned, trashed | the vault doc: one map entry per note and field (`<key>/folder`, `/name`, `/pinned`, `/trashed`) | last writer wins, per field, so a pin on one device and a move on another both hold |
 | Folders, empty ones too | the vault doc: a map of path → present or not | last writer wins, per folder |
-| Pictures in `attachments/`, and any other a note shows (one beside its note) | sealed blobs by content id (§7); the vault maps path → blob id | a blob never changes; a path is last writer wins |
+| Pictures in `attachments/` (Carnet's: see below) | sealed blobs by content id (§7); the vault maps path → blob id | a blob never changes; a path is last writer wins |
+| Any other picture a note shows (beside it, elsewhere, outside the notes folder) | not synced: the user's file, on the device that has it | — |
 | A trashed note | its doc stays; the vault marks it trashed, and its folder and name say where it came from | restoring clears the mark |
 | A note deleted forever | the vault marks it gone (`<key>/gone`), never unmarked; the server deletes its room | gone wins over any other field |
 | A picture no note shows any more | the vault's path keeps `-<id>` instead of the id; the server may drop the blob after 30 days (§6) | a path put back revives it |
 | Settings | not synced | — |
+
+**Whose a picture is.** Carnet owns the pictures in the notes folder's `attachments/` folder (any case: `Attachments/` is the same folder): a paste, a drop, an import and an export's gathering put them there. Only those sync, and only those Carnet ever removes. Any other picture a note shows, beside the note (`Home/hill.jpg`), elsewhere in the folder, or outside it (`../`, a full path, `file://`), is the user's: Carnet shows it, faint and marked, never syncs it, and never moves or deletes it on its own. Selected, the picture says so, and offers:
+
+- **Move into Carnet**: the file goes into `attachments/` under a free name (a hard link, then the old name removed, so no note ever shows nothing), and every note that shows it, one in Deleted too, is rewritten to the new path and saved as an edit is, so its history and sync see it. The open notes' undo histories are rewritten likewise, so an undo never brings back a path that leads nowhere. The notice's Undo (or Ctrl+Z while it shows) moves the file back and puts the notes' pictures back as they were; if the vault had named the new path meanwhile, it's dropped there.
+- **Copy into Carnet**: a copy in `attachments/`, and this note alone shows it, as one ordinary edit: Ctrl+Z takes it back, and the copy, unshown, goes to the sweep.
+
+A Carnet before this one synced the pictures beside notes too. What it named of those in the vault is dropped there by the first sync round of each run (the server may then drop the blob); the files, wherever they are, stay. The vault's paths outside `attachments/` are never fetched, nor written.
+
+**The sweep.** A picture of Carnet's no note shows any more is taken away on the desktop, a while after (`store_owned.rs`): a little after the window opens, then once a day while it's open, and only when sync is off, or on, caught up with the account, and no picture is on its way up or down (put off a minute otherwise). A picture is unshown when no note shows it (unsaved edits included), no note in Deleted does, no text in `.trash/` names it (a note put there by hand), no version of any note in the replica shows it, and sync isn't sending it or fetching it back. The first time one is seen so, the time is kept in `unshown.txt` beside `pictures.txt`; shown again, it's forgotten there. Unshown for **7 days**, it's moved to `.trash/attachments/…`, under the same path (or the first free name), where it can be put back by hand, and dropped in the vault: the other devices drop their copies (the drop path above, which keeps one a note there shows), and `BlobDrop` lets the server delete the blob after its own 30 days. A note saved showing it again (a version restored, an undo) puts it back from `.trash/` at once; on another device, it's fetched back while the server keeps it (`want_back`).
+
+So a picture taken out of a note by an edit is kept as long as that note's history shows it, which is as long as the note is kept: only deleting the note forever lets it go. The sweep is for pictures no version ever saved: a paste undone before the note was saved, one dropped then deleted, a copy taken in then undone before a save.
 
 **Note identity.** A note gets a random 128-bit key the first time sync sees it. The mapping key ↔ path lives in the replica, not in the file: no front matter is added. A rename in Carnet updates the mapping directly. A rename made outside Carnet is spotted on rescan: a known path that disappeared is matched to a new file sharing at least half its lines.
 
@@ -125,6 +137,7 @@ notes/<key>.loro each note's doc, history and all; loaded only when needed
 vault.loro       the vault doc
 vault.applied    the vault's version last applied to the files here
 pictures.txt     path, size, modified time and blob id of each picture, and whose ids they are
+unshown.txt      Carnet's pictures no note shows, and since when: the sweep's grace period (§4)
 forgotten.txt    rooms and pictures the server still has to be told are gone
 version          the layout of this folder (§14)
 ```
@@ -303,7 +316,7 @@ A link is one account's one picture, one direction (`GET` or `PUT`), at most 32 
 ### Deletion
 
 - **A note deleted forever** (from Deleted, after confirming): the vault marks it gone, and `RoomRemove` has the server delete the room's records and base at once and remember the room's id in a `removed` table. A device that still has the note (offline, or writing without knowing) is told `RoomRemoved` when it joins or writes, and nothing it sends is kept. The vault's own room can't be removed. Any device of the account may remove any of its rooms; the server can't read the notes to judge.
-- **A picture no note shows any more**, in any version of any remaining note (a note in Deleted counts): `BlobDrop` marks it, and the server deletes it 30 days later in an hourly sweep, unless a device offers, fetches or puts it meanwhile. Unlike a note, a picture is dropped by inference, so it gets the grace period.
+- **A picture no note shows any more**, in any version of any remaining note (a note in Deleted counts), once the last note showing it is deleted forever, or a device's sweep has found it unshown for a week (§4); only Carnet's, in `attachments/`: `BlobDrop` marks it, and the server deletes it 30 days later in an hourly sweep, unless a device offers, fetches or puts it meanwhile. Unlike a note, a picture is dropped by inference, so it gets the grace period.
 - **Until the server confirms,** the rooms and pictures to remove are kept on the device (`forgotten.txt` on the desktop, the saved state in the browser) and sent again on each login, so a deletion made offline isn't lost.
 - **Deleting the account** (`AccountDelete`, from any of its devices, after confirming): everything the server keeps of it goes at once (records, devices, pictures, slots), and every device is let go (`Denied`), each keeping its local notes. The owner's account can't be deleted this way, since it's what lets everyone else in. A host is told (§11).
 
@@ -447,7 +460,7 @@ A rich-text editor (ProseMirror and the like) was ruled out: it would need its o
 
 - **Sending:** half a second after a pause, and at once when the page is hidden or the editor closes. Each send is the editor's Markdown from the version it started from, merged (`NoteDoc::apply_from`) with whatever arrived meanwhile. A change from another device while editing is merged the same way, with the caret kept.
 - **Tables** are edited cell by cell, each cell its own editor over the page model's cell.
-- **Pictures** added from the browser are named as the desktop names a pasted one, kept sealed locally until the server has them, then put in the vault. Photos (JPEG, HEIC) are re-encoded as JPEG, at most 2560 px on the long side, with metadata such as location stripped.
+- **Pictures** added from the browser are named as the desktop names a pasted one, kept sealed locally until the server has them, then put in the vault. Photos (JPEG, HEIC) are re-encoded as JPEG, at most 2560 px on the long side, with metadata such as location stripped. A picture that doesn't come takes its place as a grey card the size it would be, saying why: one the vault names and the server lacks, "Picture not found" (asked for again when the notes change); one in `attachments/` the vault doesn't name yet, "This picture hasn't reached the server yet"; any other (the user's own, beside a note or outside the notes folder), "This picture is only on the device that has it. Move it into Carnet there to sync it."
 - **On phones** the toolbar rides above the keyboard (`visualViewport`).
 
 ### Storage, offline and size
@@ -513,7 +526,8 @@ Each note's ways to fix it, each confirmed before it runs:
 
 ```
 Cargo.toml              the workspace
-src/                    the desktop app (kui); src/sync.rs, src/pictures.rs and the store's sync parts
+src/                    the desktop app (kui); src/sync.rs, src/pictures.rs, src/store_owned.rs (whose a
+                        picture is, Move into Carnet, the sweep) and the store's sync parts
 crates/carnet-core/     the Markdown model, the editor's page and history, export, compare: no UI, builds for wasm
 crates/carnet-sync/     a device's side: note and vault docs, the replica, crypto, %ELO records, the wire,
                         the session, pairing, passwords, passkeys, compatibility; with the `net` feature,
@@ -592,7 +606,7 @@ The `wire` target found that the Loro Protocol crate's decoders reserve memory f
 
 - **Text merges** can leave visible oddities in rare concurrent edits (§3). Nothing is lost.
 - **Removal** doesn't protect against a server colluding with the removed device, and offline devices keep sealing under the old key until they reconnect (§7).
-- **Pictures:** a picture changed in place keeps its path, and the vault takes the new one, but a device that already has the old file keeps it. Pictures over 32 MiB don't sync. A picture typed into a note one letter at a time may be missed when deciding what's still in use; its id is kept in the vault (`-<id>`) so it can be fetched again within 30 days.
+- **Pictures:** a picture changed in place keeps its path, and the vault takes the new one, but a device that already has the old file keeps it. Pictures over 32 MiB don't sync. A picture typed into a note one letter at a time may be missed when deciding what's still in use; its id is kept in the vault (`-<id>`) so it can be fetched again within 30 days, and the sweep's own copy waits in `.trash/attachments/`. A device with sync set up but offline never sweeps. A picture swept on one device while another device's note shows it (its text not yet come, a week on) is offered again by that device, and kept. The pictures beside notes stay on their device: the web shows a card in their place.
 - **Folders:** a folder trashed whole on one device arrives as its notes, one by one, in the other's trash. A title literally equal to another note's clash name ("Plan 2" beside two "Plan"s) can number differently on two devices.
 - **Web editing:** a picture's width and float can't be set from the browser; Android input methods are untested. On an iPhone, Edit doesn't raise the keyboard by itself (iOS raises it only on a tap).
 - **Markdown:** punctuation is ASCII's, so other scripts' punctuation and emoji count as letters where CommonMark counts them as punctuation.

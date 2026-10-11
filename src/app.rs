@@ -63,6 +63,12 @@ const POINTER_NUDGE: f32 = 6.0;
 const RETRY_AFTER: Duration = Duration::from_millis(350);
 /// How often the inspector's "Checked …" is drawn again while it shows.
 const INSPECTED_EVERY: Duration = Duration::from_secs(20);
+/// The sweep of pictures no note shows (store_owned.rs): a little after
+/// the window opens, then once a day while it's open; put off a while
+/// when sync is busy with pictures, or hasn't caught up.
+const SWEEP_FIRST: Duration = Duration::from_secs(10);
+const SWEEP_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const SWEEP_LATER: Duration = Duration::from_secs(60);
 /// The longest pause between two clicks on the Settings page's title
 /// that still counts them as one run.
 const TITLE_CLICKS: Duration = Duration::from_millis(600);
@@ -244,6 +250,10 @@ pub enum Msg {
     /// The selected picture beside the words (1 left, 2 right) or on its
     /// own line (0).
     Float { to: u64 },
+    /// The selected picture, the user's own file, taken into the
+    /// attachments folder: moved (0), every note following it, or copied
+    /// (1), for this note alone.
+    IntoCarnet { copy: u64 },
     /// The text a step bigger (1) or smaller (-1).
     SetSize { by: i64 },
     /// How dividers are drawn: `settings::Divider::ALL[to]`.
@@ -355,6 +365,9 @@ pub enum Undo {
     Version { note: u64, version: Version },
     /// Several things moved to the trash together: each put back.
     Many(Vec<Undo>),
+    /// A picture moved into Carnet: back where it was, and its notes
+    /// showing it there.
+    Picture(Box<store::Moved>),
 }
 
 /// A note's history, shown in place of the library: its versions, and
@@ -426,6 +439,8 @@ pub struct Carnet {
     pub editing: bool,
     /// Every note's undo history, by note.
     histories: HashMap<u64, History>,
+    /// When the pictures no note shows are next looked for.
+    next_sweep: Instant,
     /// The page's key sink, as last declared.
     pub page_key: Option<Key>,
     /// Give the page the keyboard on the next frame.
@@ -823,6 +838,7 @@ impl Carnet {
             caret: Caret::at(page::start(Slot::block(0))),
             editing: false,
             histories: HashMap::new(),
+            next_sweep: Instant::now() + SWEEP_FIRST,
             page_key: None,
             focus_page: false,
             slot_keys: HashMap::new(),
@@ -988,6 +1004,110 @@ impl Carnet {
             (p, f) => format!("{} and {}", n(p, "picture", "pictures"), n(f, "other file", "other files")),
         };
         self.notify(format!("Moved {what} to the attachments folder, links and all"), None);
+    }
+
+    /// The sweep (store_owned.rs): the pictures of Carnet's no note has
+    /// shown for a week go to the trash, and other devices let go of
+    /// theirs. Quietly: nothing shown went.
+    fn sweep_pictures(&mut self) {
+        let Some(busy) = self.sync.sweep_may_run() else {
+            self.next_sweep = Instant::now() + SWEEP_LATER;
+            return;
+        };
+        self.next_sweep = Instant::now() + SWEEP_EVERY;
+        if let Ok(swept) = self.store.sweep_pictures(&busy, SystemTime::now())
+            && !swept.is_empty()
+        {
+            self.sync.poke();
+        }
+    }
+
+    /// The selected picture, the user's own file, into the attachments
+    /// folder, where it's Carnet's and syncs. Copied, this note shows the
+    /// copy: an edit like any, which Undo takes back (the copy then goes
+    /// unshown, and the sweep takes it in time, once no version shows
+    /// it). Moved, every note that showed it shows it there, saved; their
+    /// undo histories say so too, so an undo never brings back a path
+    /// that leads nowhere; the notice's Undo moves it back.
+    fn take_in_picture(&mut self, copy: bool) {
+        let Some((src, wiki)) = self.picture_at_caret() else { return };
+        let folder = self.page_folder();
+        let Some(from) = self.store.picture_file(&folder, &src, wiki).filter(|p| p.is_file()) else {
+            self.error = Some("Couldn't take the picture in: it isn't there any more".into());
+            return;
+        };
+        if self.store.owns(&from) || self.reading() {
+            return;
+        }
+        let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if copy {
+            let to = match self.store.copy_in(&from, false) {
+                Ok(to) => to,
+                Err(e) => {
+                    self.error = Some(format!("Couldn't copy the picture: {}", store::plain_error(&e)));
+                    return;
+                }
+            };
+            let edits = self.store.relinks(self.current, &from, &to);
+            self.edit(Step::Other, |d, _| store::set_srcs(d, &edits));
+            self.save_current();
+            self.store.index_files();
+            self.sync.poke();
+            self.notify(format!("Copied \u{201c}{name}\u{201d} into Carnet: this note shows the copy, which syncs"), Some(Undo::Edit));
+            return;
+        }
+        // Edits not saved yet go first: every note is written from what
+        // it holds.
+        self.save_current();
+        for i in 0..self.store.notes.len() {
+            if self.store.notes[i].dirty {
+                let _ = self.store.save(i, false);
+            }
+        }
+        match self.store.move_picture(&from) {
+            Ok(m) => {
+                let to = m.to.clone();
+                self.picture_moved(&from, &m.notes, |store, (folder, wiki)| Some(store.src_for(folder, &to, wiki)));
+                self.sync.poke();
+                let notes = m.notes.len() + m.trashed.len();
+                let said = match (m.left, notes) {
+                    (true, _) => format!("Copied \u{201c}{name}\u{201d} into Carnet; your file couldn't be moved, so it stays too"),
+                    (false, 0 | 1) => format!("Moved \u{201c}{name}\u{201d} into Carnet: it syncs now"),
+                    (false, n) => format!("Moved \u{201c}{name}\u{201d} into Carnet; {n} notes show it there"),
+                };
+                self.notify(said, Some(Undo::Picture(Box::new(m))));
+            }
+            Err(e) => self.error = Some(format!("Couldn't move the picture: {}", store::plain_error(&e))),
+        }
+    }
+
+    /// After a picture's file moved, or moved back: the undo histories of
+    /// the notes that showed it at `was` (by id, with their pictures' old
+    /// `src`s) to match, so an undo never brings back a `src` that leads
+    /// nowhere: each picture there given the `src` `new` makes of its
+    /// note's folder and whether an Obsidian embed names it, or, with
+    /// none, its old `src` back. The open note's caret kept on its feet.
+    fn picture_moved(&mut self, was: &std::path::Path, notes: &[(u64, Vec<(u64, String)>)], new: impl Fn(&Store, (&str, bool)) -> Option<String>) {
+        for (id, olds) in notes {
+            let Some(n) = self.store.notes.iter().find(|n| n.id == *id) else { continue };
+            let folder = n.folder.clone();
+            let Some(h) = self.histories.get_mut(id) else { continue };
+            let store = &self.store;
+            h.rewrite(|b| match &b.kind {
+                Kind::Image { src, wiki, .. } if store.picture_file(&folder, src, *wiki).is_some_and(|p| store::same_file(&p, was)) => {
+                    let to = new(store, (&folder, *wiki)).or_else(|| olds.first().map(|(_, s)| s.clone()))?;
+                    let mut b = b.clone();
+                    if let Kind::Image { src, .. } = &mut b.kind {
+                        *src = to;
+                    }
+                    Some(b)
+                }
+                _ => None,
+            });
+        }
+        self.store.index_files();
+        self.images.retry_failed();
+        self.caret = page::fix(self.doc(), self.caret);
     }
 
     /// What the page shows: the open note, or the version of it its
@@ -1491,6 +1611,13 @@ impl Carnet {
                     }
                 }
             }
+            Undo::Picture(m) => match self.store.unmove_picture(&m) {
+                Ok(()) => {
+                    self.picture_moved(&m.to, &m.notes, |_, _| None);
+                    self.say = Some("Put back".into());
+                }
+                Err(e) => self.error = Some(format!("Couldn't put the picture back: {}", store::plain_error(&e))),
+            },
             Undo::Folder { from, folder } => match self.store.restore_folder(&from, &folder) {
                 Ok(()) => {
                     self.reorder();
@@ -2532,6 +2659,7 @@ impl Carnet {
                 | Msg::Tint { .. }
                 | Msg::TintMenu { .. }
                 | Msg::Float { .. }
+                | Msg::IntoCarnet { .. }
                 | Msg::LinkAct { .. }
                 | Msg::CloseLink
         );
@@ -2854,6 +2982,7 @@ impl Carnet {
                 self.link_edit = None;
                 self.focus_page = true;
             }
+            Msg::IntoCarnet { copy } => self.take_in_picture(copy == 1),
             Msg::Float { to } => {
                 if let Some((id, _, _)) = self.picture_here() {
                     let to = match to {
@@ -3113,7 +3242,7 @@ impl Carnet {
             // notice's Undo says — not an edit in the note that took its
             // place.
             KeyCode::Char('z') | KeyCode::Char('Z')
-                if self.notice.as_ref().is_some_and(|n| matches!(n.undo, Some(Undo::Note { .. } | Undo::Many(_)))) =>
+                if self.notice.as_ref().is_some_and(|n| matches!(n.undo, Some(Undo::Note { .. } | Undo::Many(_) | Undo::Picture(_)))) =>
             {
                 self.notice_undo()
             }
@@ -3388,6 +3517,11 @@ impl App for Carnet {
         if let Some(n) = &self.notice {
             due.push(NOTICE_FOR.saturating_sub(n.at.elapsed()));
         }
+        // The pictures no note shows, now and then.
+        if Instant::now() >= self.next_sweep {
+            self.sweep_pictures();
+        }
+        due.push(self.next_sweep.saturating_duration_since(Instant::now()));
         // Sync's turn after what happened: the notes' places and pictures
         // to the vault (a first login, a picture beside a note), the notes
         // on the server asked again; and the inspector's "Checked …" kept

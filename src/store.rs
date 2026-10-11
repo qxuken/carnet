@@ -26,6 +26,12 @@ use carnet_core::doc::{self, Block, Doc, Kind, ListStyle, Table};
 use carnet_sync::vault::{Layout, Place};
 use carnet_sync::{Key, Newer, Origin, Replica, Revision, Version};
 
+#[path = "store_owned.rs"]
+mod owned;
+pub use owned::{Moved, is_owned, same_file, set_srcs};
+#[cfg(test)]
+pub use owned::SWEEP_GRACE;
+
 pub struct Note {
     /// Process-unique; keys the note's editors and scroll position.
     pub id: u64,
@@ -721,16 +727,7 @@ impl Store {
     /// its own name (or the first free one). Returns its `src`, as
     /// `save_attachment` does.
     pub fn import_attachment(&self, folder: &str, from: &Path) -> io::Result<String> {
-        let dir = self.dir.join(ATTACHMENTS);
-        fs::create_dir_all(&dir)?;
-        let stem = slug(&stem_of(from)).replace(' ', "-");
-        let ext = from
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("png")
-            .to_lowercase();
-        let to = free_file(&dir, &stem, &ext);
-        fs::copy(from, &to)?;
+        let to = self.copy_in(from, false)?;
         Ok(relative(&self.folder_dir(folder), &to))
     }
 
@@ -1144,6 +1141,8 @@ impl Store {
     /// The file of note `i` holds `text` now, written here or read from
     /// disk: the replica learns it, and the note learns its key.
     fn track(&mut self, i: usize, text: &str, origin: Origin) {
+        // A picture of Carnet's it shows that the sweep took: back.
+        self.bring_back(&self.notes[i].folder, text);
         let mut taken = self.notes.iter().filter_map(|n| n.key).collect();
         self.track_in(i, text, origin, &mut taken);
     }
@@ -1267,48 +1266,11 @@ impl Store {
         for n in &self.notes {
             used.extend(doc::picture_paths(&n.folder, &n.markdown(), &self.files));
         }
-        if let Some(r) = &self.replica {
-            for key in r.keys() {
-                let Some(rel) = r.entry(key).map(|e| e.path.clone()).filter(|p| p.starts_with(&format!("{TRASH}/"))) else { continue };
-                let Ok(text) = fs::read_to_string(self.dir.join(&rel)) else { continue };
-                let folder = r.vault().place(key).map(|p| p.folder).unwrap_or_default();
-                used.extend(doc::picture_paths(&folder, &text, &self.files));
-            }
+        for (_, rel, folder) in self.in_trash() {
+            let Ok(text) = fs::read_to_string(self.dir.join(&rel)) else { continue };
+            used.extend(doc::picture_paths(&folder, &text, &self.files));
         }
         used
-    }
-
-    /// The pictures among the notes, out of the attachments folder, that
-    /// sync keeps as it keeps those in it (pictures.rs): one a note shows
-    /// (a picture beside its note, say), and one the vault names
-    /// (`named`), so that one dropped on another device goes here too.
-    /// Not those in an export's pictures folder: gathering moves them into
-    /// the attachments folder. Paths from the notes folder, as on disk.
-    pub fn pictures_among_notes(&self, named: &BTreeSet<String>) -> Vec<String> {
-        let low = |p: &str| p.to_lowercase();
-        let out_of = |p: &str| {
-            let p = low(p);
-            !p.starts_with(&format!("{ATTACHMENTS}/")) && !self.picture_folders.iter().any(|f| p.starts_with(&format!("{}/", low(f))))
-        };
-        let lying: Vec<&str> = self.files.paths().filter(|p| doc::is_picture_name(p) && out_of(p)).collect();
-        let mut out: Vec<String> = named.iter().filter(|p| out_of(p) && self.dir.join(p).is_file()).cloned().collect();
-        if !lying.is_empty() {
-            // Only blocks are looked at, not the Markdown written out: this
-            // is asked every second or so.
-            let shown: HashSet<String> = self
-                .notes
-                .iter()
-                .flat_map(|n| {
-                    n.doc.blocks().iter().filter_map(|b| match &b.kind {
-                        Kind::Image { src, wiki, .. } => doc::find_picture(&n.folder, src, *wiki, &self.files).map(|p| low(&p)),
-                        _ => None,
-                    })
-                })
-                .collect();
-            let have: HashSet<String> = out.iter().map(|p| low(p)).collect();
-            out.extend(lying.into_iter().filter(|p| shown.contains(&low(p)) && !have.contains(&low(p))).map(str::to_string));
-        }
-        out
     }
 
     /// The titles of the notes in a folder in the trash.
@@ -1412,16 +1374,23 @@ impl Store {
             let folder = r.vault().place(key).map(|p| p.folder).unwrap_or_default();
             for rev in r.history(key) {
                 if let Ok(text) = r.text_at(key, &rev.version) {
-                    shown.extend(doc::picture_paths(&folder, &text, &files).into_iter().filter(|p| paths.contains(p)));
+                    for p in doc::picture_paths(&folder, &text, &files) {
+                        if let Some(q) = paths.iter().find(|q| q.eq_ignore_ascii_case(&p)) {
+                            shown.insert(q.clone());
+                        }
+                    }
                 }
             }
         }
         shown
     }
 
-    /// Of the pictures at `paths`, those no note shows now, nor any
-    /// version of one: their files gone, and dropped in the vault.
+    /// Of the pictures at `paths`, Carnet's (in the attachments folder)
+    /// that no note shows now, nor any version of one: their files gone,
+    /// and dropped in the vault. The user's own are never touched.
     fn drop_pictures(&mut self, paths: &BTreeSet<String>) {
+        let paths: BTreeSet<String> = paths.iter().filter(|p| is_owned(p)).cloned().collect();
+        let paths = &paths;
         let mut used = self.pictures_in_use();
         let rest: BTreeSet<String> = paths.difference(&used).cloned().collect();
         used.extend(self.shown_in_history(&rest));
@@ -2106,6 +2075,11 @@ impl Store {
                 continue;
             }
             let is_folder = path.is_dir();
+            // The pictures the sweep took (store_owned.rs): not a folder
+            // of notes, and put back by hand if ever.
+            if is_folder && key.eq_ignore_ascii_case(ATTACHMENTS) {
+                continue;
+            }
             if !is_folder && path.extension().is_none_or(|x| !x.eq_ignore_ascii_case("md")) {
                 continue;
             }
