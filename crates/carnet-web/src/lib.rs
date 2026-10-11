@@ -326,6 +326,12 @@ impl Vault {
             .collect()
     }
 
+    /// Pictures asked for that didn't come since last asked: their ids,
+    /// in hex.
+    pub fn take_missing(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes.missing).iter().map(|id| hex(id)).collect()
+    }
+
     /// Every note, as JSON: `[{key, title, folder, pinned, trashed,
     /// snippet, done, todos, modified}]`.
     pub fn notes(&self) -> String {

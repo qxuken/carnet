@@ -46,13 +46,15 @@ export const theme = EditorView.theme({
   '.cm-marked': { borderRadius: '3px' },
   '.cm-rule': { display: 'inline-block', width: '100%', borderTop: '1px solid var(--border-strong)', verticalAlign: 'middle' },
   '.cm-picture': { display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)', margin: '4px 0' },
-  '.cm-picture.waiting': { minHeight: '120px', minWidth: '160px' },
   '.cm-picture-box': { display: 'block' },
   // A picture at an edge: at that edge of its line, and with no width
   // given at most 45% of the text's, as the desktop sizes it.
   '.cm-float-right .cm-picture-box': { textAlign: 'right' },
   '.cm-float-right .cm-picture': { marginLeft: 'auto' },
   '.cm-float-left:not(.cm-sized) .cm-picture, .cm-float-right:not(.cm-sized) .cm-picture': { maxWidth: '45%' },
+  // Its place until it comes (styles.css `.picture-card`) the same.
+  '.cm-float-right .picture-card': { marginLeft: 'auto' },
+  '.cm-float-left:not(.cm-sized) .picture-card, .cm-float-right:not(.cm-sized) .picture-card': { width: '45%' },
   // The selected picture (picture.ts): a ring 5px out in the accent, a bar
   // on each side and a dot at the outer corner, dragged to resize; under
   // the note's header when scrolled beneath it. A finger gets more room

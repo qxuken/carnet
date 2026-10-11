@@ -31,13 +31,21 @@
       : '',
   );
 
-  // Pictures: `carnet-picture:<path>` until they've come.
+  // Pictures: `carnet-picture:<path>` until they've come; and the
+  // colours. Done each time the note is drawn anew, as it is drawn: a
+  // note edited, then Done at once, is drawn again after this view is
+  // back (the edit kept as the editor goes), with nothing else to say so.
   $effect(() => {
-    void html;
-    if (box) {
-      pictures(box);
-      tints(box);
-    }
+    if (!box) return;
+    const el = box;
+    const touch = () => {
+      pictures(el);
+      tints(el);
+    };
+    touch();
+    const drawn = new MutationObserver(touch);
+    drawn.observe(el, { childList: true });
+    return () => drawn.disconnect();
   });
 
   let sure = $state(false);

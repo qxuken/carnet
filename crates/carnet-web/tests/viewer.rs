@@ -618,6 +618,41 @@ fn a_picture_an_old_version_shows_stays_in_the_browser_too() {
     assert!(web.pictures.iter().any(|(_, b)| b == &vec![3; 3000]));
 }
 
+/// A picture the vault names that the server hasn't got (a device named
+/// it by an id from another account, say): asked for, it's said not to
+/// have come, so the page can say so rather than wait for ever; once a
+/// device has put it, asked again, it comes.
+#[test]
+fn a_picture_the_server_lacks_is_said_missing_then_comes() {
+    let mut rng = Seeded(12);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let bytes = vec![4u8; 2000];
+    let id = desk.session.blob_id(&bytes);
+    let hexed: String = id.iter().map(|b| format!("{b:02x}")).collect();
+    desk.docs.entry(vault::ROOM.into()).or_insert_with(|| NoteDoc::new(7)).set_picture("Home/hill.jpg", &hexed);
+    desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.picture_id("Home/hill.jpg").as_deref(), Some(hexed.as_str()));
+    assert_eq!(web.get_picture("Home/hill.jpg").as_deref(), Some(hexed.as_str()));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.pictures.is_empty());
+    assert_eq!(std::mem::take(&mut web.missing), vec![id], "said not to have come");
+
+    // The desktop puts it; asked again, it comes.
+    desk.session.offer_blobs(vec![id]);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    for e in desk.session.take_events() {
+        if e == Event::BlobWanted(id) {
+            desk.session.put_blob(&bytes, &mut rng);
+        }
+    }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    web.get_picture("Home/hill.jpg");
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.missing.is_empty());
+    assert!(web.pictures.iter().any(|(i, b)| *i == id && *b == bytes));
+}
+
 /// Not a test: a browser's state with 10,000 notes, written where
 /// `CARNET_BIG` says, to load into the viewer and time it (docs/SYNC.md,
 /// phase 3). `CARNET_BIG=/tmp/big cargo test -p carnet-web --test viewer
