@@ -1,6 +1,7 @@
-// A drawn note's pictures, fetched: each `carnet-picture:<path>` the wasm
-// left in it becomes the picture, kept here or asked of the server. Links
-// open in a new tab.
+// A drawn note's pictures, fetched: each `<img data-picture="<path>">`
+// the wasm left in it (no `src`, so the browser asks for nothing first)
+// becomes the picture, kept here or asked of the server. Links open in a
+// new tab.
 //
 // Until a picture comes, its place is a box the size it will be laid out
 // at (the page's width, or the width the note gives it), the same box in
@@ -13,9 +14,9 @@ import warning from '../icons/warning.svg?raw';
 import device from '../icons/device.svg?raw';
 
 export function pictures(box: HTMLElement) {
-  for (const img of box.querySelectorAll<HTMLImageElement>('img[src^="carnet-picture:"]')) {
-    const path = img.getAttribute('src')!.slice('carnet-picture:'.length);
-    img.removeAttribute('src');
+  for (const img of box.querySelectorAll<HTMLImageElement>('img[data-picture]')) {
+    const path = img.dataset.picture!;
+    delete img.dataset.picture;
     img.dataset.path = path;
     unshown(img, path);
     show(img, path, () => sync.picture(path));

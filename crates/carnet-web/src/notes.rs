@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use carnet_sync::crypto::BlobId;
 
+use carnet_core::export::Picture;
 use carnet_core::{compare, doc, name};
 use carnet_sync::crypto::{DeviceKey, Random, RecoveryCode, Ring};
 use carnet_sync::invite::InviteCode;
@@ -189,6 +190,12 @@ impl Summary {
             }
         }
         Summary { title: title.filter(|t| !t.trim().is_empty()), snippet, done, todos, modified: d.modified(), empty: text.is_empty() }
+    }
+
+    /// The note's title: its words', or else the name it has in the vault
+    /// (a desktop note's file name); none for one untitled.
+    fn named<'a>(&'a self, place: &'a Place) -> Option<&'a str> {
+        self.title.as_deref().or((!place.name.is_empty()).then_some(place.name.as_str()))
     }
 }
 
@@ -417,24 +424,36 @@ impl Notes {
         self.rooms.docs.get(vault::ROOM)?.place(Key::parse(key)?)
     }
 
-    /// Every note this browser has: title, folder, pinned and so on, as the
-    /// library lists them; those in the trash too, marked.
-    pub fn notes(&self) -> Vec<Listed> {
-        let places = self.rooms.docs.get(vault::ROOM).map(|v| v.layout().notes).unwrap_or_default();
+    /// Each note's [`Summary`], by room: made again only for a note whose
+    /// version moved since.
+    fn summaries(&self) -> std::cell::RefMut<'_, HashMap<String, (Version, Summary)>> {
         let mut summaries = self.summaries.borrow_mut();
-        let mut out = Vec::new();
         for (room, d) in &self.rooms.docs {
-            let Some(key) = Key::parse(room) else { continue };
+            if Key::parse(room).is_none() {
+                continue;
+            }
             let v = d.version();
             if summaries.get(room).is_none_or(|(at, _)| *at != v) {
                 summaries.insert(room.clone(), (v, Summary::of(d)));
             }
+        }
+        summaries
+    }
+
+    /// Every note this browser has: title, folder, pinned and so on, as the
+    /// library lists them; those in the trash too, marked.
+    pub fn notes(&self) -> Vec<Listed> {
+        let places = self.rooms.docs.get(vault::ROOM).map(|v| v.layout().notes).unwrap_or_default();
+        let summaries = self.summaries();
+        let mut out = Vec::new();
+        for room in self.rooms.docs.keys() {
+            let Some(key) = Key::parse(room) else { continue };
             let s = &summaries[room].1;
             if s.empty {
                 continue;
             }
             let place = places.get(&key).cloned().unwrap_or_default();
-            let title = s.title.clone().unwrap_or_else(|| if place.name.is_empty() { "Untitled".into() } else { place.name.clone() });
+            let title = s.named(&place).unwrap_or("Untitled").to_string();
             out.push(Listed {
                 key: room.clone(),
                 title,
@@ -458,9 +477,9 @@ impl Notes {
         folders
     }
 
-    /// A note as the page shows it. A picture's `src` becomes
-    /// `carnet-picture:<path from the notes folder>`, for the page to
-    /// fetch and show.
+    /// A note as the page shows it. A picture the page fetches itself has
+    /// no `src` but `data-picture="<path from the notes folder>"`: the
+    /// browser asks for nothing before the page has it (pictures.ts).
     pub fn html(&self, key: &str) -> String {
         let Some(d) = self.rooms.docs.get(key) else { return String::new() };
         self.draw(key, &d.text())
@@ -471,13 +490,13 @@ impl Notes {
         let folder = self.place(key).map(|p| p.folder).unwrap_or_default();
         let files = self.picture_files();
         carnet_core::export::viewer(md, |src, wiki| match find(&folder, src, wiki, &files) {
-            Some(path) => format!("carnet-picture:{path}"),
+            Some(path) => Picture::Fetch(path),
             // On the web: as it is.
-            None if ["http://", "https://", "data:"].iter().any(|p| src.starts_with(p)) => src.to_string(),
+            None if ["http://", "https://", "data:"].iter().any(|p| src.starts_with(p)) => Picture::Url(src.to_string()),
             // A file outside the notes folder: only on the device that has
             // it, which the page says (pictures.ts), as it does of one the
             // vault doesn't name.
-            None => format!("carnet-picture:{src}"),
+            None => Picture::Fetch(src.to_string()),
         })
     }
 
@@ -503,10 +522,24 @@ impl Notes {
         true
     }
 
-    /// Notes whose title or words have `query` in them, without case.
+    /// Notes whose title or words have `query` in them, without case, as
+    /// the desktop's search has it: the title the library shows (a note
+    /// from the desktop is titled by its file's name, which isn't in its
+    /// words) and the words.
     pub fn search(&self, query: &str) -> Vec<String> {
         let q = query.to_lowercase();
-        self.rooms.docs.iter().filter(|(r, d)| Key::parse(r).is_some() && d.text().to_lowercase().contains(&q)).map(|(r, _)| r.clone()).collect()
+        let places = self.rooms.docs.get(vault::ROOM).map(|v| v.layout().notes).unwrap_or_default();
+        let summaries = self.summaries();
+        self.rooms
+            .docs
+            .iter()
+            .filter(|(r, d)| {
+                let Some(key) = Key::parse(r) else { return false };
+                let place = places.get(&key).cloned().unwrap_or_default();
+                summaries[*r].1.named(&place).is_some_and(|t| t.to_lowercase().contains(&q)) || d.text().to_lowercase().contains(&q)
+            })
+            .map(|(r, _)| r.clone())
+            .collect()
     }
 
     /// A note's Markdown, for the editor, and its version (in hex): what

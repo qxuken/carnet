@@ -10,7 +10,26 @@ use crate::inline;
 /// is told when the `src` is an Obsidian embed's (`![[…]]`), a name to
 /// look for ([`find_picture`](crate::doc::find_picture)).
 pub fn html(md: &str, image_url: impl Fn(&str, bool) -> String) -> String {
-    render(&parse_blocks(md), image_url, false)
+    render(&parse_blocks(md), |src, wiki| Picture::Url(image_url(src, wiki)), false)
+}
+
+/// Where the viewer's picture is: a URL the page loads as it is (its
+/// `src`), or one for the page to fetch itself, kept in `data-picture`
+/// with no `src`, so the browser asks for nothing before the page has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picture {
+    Url(String),
+    Fetch(String),
+}
+
+impl Picture {
+    /// As the `<img>`'s attribute.
+    fn attr(&self) -> String {
+        match self {
+            Picture::Url(u) => format!("src=\"{}\"", escape(u)),
+            Picture::Fetch(p) => format!("data-picture=\"{}\"", escape(p)),
+        }
+    }
 }
 
 /// `md` as the viewer shows it (the PWA, docs/SYNC.md §8): what [`html`]
@@ -19,20 +38,21 @@ pub fn html(md: &str, image_url: impl Fn(&str, bool) -> String) -> String {
 /// tap names it; highlights as `<mark>` (a colour of its own as its
 /// `--mark`), the words' colours as `--ink`, for the page's styles to draw
 /// in the theme's hues; pictures at an edge, one after another, as a row
-/// there (`<div class="pictures left">`, `--n` of them). An image's `src`
-/// is whatever `image_url` makes of it, as for [`html`].
+/// there (`<div class="pictures left">`, `--n` of them). An image is
+/// wherever `image` puts it ([`Picture`]), told as for [`html`] whether
+/// its `src` is an Obsidian embed's.
 ///
 /// The note is read whole, as the desktop reads it: its title is its
 /// `<h1>`, and front matter is not shown.
-pub fn viewer(md: &str, image_url: impl Fn(&str, bool) -> String) -> String {
+pub fn viewer(md: &str, image: impl Fn(&str, bool) -> Picture) -> String {
     let (title, doc) = from_markdown(md);
     let mut out = title.map(|t| format!("<h1>{}</h1>", spans(&t, true))).unwrap_or_default();
     let blocks: Vec<Block> = doc.blocks().iter().filter(|b| !matches!(&b.kind, Kind::Raw(r) if r.starts_with("---\n"))).map(|b| (**b).clone()).collect();
-    out.push_str(&render(&blocks, image_url, true));
+    out.push_str(&render(&blocks, image, true));
     out
 }
 
-fn render(blocks: &[Block], image_url: impl Fn(&str, bool) -> String, viewer: bool) -> String {
+fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool) -> String {
     let spans = |t: &str| spans(t, viewer);
     let mut task = 0;
     let mut out = String::new();
@@ -134,7 +154,7 @@ fn render(blocks: &[Block], image_url: impl Fn(&str, bool) -> String, viewer: bo
                     out.push_str(&format!("<div class=\"pictures {side}\" style=\"--n:{row}\">"));
                 }
                 let w = width.map(|w| format!(" width=\"{w}\"")).unwrap_or_default();
-                out.push_str(&format!("<img src=\"{}\" alt=\"{}\"{w}>", escape(&image_url(src, *wiki)), escape(alt)));
+                out.push_str(&format!("<img {} alt=\"{}\"{w}>", image(src, *wiki).attr(), escape(alt)));
                 row -= 1;
                 if row == 0 {
                     out.push_str("</div>");
@@ -147,11 +167,7 @@ fn render(blocks: &[Block], image_url: impl Fn(&str, bool) -> String, viewer: bo
                     crate::doc::Float::Right => w.push_str(" align=\"right\""),
                     crate::doc::Float::None => {}
                 }
-                out.push_str(&format!(
-                    "<p><img src=\"{}\" alt=\"{}\"{w}></p>",
-                    escape(&image_url(src, *wiki)),
-                    escape(alt)
-                ));
+                out.push_str(&format!("<p><img {} alt=\"{}\"{w}></p>", image(src, *wiki).attr(), escape(alt)));
             }
             Kind::Raw(t) => {
                 // A fence's body, without the fences.
@@ -249,7 +265,7 @@ mod tests {
         let md = "<span class=\"initial\">O</span>nce upon a time.\n\n<span class=\"initial\" style=\"color: #C0553F\">T</span>he end.\n\nPlain.";
         let h = html(md, |s, _| s.to_string());
         assert!(h.starts_with("<p class=\"initial\">Once upon a time.</p><p class=\"initial\">The end.</p><p>Plain.</p>"), "{h}");
-        let v = viewer(md, |s, _| s.to_string());
+        let v = viewer(md, |s, _| Picture::Url(s.into()));
         assert!(v.contains("<p class=\"initial\">Once"), "{v}");
         assert!(v.contains("<p class=\"initial own\"><span class=\"ink\" style=\"--ink:#c0553fff\">T</span>he end.</p>"), "{v}");
     }
@@ -257,7 +273,7 @@ mod tests {
     #[test]
     fn the_viewer_draws_checkboxes_highlights_and_colours() {
         let md = "- [ ] milk\n- [x] bread\n  - [ ] rye\n\nSee ==this== and <mark style=\"background:#ffd0d0\">that</mark>, <span style=\"color:#c03030\">red</span>.";
-        let h = viewer(md, |s, _| format!("blob:{s}"));
+        let h = viewer(md, |s, _| Picture::Url(format!("blob:{s}")));
         assert!(h.contains("<li class=\"task\"><input type=\"checkbox\" data-task=\"0\"><span>milk</span></li>"), "{h}");
         assert!(h.contains("<li class=\"task done\"><input type=\"checkbox\" data-task=\"1\" checked><span>bread</span></li>"), "{h}");
         assert!(h.contains("data-task=\"2\"><span>rye"), "{h}");
@@ -267,16 +283,21 @@ mod tests {
         // Front matter isn't drawn, nor counted: box 0 is the first real
         // one, as toggle_task counts.
         let fm = "---\ntags: [x]\n- [ ] in front matter\n---\n# Title\n\n- [ ] real\n";
-        let v = viewer(fm, |s, _| s.to_string());
+        let v = viewer(fm, |s, _| Picture::Url(s.into()));
         assert!(v.starts_with("<h1>Title</h1>") && v.contains("data-task=\"0\"><span>real") && !v.contains("front matter"), "{v}");
         assert_eq!(crate::doc::toggle_task(fm, 0).unwrap(), fm.replacen("- [ ] real", "- [x] real", 1));
         // Pictures at an edge, one after another: a row at that edge.
-        let row = viewer("![a|left](a.png)\n![b|right|300](b.png)\n\n---\n\nWords.\n\n![c|right](c.png)\n", |s, _| s.to_string());
+        let row = viewer("![a|left](a.png)\n![b|right|300](b.png)\n\n---\n\nWords.\n\n![c|right](c.png)\n", |s, _| Picture::Url(s.into()));
         assert!(
             row.contains("<div class=\"pictures left\" style=\"--n:2\"><img src=\"a.png\" alt=\"a\"><img src=\"b.png\" alt=\"b\" width=\"300\"></div><hr><p>Words.</p><div class=\"pictures right\" style=\"--n:1\"><img src=\"c.png\" alt=\"c\"></div>"),
             "{row}"
         );
         assert!(html("![a|left](a.png)", |s, _| s.to_string()).contains("<p><img src=\"a.png\" alt=\"a\" align=\"left\"></p>"), "the copy keeps align");
+        // A picture the page fetches itself: no `src` for the browser to
+        // ask for before it has it.
+        let fetched = viewer("![a|left](a.png)\n\n![b](b.png)\n", |s, _| Picture::Fetch(format!("x/{s}")));
+        assert!(fetched.contains("<img data-picture=\"x/a.png\" alt=\"a\">") && fetched.contains("<p><img data-picture=\"x/b.png\" alt=\"b\"></p>"), "{fetched}");
+        assert!(!fetched.contains("src="), "{fetched}");
         // The copy for mail stays as it was.
         assert!(html(md, |s, _| s.to_string()).contains("\u{2610} milk"));
     }

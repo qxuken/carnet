@@ -31,7 +31,7 @@
       : '',
   );
 
-  // Pictures: `carnet-picture:<path>` until they've come; and the
+  // Pictures: `data-picture="<path>"` until they've come; and the
   // colours. Done each time the note is drawn anew, as it is drawn: a
   // note edited, then Done at once, is drawn again after this view is
   // back (the edit kept as the editor goes), with nothing else to say so.
