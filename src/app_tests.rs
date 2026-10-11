@@ -3655,6 +3655,142 @@ fn the_owner_invites_someone_and_removes_their_account() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// Keys two nodes of the last frame share, in the tree and in the access
+/// tree: one the access tree has twice is a child given twice to
+/// accesskit, which panics at it.
+fn shared_keys(d: &mut Drive) -> Vec<String> {
+    let mut twice = Vec::new();
+    let mut seen = std::collections::HashMap::new();
+    for n in d.core.nodes() {
+        if let Some((text, label)) = seen.insert(n.key, (n.text.clone(), n.label.clone())) {
+            twice.push(format!("{:?}: {text:?} / {label:?}, and {:?} / {:?}", n.key, n.text, n.label));
+        }
+    }
+    let mut seen = std::collections::HashMap::new();
+    for n in &d.core.access_tree().nodes {
+        if let Some(first) = seen.insert(n.key, n.name.clone()) {
+            twice.push(format!("in the access tree, {:?}: {first:?} and {:?}", n.key, n.name));
+        }
+    }
+    twice
+}
+
+/// Removed from the account on another device (the web app, here a second
+/// app), this desktop is let go; the owner makes an invite there, and it's
+/// typed here into Settings → Sync and connected. No frame on the way has
+/// two nodes under one key (a release build panicked in accesskit at it).
+#[test]
+fn removed_then_back_by_an_invite_draws_each_node_once() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-rejoin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    // Every frame of each, looked at: a duplicate seen the moment it's drawn.
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&[(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        loop {
+            for (app, d) in apps.iter_mut() {
+                d.core.set_inspect(true);
+                d.frame(&mut **app);
+                let twice = shared_keys(d);
+                assert!(twice.is_empty(), "{what}: {twice:#?}");
+                let w = d.warnings();
+                assert!(w.is_empty(), "{what}: {w:?}");
+            }
+            if done(apps) {
+                break;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    // The web app: the server's owner, Settings open the whole time.
+    let (mut w, mut dw, dir_w) = fresh("rejoin-web");
+    w.sync.set_name("Browser".into());
+    w.sync_server = origin.clone();
+    w.sync_code = invite.text();
+    w.on_plain(Msg::SyncStart);
+    until("the web app online", &mut [(&mut w, &mut dw)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    w.settings_open = true;
+    w.on_plain(Msg::SyncPair);
+    until("a pairing code", &mut [(&mut w, &mut dw)], &|x| x[0].0.sync.code.is_some() && x[0].0.sync.invites.as_ref().is_some_and(|i| i.owner));
+
+    // The desktop comes in by it, and has Settings → Sync open.
+    let (mut a, mut da, dir_a) = fresh("rejoin-desk");
+    a.sync.set_name("Desk".into());
+    a.sync_server = origin.clone();
+    a.sync_code = w.sync.code.clone().unwrap();
+    a.settings_open = true;
+    a.on_plain(Msg::SyncStart);
+    // The account has a passkey (the web app's way in), and the desktop
+    // shows the notes on the server too.
+    w.sync.add_passkey_for_test("Passkey from Safari on Mac", b"credential", &[5; 32]);
+    a.on_plain(Msg::SyncInspector);
+    until("both list two devices, the desktop the owner's, the passkey and the notes", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| {
+        x.iter().all(|(app, _)| app.sync.devices.as_ref().is_some_and(|l| l.len() == 2))
+            && x[1].0.sync.invites.as_ref().is_some_and(|i| i.owner)
+            && x[1].0.sync.passkeys.len() == 1
+            && x[1].0.sync.inspection.is_some()
+    });
+
+    // Removed from the web app: the desktop is told, and leaves sync.
+    let at = w.sync.devices.as_ref().unwrap().iter().position(|d| !d.you).unwrap() as u64;
+    w.on_plain(Msg::SyncRemove { at });
+    w.on_plain(Msg::SyncRemove { at });
+    until("the desktop is out", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| !x[1].0.sync.is_on());
+    assert!(a.sync.error.as_deref().is_some_and(|e| e.contains("removed")), "{:?}", a.sync.error);
+
+    // The owner makes an invite; it's typed into the desktop and connected.
+    w.on_plain(Msg::SyncInvite);
+    until("the invite", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| x[0].0.sync.invite.is_some());
+    a.sync_server = origin.clone();
+    a.sync_code = w.sync.invite.clone().unwrap();
+    a.sync_reset_fields = true;
+    a.on_plain(Msg::SyncStart);
+    until("the desktop online on an account of its own, its devices and invites listed", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| {
+        let a = &x[1].0;
+        a.sync.status == crate::sync::Status::Online
+            && a.sync.devices.as_ref().is_some_and(|l| l.len() == 1)
+            && a.sync.invites.as_ref().is_some_and(|i| !i.owner)
+    });
+    assert_ne!(a.sync.account(), w.sync.account());
+    // The notes on the server, still shown: asked again until the
+    // desktop's own have reached its new account.
+    for _ in 0..200 {
+        if a.sync.inspection.as_ref().is_some_and(|(rooms, _)| !rooms.is_empty()) {
+            break;
+        }
+        if a.sync.inspection.is_some() {
+            a.on_plain(Msg::SyncInspectorRefresh);
+        }
+        until("asked", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|_| true);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(a.sync.inspection.as_ref().is_some_and(|(rooms, _)| !rooms.is_empty()), "the notes on the server listed");
+    // A while longer, as the app sits there.
+    for _ in 0..40 {
+        until("settled", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|_| true);
+    }
+
+    drop(a);
+    drop(w);
+    let _ = stop.send(());
+    let _ = rt.block_on(served);
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_w);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 fn d_frame_twice(app: &mut Carnet, d: &mut Drive) {
     d.frame(app);
     d.frame(app);
@@ -4619,3 +4755,28 @@ fn a_reset_puts_the_look_back_when_asked_twice() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A note's history and the Deleted folder list their rows under a line
+/// of words: each row keyed apart from it, every node once.
+#[test]
+fn the_history_and_deleted_lists_draw_each_node_once() {
+    let (mut app, mut d, dir) = two_versions("lists-once");
+    let check = |what: &str, app: &mut Carnet, d: &mut Drive| {
+        d.core.set_inspect(true);
+        d.frame(app);
+        d.frame(app);
+        let twice = shared_keys(d);
+        assert!(twice.is_empty(), "{what}: {twice:#?}");
+    };
+    app.on_plain(Msg::ShowHistory);
+    check("the history", &mut app, &mut d);
+    app.on_plain(Msg::CloseHistory);
+    let folder = app.store.create_folder("", "Work").unwrap();
+    app.move_note(app.current, &folder);
+    app.delete_note_at(app.current);
+    app.trash_folder("Work");
+    app.notice = None;
+    app.on_plain(Msg::ShowDeleted);
+    check("Deleted", &mut app, &mut d);
+    assert_eq!(app.trash.len(), 2);
+    remove_test_dir(dir);
+}

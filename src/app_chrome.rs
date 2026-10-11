@@ -341,8 +341,10 @@ impl Carnet {
                 for (i, d) in self.trash.iter().enumerate() {
                     let from = if d.folder.is_empty() { "All notes".to_string() } else { folder_name(&d.folder).to_string() };
                     let on = open.as_ref() == Some(&d.path);
-                    ui.with_indexed(
-                        i as u64,
+                    // Keyed apart from the line above them: an index key is
+                    // the one the `i`th unkeyed child has.
+                    ui.with_key(
+                        ui.child_key("trashed").index(i as u64),
                         NodeSpec::column()
                             .grow_width()
                             .pad_xy(14.0, 9.0)
@@ -436,7 +438,7 @@ impl Carnet {
                     } else {
                         row.hover_bg(t.hover)
                     };
-                    ui.with_indexed(i as u64, row, |ui| {
+                    ui.with_key(ui.child_key("version").index(i as u64), row, |ui| {
                         ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
                             ui.text_in(
                                 NodeSpec::row().grow_width().min_width(0.0),

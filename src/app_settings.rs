@@ -641,7 +641,7 @@ impl Carnet {
             let armed = self.sync_inspect_armed.as_ref().filter(|(room, _)| *room == r.room).map(|(_, repair)| *repair);
             let days_left = (r.shelved_since + KEEP_DAYS * 86_400).saturating_sub(secs).div_ceil(86_400).max(1);
             let undoable = r.base.as_ref().is_some_and(|b| b.undoable) && r.shelved > 0;
-            ui.with_indexed(i as u64, NodeSpec::column().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 10.0, b: 10.0 }).gap(6.0), |ui| {
+            ui.with_key(ui.child_key("sync-room").index(i as u64), NodeSpec::column().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 10.0, b: 10.0 }).gap(6.0), |ui| {
                 // The note, and More.
                 ui.with(NodeSpec::row().grow_width().gap(10.0).cross_align(Align::Center), |ui| {
                     ui.text_in(NodeSpec::row().grow_width(), &title, TextStyle::new(Type::STRONG.size).color(t.fg));
@@ -742,7 +742,7 @@ impl Carnet {
                     (Icon::Clock, t.fg, e.what.clone())
                 };
                 let words = format!("{}: {what} \u{b7} {} \u{b7} {}", title_of(self, &e.room), ago(e.at), name_of(&e.device));
-                ui.with_indexed(1000 + i as u64, NodeSpec::row().grow_width().pad_xy(18.0, 3.0).selectable(), |ui| line(ui, g, ink, &words, small(t.fg)));
+                ui.with_key(ui.child_key("sync-log").index(i as u64), NodeSpec::row().grow_width().pad_xy(18.0, 3.0).selectable(), |ui| line(ui, g, ink, &words, small(t.fg)));
             }
         }
     }
@@ -937,6 +937,10 @@ impl Carnet {
                             TextStyle::new(Type::SMALL.size).color(t.muted),
                         );
                         let now = SystemTime::now();
+                        // Each list in this card keyed by its own name and
+                        // the row's place: an index key alone is the one the
+                        // `i`th unkeyed child has, and two lists' first rows
+                        // would be one node to the access tree.
                         for (i, d) in list.iter().enumerate() {
                             let name = d.name.clone().unwrap_or_else(|| "A device not yet named".into());
                             let what = if d.you {
@@ -959,7 +963,7 @@ impl Carnet {
                             if d.you
                                 && let Some(typed) = self.sync_rename.clone()
                             {
-                                ui.with_indexed(i as u64, NodeSpec::column().grow_width(), |ui| {
+                                ui.with_key(ui.child_key("sync-device").index(i as u64), NodeSpec::column().grow_width(), |ui| {
                                     ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_align(Align::Center).wrap(), |ui| {
                                         let k = field(self, ui, "sync-rename", &typed, "What this device is called", Field::DeviceName);
                                         self.apply_focus(ui, k, Field::DeviceName);
@@ -969,7 +973,7 @@ impl Carnet {
                                 });
                                 continue;
                             }
-                            ui.with_indexed(i as u64, NodeSpec::column().grow_width(), |ui| {
+                            ui.with_key(ui.child_key("sync-device").index(i as u64), NodeSpec::column().grow_width(), |ui| {
                                 setting(ui, l, &name, Some(&what), |ui| {
                                     if d.you {
                                         pill_button(ui, l, "sync-rename", "Rename", false, status == Status::Online, Msg::SyncRename);
@@ -1143,7 +1147,7 @@ impl Carnet {
                             let added = super::chrome::ago(now, SystemTime::UNIX_EPOCH + Duration::from_secs(p.made));
                             format!("Added {added}. Signs a browser in to this account.")
                         };
-                        ui.with_indexed(i as u64, NodeSpec::column().grow_width(), |ui| {
+                        ui.with_key(ui.child_key("sync-passkey").index(i as u64), NodeSpec::column().grow_width(), |ui| {
                             setting(ui, l, &name, Some(&what), |ui| {
                                 if armed {
                                     pill_button(ui, l, &format!("passkey-cancel-{i}"), "Cancel", false, true, Msg::SyncPasskeyCancel);
@@ -1191,7 +1195,7 @@ impl Carnet {
                         let code = self.sync.invite_code(&w.hash);
                         let title = code.clone().unwrap_or_else(|| "An invite".into());
                         let what = format!("Not used yet \u{b7} {}", left(secs, w.until));
-                        ui.with_indexed(i as u64, NodeSpec::column().grow_width(), |ui| {
+                        ui.with_key(ui.child_key("sync-waiting").index(i as u64), NodeSpec::column().grow_width(), |ui| {
                             setting_in(ui, l, &title, Some(&what), code.is_some(), |ui| {
                                 if code.is_some() {
                                     pill_button(ui, l, &format!("sync-invite-copy-{i}"), "Copy", false, true, Msg::SyncInviteCopy { at: i as u64 });
@@ -1223,7 +1227,7 @@ impl Carnet {
                             } else {
                                 what
                             };
-                            ui.with_indexed(1000 + i as u64, NodeSpec::column().grow_width(), |ui| {
+                            ui.with_key(ui.child_key("sync-account").index(i as u64), NodeSpec::column().grow_width(), |ui| {
                                 setting(ui, l, "An account", Some(&what), |ui| {
                                     let word = if armed { "Remove for real" } else { "Remove" };
                                     pill_button(ui, l, &format!("sync-account-remove-{i}"), word, armed, status == Status::Online, Msg::SyncAccountRemove { at: i as u64 });
