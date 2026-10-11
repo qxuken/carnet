@@ -107,6 +107,11 @@ impl Carnet {
     /// is the whole window (`full`), the window's own buttons in its top
     /// row, until a note is chosen.
     pub(super) fn sidebar(&mut self, ui: &mut Ui<'_>, l: &Look, full: bool) {
+        // A note's history is a level of its own: the whole column.
+        if self.versions.is_some() {
+            self.history_level(ui, l, full);
+            return;
+        }
         let t = l.t;
         let column = NodeSpec::column().grow_height().bg(l.side);
         let column = if full { column.grow_width() } else { column.width(self.library_w()) };
@@ -125,9 +130,7 @@ impl Carnet {
                     .focus_region()
                     .window_drag_unless(self.menu_open),
                 |ui| {
-                    let heading = if self.versions.is_some() {
-                        "History"
-                    } else if self.deleted {
+                    let heading = if self.deleted {
                         "Deleted"
                     } else {
                         self.folder.as_deref().map_or("Notes", folder_name)
@@ -171,11 +174,6 @@ impl Carnet {
             );
             self.search(ui, l);
             self.folders(ui, l);
-            if self.versions.is_some() {
-                self.history_list(ui, l);
-                self.sidebar_foot(ui, l);
-                return;
-            }
             if self.deleted {
                 self.deleted_list(ui, l);
                 self.sidebar_foot(ui, l);
@@ -426,14 +424,22 @@ impl Carnet {
         );
     }
 
-    /// The open note's versions, newest first, as the web app lists them:
-    /// what made each, when, and how many words it added and took away,
-    /// under a line saying how to read them and what the marks mean. A
-    /// click shows one on the page.
-    fn history_list(&mut self, ui: &mut Ui<'_>, l: &Look) {
+    /// A note's history, in the library's place as a level of its own,
+    /// as the web app's is: a way back and "History" in the column's top
+    /// row, a line saying how to read the versions and what the marks
+    /// mean, then the versions, newest first — what made each, when, and
+    /// how many words it added and took away. A click (or Enter, the
+    /// arrows walking the list) shows one on the page. The library under
+    /// it is left as it was, to come back to.
+    fn history_level(&mut self, ui: &mut Ui<'_>, l: &Look, full: bool) {
         let t = l.t;
+        // Nothing of the library is drawn to take a dragged note or file,
+        // nor a folder row for the arrows.
+        self.card_rects.clear();
+        self.folder_rects.clear();
+        self.folder_rows.clear();
         let Some(v) = &self.versions else { return };
-        let (rows, shown) = (v.list.clone(), v.shown);
+        let (rows, shown, focus) = (v.list.clone(), v.shown, v.focus);
         // Words in and out of each version, against the one before it.
         let deltas: Vec<Option<(usize, usize)>> = (0..rows.len())
             .map(|i| {
@@ -442,66 +448,120 @@ impl Carnet {
                 Some(carnet_core::compare::word_delta(&old, &new))
             })
             .collect();
-        ui.with_keyed(
-            "history",
-            NodeSpec::column()
-                .grow_width()
-                .grow_height()
-                .pad_xy(12.0, 6.0)
-                .gap(2.0)
-                .scroll_y()
-                .scrollbar_width(4.0)
-                .role(Role::List)
-                .label("History"),
-            |ui| {
-                ui.text_in(
-                    NodeSpec::row().pad_xy(14.0, 4.0),
-                    HISTORY_HINT,
-                    TextStyle::new(Type::SMALL.size).color(t.muted),
-                );
-                for (i, r) in rows.iter().enumerate() {
-                    let what = self.version_label(r);
-                    let when = super::revision_ago(r);
-                    let words = match deltas[i] {
-                        Some((0, 0)) | None => "no words changed".to_string(),
-                        Some((added, 0)) => format!("+{added} words"),
-                        Some((0, gone)) => format!("−{gone} words"),
-                        Some((added, gone)) => format!("+{added} −{gone} words"),
-                    };
-                    let detail = if i == 0 { format!("The note as it is · {words}") } else { format!("{when} · {words}") };
-                    let mut row = NodeSpec::column()
-                        .grow_width()
-                        .pad_xy(14.0, 9.0)
-                        .gap(3.0)
-                        .radius(radius::CARD)
-                        .on_click(Msg::ShowVersion { index: i as u64 })
-                        .label(what.as_str())
-                        .description(detail.clone())
-                        .selected(i == shown);
-                    row = if i == shown {
-                        row.bg(l.card).shadow_color(l.shadow).shadow_blur(16.0).shadow_y(3.0)
-                    } else {
-                        row.hover_bg(t.hover)
-                    };
-                    ui.with_key(ui.child_key("version").index(i as u64), row, |ui| {
-                        ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
+        let column = NodeSpec::column().grow_height().bg(l.side);
+        let column = if full { column.grow_width() } else { column.width(self.library_w()) };
+        let mut focus_key = None;
+        ui.with_keyed("history-level", column, |ui| {
+            // The column's top row, as the library's: window chrome, past
+            // the traffic lights on a Mac.
+            ui.with(
+                NodeSpec::row()
+                    .grow_width()
+                    .height(STRIP_H)
+                    .padding(Edges { l: (size::GUTTER - 7.0).max(self.lights), r: if full { 0.0 } else { 14.0 }, t: 0.0, b: 0.0 })
+                    .gap(4.0)
+                    .cross_align(Align::Center)
+                    .window_drag_unless(self.menu_open),
+                |ui| {
+                    ui.with_keyed(
+                        "history-back",
+                        NodeSpec::row()
+                            .size(30.0, 30.0)
+                            .radius(radius::ROUND)
+                            .hover_bg(t.hover)
+                            .pressed_bg(t.pressed)
+                            .on_click(Msg::CloseHistory)
+                            .label("Back to the notes")
+                            .tooltip("Back to the notes (Esc)")
+                            .center(),
+                        |ui| icon(ui, Icon::Back, t.fg, 20.0, false),
+                    );
+                    ui.text_in(
+                        NodeSpec::row().grow_width().min_width(0.0),
+                        "History",
+                        TextStyle::new(Type::HEADING.size).family(l.serif).color(t.fg).ellipsis(),
+                    );
+                    if full {
+                        gap(ui, 8.0);
+                        widgets::window_buttons(ui);
+                    }
+                },
+            );
+            ui.text_in(
+                NodeSpec::row().grow_width().padding(Edges { l: 26.0, r: 20.0, t: 0.0, b: 8.0 }),
+                HISTORY_HINT,
+                TextStyle::new(Type::SMALL.size).color(t.muted),
+            );
+            ui.with_keyed(
+                "history",
+                NodeSpec::column()
+                    .grow_width()
+                    .grow_height()
+                    .padding(Edges { l: 12.0, r: 12.0, t: 2.0, b: 16.0 })
+                    .gap(2.0)
+                    .scroll_y()
+                    .scrollbar_width(4.0)
+                    .role(Role::List)
+                    .label("History"),
+                |ui| {
+                    for (i, r) in rows.iter().enumerate() {
+                        let what = self.version_label(r);
+                        let when = super::revision_ago(r);
+                        let words = match deltas[i] {
+                            Some((0, 0)) | None => "no words changed".to_string(),
+                            Some((added, 0)) => format!("+{added} words"),
+                            Some((0, gone)) => format!("−{gone} words"),
+                            Some((added, gone)) => format!("+{added} −{gone} words"),
+                        };
+                        let detail = if i == 0 { format!("The note as it is · {words}") } else { format!("{when} · {words}") };
+                        // An item of the list: one Tab stop, the arrows
+                        // moving between them and Enter reading one.
+                        let mut row = NodeSpec::column()
+                            .grow_width()
+                            .pad_xy(14.0, 9.0)
+                            .gap(3.0)
+                            .radius(radius::CARD)
+                            .role(Role::ListItem)
+                            .focusable()
+                            .on_click(Msg::ShowVersion { index: i as u64 })
+                            .label(what.as_str())
+                            .description(detail.clone())
+                            .selected(i == shown);
+                        row = if i == shown {
+                            row.bg(l.card).shadow_color(l.shadow).shadow_blur(16.0).shadow_y(3.0)
+                        } else {
+                            row.hover_bg(t.hover)
+                        };
+                        let k = ui.with_key(ui.child_key("version").index(i as u64), row, |ui| {
+                            ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
+                                ui.text_in(
+                                    NodeSpec::row().grow_width().min_width(0.0),
+                                    &what,
+                                    TextStyle::new(Type::STRONG.size).color(t.fg).ellipsis(),
+                                );
+                                let age = if i == 0 { "now".to_string() } else { short_ago(SystemTime::now(), super::revision_time(r)) };
+                                ui.text(&age, TextStyle::new(Type::CAPTION.size).color(t.muted).nowrap());
+                            });
                             ui.text_in(
                                 NodeSpec::row().grow_width().min_width(0.0),
-                                &what,
-                                TextStyle::new(Type::STRONG.size).color(t.fg).ellipsis(),
+                                &detail,
+                                TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis(),
                             );
-                            let age = if i == 0 { "now".to_string() } else { short_ago(SystemTime::now(), super::revision_time(r)) };
-                            ui.text(&age, TextStyle::new(Type::CAPTION.size).color(t.muted).nowrap());
                         });
-                        ui.text_in(
-                            NodeSpec::row().grow_width().min_width(0.0),
-                            &detail,
-                            TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis(),
-                        );
-                    });
-                }
-            },
-        );
+                        if focus && i == shown {
+                            focus_key = Some(k);
+                        }
+                    }
+                },
+            );
+        });
+        if let Some(k) = focus_key {
+            ui.focus(k);
+            ui.reveal(k);
+            if let Some(v) = self.versions.as_mut() {
+                v.focus = false;
+            }
+        }
     }
 
     /// The column's last row: the way to the settings.
@@ -976,8 +1036,13 @@ impl Carnet {
             |ui| {
                 if narrow {
                     gap(ui, 8.0_f32.max(lights));
-                    Tool::new("t-back", Icon::Back, "All notes", "Back to the list of notes".to_string(), Msg::ShowList)
-                        .draw(ui, &t);
+                    // From a version of a note's history: back to its list.
+                    let (name, hint) = if self.versions.is_some() {
+                        ("History", "Back to the versions")
+                    } else {
+                        ("All notes", "Back to the list of notes")
+                    };
+                    Tool::new("t-back", Icon::Back, name, hint.to_string(), Msg::ShowList).draw(ui, &t);
                 } else {
                     // The library's own switch, at the strip's start: past
                     // the traffic lights when the library has gone.

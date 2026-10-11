@@ -17,6 +17,14 @@ const FONT_ROW_H: f32 = 34.0;
 
 impl Carnet {
     pub(super) fn on_settings(&mut self, msg: Msg) {
+        // The column's switch with a note's history in it: the history
+        // goes, and the library with it if it showed.
+        if matches!(msg, Msg::ToggleSidebar) && self.versions.is_some() {
+            self.close_history();
+            if !self.side_shown() {
+                return;
+            }
+        }
         let s = &mut self.settings;
         match msg {
             Msg::ShowSettings => {
