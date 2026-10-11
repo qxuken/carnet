@@ -469,7 +469,7 @@ impl Carnet {
     /// pictures (`i..k`, side by side), and the blocks that run beside
     /// them (`k..end`) — as many as it takes, by last frame's heights, to
     /// pass the tallest picture's foot. A picture on a line of its own
-    /// ends it.
+    /// ends it, and so does a divider.
     fn float_group(&self, blocks: &[Rc<Block>], i: usize, prev: &HashMap<u64, Rect>) -> Option<(usize, usize)> {
         let floated = |b: &Block| matches!(b.kind, Kind::Image { float, .. } if float != Float::None);
         if !floated(&blocks[i]) {
@@ -488,7 +488,9 @@ impl Carnet {
         let mut end = k;
         let mut beside = 0.0;
         while end < blocks.len() && beside < tall - 8.0 {
-            if matches!(blocks[end].kind, Kind::Image { .. }) {
+            // A divider ends a part of the note: it goes across the page,
+            // under the pictures, not in a column beside them.
+            if matches!(blocks[end].kind, Kind::Image { .. } | Kind::Divider) {
                 break;
             }
             beside += prev.get(&blocks[end].id).map_or(30.0, |r| r.h);

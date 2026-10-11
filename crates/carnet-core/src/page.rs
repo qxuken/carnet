@@ -739,7 +739,7 @@ fn shortcuts(doc: &mut Doc, c: &mut Caret, old: &str) {
             *c = Caret::at(entry(doc, &target, caret_in));
             if target.kind.is_atomic() {
                 // Nothing to type on: carry on in the block below.
-                *c = Caret::at(carry_on(doc, doc.index_of(target.id).unwrap_or(0) + 1));
+                carry_on_unless_picture(doc, doc.index_of(target.id).unwrap_or(0) + 1, c);
             }
             doc.ensure_tail();
         }
@@ -1581,22 +1581,40 @@ fn carry_on(doc: &mut Doc, j: usize) -> Pos {
     start(Slot::block(next))
 }
 
+/// Where the caret carries on past a divider put in just before block
+/// `j`: as `carry_on`, but where a picture (or another divider) follows,
+/// just past the divider, where typing starts a paragraph — no empty
+/// line is made between the divider and the picture, to show as a gap.
+fn carry_on_unless_picture(doc: &mut Doc, j: usize, c: &mut Caret) {
+    if doc.blocks().get(j).is_some_and(|b| b.kind.is_atomic()) {
+        let divider = Slot::block(doc.blocks()[j - 1].id);
+        *c = Caret::at(end(doc, divider));
+        return;
+    }
+    *c = Caret::at(carry_on(doc, j));
+}
+
 /// A divider where the caret is. In the middle of a block's words the
 /// block is cut there, the divider between the halves and the caret at
 /// the start of the second; at the start of a block it goes before it,
 /// the caret staying; at the end, after it, and on an empty line in its
 /// place, the caret going on to the next block with text — a new line is
-/// made only when there is none. In a table, or on a picture, a divider
-/// or code, it goes after the block.
+/// made only when there is none, and none before a picture, where the
+/// caret stays. In a table, or on a picture (selected, it stays: the
+/// divider goes after it, not in its place), a divider or code, it goes
+/// after the block.
 pub fn insert_divider(doc: &mut Doc, c: &mut Caret) -> bool {
-    replace_selection(doc, c);
+    let on_one_atomic = !c.is_empty() && c.anchor.slot == c.head.slot && is_atomic(doc, c.head.slot);
+    if !on_one_atomic {
+        replace_selection(doc, c);
+    }
     let p = c.head;
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     let kind = doc.blocks()[i].kind.clone();
     let words = p.slot.cell.is_none() && matches!(kind, Kind::Text(_) | Kind::Heading { .. } | Kind::Item { .. } | Kind::Quote(_));
     if !words {
         doc.insert(i + 1, Block::new(Kind::Divider));
-        *c = Caret::at(carry_on(doc, i + 2));
+        carry_on_unless_picture(doc, i + 2, c);
         doc.ensure_tail();
         return true;
     }
@@ -1606,12 +1624,12 @@ pub fn insert_divider(doc: &mut Doc, c: &mut Caret) -> bool {
     let (at_start, at_end) = (v.drawn(byte) == 0, v.drawn(byte) == v.drawn_len());
     if t.is_empty() && matches!(kind, Kind::Text(_)) {
         doc.set(i, Block::new(Kind::Divider));
-        *c = Caret::at(carry_on(doc, i + 1));
+        carry_on_unless_picture(doc, i + 1, c);
     } else if at_start {
         doc.insert(i, Block::new(Kind::Divider));
     } else if at_end {
         doc.insert(i + 1, Block::new(Kind::Divider));
-        *c = Caret::at(carry_on(doc, i + 2));
+        carry_on_unless_picture(doc, i + 2, c);
     } else {
         // Cut as Enter cuts (a bold run cut is bold on both sides); the
         // spaces or the line break at the cut go.
@@ -2296,7 +2314,7 @@ pub fn remove_block(doc: &mut Doc, c: &mut Caret) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doc::Table;
+    use crate::doc::{Float, Table};
 
     fn doc(blocks: Vec<Block>) -> Doc {
         Doc::new(blocks)
@@ -2621,6 +2639,53 @@ mod tests {
         let mut t = Typing::default();
         t.type_text(&mut d, &mut c, "---");
         assert_eq!(texts(&d)[..2], ["---", "Head:Next"]);
+    }
+
+    /// Two pictures at the left edge and one on its own line below: a
+    /// divider put in between makes no empty line under it (a gap before
+    /// the picture), and a selected picture stays, the divider after it.
+    #[test]
+    fn a_divider_between_pictures_makes_no_empty_line() {
+        let pic = |src: &str, float: Float| Block::new(Kind::Image { src: src.into(), alt: String::new(), width: Some(160), float, wiki: false });
+        let note = || doc(vec![pic("a.png", Float::Left), pic("b.png", Float::Left), pic("c.png", Float::None), Block::text("Words")]);
+        let kinds = |d: &Doc| {
+            d.blocks()
+                .iter()
+                .map(|b| match &b.kind {
+                    Kind::Image { src, .. } => src.clone(),
+                    Kind::Divider => "---".into(),
+                    k => format!("{k:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        // The second picture selected.
+        let mut d = note();
+        let b = Slot::block(d.blocks()[1].id);
+        let mut c = Caret { anchor: start(b), head: end(&d, b) };
+        assert!(insert_block(&mut d, &mut c, Kind::Divider));
+        assert_eq!(kinds(&d), ["a.png", "b.png", "---", "c.png", "Text(\"Words\")"]);
+        let rule = Slot::block(d.blocks()[2].id);
+        assert_eq!(c, Caret::at(end(&d, rule)), "the caret just past the divider");
+        // Typing there starts a paragraph after it, before the picture.
+        insert(&mut d, &mut c, "x");
+        assert_eq!(kinds(&d)[2..5], ["---", "Text(\"x\")", "c.png"]);
+        // An empty line between them: the divider in its place.
+        let mut d = note();
+        d.insert(2, Block::text(""));
+        let mut c = at(&d, 2, 0);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(kinds(&d), ["a.png", "b.png", "---", "c.png", "Text(\"Words\")"]);
+        // `---` typed there, the same.
+        let mut d = note();
+        d.insert(2, Block::text(""));
+        let mut c = at(&d, 2, 0);
+        Typing::default().type_text(&mut d, &mut c, "---");
+        assert_eq!(kinds(&d), ["a.png", "b.png", "---", "c.png", "Text(\"Words\")"]);
+        // At the end of words before a picture.
+        let mut d = doc(vec![Block::text("Hello"), pic("c.png", Float::None)]);
+        let mut c = at(&d, 0, 5);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(kinds(&d)[..3], ["Text(\"Hello\")", "---", "c.png"]);
     }
 
     /// Tab in text is a tab character, never spaces: typed in the middle

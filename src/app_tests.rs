@@ -1863,6 +1863,50 @@ fn a_picture_is_carried_between_lines_and_beside_another() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Two pictures at the left edge, one on a line of its own under them: a
+/// divider put in after the second goes between, with no empty line made
+/// under it, and is drawn across the page under the pictures — not in a
+/// column beside them, where the pictures' height showed as a gap.
+#[test]
+fn a_divider_after_pictures_at_the_edge_has_no_gap_under_it() {
+    let (mut app, mut d, dir) = body("rule-floats");
+    for shade in [200u8, 90, 120] {
+        let rgba: Vec<u8> = (0..300 * 200).flat_map(|_| [shade, 120, 150, 255]).collect();
+        app.paste_picture(300, 200, &rgba);
+        d.frame(&mut app);
+    }
+    let pics: Vec<u64> = blocks(&app).iter().filter(|b| matches!(b.kind, Kind::Image { .. })).map(|b| b.id).collect();
+    assert_eq!(pics.len(), 3, "{:?}", texts(&app));
+    for &id in &pics[..2] {
+        app.edit(Step::Other, |doc, _| page::set_image_float(doc, id, Float::Left) && page::set_image_width(doc, id, Some(160)));
+    }
+    let i = app.doc().index_of(pics[1]).unwrap();
+    app.caret = page::select_blocks(app.doc(), i, i);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    app.on_plain(Msg::InsertDivider);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let kinds: Vec<String> = blocks(&app)
+        .iter()
+        .map(|b| match &b.kind {
+            Kind::Image { .. } => "picture".to_string(),
+            Kind::Divider => "---".to_string(),
+            _ => format!("text:{}", b.text_ref().unwrap_or("")),
+        })
+        .collect();
+    let at = kinds.iter().position(|k| k == "---").expect("a divider");
+    assert_eq!(kinds[at - 2..at + 2], ["picture", "picture", "---", "picture"], "{kinds:?}");
+    let rect = |id: u64| app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).unwrap();
+    let (first, rule, below) = (rect(pics[0]), rect(blocks(&app)[at].id), rect(pics[2]));
+    assert!(rule.y >= first.y + first.h - 1.0, "under the pictures: {first:?} {rule:?}");
+    assert!((rule.x - first.x).abs() < 2.0, "across the page, from its left: {first:?} {rule:?}");
+    assert!(below.y - (rule.y + rule.h) < 40.0, "no gap under it: {rule:?} {below:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Lets what eases get where it is going: the frame clock moved on.
 fn settle(app: &mut Carnet, d: &mut Drive) {
     d.advance(1.0);
