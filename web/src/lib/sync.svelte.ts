@@ -6,6 +6,7 @@ import init, { Join, Vault, app_version, code_from_link, invite_from, protocol, 
 import * as sealed from './sealed';
 import * as db from './db';
 import * as passkey from './passkey';
+import { Shown } from './shown';
 
 export type Note = {
   key: string;
@@ -153,7 +154,7 @@ class Sync {
   private ws: WebSocket | null = null;
   private wait = 1000;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
-  private pictures = new Map<string, string>();
+  private pictures = new Shown();
   private wanted = new Map<string, { path: string; done: (url: string) => void }[]>();
   private pruneTimer: ReturnType<typeof setTimeout> | undefined;
   private wantDevices = false;
@@ -248,7 +249,7 @@ class Sync {
     await sealed.put(PICTURE + id, bytes);
     const list = (await db.get<[string, string][]>(UPLOADS)) ?? [];
     await db.set(UPLOADS, [...list, [path, id]]);
-    this.pictures.set(path, URL.createObjectURL(new Blob([bytes], { type })));
+    this.pictures.add(path, new Blob([bytes], { type }));
     const depth = folder ? folder.split('/').length : 0;
     return '../'.repeat(depth) + path;
   }
@@ -357,9 +358,7 @@ class Sync {
       // never goes stale.
       void sealed.put(PICTURE + id, data);
       for (const w of this.wanted.get(id) ?? []) {
-        const url = URL.createObjectURL(new Blob([data]));
-        this.pictures.set(w.path, url);
-        w.done(url);
+        w.done(this.pictures.add(w.path, new Blob([data])));
       }
       this.wanted.delete(id);
     }
@@ -601,7 +600,9 @@ class Sync {
     return this.vault?.picture_path(folder, src, wiki);
   }
 
-  /// The picture at `path` (from the notes folder), as a URL to show.
+  /// The picture at `path` (from the notes folder), as a URL to show:
+  /// one kept while it's on screen, else made again from the copy kept
+  /// for offline, else fetched.
   picture(path: string): Promise<string> {
     const have = this.pictures.get(path);
     if (have) return Promise.resolve(have);
@@ -611,9 +612,7 @@ class Sync {
       (kept) =>
         new Promise((done, fail) => {
           if (kept) {
-            const url = URL.createObjectURL(new Blob([kept]));
-            this.pictures.set(path, url);
-            return done(url);
+            return done(this.pictures.add(path, new Blob([kept])));
           }
           if (!this.vault?.get_picture(path)) return fail(new Error('not in the vault'));
           this.flush();
@@ -851,7 +850,6 @@ class Sync {
     this.vault = null;
     await db.clear();
     sealed.drop();
-    for (const url of this.pictures.values()) URL.revokeObjectURL(url);
     this.pictures.clear();
     this.notes = [];
     this.folders = [];
