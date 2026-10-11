@@ -368,15 +368,18 @@ fn the_browser_lists_draws_and_ticks() {
     // Drawn: real checkboxes, the highlight, the picture to fetch.
     let h = web.html(&shop.to_string());
     assert!(h.contains("data-task=\"0\"><span>milk") && h.contains("checked><span>bread") && !h.contains("<p></p>"), "{h}");
-    assert!(h.contains("src=\"carnet-picture:attachments/p.png\""), "resolved from its folder: {h}");
-    assert!(h.contains("src=\"carnet-picture:Home/hill.jpg\""), "beside its note: {h}");
+    assert!(h.contains("data-picture=\"attachments/p.png\""), "resolved from its folder: {h}");
+    assert!(h.contains("data-picture=\"Home/hill.jpg\""), "beside its note: {h}");
     let h = web.html(&plan.to_string());
     assert!(h.contains("<mark>words</mark>"), "{h}");
-    assert!(h.contains("<img src=\"carnet-picture:attachments/2026/photo.png\" alt=\"\" width=\"200\">"), "found by its name: {h}");
+    assert!(h.contains("<img data-picture=\"attachments/2026/photo.png\" alt=\"\" width=\"200\">"), "found by its name: {h}");
     // A file outside the notes folder: the page says it's on the device
     // that has it; one on the web, as it is.
-    assert!(h.contains("src=\"carnet-picture:/Users/me/Pictures/sea.png\""), "{h}");
+    assert!(h.contains("data-picture=\"/Users/me/Pictures/sea.png\""), "{h}");
     assert!(h.contains("src=\"https://example.com/a.png\""), "{h}");
+    // Only that one has a `src`: the browser asks for no other before the
+    // page has it.
+    assert_eq!(h.matches("src=").count(), 1, "{h}");
     assert_eq!(web.picture_path("", "photo.png", true).as_deref(), Some("attachments/2026/photo.png"));
     assert_eq!(web.picture_path("Home", "../attachments/p.png", false).as_deref(), Some("attachments/p.png"));
     assert_eq!(web.picture_path("Home", "Hill.JPG", false).as_deref(), Some("Home/hill.jpg"), "as the vault spells it");
@@ -391,6 +394,78 @@ fn the_browser_lists_draws_and_ticks() {
     let again = Notes::open(ORIGIN, Me::from_bytes(&web.me.to_bytes()).unwrap(), "Phone", &saved, 100).unwrap();
     assert_eq!(again.notes().len(), 2);
     assert_eq!(again.session.cursor(), web.session.cursor());
+}
+
+/// Search as the desktop's: the title the library shows — for a note from
+/// the desktop, its file's name, which isn't in its words — and the words,
+/// case aside; not the folder, nor "Untitled".
+#[test]
+fn search_finds_a_desktop_notes_title_its_file_name() {
+    let mut rng = Seeded(11);
+    let mut hub = Hub::new(ORIGIN, Memory::default());
+    hub.store_mut().add_account(ACCOUNT, true).unwrap();
+    let ring = Ring::new(VaultKey::generate(&mut rng));
+    let (dk, wk) = (DeviceKey::generate(&mut rng), DeviceKey::generate(&mut rng));
+    hub.store_mut().add_device(ACCOUNT, b"desk", dk.public()).unwrap();
+    hub.store_mut().add_device(ACCOUNT, b"web", wk.public()).unwrap();
+    let id = Identity { origin: ORIGIN.into(), account: ACCOUNT.to_vec(), device: b"desk".to_vec(), key: dk, ring: ring.clone(), name: "Desk".into() };
+    let mut desk = Desk { session: Session::new(id, 0), docs: BTreeMap::new() };
+
+    // As the desktop syncs them: the title is the file's name, kept in the
+    // vault; the words have no heading.
+    let weekend = Key::random();
+    let item = Key::random();
+    let heading = Key::random();
+    let untitled = Key::random();
+    let v = NoteDoc::new(7);
+    for (k, text, folder, name) in [
+        (weekend, "The light on the hill at seven.\n", "Home", "Weekend"),
+        (item, "Note number 22 with a few words in it.\n", "Many", "Item 22"),
+        (heading, "# Acme plan\n\nQuarterly words.\n", "Work", "Acme plan"),
+        (untitled, "Nothing to title it by.\n", "", ""),
+    ] {
+        desk.docs.insert(k.to_string(), NoteDoc::new(7));
+        desk.docs[&k.to_string()].record(text, Origin::Save);
+        v.set_place(k, &Place { folder: folder.into(), name: name.into(), pinned: false, trashed: false });
+    }
+    desk.docs.insert(vault::ROOM.to_string(), v);
+
+    let me = Me { account: ACCOUNT.to_vec(), device: b"web".to_vec(), key: wk, ring };
+    let mut web = Notes::open(ORIGIN, me, "Phone", &[], 99).unwrap();
+    desk.session.connected();
+    web.session.connected();
+    for c in [1, 2] {
+        for o in hub.connect(c, &mut rng) {
+            if let Out::Send(_, b) = o {
+                if c == 1 {
+                    desk.session.receive(&b, &mut DeskDocs(&mut desk.docs), &mut rng);
+                } else {
+                    web.receive(&b, &mut rng);
+                }
+            }
+        }
+    }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.notes().len(), 4);
+
+    let found = |q: &str| {
+        let mut hits = web.search(q);
+        hits.sort();
+        hits
+    };
+    let one = |k: Key| vec![k.to_string()];
+    // The title, any case, whole or in part.
+    assert_eq!(found("Weekend"), one(weekend));
+    assert_eq!(found("weekEND"), one(weekend));
+    assert_eq!(found("Item 22"), one(item));
+    assert_eq!(found("acme"), one(heading));
+    // The words still.
+    assert_eq!(found("HILL AT"), one(weekend));
+    assert_eq!(found("quarterly"), one(heading));
+    // Not by the word the library shows for an untitled note, nor by a
+    // folder's name: the desktop finds neither.
+    assert!(found("untitled").is_empty());
+    assert!(found("Many").is_empty());
 }
 
 /// What a browser kept opens in the builds after it: the bytes every
