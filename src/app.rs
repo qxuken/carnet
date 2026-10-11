@@ -375,6 +375,9 @@ pub struct Versions {
     pub against_now: bool,
     /// The versions' texts, read as a row or the page needs one.
     texts: HashMap<usize, String>,
+    /// The keyboard to go to the shown version's row once it is drawn:
+    /// the arrows walk the list from there.
+    pub focus: bool,
 }
 
 /// Something in the trash, open on the page to read (a folder: its notes'
@@ -1103,8 +1106,10 @@ impl Carnet {
     }
 
     /// The library beside the page: as the settings say, and never in zen.
+    /// A note's history takes its place, and shows whatever they say: it
+    /// is read nowhere else.
     pub(super) fn side_shown(&self) -> bool {
-        self.settings.sidebar && !self.zen
+        (self.settings.sidebar && !self.zen) || self.versions.is_some()
     }
 
     /// Focus — the blocks not being written step back — as the settings
@@ -1209,7 +1214,11 @@ impl Carnet {
     }
 
     fn focus(&mut self, field: Field) {
-        // The search and a new folder's name are the library's: it shows.
+        // The search and a new folder's name are the library's: it shows,
+        // in place of a note's history.
+        if matches!(field, Field::Search | Field::Folder) {
+            self.close_history();
+        }
         if matches!(field, Field::Search | Field::Folder) && !self.side_shown() {
             self.zen = false;
             if !self.settings.sidebar {
@@ -1503,9 +1512,11 @@ impl Carnet {
 
     // ---------------------------------------------------------- history
 
-    /// The open note's history in place of the library, the newest
-    /// version on the page. Its edits are saved first: the history ends
-    /// with the note as it is.
+    /// The open note's history in place of the library — the whole
+    /// column, a level of its own as the web app's is — the newest version
+    /// on the page. Its edits are saved first: the history ends with the
+    /// note as it is. The library is left as it was (its folder, its
+    /// search, where it was scrolled), to come back to.
     pub(super) fn show_history(&mut self) {
         self.save_current();
         if self.store.notes[self.current].dirty {
@@ -1517,7 +1528,6 @@ impl Carnet {
             return;
         }
         self.settings_open = false;
-        self.deleted = false;
         self.close_peek();
         self.list_view = true;
         self.versions = Some(Versions {
@@ -1528,6 +1538,7 @@ impl Carnet {
             doc: Doc::default(),
             against_now: false,
             texts: HashMap::new(),
+            focus: true,
         });
         self.show_version(0);
     }
@@ -2638,7 +2649,12 @@ impl Carnet {
                 self.show_folder(if index == ALL { None } else { folder });
             }
             Msg::ShowHistory => self.show_history(),
-            Msg::ShowVersion { index } => self.show_version(index as usize),
+            Msg::ShowVersion { index } => {
+                self.show_version(index as usize);
+                // On a narrow window, the version in the list's place, with
+                // a way back to the list.
+                self.list_view = false;
+            }
             Msg::RestoreVersion => self.restore_version(),
             Msg::RestoreVersionCopy => self.restore_version_copy(),
             Msg::CloseHistory => self.close_history(),

@@ -3071,7 +3071,10 @@ fn a_notes_history_shows_its_versions_read_only_and_brings_one_back() {
     );
     assert!(HISTORY_HINT_WORDS.iter().all(|w| super::chrome::HISTORY_HINT.contains(w)));
     assert!(!drawn(&mut d, &mut app, "added"), "the list's line says what the marks mean");
+    // In the library's place, the whole column: no search, folders or
+    // notes over or under it.
     assert!(drawn(&mut d, &mut app, "History"));
+    no_library(&mut d, &mut app);
     assert!(drawn(&mut d, &mut app, "Edited here"));
     assert!(drawn(&mut d, &mut app, "The note as it is · +2 words"));
     assert!(drawn(&mut d, &mut app, "Where its history starts"));
@@ -3160,6 +3163,215 @@ fn the_history_goes_away_with_esc_another_note_or_the_menus() {
     app.new_note();
     app.on_plain(Msg::ShowHistory);
     assert!(app.versions.is_none());
+    remove_test_dir(dir);
+}
+
+/// Forty notes in a folder "Work", and a new note at the top level saved
+/// twice ("First words", then "First words and more"): a library long
+/// enough to scroll, and a note with a history.
+fn a_library_and_two_versions(name: &str, w: f32) -> (Carnet, Drive, std::path::PathBuf) {
+    let (store, dir) = temp_store(name);
+    drop(store);
+    std::fs::create_dir_all(dir.join("Work")).unwrap();
+    for i in 0..40 {
+        std::fs::write(dir.join("Work").join(format!("Note {i}.md")), format!("# Note {i}\n\nWords of note {i}\n")).unwrap();
+    }
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), w, 760.0).framing();
+    d.frame(&mut app);
+    app.new_note();
+    d_frame_twice(&mut app, &mut d);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "First words");
+    app.save_current();
+    type_in(&mut app, &mut d, " and more");
+    app.save_current();
+    d.frame(&mut app);
+    (app, d, dir)
+}
+
+/// Where the last frame put the node keyed `label`.
+fn keyed_rect(d: &mut Drive, label: &str) -> Rect {
+    let k = d.key_of(label).unwrap_or_else(|| panic!("{label} is drawn"));
+    d.rect_of(k).unwrap()
+}
+
+/// Nothing of the library is drawn: not its top row's title, its search,
+/// its folders or its notes.
+fn no_library(d: &mut Drive, app: &mut Carnet) {
+    d.frame(app);
+    for k in ["library", "folders", "search-pill", "new-folder", "new-note", "open-settings"] {
+        assert!(d.key_of(k).is_none(), "{k} is not drawn with the history");
+    }
+    assert!(!drawn(d, app, "All notes"), "nor its folders' names");
+    assert!(!drawn(d, app, "Notes"));
+}
+
+#[test]
+fn the_history_is_a_level_of_its_own_and_back_leaves_the_library_as_it_was() {
+    let (mut app, mut d, dir) = a_library_and_two_versions("history-level", 1100.0);
+    app.show_folder(Some("Work".into()));
+    app.focus(Field::Search);
+    d.frame(&mut app);
+    type_in(&mut app, &mut d, "Note");
+    d_frame_twice(&mut app, &mut d);
+    let search = d.core.focus().expect("the search has the keyboard");
+    let count = app.order.len();
+    assert!(count >= 40, "the notes in Work, and any other the search finds");
+    let list = d.key_of("library").expect("the notes are listed");
+    d.core.set_scroll(list, Vec2::new(0.0, 400.0));
+    d_frame_twice(&mut app, &mut d);
+    let scrolled = d.core.scroll_offset(list).y;
+    assert!(scrolled > 300.0, "scrolled down the notes: {scrolled}");
+    let width = keyed_rect(&mut d, "library-pane").w;
+
+    for back in ["escape", "the back button", "Done"] {
+        app.on_plain(Msg::ShowHistory);
+        d_frame_twice(&mut app, &mut d);
+        assert!(app.versions.is_some());
+        // The whole column is the history's: a way back and its name over
+        // the line on how to read it, then the versions.
+        no_library(&mut d, &mut app);
+        assert!(d.key_of("history-back").is_some(), "a way back");
+        assert!(d.key_named("Back to the notes").is_some());
+        assert!(drawn(&mut d, &mut app, "History"));
+        assert!(d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with("Click one to read it."))));
+        assert!(drawn(&mut d, &mut app, "The note as it is · +2 words"));
+        assert!(drawn(&mut d, &mut app, "Where its history starts"));
+        assert_eq!(keyed_rect(&mut d, "history-level").w, width, "the library's width");
+        // The page shows the note as it is, with its way back.
+        assert!(drawn(&mut d, &mut app, "Done"));
+
+        match back {
+            "escape" => key(&mut app, &mut d, "escape"),
+            "the back button" => {
+                let k = d.key_of("history-back").unwrap();
+                d.click_key(&mut app, k);
+            }
+            _ => {
+                let k = d.key_named("Done").unwrap();
+                d.click_key(&mut app, k);
+            }
+        }
+        d_frame_twice(&mut app, &mut d);
+        assert!(app.versions.is_none(), "{back} closes it");
+        // The library as it was: its folder, its search, where it was
+        // scrolled.
+        assert_eq!(app.folder.as_deref(), Some("Work"), "{back}");
+        assert_eq!(app.query, "Note", "{back}");
+        assert_eq!(d.core.edit_text(search).as_deref(), Some("Note"), "{back}: the search still reads it");
+        assert_eq!(app.order.len(), count, "{back}");
+        assert_eq!(d.key_of("library"), Some(list), "{back}");
+        let now = d.core.scroll_offset(list).y;
+        assert!((now - scrolled).abs() < 1.0, "{back}: scrolled where it was ({now}, was {scrolled})");
+        assert!(d.key_of("history-level").is_none());
+        assert!(drawn(&mut d, &mut app, "Work"), "the folders are back");
+    }
+    // The search's shortcut, or a new folder, is the library's: back to it.
+    app.on_plain(Msg::ShowHistory);
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "f", CTRL);
+    d.frame(&mut app);
+    assert!(app.versions.is_none(), "searching closes the history");
+    assert_eq!(d.core.focus(), Some(search), "and the search has the keyboard");
+    app.on_plain(Msg::ShowHistory);
+    app.on_plain(Msg::NewFolder);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.versions.is_none(), "so does a new folder");
+    assert!(app.naming.is_some() && d.key_of("folders").is_some());
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    remove_test_dir(dir);
+}
+
+#[test]
+fn the_arrows_walk_the_versions_and_enter_reads_one() {
+    let (mut app, mut d, dir) = two_versions("history-keys");
+    app.on_plain(Msg::ShowHistory);
+    d_frame_twice(&mut app, &mut d);
+    let row = |d: &mut Drive, name: &str| d.key_named(name).unwrap();
+    // The keyboard is on the version shown, the note as it is.
+    assert_eq!(d.core.focus(), Some(row(&mut d, "Edited here")));
+    key(&mut app, &mut d, "down");
+    assert_eq!(d.core.focus(), Some(row(&mut d, "Where its history starts")));
+    assert_eq!(app.versions.as_ref().unwrap().shown, 0, "moved to, not read yet");
+    assert_eq!(texts(&app)[0], "First words <mark style=\"background: #D8EAC0CC\">and more</mark>");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(app.versions.as_ref().unwrap().shown, 1);
+    assert_eq!(texts(&app)[0], "First words");
+    key(&mut app, &mut d, "up");
+    assert_eq!(d.core.focus(), Some(row(&mut d, "Edited here")));
+    key(&mut app, &mut d, "enter");
+    assert_eq!(app.versions.as_ref().unwrap().shown, 0);
+    key(&mut app, &mut d, "escape");
+    assert!(app.versions.is_none());
+    assert!(d.key_of("library").is_some(), "the notes again");
+    remove_test_dir(dir);
+}
+
+#[test]
+fn on_a_narrow_window_the_history_is_where_the_list_would_be() {
+    let (mut app, mut d, dir) = a_library_and_two_versions("history-narrow", 640.0);
+    assert!(d.key_of("library").is_none(), "the note, not the list");
+    app.on_plain(Msg::ShowHistory);
+    d_frame_twice(&mut app, &mut d);
+    // The whole window, as the list is.
+    no_library(&mut d, &mut app);
+    let level = keyed_rect(&mut d, "history-level");
+    assert_eq!(level.w, 640.0);
+    assert!(d.key_of("t-back").is_none(), "no page beside it");
+    // A version read: the page, with a way back to the versions.
+    let k = d.key_named("Where its history starts").unwrap();
+    d.click_key(&mut app, k);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app)[0], "First words");
+    assert!(d.key_of("history-level").is_none());
+    let back = d.key_of("t-back").expect("a way back");
+    assert!(d.key_named("History").is_some(), "back to the history, it says");
+    d.click_key(&mut app, back);
+    d_frame_twice(&mut app, &mut d);
+    assert!(d.key_of("history-level").is_some(), "the versions again");
+    assert!(app.versions.is_some());
+    key(&mut app, &mut d, "escape");
+    d.frame(&mut app);
+    assert!(app.versions.is_none());
+    assert!(d.key_of("library").is_some(), "and the list of notes");
+    remove_test_dir(dir);
+}
+
+#[test]
+fn the_history_shows_with_the_library_hidden_and_goes_with_it() {
+    let (mut app, mut d, dir) = two_versions("history-hidden");
+    app.on_settings(Msg::ToggleSidebar);
+    assert!(!app.settings.sidebar);
+    let settle = |app: &mut Carnet, d: &mut Drive| {
+        for _ in 0..20 {
+            d.advance(0.05);
+            d.frame(app);
+        }
+    };
+    settle(&mut app, &mut d);
+    let pane = |d: &mut Drive| keyed_rect(d, "library-pane").w;
+    assert_eq!(pane(&mut d), 0.0);
+    app.on_plain(Msg::ShowHistory);
+    settle(&mut app, &mut d);
+    assert_eq!(pane(&mut d), app.library_w(), "the history shows where the library would");
+    assert!(d.key_of("history-level").is_some());
+    key(&mut app, &mut d, "escape");
+    settle(&mut app, &mut d);
+    assert_eq!(pane(&mut d), 0.0, "and goes again with it");
+    assert!(!app.settings.sidebar, "the library stays hidden");
+    // The column's switch puts the history away; with the library shown
+    // it goes too.
+    app.on_plain(Msg::ShowHistory);
+    app.on_settings(Msg::ToggleSidebar);
+    assert!(app.versions.is_none());
+    assert!(!app.settings.sidebar);
+    app.on_settings(Msg::ToggleSidebar);
+    app.on_plain(Msg::ShowHistory);
+    app.on_settings(Msg::ToggleSidebar);
+    assert!(app.versions.is_none());
+    assert!(!app.settings.sidebar, "hidden, as the switch says");
     remove_test_dir(dir);
 }
 
