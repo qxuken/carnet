@@ -457,6 +457,48 @@ impl Editor {
         self.edit(Step::Other, |d, c| page::insert_block(d, c, kind))
     }
 
+    // ------------------------------------------------------------ pictures
+
+    /// The one picture the caret is on, or selects: its line, where it
+    /// sits and the width the note gives it.
+    pub fn picture_here(&self) -> Option<(usize, doc::Float, Option<u32>)> {
+        if !matches!(self.focus, Focus::Body) {
+            return None;
+        }
+        let i = page::picture_at(&self.doc, self.caret)?;
+        let line = self.lines.iter().position(|l| l.block == Some(i))?;
+        match self.doc.blocks()[i].kind {
+            Kind::Image { float, width, .. } => Some((line, float, width)),
+            _ => None,
+        }
+    }
+
+    /// The caret's picture given `width` (`None`: its own), as one step
+    /// of the history; it stays selected.
+    pub fn set_picture_width(&mut self, width: Option<u32>) -> bool {
+        let Some(i) = page::picture_at(&self.doc, self.caret).filter(|_| matches!(self.focus, Focus::Body)) else { return false };
+        let id = self.doc.blocks()[i].id;
+        self.edit(Step::Other, |d, _| page::set_image_width(d, id, width))
+    }
+
+    /// The caret's picture put on its own line or at an edge; `toggle`, as
+    /// a shortcut does, back on its own line when it is there already.
+    pub fn set_picture_float(&mut self, to: doc::Float, toggle: bool) -> bool {
+        let Some((_, now, _)) = self.picture_here() else { return false };
+        let Some(i) = page::picture_at(&self.doc, self.caret) else { return false };
+        let id = self.doc.blocks()[i].id;
+        let to = if toggle { page::float_toggled(now, to) } else { to };
+        self.edit(Step::Other, |d, _| page::set_image_float(d, id, to))
+    }
+
+    /// The caret's picture taken out of the note.
+    pub fn remove_picture(&mut self) -> bool {
+        if self.picture_here().is_none() {
+            return false;
+        }
+        self.edit(Step::Other, page::remove_block)
+    }
+
     // ------------------------------------------------------------ tables
 
     /// The table on CodeMirror's line `line`: its block's index and the table.
@@ -648,12 +690,13 @@ impl Editor {
             Kind::Quote(_) => look.kind = "quote",
             Kind::Raw(t) => look.kind = if t.starts_with("---\n") { "front" } else { "code" },
             Kind::Divider => look.kind = "divider",
-            Kind::Image { src, alt, width, wiki, .. } => {
+            Kind::Image { src, alt, width, float, wiki } => {
                 look.kind = "image";
                 look.src = src.clone();
                 look.wiki = *wiki;
                 look.alt = alt.clone();
                 look.width = *width;
+                look.float = *float;
             }
             Kind::Table(t) => {
                 look.kind = "table";
@@ -757,6 +800,8 @@ pub struct Look {
     pub wiki: bool,
     pub alt: String,
     pub width: Option<u32>,
+    /// A picture's place: on its own line, or at an edge.
+    pub float: doc::Float,
     /// A table's cells, row by row: each one's words and their styles.
     pub cells: Vec<Vec<(String, Runs)>>,
 }
@@ -802,6 +847,46 @@ mod tests {
         assert!(e.look(1).runs.iter().any(|r| r.2.mark != 0 && (r.0, r.1) == (9, 13)));
         assert!(e.look(3).runs.iter().any(|r| r.2.ink != 0 && (r.0, r.1) == (2, 5)));
         assert_eq!(e.look(4).kind, "divider");
+    }
+
+    /// A picture selected whole; its width and side are set as
+    /// the desktop sets them, written in its alt text, each one step to
+    /// undo; a shortcut for the side it is at puts it back on its own line.
+    #[test]
+    fn a_picture_resized_and_put_at_an_edge() {
+        let mut e = Editor::open("# Trip\n\nBefore.\n\n![the view](view.png)\n\nAfter.\n");
+        assert_eq!(e.picture_here(), None);
+        e.select(2, 0, 2, 1);
+        assert_eq!(e.picture_here(), Some((2, doc::Float::None, None)));
+        // The caret beside it is on it too, as on the desktop.
+        e.select(2, 1, 2, 1);
+        assert_eq!(e.picture_here().map(|p| p.0), Some(2));
+        assert!(e.set_picture_width(Some(320)));
+        assert!(e.set_picture_float(doc::Float::Left, false));
+        assert_eq!(e.picture_here(), Some((2, doc::Float::Left, Some(320))));
+        assert!(e.markdown().contains("![the view|left|320](view.png)"), "{}", e.markdown());
+        let look = e.look(2);
+        assert_eq!((look.width, look.float), (Some(320), doc::Float::Left));
+        // A shortcut: to the other side, then back on its own line.
+        assert!(e.set_picture_float(doc::Float::Right, true));
+        assert!(e.markdown().contains("![the view|right|320](view.png)"));
+        assert!(e.set_picture_float(doc::Float::Right, true));
+        assert!(e.markdown().contains("![the view|320](view.png)"));
+        // Its own width again; each change one step back.
+        assert!(e.set_picture_width(None));
+        assert!(e.markdown().contains("![the view](view.png)"));
+        assert!(e.undo());
+        assert!(e.markdown().contains("![the view|320](view.png)"));
+        // Nothing to do with words in the selection, or in the title.
+        e.select(1, 0, 2, 1);
+        assert!(!e.set_picture_width(Some(100)) && !e.set_picture_float(doc::Float::Left, false));
+        e.select(0, 1, 0, 1);
+        assert_eq!(e.picture_here(), None);
+        // Taken out.
+        e.select(2, 0, 2, 1);
+        assert!(e.remove_picture());
+        assert!(!e.markdown().contains("view.png"));
+        assert_eq!(e.lines().iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Trip", "Before.", "After."]);
     }
 
     /// An Obsidian embed is a picture on the page, its `src` a name to look

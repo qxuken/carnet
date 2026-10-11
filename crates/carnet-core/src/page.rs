@@ -1506,6 +1506,61 @@ pub fn set_image_float(doc: &mut Doc, id: u64, to: doc::Float) -> bool {
     false
 }
 
+/// The one picture a caret is on, or selects: its block's index. Not
+/// when the caret takes in anything else too.
+pub fn picture_at(doc: &Doc, c: Caret) -> Option<usize> {
+    let mut touched = touched(doc, c);
+    let i = touched.next()?;
+    if touched.next().is_some() {
+        return None;
+    }
+    matches!(doc.blocks()[i].kind, Kind::Image { .. }).then_some(i)
+}
+
+/// The narrowest a picture is drawn, or resized to.
+pub const PICTURE_MIN: f32 = 48.0;
+
+/// A picture at an edge with no width given is at most this share of the
+/// text's width, so the words keep room beside it.
+pub const PICTURE_BESIDE: f32 = 0.45;
+
+/// The widths a picture is given from a menu: each a share, in percent,
+/// of the text's width.
+pub const PICTURE_SIZES: [(&str, u32); 4] = [("Small", 25), ("Medium", 50), ("Large", 75), ("Full width", 100)];
+
+/// How wide a picture `natural` pixels wide is drawn, given `given` (the
+/// note's width for it, if any), beside words or not, where the text is
+/// `text_w` wide and the picture may be `max` at most: its own width (at
+/// an edge, [`PICTURE_BESIDE`] of the text's at most) unless given
+/// another, never under [`PICTURE_MIN`] (or its own, when it is smaller)
+/// nor over `max`. Also the width it has with none given, which a resize
+/// let go near forgets the width at ([`resized_width`]).
+pub fn picture_width(natural: f32, given: Option<u32>, text_w: f32, max: f32, floated: bool) -> (f32, f32) {
+    let max = max.max(PICTURE_MIN);
+    let fit = if floated { natural.min((text_w * PICTURE_BESIDE).round()) } else { natural };
+    let w = given.map_or(fit, |w| w as f32).clamp(PICTURE_MIN.min(natural), max);
+    (w, fit.min(max))
+}
+
+/// A picture's width while its handle is dragged `dx` outwards from
+/// where it was `from` wide: [`PICTURE_MIN`] to `max`.
+pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
+    (from + dx).clamp(PICTURE_MIN, max.max(PICTURE_MIN))
+}
+
+/// The width a resize let go at `w` gives a picture: whole pixels, and
+/// none at all back at (within 2 of) `fit`, the width it has with none.
+pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
+    let w = w.round();
+    ((w - fit).abs() >= 2.0).then_some(w as u32)
+}
+
+/// Where a shortcut for `to` puts a picture that is at `now`: there, or
+/// back on its own line when it is there already.
+pub fn float_toggled(now: doc::Float, to: doc::Float) -> doc::Float {
+    if now == to { doc::Float::None } else { to }
+}
+
 /// Where a dragged picture is let go: before block `i` (a line of its own
 /// between blocks), or beside another picture — the two side by side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2797,6 +2852,56 @@ mod tests {
         let mut c = at(&d, 0, 5);
         insert_block(&mut d, &mut c, Kind::Divider);
         assert_eq!(kinds(&d)[..3], ["Text(\"Hello\")", "---", "c.png"]);
+    }
+
+    /// A picture's width: its own, at an edge 45% of the text's at most,
+    /// never under 48 nor over the room; a resize let go back at its own
+    /// width forgets the width; a shortcut for the side it is at puts it
+    /// back on its own line; and all of it written in its alt text.
+    #[test]
+    fn a_pictures_width_and_side() {
+        // Its own, or the one given, within 48 and the room.
+        assert_eq!(picture_width(800.0, None, 600.0, 600.0, false), (600.0, 600.0));
+        assert_eq!(picture_width(300.0, None, 600.0, 600.0, false), (300.0, 300.0));
+        assert_eq!(picture_width(300.0, Some(120), 600.0, 600.0, false), (120.0, 300.0));
+        assert_eq!(picture_width(300.0, Some(10), 600.0, 600.0, false), (48.0, 300.0));
+        assert_eq!(picture_width(300.0, Some(900), 600.0, 600.0, false), (600.0, 300.0));
+        assert_eq!(picture_width(20.0, None, 600.0, 600.0, false), (20.0, 20.0), "a tiny one stays its size");
+        // At an edge: 45% of the text's width at most, unless given more.
+        assert_eq!(picture_width(800.0, None, 600.0, 600.0, true), (270.0, 270.0));
+        assert_eq!(picture_width(200.0, None, 600.0, 600.0, true), (200.0, 200.0));
+        assert_eq!(picture_width(800.0, Some(400), 600.0, 600.0, true), (400.0, 270.0));
+        // Dragged: within 48 and the room.
+        assert_eq!(dragged_width(200.0, 50.0, 600.0), 250.0);
+        assert_eq!(dragged_width(200.0, -500.0, 600.0), PICTURE_MIN);
+        assert_eq!(dragged_width(200.0, 900.0, 600.0), 600.0);
+        // Let go: whole pixels; back at its own width, none given.
+        assert_eq!(resized_width(250.4, 300.0), Some(250));
+        assert_eq!(resized_width(298.6, 300.0), None);
+        assert_eq!(resized_width(301.0, 300.0), None);
+        // A shortcut for the side it is at: back on its own line.
+        assert_eq!(float_toggled(Float::None, Float::Right), Float::Right);
+        assert_eq!(float_toggled(Float::Left, Float::Right), Float::Right);
+        assert_eq!(float_toggled(Float::Right, Float::Right), Float::None);
+
+        let pic = Kind::Image { src: "a b.png".into(), alt: "the view".into(), width: None, float: Float::None, wiki: false };
+        let mut d = doc(vec![Block::text("Hello"), Block::new(pic), Block::text("World")]);
+        let id = d.blocks()[1].id;
+        // The one picture the caret is on, or selects whole.
+        assert_eq!(picture_at(&d, select_blocks(&d, 1, 1)), Some(1));
+        assert_eq!(picture_at(&d, at(&d, 1, 1)), Some(1));
+        assert_eq!(picture_at(&d, at(&d, 0, 2)), None);
+        assert_eq!(picture_at(&d, select_blocks(&d, 0, 1)), None, "words selected with it");
+        // Its width and side, in its alt text as the desktop writes them.
+        assert!(set_image_width(&mut d, id, Some(250)));
+        assert!(!set_image_width(&mut d, id, Some(250)), "the same again changes nothing");
+        assert!(set_image_float(&mut d, id, Float::Right));
+        let md = crate::doc::to_markdown(None, &d);
+        assert!(md.contains("![the view|right|250](<a b.png>)"), "{md}");
+        assert_eq!(crate::doc::from_markdown(&md).1.blocks()[1].kind, d.blocks()[1].kind);
+        assert!(set_image_width(&mut d, id, None));
+        assert!(set_image_float(&mut d, id, Float::None));
+        assert!(crate::doc::to_markdown(None, &d).contains("![the view](<a b.png>)"));
     }
 
     /// Tab in text is a tab character, never spaces: typed in the middle

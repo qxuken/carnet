@@ -224,8 +224,11 @@
   .shell { height: 100%; display: flex; }
   .side { width: 100%; min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--side); position: relative; }
   .shell.wide .side { width: var(--side-w); max-width: max(200px, calc(100% - 440px)); flex: none; border-right: 1px solid var(--border); }
-  .edge { position: absolute; top: 0; right: -4px; bottom: 0; width: 7px; cursor: ew-resize; z-index: 2; touch-action: none; }
-  .edge::after { content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 3px; background: transparent; transition: background 0.15s; }
+  /* Its edge: from the border out over the note's margin, never over the
+     list's scrollbar, which runs down the library's own right side; its
+     line drawn on the border. */
+  .edge { position: absolute; top: 0; right: -8px; bottom: 0; width: 8px; cursor: ew-resize; z-index: 2; touch-action: none; }
+  .edge::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 3px; background: transparent; transition: background 0.15s; }
   .edge:hover::after { background: var(--border-strong); }
   .edge.on::after, .edge:focus-visible::after { background: var(--focus); }
   .edge:focus-visible { outline: none; }

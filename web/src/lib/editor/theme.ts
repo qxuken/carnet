@@ -48,6 +48,39 @@ export const theme = EditorView.theme({
   '.cm-picture': { display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)', margin: '4px 0' },
   '.cm-picture.waiting': { minHeight: '120px', minWidth: '160px' },
   '.cm-picture-box': { display: 'block' },
+  // A picture at an edge: at that edge of its line, and with no width
+  // given at most 45% of the text's, as the desktop sizes it.
+  '.cm-float-right .cm-picture-box': { textAlign: 'right' },
+  '.cm-float-right .cm-picture': { marginLeft: 'auto' },
+  '.cm-float-left:not(.cm-sized) .cm-picture, .cm-float-right:not(.cm-sized) .cm-picture': { maxWidth: '45%' },
+  // The selected picture (picture.ts): a ring 5px out in the accent, a bar
+  // on each side and a dot at the outer corner, dragged to resize; under
+  // the note's header when scrolled beneath it. A finger gets more room
+  // round each handle than a mouse.
+  '.cm-picked': { position: 'absolute', zIndex: '0', pointerEvents: 'none' },
+  '.cm-picked-ring': { position: 'absolute', inset: '-5px', border: '2px solid var(--accent)', borderRadius: 'var(--radius-card)' },
+  '.cm-grip': {
+    position: 'absolute', boxSizing: 'border-box', pointerEvents: 'auto', touchAction: 'none',
+    background: 'var(--card)', border: '2px solid var(--accent)', borderRadius: '999px',
+  },
+  '.cm-grip::before': { content: "''", position: 'absolute', inset: '-10px' },
+  '.cm-picked:not(.sized) .cm-grip': { display: 'none' },
+  '.cm-grip-left, .cm-grip-right': { top: '50%', width: '8px', height: 'min(30px, 50%)', transform: 'translateY(-50%)', cursor: 'ew-resize' },
+  '.cm-grip-left': { left: '-9px' },
+  '.cm-grip-right': { right: '-9px' },
+  '.cm-grip-corner': { right: '-10px', bottom: '-10px', width: '14px', height: '14px', cursor: 'nwse-resize' },
+  '.cm-picked.right .cm-grip-corner': { right: 'auto', left: '-10px', cursor: 'nesw-resize' },
+  '@media (pointer: coarse)': {
+    '.cm-grip::before': { inset: '-16px' },
+    '.cm-grip-left, .cm-grip-right': { width: '10px', height: 'min(40px, 50%)' },
+    '.cm-grip-corner': { width: '20px', height: '20px', right: '-12px', bottom: '-12px' },
+    '.cm-picked.right .cm-grip-corner': { left: '-12px' },
+  },
+  '.cm-picked-size': {
+    display: 'none', position: 'absolute', left: '8px', bottom: '8px', padding: '3px 8px', borderRadius: 'var(--radius)',
+    background: 'var(--card)', color: 'var(--ink)', font: '500 12.5px/1.3 var(--sans)', whiteSpace: 'nowrap', boxShadow: '0 1px 4px #0000001f',
+  },
+  '.cm-picked.dragging .cm-picked-size': { display: 'block' },
   '.cm-tablewrap': { display: 'block', overflowX: 'auto' },
   '.cm-tablewrap table': { borderCollapse: 'collapse', margin: '4px 0', font: '400 15px/1.5 var(--sans)' },
   '.cm-tablewrap th, .cm-tablewrap td': { border: '1px solid var(--border-strong)', padding: '6px 10px', textAlign: 'left', verticalAlign: 'top', minWidth: '3em', outline: 'none', caretColor: 'var(--accent)' },

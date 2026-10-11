@@ -15,6 +15,7 @@ import type { PageEditor } from '../../wasm/carnet_web.js';
 import { HIGHLIGHT, inkCss, washCss } from '../colors';
 import { missing, unshown } from '../pictures';
 import { TableWidget, place, type Cell, type TableContext } from './table';
+import { pictureTools } from './picture';
 
 /// How a line is drawn (`PageEditor.looks`).
 export type Look = {
@@ -29,6 +30,8 @@ export type Look = {
   wk: boolean;
   alt: string;
   w: number | null;
+  /// A picture's place: 0 its own line, 1 left of the text, 2 right.
+  fl: number;
   cells: Cell[][];
 };
 
@@ -223,6 +226,17 @@ class Picture extends WidgetType {
     );
     return box;
   }
+  /// Another width or alt text for the same picture (it was resized):
+  /// the one shown kept, not fetched and drawn again.
+  updateDOM(dom: HTMLElement, _view: EditorView, from: Picture) {
+    if (from.src !== this.src || from.wiki !== this.wiki) return false;
+    const img = dom.querySelector<HTMLImageElement>('img.cm-picture');
+    if (img) {
+      img.style.width = this.width ? `${this.width}px` : '';
+      img.alt = this.alt;
+    }
+    return true;
+  }
 }
 
 function build(view: EditorView, pictures: Pictures, toggle: (line: number) => void, tables: TableContext): { deco: DecorationSet; atomic: DecorationSet } {
@@ -238,6 +252,10 @@ function build(view: EditorView, pictures: Pictures, toggle: (line: number) => v
       const cls = [`cm-${look.k}`];
       if (look.f && n > 1) cls.push('cm-block');
       if (look.d) cls.push('cm-ticked');
+      // A picture at an edge: there on its line (the words beside it are
+      // the reading view's), at most 45% wide with no width given.
+      if (look.k === 'image' && look.fl) cls.push(look.fl === 2 ? 'cm-float-right' : 'cm-float-left');
+      if (look.k === 'image' && look.w) cls.push('cm-sized');
       const attrs: Record<string, string> = { class: cls.join(' ') };
       if (look.i) attrs.style = `--indent:${look.i}`;
       out.push(Decoration.line({ attributes: attrs }).range(line.from));
@@ -340,6 +358,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
   const extensions: Extension[] = [
     looks.init(() => JSON.parse(pe.looks())),
     plugin,
+    pictureTools(pe, run),
     EditorState.transactionFilter.of((tr) => {
       if (tr.annotation(own)) return tr;
       if (!tr.docChanged) {
@@ -382,6 +401,10 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
       { key: 'Mod-z', run: run(() => pe.undo()) },
       { key: 'Shift-Mod-z', run: run(() => pe.redo()) },
       { key: 'Mod-y', run: run(() => pe.redo()) },
+      // The desktop's: a picture to the left or right of the text, or
+      // back on its own line from there.
+      { key: 'Mod-Alt-l', run: (v) => !!pe.picture_here() && run(() => pe.set_picture_float(1, true))(v) },
+      { key: 'Mod-Alt-r', run: (v) => !!pe.picture_here() && run(() => pe.set_picture_float(2, true))(v) },
     ]),
     EditorView.domEventHandlers({
       copy(e, v) {
