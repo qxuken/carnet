@@ -527,6 +527,7 @@ impl Vault {
                     format!(r#"{{"passkeys":[{}]}}"#, rows.join(","))
                 }
                 Said::PasskeySet => r#"{"passkeySet":true}"#.to_string(),
+                Said::Writable => r#"{"writable":true}"#.to_string(),
                 Said::Usage(u) => format!(
                     r#"{{"usage":{{"notes":{},"pictures":{},"limit":{},"writable":{},"plan":{},"until":{}}}}}"#,
                     u.notes,

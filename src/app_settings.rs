@@ -618,6 +618,20 @@ impl Carnet {
         if !checked.is_empty() {
             ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 8.0, b: 2.0 }), |ui| line(ui, Icon::Clock, t.muted, &checked, small(t.muted)));
         }
+        // Notes the server has and this device hasn't: said first, in so
+        // many words, never folded into "up to date".
+        let here_as_note = |me: &Self, room: &str| {
+            room == carnet_sync::vault::ROOM
+                || carnet_sync::Key::parse(room).is_some_and(|k| me.store.notes.iter().any(|n| n.key == Some(k)) || me.store.replica.as_ref().is_some_and(|r| r.entry(k).is_some()))
+        };
+        let lacking = rooms.iter().filter(|r| !r.held.is_empty() && !here_as_note(self, &r.room)).count();
+        if lacking > 0 {
+            let words = match lacking {
+                1 => "1 note on the server isn't on this device yet.".to_string(),
+                n => format!("{n} notes on the server aren't on this device yet."),
+            };
+            ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 10.0), |ui| line(ui, Icon::Down, t.warning, &words, small(t.fg)));
+        }
         let (mut quiet, mut shown) = (0, 0);
         for (i, r) in rooms.iter().enumerate() {
             // This device's copy against the server's, by peer. One this
@@ -634,7 +648,10 @@ impl Carnet {
             };
             let (mine, theirs) = (ahead(&here, &r.held), ahead(&r.held, &here));
             if r.base.is_none() && r.shelved == 0 && mine == 0 && theirs == 0 {
-                quiet += 1;
+                // The vault in step isn't a note: not counted as one.
+                if r.room != carnet_sync::vault::ROOM {
+                    quiet += 1;
+                }
                 continue;
             }
             shown += 1;
@@ -729,7 +746,7 @@ impl Carnet {
                 }
             });
         }
-        if quiet > 0 || rooms.is_empty() {
+        if quiet > 0 || rooms.iter().all(|r| r.room == carnet_sync::vault::ROOM) {
             let more = if shown > 0 { " other" } else { "" };
             let words = match quiet {
                 0 => "The server has no notes yet.".to_string(),

@@ -34,7 +34,7 @@
 //! and the window need not wait for it. Dropping the replica waits for
 //! every write.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
@@ -97,6 +97,15 @@ pub struct Replica {
     by_path: HashMap<String, Key>,
     log: File,
     cache: HashMap<Key, NoteDoc>,
+    /// Each cached doc's version as its file has it (or will, once the
+    /// writer is done): a doc sync changed since is written before it
+    /// leaves memory, not lost.
+    clean: HashMap<Key, Version>,
+    /// Rooms sync made a doc for that no file of the folder is yet: a note
+    /// another device has, whose words haven't come or were empty. Each
+    /// is a room this device joins on every login (the session's cursor
+    /// passes it), so it's kept as a doc file, and found again on open.
+    known: BTreeSet<Key>,
     writer: Writer,
     /// Docs sync asked for under a name that is not a key: kept apart,
     /// never written.
@@ -146,6 +155,15 @@ impl Replica {
             .map(|(k, e)| (e.path.to_lowercase(), *k))
             .collect();
         let log = OpenOptions::new().create(true).append(true).open(&index)?;
+        // Docs with no entry: rooms sync was told of, kept for it.
+        let known = fs::read_dir(dir.join(NOTES))
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".loro")).and_then(Key::parse))
+                    .filter(|k| !entries.contains_key(k))
+                    .collect()
+            })
+            .unwrap_or_default();
         let peer = random_u64();
         let vault = fs::read(dir.join(VAULT)).ok().and_then(|b| NoteDoc::load(&b, peer).ok()).unwrap_or_else(|| NoteDoc::new(peer));
         let applied = fs::read(dir.join(APPLIED)).ok().and_then(|b| Version::from_bytes(&b)).unwrap_or_default();
@@ -156,6 +174,8 @@ impl Replica {
             by_path,
             log,
             cache: HashMap::new(),
+            clean: HashMap::new(),
+            known,
             writer: Writer::start(dir.join(NOTES)),
             strays: HashMap::new(),
             vault,
@@ -276,6 +296,8 @@ impl Replica {
             }
         }
         self.cache.remove(&key);
+        self.clean.remove(&key);
+        self.known.remove(&key);
         self.writer.waiting.lock().unwrap_or_else(|e| e.into_inner()).remove(&key);
         match fs::remove_file(self.doc_path(key)) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -360,7 +382,7 @@ impl Replica {
     fn doc(&mut self, key: Key) -> &NoteDoc {
         if !self.cache.contains_key(&key) {
             if self.cache.len() >= CACHED {
-                self.cache.clear();
+                self.unload();
             }
             let path = self.doc_path(key);
             let waiting = self.writer.waiting(key);
@@ -372,6 +394,7 @@ impl Replica {
                 Err(_) => NoteDoc::new(self.peer),
             };
             doc.set_author(self.author.as_deref());
+            self.clean.insert(key, doc.version());
             self.cache.insert(key, doc);
         }
         &self.cache[&key]
@@ -389,12 +412,26 @@ impl Replica {
         }
     }
 
+    /// Every doc out of memory. What sync took in and the store hasn't
+    /// written yet (a device catching up takes in many notes before it
+    /// writes one) goes to disk first, not lost.
+    fn unload(&mut self) {
+        for (k, doc) in self.cache.drain() {
+            if self.clean.get(&k) != Some(&doc.version()) {
+                self.writer.write(k, doc.to_bytes());
+            }
+        }
+        self.clean.clear();
+    }
+
     fn doc_path(&self, key: Key) -> PathBuf {
         self.dir.join(NOTES).join(format!("{key}.loro"))
     }
 
-    fn write_doc(&self, key: Key) -> io::Result<()> {
-        self.writer.write(key, self.cache[&key].to_bytes());
+    fn write_doc(&mut self, key: Key) -> io::Result<()> {
+        let doc = &self.cache[&key];
+        self.writer.write(key, doc.to_bytes());
+        self.clean.insert(key, doc.version());
         Ok(())
     }
 
@@ -414,7 +451,7 @@ impl Replica {
 /// Sync's view of the replica: a room is a note, by its key in hex.
 impl Docs for Replica {
     fn rooms(&self) -> Vec<String> {
-        let mut rooms: Vec<String> = self.entries.keys().chain(self.cache.keys()).map(Key::to_string).collect();
+        let mut rooms: Vec<String> = self.entries.keys().chain(self.cache.keys()).chain(&self.known).map(Key::to_string).collect();
         rooms.sort_unstable();
         rooms.dedup();
         // The vault first: where the notes go comes before the notes.
@@ -424,7 +461,14 @@ impl Docs for Replica {
 
     fn doc(&mut self, room: &str) -> &NoteDoc {
         match Key::parse(room) {
-            Some(key) => Replica::doc(self, key),
+            Some(key) => {
+                // A room new to this device: kept as one from now on.
+                if !self.entries.contains_key(&key) && self.known.insert(key) {
+                    Replica::doc(self, key);
+                    let _ = self.write_doc(key);
+                }
+                Replica::doc(self, key)
+            }
             None if room == vault::ROOM => &self.vault,
             None => {
                 let peer = self.peer;
@@ -491,6 +535,13 @@ impl Writer {
     /// A doc handed over and not on disk yet.
     fn waiting(&self, key: Key) -> Option<Vec<u8>> {
         self.waiting.lock().ok()?.get(&key).cloned()
+    }
+}
+
+/// Closed: what sync took in is kept, and the writer waited for.
+impl Drop for Replica {
+    fn drop(&mut self) {
+        self.unload();
     }
 }
 
@@ -621,6 +672,46 @@ mod tests {
         let d = std::env::temp_dir().join(format!("carnet-replica-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
+    }
+
+    /// A device catching up takes in more notes than stay in memory before
+    /// the store writes one: none is lost, each stays a room (after a
+    /// restart too), and one forgotten goes.
+    #[test]
+    fn rooms_sync_made_are_kept_past_memory_and_restarts() {
+        let dir = temp("catching-up");
+        let keys: Vec<Key> = (0..CACHED * 2 + 5).map(|_| Key::random()).collect();
+        {
+            let mut r = Replica::open(&dir).unwrap();
+            // As the session does: a doc made for each room it's told of,
+            // then what the server holds of each taken in.
+            for k in &keys {
+                let _ = Docs::doc(&mut r, &k.to_string());
+            }
+            for (i, k) in keys.iter().enumerate() {
+                let other = NoteDoc::new(7);
+                other.record(&format!("note {i}\n"), Origin::Save);
+                Docs::doc(&mut r, &k.to_string()).import(&other.to_bytes()).unwrap();
+            }
+            for (i, k) in keys.iter().enumerate() {
+                assert_eq!(r.text(*k), format!("note {i}\n"), "the words taken in");
+            }
+            assert_eq!(r.rooms().len(), keys.len() + 1);
+        }
+        let mut r = Replica::open(&dir).unwrap();
+        assert_eq!(r.rooms().len(), keys.len() + 1, "still rooms after a restart");
+        assert_eq!(r.text(keys[0]), "note 0\n");
+        // An empty one, told of and not come: a room too.
+        let empty = Key::random();
+        let _ = Docs::doc(&mut r, &empty.to_string());
+        drop(r);
+        let mut r = Replica::open(&dir).unwrap();
+        assert!(r.rooms().contains(&empty.to_string()));
+        r.forget(empty).unwrap();
+        assert!(!r.rooms().contains(&empty.to_string()));
+        drop(r);
+        assert!(!Replica::open(&dir).unwrap().rooms().contains(&empty.to_string()));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

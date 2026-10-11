@@ -145,7 +145,8 @@ version          the layout of this folder (§14)
 - **The index is an append-only log.** A save appends one short line. When the log opens with more stale lines than live ones, it's rewritten whole.
 - **Docs are written by a thread of their own.** A save hands over the bytes and goes on; a doc still waiting to be written is read from memory.
 - **Writes are atomic, but not flushed to disk** the way notes are. A replica that's lost or behind is rebuilt from the files, without their history. A doc that doesn't decode is renamed `.loro.bad`, not deleted.
-- **Memory:** only the index and up to 32 recently used docs stay loaded. On a folder of 5,000 notes the first open, which makes every doc, costs a few hundred milliseconds more than plain files, once; later opens cost about the same as plain files.
+- **Memory:** only the index and up to 32 recently used docs stay loaded. On a folder of 5,000 notes the first open, which makes every doc, costs a few hundred milliseconds more than plain files, once; later opens cost about the same as plain files. A doc sync changed that the store hasn't written yet is written before it leaves memory: a device catching up takes in many notes before it writes one.
+- **A room told of is kept.** A note the feed names that has no file here yet (its words not come) still gets a doc file, and the replica lists it as a room from then on, across restarts, since the feed's cursor passes it (§6). One the server says was removed before it came is forgotten.
 
 The replica exists even with sync off: it's what gives every note its history (§9) and lets a save merge with an outside edit (§5).
 
@@ -500,7 +501,7 @@ On the desktop it opens from the note's menu (History). The library column becom
 
 ### Sync repair: Settings → Sync → Notes on the server
 
-It lists each note the server holds that's worth a look, by title, in plain words with an icon per line. The vault is listed too, as "Folders and note names"; a room this device has no copy of yet, as "A note not on this device yet", and it is never offered **Replace with this device's copy**: there is nothing here to replace the server's with.
+It lists each note the server holds that's worth a look, by title, in plain words with an icon per line. The vault is listed too, as "Folders and note names"; a room this device has no copy of yet, as "A note not on this device yet" (how many there are is said first, never counted as up to date), and it is never offered **Replace with this device's copy**: there is nothing here to replace the server's with.
 
 | Shown | Comes from |
 |---|---|
@@ -561,7 +562,9 @@ fuzz/                   cargo-fuzz targets (§12)
 
 **Running work on the hub.** `HubHandle::run(|hub, outs| …)` runs a closure on the hub's thread, one thing at a time like everything else there: for example, minting an invite for a new signup with `server::invite(store, false)` (never an owner's invite), or reading an account's usage. A signup flow can then hand the person the invite as a link to the web app, `https://server/#invite=ABCD-…`, which the web app redeems on open.
 
-**Quotas and read-only accounts.** The picture worker gives no upload link for a new picture once the account is at its limit (so one picture may take it over, never two), and the device is told once, in plain words (`quota::FULL`). A note's text is never refused for size. An account that may not write (`writable: false`, e.g. a lapsed plan) is read-only: rooms are joined with the Loro Protocol's read permission, the session sends nothing to them and raises `Event::ReadOnly` once, and edits wait on the device until a login finds the account writable again. `Usage` / `UsageIs` let a device show what's kept and the limit; on a self-hosted server, just what's kept.
+**Quotas and read-only accounts.** The picture worker gives no upload link for a new picture once the account is at its limit (so one picture may take it over, never two), and the device is told once, in plain words (`quota::FULL`). A note's text is never refused for size. An account that may not write (`writable: false`, e.g. a lapsed plan) is read-only: rooms are joined with the Loro Protocol's read permission, the session sends nothing to them and raises `Event::ReadOnly` once, and edits wait on the device until the account is writable again. `Usage` / `UsageIs` let a device show what's kept and the limit; on a self-hosted server, just what's kept.
+
+**A limit changed is told at once.** When a host changes what its `Quota` says of an account (a plan set or ended, a suspension put on or lifted), it calls `HubHandle::limit_changed(account)` (`Hub::limit_changed` on the hub's thread), once its quota answers anew. Every socket of the account logged in is sent a `UsageIs`, unasked. A device told it can't write treats every room as read only from then on (`Event::ReadOnly`), without a write sent to be refused. A device read only until then joins its read-only rooms again, is let write, sends what waited (`Event::Writable`), and the apps take the read-only words back; the plan's line in Settings is the new one. A device from before this, told so, shows the new line and writes again at its next login. Without the call, a device learns at its next write or login.
 
 **What stays the same.** A hosted server runs the same hub, the same protocol and the same end-to-end encryption; the seams pass account ids and invite hashes, never content. A host keeps its own data (emails, plans) in its own storage, which can be the same Postgres database in tables of its own.
 

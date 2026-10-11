@@ -3657,6 +3657,197 @@ fn the_accounts_passkeys_are_listed_and_removed() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// The account suspended, then the suspension lifted, while the app is
+/// open (the host tells the hub: `limit_changed`): Settings says read only
+/// at once, then takes it back; a note saved meanwhile reaches the server
+/// with no restart; the plan's line is the new one.
+#[test]
+fn the_app_learns_at_once_its_account_can_write_again() {
+    use carnet_server::quota::{Limit, Quota};
+    use carnet_server::server::{self, Config, HubHandle};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    struct Plan(Mutex<Limit>);
+    impl Quota for Plan {
+        fn limit(&self, _: &[u8]) -> Limit {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    let data = std::env::temp_dir().join(format!("carnet-app-limit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let plan = Arc::new(Plan(Mutex::new(Limit { bytes: Some(1 << 20), writable: true, plan: "Personal".into(), until: 0 })));
+    let handle: Arc<Mutex<Option<HubHandle>>> = Arc::default();
+    let h = handle.clone();
+    let host = server::Host { quota: plan.clone(), first_invite: false, ready: Some(Box::new(move |hub| *h.lock().unwrap() = Some(hub))), ..server::Host::default() };
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (mut a, mut da, dir_a) = fresh("limit-a");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut da, &|x| x.sync.status == crate::sync::Status::Online);
+    a.settings_open = true;
+    until("the plan shown", &mut a, &mut da, &|x| x.sync.usage.as_ref().is_some_and(|u| u.plan == "Personal"));
+    let hub = handle.lock().unwrap().clone().unwrap();
+    let account = rt.block_on(async move { hub.run(|hub, _| hub.store().account_list()[0].0.clone()).await.unwrap() });
+    let tell = || {
+        let hub = handle.lock().unwrap().clone().unwrap();
+        let account = account.clone();
+        rt.block_on(async move { hub.limit_changed(account).await.unwrap() });
+    };
+    let held = || {
+        let hub = handle.lock().unwrap().clone().unwrap();
+        let account = account.clone();
+        rt.block_on(async move { hub.run(move |hub, _| hub.store().usage(&account)).await.unwrap() })
+    };
+
+    plan.0.lock().unwrap().writable = false;
+    tell();
+    until("read only, said", &mut a, &mut da, &|x| x.sync.error.as_deref().is_some_and(|e| e.contains("read only")));
+    let before = held();
+    type_in(&mut a, &mut da, "Typed while suspended");
+    a.save_current();
+    for _ in 0..50 {
+        da.frame(&mut a);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(held(), before, "nothing taken");
+
+    *plan.0.lock().unwrap() = Limit { bytes: Some(1 << 30), writable: true, plan: "Family".into(), until: 0 };
+    tell();
+    until("writable again, the plan new", &mut a, &mut da, &|x| x.sync.error.is_none() && x.sync.usage.as_ref().is_some_and(|u| u.plan == "Family"));
+    let t0 = Instant::now();
+    while held() == before {
+        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: what waited sent");
+        da.frame(&mut a);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    a.settings_open = false;
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(a);
+    remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A device paired into an account that already has more notes than the
+/// replica keeps in memory gets every one of them, as files, and they
+/// stay its rooms after a restart; its inspector finds nothing missing.
+#[test]
+fn a_device_paired_late_gets_every_note() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-late-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&[(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(30), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let (mut a, mut da, dir_a) = fresh("late-a");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    const MANY: usize = 45;
+    for k in 0..MANY {
+        let mut n = Note::new(&format!("Note {k:02}"), Doc::new(vec![Block::text(format!("words of note {k}"))]));
+        n.folder = String::new();
+        a.store.notes.push(n);
+        let i = a.store.notes.len() - 1;
+        a.store.save(i, true).unwrap();
+    }
+    until("A has sent them all", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.due().is_none() && x[0].0.sync.is_idle() && x[0].0.store.notes.iter().filter(|n| n.key.is_some()).count() > MANY);
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+
+    let (store, dir_b) = temp_store("late-b");
+    let mut b = Carnet::new(store);
+    let mut db = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    db.frame(&mut b);
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    let titles = |s: &Store| {
+        let mut t: Vec<String> = s.notes.iter().filter(|n| n.path.is_some()).map(|n| n.title.clone()).collect();
+        t.sort();
+        t
+    };
+    until("B has every note", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| titles(&x[0].0.store) == titles(&x[1].0.store));
+    assert_eq!(titles(&b.store).len(), MANY + 1);
+    // B's own welcome note went to B's Deleted, and only there.
+    for _ in 0..100 {
+        da.frame(&mut a);
+        db.frame(&mut b);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let trashed = |dir: &std::path::Path| std::fs::read_dir(dir.join(".trash")).map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".md")).collect::<Vec<_>>()).unwrap_or_default();
+    eprintln!("A trash {:?} / B trash {:?}", trashed(&dir_a), trashed(&dir_b));
+    assert!(trashed(&dir_a).is_empty(), "B's welcome note in A's Deleted");
+    assert_eq!(trashed(&dir_b).len(), 1, "B's welcome note in B's");
+
+    // Its inspector: nothing on the server it lacks.
+    b.settings_open = true;
+    b.on_plain(Msg::SyncInspector);
+    until("inspected", &mut [(&mut b, &mut db)], &|x| x[0].0.sync.inspection.as_ref().is_some_and(|(rooms, _)| rooms.len() > MANY));
+    let _ = drawn(&mut db, &mut b, "");
+    let shows = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.contains(s)));
+    assert!(!shows(&db, "not on this device") && !shows(&db, "on this device yet"), "B lacks a note the server has");
+    // Notes counted, and only notes (not the vault).
+    assert!(shows(&db, &format!("{} notes are up to date.", MANY + 1)));
+    // One it lacked would be said so, first, in so many words.
+    if let Some((rooms, _)) = b.sync.inspection.as_mut() {
+        let mut lacking = rooms.iter().find(|r| r.room != carnet_sync::vault::ROOM).unwrap().clone();
+        lacking.room = carnet_sync::Key::random().to_string();
+        rooms.push(lacking);
+    }
+    let _ = drawn(&mut db, &mut b, "");
+    assert!(shows(&db, "1 note on the server isn't on this device yet."));
+    b.settings_open = false;
+    // Every note is a room of B's, after a restart too.
+    let rooms = |app: &Carnet| app.store.replica.as_ref().map(|r| carnet_sync::session::Docs::rooms(r).len()).unwrap_or(0);
+    assert!(rooms(&b) > MANY + 1, "{} rooms", rooms(&b));
+
+    a.settings_open = false;
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(a);
+    drop(b);
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// Two whole apps and a real server: A sets up by an invite and writes a
 /// note; B comes in by the pairing code A shows, and has it; B's edit
 /// reaches A's open note.
