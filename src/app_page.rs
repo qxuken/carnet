@@ -280,7 +280,9 @@ impl Carnet {
     /// line, as Undo is.
     fn history_line(&self, ui: &mut Ui<'_>, l: &Look, what: &str, can_restore: bool, against_now: bool) {
         let t = l.t;
-        ui.text(what, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
+        // It gives way to the actions: cut short with "…" rather than
+        // mid-word when the line is full.
+        ui.text_in(NodeSpec::row().grow_width().min_width(0.0), what, TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis());
         // Against now, the marks mean something else than the list's line
         // says: their key, drawn as they are.
         if against_now {
