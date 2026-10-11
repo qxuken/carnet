@@ -925,7 +925,7 @@ impl Carnet {
                 .float(FloatConfig::parent().inside(Align::Start, Align::Start).offset(6.0, 6.0).clipped())
                 .label("Your file, not Carnet's")
                 .tooltip("Your file, not Carnet's: it isn't synced, and Carnet won't remove it"),
-            |ui| icons::icon(ui, Glyph::Device, t.muted, 14.0, false),
+            |ui| icons::icon(ui, Glyph::CloudOff, t.muted, 14.0, false),
         );
         if !bar {
             return;
@@ -957,7 +957,7 @@ impl Carnet {
                 .float(FloatConfig::parent().at(x, Align::End).self_at(x, Align::Start).offset(if right { 5.0 } else { -5.0 }, 22.0).clipped()),
             |ui| {
                 ui.with(NodeSpec::row().grow_width().gap(8.0).cross_align(Align::Start), |ui| {
-                    icons::icon(ui, Glyph::Device, t.muted, 14.0, false);
+                    icons::icon(ui, Glyph::CloudOff, t.muted, 14.0, false);
                     ui.text_in(
                         NodeSpec::row().grow_width().min_width(0.0),
                         "Your file, not Carnet's: it isn't synced, and Carnet won't remove it",

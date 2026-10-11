@@ -151,6 +151,22 @@ impl Carnet {
         self.save_settings();
     }
 
+    /// "New here?"'s turn: the server typed asked whether it takes signups
+    /// while Settings → Sync asks for a way in; an invite sent, its code
+    /// to be typed where codes go.
+    pub(super) fn signup_tick(&mut self) {
+        if self.settings_open && !self.sync.is_on() {
+            self.signup.want(&self.sync_server);
+        }
+        if self.signup.tick() {
+            self.sync_how = 0;
+            self.sync_code.clear();
+            self.sync_reset_fields = true;
+            self.sync.error = None;
+            self.focus_req = Some(Field::SyncCode);
+        }
+    }
+
     fn save_settings(&mut self) {
         if let Err(e) = self.settings.save() {
             self.error = Some(format!("Couldn't save the settings: {e}"));
@@ -848,13 +864,33 @@ impl Carnet {
                         "From another of your devices (Settings \u{2192} Sync \u{2192} Add a device), or an invite from your server for a new account.",
                     ),
                 };
-                setting(ui, l, title, Some(what), |ui| {
+                // An invite just asked for here: said where its code goes
+                // (unless another is being asked for).
+                let sent = if how == 0 && !self.signup.open { self.signup.sent_to.clone() } else { None };
+                setting(ui, l, title, if sent.is_some() { None } else { Some(what) }, |ui| {
                     for (to, word) in [(0, "Use a code"), (1, "Use recovery words"), (2, "Use email and password")] {
                         if to != how {
                             pill_button(ui, l, &format!("sync-how-{to}"), word, false, !starting, Msg::SyncHow { to });
                         }
                     }
                 });
+                // A line said of signing up: an icon, then words.
+                let said = |ui: &mut Ui<'_>, key: &str, g: Icon, ink: Color, words: &str| {
+                    ui.with_keyed(
+                        key,
+                        NodeSpec::row().grow_width().pad_xy(18.0, 2.0).gap(8.0).cross_align(Align::Center).selectable().live(kui_native::Live::Polite),
+                        |ui| {
+                            crate::icons::icon(ui, g, ink, 15.0, false);
+                            ui.text_in(NodeSpec::row().grow_width().min_width(0.0), words, TextStyle::new(Type::UI.size).color(ink));
+                        },
+                    );
+                };
+                if let Some(to) = &sent {
+                    said(ui, "signup-sent", Icon::Check, t.fg, &format!("We sent an invite to {to}. Paste its code here"));
+                    if let Some(more) = self.signup.said.clone() {
+                        said(ui, "signup-said", Icon::Clock, t.muted, &more);
+                    }
+                }
                 let (hint, button) = match how {
                     1 => ("twelve words, spaces between", "Recover"),
                     2 => ("you@example.com", "Sign in"),
@@ -879,6 +915,7 @@ impl Carnet {
                         if reset {
                             ui.set_edit_text(k, &code);
                         }
+                        self.apply_focus(ui, k, Field::SyncCode);
                     }
                     if starting {
                         ui.text("Connecting\u{2026}", TextStyle::new(Type::UI.size).color(t.muted).nowrap());
@@ -889,6 +926,40 @@ impl Carnet {
                         pill_button(ui, l, "sync-start", button, true, ready, Msg::SyncStart);
                     }
                 });
+                // New here, on a server that takes signups (a hosted one):
+                // an invite asked for by email, in place.
+                if how == 0 && self.signup.offered().is_some() {
+                    rule(ui, l);
+                    let open = self.signup.open;
+                    let (name, note, button) = match (open, &sent) {
+                        (true, _) => ("New here? Make an account", "Your email: the server sends an invite there, and its code goes in the field above.", ""),
+                        (false, Some(_)) => ("No invite yet?", "It can take a minute. Look in spam too, or ask again.", "Ask again"),
+                        (false, None) => ("New here?", "Make an account on this server: it sends an invite to your email.", "Make an account"),
+                    };
+                    setting(ui, l, name, Some(note), |ui| {
+                        if open {
+                            pill_button(ui, l, "signup-cancel", "Cancel", false, true, Msg::SignupOpen);
+                        } else {
+                            pill_button(ui, l, "signup-open", button, false, !starting, Msg::SignupOpen);
+                        }
+                    });
+                    if open {
+                        ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
+                            let email = self.signup.email.clone();
+                            let k = field(self, ui, "signup-email", &email, "you@example.com", Field::SignupEmail);
+                            self.apply_focus(ui, k, Field::SignupEmail);
+                            if self.signup.sending() {
+                                ui.text("Sending\u{2026}", TextStyle::new(Type::UI.size).color(t.muted).nowrap());
+                            } else {
+                                pill_button(ui, l, "signup-send", "Send me an invite", true, !self.signup.email.trim().is_empty(), Msg::SignupSend);
+                            }
+                        });
+                        if let Some(why) = self.signup.error.clone() {
+                            said(ui, "signup-error", Icon::Warning, t.danger, &why);
+                            ui.leaf(NodeSpec::row().height(12.0).role(Role::None));
+                        }
+                    }
+                }
             } else {
                 let (word, ink) = match &status {
                     Status::Online => ("Online".to_string(), t.fg),
@@ -921,7 +992,10 @@ impl Carnet {
                                 line.push_str(&format!(", until {}", super::chrome::date_words(SystemTime::UNIX_EPOCH + Duration::from_secs(until))));
                             }
                         }
-                        ui.text(&line, TextStyle::new(Type::SMALL.size).color(t.muted));
+                        ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
+                            crate::icons::icon(ui, Icon::Cloud, t.muted, 14.0, false);
+                            ui.text_in(NodeSpec::row().grow_width().min_width(0.0), &line, TextStyle::new(Type::SMALL.size).color(t.muted));
+                        });
                         if !u.writable {
                             ui.text(
                                 "Read only for now: what's written here stays here, and syncs once the account can write again.",

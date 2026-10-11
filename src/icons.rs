@@ -82,6 +82,10 @@ pub enum Glyph {
     Scan,
     /// One of the account's devices: a phone.
     Device,
+    /// The server, what it keeps: a cloud.
+    Cloud,
+    /// Not synced, kept off the server: the cloud struck through.
+    CloudOff,
     /// The recovery words: a key.
     Key,
     /// Write in it: a pencil.
@@ -104,7 +108,9 @@ pub enum Glyph {
 const FRAME_TABLE: &str = "M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V7A1.5 1.5 0 0 1 5 5.5z ";
 const FRAME_PICTURE: &str = "M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 5 4.5z ";
 const FRAME_ROW: &str = "M5 4h14a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5.5A1.5 1.5 0 0 1 5 4z ";
-const FRAME_COL: &str = "M5 3.5h6a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5z ";
+const CLOUD: &str = "M7.5 18.5h9.5a3 3 0 1 0-.23-5.99a5 5 0 1 0-9.74-.98A3.5 3.5 0 0 0 7.5 18.5z";
+const CLOUD_OFF: &str = "M7.5 18.5h9.5a3 3 0 1 0-.23-5.99a5 5 0 1 0-9.74-.98A3.5 3.5 0 0 0 7.5 18.5z M4.5 4.5l15 15";
+const FRAME_COL: &str ="M5 3.5h6a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5z ";
 
 impl Glyph {
     /// The outline to stroke (a frame and the rest), and the one to fill
@@ -237,6 +243,10 @@ impl Glyph {
                 "",
             ),
             Device => ("M8.5 3.5h7a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 7 19V5a1.5 1.5 0 0 1 1.5-1.5z M11 17.5h2", ""),
+            // Three lobes on a flat base: a small one each side, a big one
+            // over them.
+            Cloud => (CLOUD, ""),
+            CloudOff => (CLOUD_OFF, ""),
             Key => ("M7.5 15a3.5 3.5 0 1 0 0-7a3.5 3.5 0 1 0 0 7z M11 11.5h9 M17 11.5v3 M20 11.5v2", ""),
             Edit => ("M4.5 19.5h3.8L19 8.8a2.1 2.1 0 0 0-3-3L5.3 16.5z M14.3 7.5l2.2 2.2", ""),
             Person => ("M12 12a3.5 3.5 0 1 0 0-7a3.5 3.5 0 1 0 0 7z M5 20c0-3.6 3.1-5.5 7-5.5s7 1.9 7 5.5", ""),
@@ -273,7 +283,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 62] = [
+    pub const ALL: [Glyph; 64] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -282,7 +292,7 @@ impl Glyph {
         Glyph::ChevronUp, Glyph::More, Glyph::Quote, Glyph::TextColor, Glyph::Highlight, Glyph::FloatLeft,
         Glyph::FloatRight, Glyph::Inline, Glyph::Sidebar, Glyph::Zen, Glyph::Check, Glyph::Undo, Glyph::Upload,
         Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
-        Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial,
+        Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.

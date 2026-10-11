@@ -3606,6 +3606,136 @@ fn a_hosted_password_signs_in_with_the_email_signed_up_with() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// New here, on a server that takes signups (a hosted one; its signup
+/// route faked, the invite it would mail made beforehand): Settings → Sync
+/// asks whether it does, offers "New here?", asks for an invite for the
+/// email typed (JSON, no Origin: as the app sends it), says where it went
+/// with the code field focused, and the code pasted there makes the
+/// account. A refusal is said in the server's words. A server of one's
+/// own offers none of it.
+#[test]
+fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
+    use axum::http::{HeaderMap, StatusCode, header};
+    use carnet_server::server::{self, Config};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-signup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::invite(&mut carnet_server::Sharded::open(&data).unwrap(), false).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    // Each signup asked for: its type, its Origin, its body. The first is
+    // refused, as a service mailing that address lately might.
+    type Asked = (Option<String>, Option<String>, String);
+    let asked: Arc<Mutex<Vec<Asked>>> = Arc::default();
+    let log = asked.clone();
+    let signup = move |headers: HeaderMap, body: String| {
+        let log = log.clone();
+        async move {
+            let h = |n| headers.get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let mut log = log.lock().unwrap();
+            log.push((h(header::CONTENT_TYPE), h(header::ORIGIN), body));
+            let json = [(header::CONTENT_TYPE, "application/json")];
+            if log.len() == 1 {
+                (StatusCode::TOO_MANY_REQUESTS, json, r#"{"error":"Mailed lately: look for it, or wait ten minutes."}"#)
+            } else {
+                (StatusCode::ACCEPTED, json, r#"{"sent":true}"#)
+            }
+        }
+    };
+    let host = server::Host {
+        routes: axum::Router::new().route("/v1/signup", axum::routing::post(signup)),
+        signup: Some(format!("{origin}/start")),
+        first_invite: false,
+        ..server::Host::default()
+    };
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let focused = |app: &Carnet, d: &Drive| d.core.focus().and_then(|k| app.fields.get(&k)).copied();
+
+    let (store, dir) = temp_store("signup");
+    let mut a = Carnet::new(store);
+    // Tall enough that Settings → Sync shows whole, to click in.
+    let mut d = Drive::new(Core::new(), 1100.0, 4400.0).framing();
+    a.settings_open = true;
+    a.sync_server = origin.clone();
+    until("asked whether it takes signups", &mut a, &mut d, &|x| x.signup.offered().is_some());
+    assert!(drawn(&mut d, &mut a, "New here?"));
+    let open = d.key_of("signup-open").expect("Make an account");
+    assert_eq!(d.key_named("Make an account"), Some(open));
+    let r = d.rect_of(open).unwrap();
+    d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d_frame_twice(&mut a, &mut d);
+    assert!(drawn(&mut d, &mut a, "New here? Make an account"));
+    assert_eq!(focused(&a, &d), Some(Field::SignupEmail), "the email field has the keyboard");
+    type_in(&mut a, &mut d, "ann@example.com");
+    assert_eq!(a.signup.email, "ann@example.com");
+    // Refused: in the server's words, under the field.
+    key(&mut a, &mut d, "enter");
+    until("refused", &mut a, &mut d, &|x| x.signup.error.is_some());
+    assert!(drawn(&mut d, &mut a, "Mailed lately: look for it, or wait ten minutes."));
+    assert!(a.signup.sent_to.is_none());
+    // Asked again: sent, and the code field has the keyboard.
+    let send = d.key_of("signup-send").expect("Send me an invite");
+    let r = d.rect_of(send).unwrap();
+    d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    until("sent", &mut a, &mut d, &|x| x.signup.sent_to.is_some());
+    d_frame_twice(&mut a, &mut d);
+    assert!(drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here"));
+    assert!(!drawn(&mut d, &mut a, "Send me an invite"), "the email field gone");
+    assert!(drawn(&mut d, &mut a, "No invite yet?"), "asked again if it doesn't come");
+    assert_eq!(focused(&a, &d), Some(Field::SyncCode));
+    {
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 2);
+        for (kind, from, body) in asked.iter() {
+            assert_eq!((kind.as_deref(), from.as_deref(), body.as_str()), (Some("application/json"), None, r#"{"email":"ann@example.com"}"#));
+        }
+    }
+    // The code pasted: in.
+    type_in(&mut a, &mut d, &invite.text());
+    assert_eq!(a.sync_code, invite.text());
+    key(&mut a, &mut d, "enter");
+    until("in", &mut a, &mut d, &|x| x.sync.status == crate::sync::Status::Online);
+
+    // A server of one's own: no signups, so nothing of them.
+    let own = std::env::temp_dir().join(format!("carnet-app-signup-own-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&own);
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let own_origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop_own, stopped_own) = tokio::sync::oneshot::channel::<()>();
+    let served_own = rt.spawn(server::serve(Config { data: own.clone(), origin: own_origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped_own.await;
+    }));
+    let (mut b, mut db, dir_b) = fresh("signup-own");
+    b.settings_open = true;
+    b.sync_server = own_origin;
+    until("asked", &mut b, &mut db, &|x| x.signup.answered());
+    assert!(b.signup.offered().is_none());
+    assert!(!drawn(&mut db, &mut b, "New here?"));
+
+    let _ = stop.send(());
+    let _ = stop_own.send(());
+    rt.block_on(served).unwrap().unwrap();
+    rt.block_on(served_own).unwrap().unwrap();
+    for dir in [dir, dir_b] {
+        remove_test_dir(dir);
+    }
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(&own);
+}
+
 /// A passkey made in a browser shows in the app's Settings → Sync by its
 /// name, and goes when Remove is asked twice: Cancel, or Yes, remove.
 #[test]

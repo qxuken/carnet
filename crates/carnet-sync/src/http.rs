@@ -1,7 +1,9 @@
 //! The desktop's HTTP, for pictures (docs/SYNC.md §6): a picture's sealed
 //! bytes put to, or fetched from, the short-lived link the server gave
 //! ([`Transfer`]). A thread of its own, as the socket has, and nothing
-//! else: what the bytes are is the session's business.
+//! else: what the bytes are is the session's business. And now and then
+//! a question of the app's own to its server, apart from the socket
+//! ([`ask`]): whether it takes signups, an invite asked for.
 //!
 //! HTTP/1.1, one request to a connection, over the socket's own TLS (the
 //! web's roots, and a self-hosted server's certificate besides). A put
@@ -112,10 +114,56 @@ fn parse(url: &str) -> Result<Url, String> {
 }
 
 async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer) -> Result<Vec<u8>, String> {
-    let (url, method, body): (&str, &str, &[u8]) = match t {
-        Transfer::Put { url, sealed, .. } => (url, "PUT", sealed),
-        Transfer::Get { url, .. } => (url, "GET", &[]),
+    let answer = match t {
+        Transfer::Put { url, sealed, .. } => request(config, "PUT", url, Some(("application/octet-stream", sealed))).await?,
+        Transfer::Get { url, .. } => request(config, "GET", url, None).await?,
     };
+    if !(200..300).contains(&answer.status) {
+        return Err(format!("HTTP {}", answer.status));
+    }
+    Ok(answer.body)
+}
+
+/// An answer, whatever its status: what a question of the app's own
+/// ([`ask`]) reads, a refusal's words among them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Answer {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// How long a question may take, all of it.
+const ASK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A question of the app's own to its server, on a thread of its own and
+/// over the socket's TLS (the web's roots): a GET, or with `json` a POST
+/// of it. Its answer comes on the channel, whatever its status, and
+/// `wake` is called then. Asked now and then (whether a server takes
+/// signups, an invite asked for), so a thread each is enough.
+pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static) -> std::io::Result<mpsc::Receiver<Result<Answer, String>>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new().name("carnet-ask".into()).spawn(move || {
+        let result = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt.block_on(async {
+                let config = crate::net::client_config(&[]);
+                let body = json.as_deref().map(|b| ("application/json", b));
+                let method = if body.is_some() { "POST" } else { "GET" };
+                match tokio::time::timeout(ASK_TIMEOUT, request(config, method, &url, body)).await {
+                    Ok(r) => r,
+                    Err(_) => Err("timed out".into()),
+                }
+            }),
+            Err(e) => Err(e.to_string()),
+        };
+        if tx.send(result).is_ok() {
+            wake();
+        }
+    })?;
+    Ok(rx)
+}
+
+/// One request, with a body of its type if any, and its answer.
+async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>) -> Result<Answer, String> {
     let u = parse(url)?;
     let tcp = tokio::net::TcpStream::connect((u.host.as_str(), u.port)).await.map_err(|e| e.to_string())?;
     if u.tls {
@@ -127,12 +175,13 @@ async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer) -> Result<Vec
     }
 }
 
-async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &str, body: &[u8]) -> Result<Vec<u8>, String> {
+async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &str, body: Option<(&str, &[u8])>) -> Result<Answer, String> {
     let host = if (u.tls && u.port == 443) || (!u.tls && u.port == 80) { u.host.clone() } else { format!("{}:{}", u.host, u.port) };
     let mut head = format!("{method} {} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: Carnet\r\n", u.path);
-    if method == "PUT" {
-        head.push_str(&format!("Content-Type: application/octet-stream\r\nContent-Length: {}\r\n", body.len()));
+    if let Some((kind, b)) = body {
+        head.push_str(&format!("Content-Type: {kind}\r\nContent-Length: {}\r\n", b.len()));
     }
+    let body = body.map_or(&[][..], |(_, b)| b);
     head.push_str("\r\n");
     s.write_all(head.as_bytes()).await.map_err(|e| e.to_string())?;
     s.write_all(body).await.map_err(|e| e.to_string())?;
@@ -176,13 +225,10 @@ async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &
     if length.is_some_and(|l| body.len() < l) {
         return Err("the answer stopped short".into());
     }
-    if !(200..300).contains(&status) {
-        return Err(format!("HTTP {status}"));
-    }
     if body.len() > MOST {
         return Err("an answer past what a picture may be".into());
     }
-    Ok(body)
+    Ok(Answer { status, body })
 }
 
 /// A chunked body, put back together.
@@ -280,5 +326,32 @@ mod tests {
             let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nhal".to_vec()).await;
             assert!(transfer(config(), &Transfer::Get { id: [1; 32], url: base }).await.is_err());
         });
+    }
+
+    /// A question of the app's own: JSON posted as it is, and a refusal
+    /// read with its words, not just its status.
+    #[test]
+    fn a_question_posts_json_and_reads_any_answer() {
+        // The server answers on a thread of the runtime's while this one
+        // waits for the question's.
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let (base, server) = rt.block_on(one_answer(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 21\r\n\r\n{\"error\":\"slow down\"}".to_vec()));
+        let woke = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let w = woke.clone();
+        let rx = ask(format!("{base}/v1/signup"), Some(br#"{"email":"ann@example.com"}"#.to_vec()), move || w.store(true, std::sync::atomic::Ordering::SeqCst)).unwrap();
+        let got = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(got, Answer { status: 429, body: br#"{"error":"slow down"}"#.to_vec() });
+        assert!(woke.load(std::sync::atomic::Ordering::SeqCst));
+        let asked = String::from_utf8(rt.block_on(server).unwrap()).unwrap();
+        assert!(asked.starts_with("POST /v1/signup HTTP/1.1\r\n"), "{asked}");
+        assert!(asked.contains("Content-Type: application/json\r\nContent-Length: 27\r\n") && !asked.to_lowercase().contains("origin:"), "{asked}");
+        assert!(asked.ends_with("\r\n\r\n{\"email\":\"ann@example.com\"}"), "{asked}");
+        // A GET without a body; nobody there: said.
+        let (base, server) = rt.block_on(one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()));
+        let got = ask(format!("{base}/v1/info"), None, || {}).unwrap().recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!(got.status, 200);
+        assert!(String::from_utf8(rt.block_on(server).unwrap()).unwrap().starts_with("GET /v1/info HTTP/1.1\r\n"));
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        assert!(ask(format!("http://{closed}/v1/info"), None, || {}).unwrap().recv_timeout(Duration::from_secs(10)).unwrap().is_err());
     }
 }

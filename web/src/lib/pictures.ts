@@ -11,7 +11,8 @@
 
 import { NOTES_CHANGED, NOT_ON_SERVER, sync } from './sync.svelte';
 import warning from '../icons/warning.svg?raw';
-import device from '../icons/device.svg?raw';
+import cloud from '../icons/cloud.svg?raw';
+import cloudOff from '../icons/cloud-off.svg?raw';
 
 export function pictures(box: HTMLElement) {
   for (const img of box.querySelectorAll<HTMLImageElement>('img[data-picture]')) {
@@ -54,8 +55,8 @@ function why(e: unknown, path: string): [string, string] {
   if (e instanceof Error && e.message === NOT_ON_SERVER) return ['Picture not found', warning];
   // A path from the notes folder (the reader's), or as the note writes it
   // (the editor's: `../attachments/…` from a folder).
-  if (/^(\.\.\/)*attachments\//i.test(path)) return ['This picture hasn’t reached the server yet', device];
-  return ['This picture is only on the device that has it. Move it into Carnet there to sync it.', device];
+  if (/^(\.\.\/)*attachments\//i.test(path)) return ['This picture hasn’t reached the server yet', cloud];
+  return ['This picture is only on the device that has it. Move it into Carnet there to sync it.', cloudOff];
 }
 
 /// Pictures not found, still on the page, and how to ask for each again.

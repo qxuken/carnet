@@ -25,6 +25,8 @@ mod note;
 #[cfg(not(target_arch = "wasm32"))]
 mod replica;
 pub mod session;
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
+pub mod signup;
 pub mod vault;
 pub mod wire;
 
