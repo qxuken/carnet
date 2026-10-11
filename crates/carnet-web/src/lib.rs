@@ -500,7 +500,10 @@ impl Vault {
                     format!(r#"{{"invites":{{"owner":{owner},"waiting":[{}],"accounts":[{}]}}}}"#, waiting.join(","), accounts.join(","))
                 }
                 Said::Uploaded(id) => format!(r#"{{"uploaded":{}}}"#, json(&id)),
-                Said::Password { allowed, id } => format!(r#"{{"password":{{"allowed":{allowed},"id":{}}}}}"#, id.as_deref().map_or("null".into(), json)),
+                Said::Password { allowed, id, only } => {
+                    let or_null = |s: Option<&str>| s.map_or("null".into(), json);
+                    format!(r#"{{"password":{{"allowed":{allowed},"id":{},"only":{}}}}}"#, or_null(id.as_deref()), or_null(only.as_deref()))
+                }
                 Said::PasswordSet => r#"{"passwordSet":true}"#.to_string(),
                 Said::Passkeys(list) => {
                     let rows: Vec<String> = list

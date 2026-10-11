@@ -119,8 +119,12 @@ pub enum Carnet {
     ListDevices,
     /// Server → device: the devices not removed, the account's epoch, the
     /// recovery code's card and the password's (each empty if none),
-    /// whether this server takes passwords at all, and the passkeys.
-    Devices { epoch: u32, devices: Vec<DeviceRow>, recovery: Vec<u8>, password: Vec<u8>, passwords: bool, passkeys: Vec<PasskeyRow> },
+    /// whether this server takes passwords at all, the passkeys, and the
+    /// one email a password may sign in as here (`password_email`: the
+    /// email the account signed up with, on a hosted service whose
+    /// passwords sign in by it alone; empty: any). Told only to the
+    /// account's own devices.
+    Devices { epoch: u32, devices: Vec<DeviceRow>, recovery: Vec<u8>, password: Vec<u8>, passwords: bool, passkeys: Vec<PasskeyRow>, password_email: String },
     /// Device → server: take `device` out. Another device: `epoch` is the
     /// next, and `keys` its vault key sealed to each device kept (and to
     /// the recovery code, under an empty id), `cards` theirs sealed under
@@ -431,7 +435,7 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
                     w.push_var_bytes(card);
                 }
                 Carnet::ListDevices => w.push_byte(20),
-                Carnet::Devices { epoch, devices, recovery, password, passwords, passkeys } => {
+                Carnet::Devices { epoch, devices, recovery, password, passwords, passkeys, password_email } => {
                     w.push_byte(21);
                     w.push_uleb128(u64::from(*epoch));
                     w.push_uleb128(devices.len() as u64);
@@ -450,6 +454,11 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
                         w.push_bytes(&p.public);
                         w.push_var_bytes(&p.card);
                         w.push_uleb128(p.made);
+                    }
+                    // Added at the end (§14), and only when there's one: a
+                    // list without it is written as before it was.
+                    if !password_email.is_empty() {
+                        w.push_var_string(password_email);
                     }
                 }
                 Carnet::Revoke { device, epoch, keys, cards } => {
@@ -747,7 +756,9 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
                     passkeys.push(PasskeyRow { public: fixed(&mut r, 32)?.try_into().expect("32"), card: r.read_var_bytes()?.to_vec(), made: r.read_uleb128()? });
                 }
             }
-            Carnet::Devices { epoch, devices, recovery, password, passwords, passkeys }
+            // A server from before password emails: any.
+            let password_email = if r.remaining() > 0 { r.read_var_string()? } else { String::new() };
+            Carnet::Devices { epoch, devices, recovery, password, passwords, passkeys, password_email }
         }
         22 => {
             let device = r.read_var_bytes()?.to_vec();
@@ -975,8 +986,11 @@ mod tests {
                 password: vec![6; 90],
                 passwords: true,
                 passkeys: vec![PasskeyRow { public: [7; 32], card: vec![8; 120], made: 1_760_000_000 }, PasskeyRow { public: [9; 32], card: vec![1; 120], made: 0 }],
+                password_email: String::new(),
             }),
-            Frame::Carnet(Carnet::Devices { epoch: 0, devices: Vec::new(), recovery: Vec::new(), password: Vec::new(), passwords: false, passkeys: Vec::new() }),
+            // On a server holding passwords to the account's email.
+            Frame::Carnet(Carnet::Devices { epoch: 1, devices: Vec::new(), recovery: Vec::new(), password: Vec::new(), passwords: true, passkeys: Vec::new(), password_email: "ann@example.com".into() }),
+            Frame::Carnet(Carnet::Devices { epoch: 0, devices: Vec::new(), recovery: Vec::new(), password: Vec::new(), passwords: false, passkeys: Vec::new(), password_email: String::new() }),
             Frame::Carnet(Carnet::PasskeyAdd { public: [4; 32], wrapped: vec![5; 60], card: vec![6; 120] }),
             Frame::Carnet(Carnet::PasskeyDrop { public: [4; 32] }),
             Frame::Carnet(Carnet::PasskeySet),
@@ -1058,10 +1072,11 @@ mod tests {
         }
         assert_eq!(decode_vv(&encode_vv(&[(1, 2), (u64::MAX, 0)])).unwrap(), [(1, 2), (u64::MAX, 0)]);
         assert!(decode(b"%CRN\x05\xff\xff\xff\x0f").is_err(), "a count past the end");
-        // A server from before passkeys: its list, without them.
-        let old = encode(&Frame::Carnet(Carnet::Devices { epoch: 1, devices: Vec::new(), recovery: Vec::new(), password: Vec::new(), passwords: true, passkeys: Vec::new() }));
+        // A server from before passkeys: its list, without them (nor a
+        // password's email: any).
+        let old = encode(&Frame::Carnet(Carnet::Devices { epoch: 1, devices: Vec::new(), recovery: Vec::new(), password: Vec::new(), passwords: true, passkeys: Vec::new(), password_email: String::new() }));
         let old = &old[..old.len() - 1];
-        assert!(matches!(decode(old), Ok(Frame::Carnet(Carnet::Devices { epoch: 1, passwords: true, passkeys, .. })) if passkeys.is_empty()));
+        assert!(matches!(decode(old), Ok(Frame::Carnet(Carnet::Devices { epoch: 1, passwords: true, passkeys, password_email, .. })) if passkeys.is_empty() && password_email.is_empty()));
         // A DocUpdate claiming billions of updates in a few bytes: refused
         // before anything is made room for.
         let mut m = b"%ELO\x01r\x03".to_vec();

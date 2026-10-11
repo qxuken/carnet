@@ -29,15 +29,19 @@
   /// says not.
   let passwords = $state(true);
   let passkeys = $state(true);
+  /// A password here signs in with the email the account signed up with
+  /// (a hosted service holds them to it).
+  let signupEmail = $state(false);
   /// Why this app and the server can't sync, if they can't (`compat`).
   let outdated = $state('');
-  type Info = { signup?: string; passwords?: boolean; protocol?: number; oldest?: number; deprecated?: number; features?: string[] };
+  type Info = { signup?: string; passwords?: boolean; password_email?: string; protocol?: number; oldest?: number; deprecated?: number; features?: string[] };
   onMount(() => {
     fetch('/v1/info')
       .then((r) => (r.ok ? r.json() : null))
       .then((i: Info | null) => {
         signup = i?.signup ?? null;
         passwords = i?.passwords ?? true;
+        signupEmail = i?.password_email === 'account';
         if (i?.features) passkeys = i.features.includes('passkeys');
         if (i) outdated = server_fit(i.protocol ?? 0, i.oldest ?? 0, i.deprecated ?? 0);
       })
@@ -116,7 +120,7 @@
     {#if words}
       <p>Type the twelve recovery words made on one of your devices, for when none is left.</p>
     {:else if way === 'password'}
-      <p>The email and password set on another of your devices.</p>
+      <p>{signupEmail ? 'The email you signed up with, and the password set on another of your devices.' : 'The email and password set on another of your devices.'}</p>
     {:else if way === 'passkey'}
       <p>A passkey added for Carnet on another of your devices, or in this browser before. The browser asks which, and for your face, fingerprint or PIN.</p>
     {:else}

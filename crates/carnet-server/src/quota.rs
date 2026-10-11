@@ -49,7 +49,59 @@ pub trait Admission: Send + Sync {
     fn admitted(&self, invite: [u8; 32], account: &[u8]);
     /// The account is gone: deleted from one of its devices, or removed.
     fn removed(&self, _account: &[u8]) {}
+    /// The email the account came in by, if the host knows one (a hosted
+    /// service: the one its invite was mailed to, and so confirmed). What
+    /// [`PasswordEmails::Account`] holds passwords to. Asked on the hub's
+    /// thread: quick, or kept.
+    fn email_of(&self, _account: &[u8]) -> Option<String> {
+        None
+    }
 }
+
+/// Which email a password may sign in as (docs/SYNC.md §7). The email is
+/// the password's name, nothing more: OPAQUE never shows the server the
+/// password, and a sign-in finds the account by the email. Who may name
+/// a password after which email is the server's to say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PasswordEmails {
+    /// Any the account's device types, not taken by another account: a
+    /// server of one's own, which mails nobody and knows no emails.
+    #[default]
+    Any,
+    /// Only the email the account came in by, as its host says
+    /// ([`Admission::email_of`]): a hosted service, whose signup mailed
+    /// the invite to it, so it's known to be theirs. Another is refused,
+    /// with the one it must be ([`password_email_is`]); an account the
+    /// host knows no email of can't set one. The account's devices are
+    /// told the email with their list, to show it rather than ask.
+    ///
+    /// (A third, `Confirm`, is for later: any email, once a code mailed
+    /// to it comes back. It needs a seam to mail by, and a frame for the
+    /// code between `PasswordSetStart` and `PasswordSetFinish`: the
+    /// server mails the code on the start, keeps it with the account for
+    /// ten minutes, and takes the finish only with it.)
+    Account,
+}
+
+impl PasswordEmails {
+    /// How `/v1/info` says it.
+    pub fn name(self) -> &'static str {
+        match self {
+            PasswordEmails::Any => "any",
+            PasswordEmails::Account => "account",
+        }
+    }
+}
+
+/// What a device is told when it sets a password with an email other than
+/// the account's, under [`PasswordEmails::Account`].
+pub fn password_email_is(email: &str) -> String {
+    format!("On this service, the password signs in with the email you signed up with: {email}")
+}
+
+/// Under [`PasswordEmails::Account`], when the host knows no email for the
+/// account.
+pub const NO_ACCOUNT_EMAIL: &str = "On this service, the password signs in with the email you signed up with, and this account has none here: ask the service's help";
 
 /// A server of one's own: invites are the whole story.
 pub struct ByInvite;

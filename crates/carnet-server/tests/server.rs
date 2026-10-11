@@ -646,7 +646,9 @@ async fn a_host_adds_routes_and_works_on_the_hub() {
     assert_eq!((status, body.as_slice()), (200, b"landing".as_slice()));
     assert_eq!(request(addr, "GET", "/v1/signup", "", b"").await.2, b"signup");
     assert_eq!(request(addr, "GET", "/v1/nothing", "", b"").await.0, 404);
-    assert!(String::from_utf8_lossy(&request(addr, "GET", "/v1/info", "", b"").await.2).contains("\"passwords\":false"), "no passwords unless asked");
+    let info = String::from_utf8_lossy(&request(addr, "GET", "/v1/info", "", b"").await.2).into_owned();
+    assert!(info.contains("\"passwords\":false"), "no passwords unless asked: {info}");
+    assert!(!info.contains("password_email"), "nor which email they'd take: {info}");
     assert_eq!(request(addr, "GET", "/v1/health", "", b"").await.0, 200);
     // An invite made by the host, on the hub, used over the socket.
     let code = hub.run(|hub, _| server::invite(hub.store_mut(), false).unwrap()).await.unwrap();

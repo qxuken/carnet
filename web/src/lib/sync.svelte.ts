@@ -53,7 +53,7 @@ type Said =
   | { invites: Invites }
   | { uploaded: string }
   | { usage: Usage }
-  | { password: { allowed: boolean; id: string | null } }
+  | { password: { allowed: boolean; id: string | null; only: string | null } }
   | { passwordSet: true }
   | { passkeys: Passkey[] }
   | { passkeySet: true };
@@ -115,9 +115,10 @@ class Sync {
   /// What the server said it can do (`compat::feature`), as it greeted
   /// this browser last: what Settings offers.
   features = $state<string[]>([]);
-  /// With the devices: whether the server takes passwords, and the email
-  /// the account's password signs in as.
-  password = $state<{ allowed: boolean; id: string | null } | null>(null);
+  /// With the devices: whether the server takes passwords, the email the
+  /// account's password signs in as, and the only one it may here (a
+  /// hosted service: the email signed up with), if the server says one.
+  password = $state<{ allowed: boolean; id: string | null; only: string | null } | null>(null);
   /// Counts each password set (or taken away), for a screen to follow.
   passwordSets = $state(0);
   /// With the devices: the account's passkeys, the oldest first.

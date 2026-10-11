@@ -2639,14 +2639,18 @@ impl Carnet {
                 self.sync.start(&self.sync_server, how);
             }
             Msg::SyncPassword => {
-                let email = self.sync.password.as_ref().and_then(|(_, id)| id.clone()).unwrap_or_default();
+                // Held to the account's email (a hosted service): that one,
+                // and the password field to type in.
+                let only = self.sync.password_email.clone();
+                let email = only.clone().or_else(|| self.sync.password.as_ref().and_then(|(_, id)| id.clone())).unwrap_or_default();
                 self.pw_edit = Some((email, String::new()));
                 self.pw_remove_armed = false;
                 self.sync.error = None;
-                self.focus_req = Some(Field::PasswordEmail);
+                self.focus_req = Some(if only.is_some() { Field::PasswordNew } else { Field::PasswordEmail });
             }
             Msg::SyncPasswordSave => {
                 if let Some((email, password)) = self.pw_edit.clone() {
+                    let email = self.sync.password_email.clone().unwrap_or(email);
                     self.sync.set_password(&email, &password);
                 }
             }

@@ -289,7 +289,7 @@ cargo build --release -p carnet-server --features postgres,s3
 | | |
 |---|---|
 | `GET /` | what this is |
-| `GET /v1/info` | `{"server", "version", "origin", "signup", "passwords", "protocol", "oldest", "deprecated", "features"}`: which apps it takes and what it can do (docs/SYNC.md §14); not how many use it (that's `carnet_accounts` in `/metrics`) |
+| `GET /v1/info` | `{"server", "version", "origin", "signup", "passwords", "password_email", "protocol", "oldest", "deprecated", "features"}`: which apps it takes and what it can do (docs/SYNC.md §14); not how many use it (that's `carnet_accounts` in `/metrics`) |
 | `GET /v1/health` | `{"ok": true}` while the hub answers; `503` if not |
 | `GET /v1/sync` | the WebSocket: Carnet's frames (log in, use an invite, pair, what changed) and the Loro Protocol's rooms, one per note |
 | `GET /v1/blobs/<link>` | a sealed picture, by a link the socket gave: one picture, for minutes |

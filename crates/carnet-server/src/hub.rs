@@ -19,7 +19,7 @@ use loro_protocol::ProtocolMessage;
 
 use crate::blobs::Job;
 use crate::limits::{self, Limiter};
-use crate::quota::{Admission, ByInvite, Quota, Unlimited};
+use crate::quota::{Admission, ByInvite, NO_ACCOUNT_EMAIL, PasswordEmails, Quota, Unlimited, password_email_is};
 use crate::storage::{self, Logged, Storage, covers};
 
 pub type ConnId = u64;
@@ -195,6 +195,8 @@ pub struct Hub<S: Storage> {
     /// Its OPAQUE key, if it takes passwords (§7); a server of one's own
     /// doesn't, unless asked.
     passwords: Option<password::Server>,
+    /// Which email a password may sign in as.
+    password_emails: PasswordEmails,
 }
 
 impl<S: Storage> Hub<S> {
@@ -217,6 +219,7 @@ impl<S: Storage> Hub<S> {
             quota: std::sync::Arc::new(Unlimited),
             admission: std::sync::Arc::new(ByInvite),
             passwords: None,
+            password_emails: PasswordEmails::Any,
         }
     }
 
@@ -229,6 +232,25 @@ impl<S: Storage> Hub<S> {
 
     pub fn set_passwords(&mut self, server: password::Server) {
         self.passwords = Some(server);
+    }
+
+    /// Holding passwords to `emails` (any, unless said).
+    pub fn with_password_emails(mut self, emails: PasswordEmails) -> Self {
+        self.password_emails = emails;
+        self
+    }
+
+    pub fn set_password_emails(&mut self, emails: PasswordEmails) {
+        self.password_emails = emails;
+    }
+
+    /// The one email `account`'s password may sign in as, if this server
+    /// holds it to one: `Some("")` when it would and the host knows none.
+    fn password_email(&self, account: &[u8]) -> Option<String> {
+        match self.password_emails {
+            PasswordEmails::Any => None,
+            PasswordEmails::Account => Some(self.admission.email_of(account).map(|e| password::id(&e)).unwrap_or_default()),
+        }
     }
 
     /// Telling `admission` of each account an invite makes.
@@ -534,8 +556,8 @@ impl<S: Storage> Hub<S> {
             Carnet::PasswordSetStart { id, request } => {
                 let Some(server) = &self.passwords else { return vec![carnet(conn, Carnet::Refused { reason: NO_PASSWORDS.into() })] };
                 let id = password::id(&id);
-                if let Some(why) = self.password_taken(&account, &id) {
-                    return vec![carnet(conn, Carnet::Refused { reason: why.into() })];
+                if let Some(reason) = self.password_taken(&account, &id) {
+                    return vec![carnet(conn, Carnet::Refused { reason })];
                 }
                 match server.register(&id, &request) {
                     Ok(response) => vec![carnet(conn, Carnet::PasswordSetReply { response })],
@@ -547,8 +569,8 @@ impl<S: Storage> Hub<S> {
                     return vec![carnet(conn, Carnet::Refused { reason: NO_PASSWORDS.into() })];
                 }
                 let id = password::id(&id);
-                if let Some(why) = self.password_taken(&account, &id) {
-                    return vec![carnet(conn, Carnet::Refused { reason: why.into() })];
+                if let Some(reason) = self.password_taken(&account, &id) {
+                    return vec![carnet(conn, Carnet::Refused { reason })];
                 }
                 if upload.len() > 4096 || wrapped.len() > MAX_WRAPPED * 8 || card.len() > MAX_CARD {
                     return self.deny(conn, "a password's record past its size");
@@ -718,12 +740,17 @@ impl<S: Storage> Hub<S> {
 
     /// Why `account` can't sign in as `id`: not an email, or another
     /// account's.
-    fn password_taken(&self, account: &[u8], id: &str) -> Option<&'static str> {
+    fn password_taken(&self, account: &[u8], id: &str) -> Option<String> {
         if !id.contains('@') || id.len() > 254 {
-            return Some("That doesn't look like an email address");
+            return Some("That doesn't look like an email address".into());
+        }
+        match self.password_email(account) {
+            Some(only) if only.is_empty() => return Some(NO_ACCOUNT_EMAIL.into()),
+            Some(only) if only != id => return Some(password_email_is(&only)),
+            _ => {}
         }
         match self.store.password_of(id) {
-            Some((owner, _)) if owner != account => Some("That email signs in to another account already"),
+            Some((owner, _)) if owner != account => Some("That email signs in to another account already".into()),
             _ => None,
         }
     }
@@ -975,6 +1002,8 @@ impl<S: Storage> Hub<S> {
             password: self.store.password_card(account),
             passwords: self.passwords.is_some(),
             passkeys: self.store.passkeys(account).into_iter().map(|p| PasskeyRow { public: p.public, card: p.card, made: p.made }).collect(),
+            // Its own email, to its own devices only.
+            password_email: if self.passwords.is_some() { self.password_email(account).unwrap_or_default() } else { String::new() },
         })
     }
 

@@ -1066,9 +1066,13 @@ impl Carnet {
                 // them: a hosted one), beside codes and the words.
                 if let Some((true, id)) = self.sync.password.clone() {
                     rule(ui, l);
-                    let what = match &id {
-                        Some(id) => format!("A new device, or a browser, can come in with {id} and the password."),
-                        None => "Set one, and a new device, or a browser, can come in with your email and it, instead of a code.".to_string(),
+                    // A hosted service holds passwords to the email signed
+                    // up with: shown, never asked.
+                    let only = self.sync.password_email.clone();
+                    let what = match (&id, &only) {
+                        (Some(id), _) => format!("A new device, or a browser, can come in with {id} and the password."),
+                        (None, Some(only)) => format!("Set one, and a new device, or a browser, can come in with {only} and it, instead of a code."),
+                        (None, None) => "Set one, and a new device, or a browser, can come in with your email and it, instead of a code.".to_string(),
                     };
                     let online = status == Status::Online;
                     let editing = self.pw_edit.is_some();
@@ -1089,24 +1093,39 @@ impl Carnet {
                     });
                     if let Some((email, password)) = self.pw_edit.clone() {
                         ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 10.0 }).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
-                            let k = field(self, ui, "pw-email", &email, "you@example.com", Field::PasswordEmail);
-                            if self.focus_req == Some(Field::PasswordEmail) {
-                                ui.focus(k);
-                                self.focus_req = None;
+                            if let Some(only) = &only {
+                                ui.text(only, TextStyle::new(Type::UI.size).color(t.fg).nowrap());
+                            } else {
+                                let k = field(self, ui, "pw-email", &email, "you@example.com", Field::PasswordEmail);
+                                if self.focus_req == Some(Field::PasswordEmail) {
+                                    ui.focus(k);
+                                    self.focus_req = None;
+                                }
                             }
                             let shown = masked(&password, self.sync_show_password);
                             let k = field(self, ui, "pw-new", &shown, "A password, 8 letters or more", Field::PasswordNew);
                             if std::mem::take(&mut self.sync_mask_reset) {
                                 ui.set_edit_text(k, &shown);
                             }
+                            if self.focus_req == Some(Field::PasswordNew) {
+                                ui.focus(k);
+                                self.focus_req = None;
+                            }
                         });
+                        if only.is_some() {
+                            ui.text_in(
+                                NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 6.0 }),
+                                "On this service, the password signs in with the email you signed up with.",
+                                TextStyle::new(Type::SMALL.size).color(t.muted),
+                            );
+                        }
                         ui.text_in(
                             NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 10.0 }),
                             "The password never leaves this device: the server can't read it, nor reset it. Keep the recovery words too.",
                             TextStyle::new(Type::SMALL.size).color(t.muted),
                         );
                         // The row's own buttons, under its fields, whatever the width.
-                        let ready = email.contains('@') && password.chars().count() >= 8;
+                        let ready = only.as_deref().unwrap_or(&email).contains('@') && password.chars().count() >= 8;
                         ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).gap(10.0).main_align(Align::End), |ui| {
                             pill_button(ui, l, "pw-cancel", "Cancel", false, true, Msg::SyncPasswordCancel);
                             pill_button(ui, l, "pw-save", "Save", true, ready && online, Msg::SyncPasswordSave);
