@@ -6,11 +6,11 @@ Carnet is a small, fast, native notes app for macOS, Windows and Linux. Every no
 
 | Light | Dark |
 |---|---|
-| ![A note with a picture, a highlight and a checklist, in the Linen palette](docs/light.png) | ![A table of books, in the Linen palette's dark mode](docs/dark.png) |
+| ![A note with a dropped first letter, a highlight, a picture and a checklist, in the Linen palette](docs/light.png) | ![A table of books, in the Linen palette's dark mode](docs/dark.png) |
 
 | Settings | A narrow window |
 |---|---|
-| ![The settings page: palettes, theme, page width, density, text size, dividers, fonts](docs/settings.png) | ![A note in a narrow window, the library tucked away](docs/narrow.png) |
+| ![The settings page: theme, page width, density, text size, dividers, the first letter's height, font and colour, and the fonts](docs/settings.png) | ![A note in a narrow window, the library tucked away](docs/narrow.png) |
 
 A *carnet* is French for a small notebook.
 
