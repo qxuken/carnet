@@ -411,6 +411,40 @@ fn ornament_parts(d: Divider) -> (f32, f32, String, String, f32) {
             "M60 6 L64 10 L60 14 L56 10 Z".into(),
             1.3,
         ),
+        // The hedera: a heart-shaped leaf pointing right, notched where
+        // its stem meets it, the stem curling back over it.
+        Divider::Fleuron => (
+            36.0,
+            22.0,
+            "M15 11 C10 11 6.5 10 5 7.2 C3.6 4.6 5.6 2 8.2 2.8 C10.2 3.4 10 6 7.9 6.1".into(),
+            "M15 11 C11.5 7 13 3 17.5 3.5 C23 4 28 7.5 33 11 C28 14.5 23 18 17.5 18.5 \
+             C13 19 11.5 15 15 11 Z"
+                .into(),
+            1.3,
+        ),
+        // Lozenges, a little taller than wide, spaced as the dots are.
+        Divider::Diamonds => (
+            36.0,
+            9.0,
+            String::new(),
+            [3.0, 18.0, 33.0].map(|x| format!("M{x} 0 L{} 4.5 L{x} 9 L{} 4.5 Z ", x + 3.0, x - 3.0)).concat(),
+            0.0,
+        ),
+        Divider::Lozenge => (
+            96.0,
+            10.0,
+            "M0 5 L39 5 M57 5 L96 5".into(),
+            "M48 0.5 L52.5 5 L48 9.5 L43.5 5 Z".into(),
+            1.0,
+        ),
+        // One even wave, its ends turned in.
+        Divider::Wave => (
+            44.0,
+            10.0,
+            "M2 6.5 C7 1 14 1 22 5 C30 9 37 9 42 3.5".into(),
+            String::new(),
+            1.6,
+        ),
     }
 }
 
@@ -456,6 +490,9 @@ mod tests {
             let (_, _, s, f, _) = ornament_parts(d);
             for part in [&s, &f] {
                 assert!(part.is_empty() || Path::parse(part).is_ok(), "{d:?}: {:?}", Path::parse(part).err());
+                // A line ended with `\\` inside the string, not `\`: the
+                // rest of the outline read as nothing.
+                assert!(!part.contains('\\'), "{d:?}: a stray backslash");
             }
             assert!(scaled(&s, 0.75).is_some() || scaled(&f, 0.75).is_some(), "{d:?} draws something");
         }

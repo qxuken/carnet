@@ -158,7 +158,7 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 - **Density**: Compact, Comfortable or Airy.
 - **Fonts**: a pairing (Book, Modern, Classic, System); under it, **Text** and **Headings**: any installed family, searchable, each name shown in its own face.
 - **Page width**: Narrow, Medium or Wide; **Text size**: 12 to 24 px.
-- **Dividers**: three dots, a short line, three stars, stars in a triangle, or a flourish. Only the look changes: the file still says `---`.
+- **Dividers**: three dots, a short line, three stars, stars in a triangle, a flourish, a printer's leaf (❧), three diamonds, a diamond between lines, or a wave. Only the look changes: the file still says `---`.
 - **First letter**: plain, or dropped: the note's first paragraph opens with a large letter, the first lines beside it, as tall as the paragraph's lines up to a limit: a two-line paragraph drops two, a one-line one none. Under it, while it's dropped: **Up to** (two, three or four lines), **Font** (the heading face, or any other) and **Colour** (the accent's or the text's). The settings' preview shows it.
 - **Toolbar**: always shown, or fading while you type; **Focus** and **Typewriter**, as above.
 - **Window**: the notes list shows the desktop through it, blurred, where the system can (macOS, Windows 11, KDE); **Solid** turns that off from the next start.

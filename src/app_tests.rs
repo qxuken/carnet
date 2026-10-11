@@ -4178,7 +4178,7 @@ fn the_page_follows_the_text_size_down_to_12px() {
         d_frame_twice(&mut app, &mut d);
         assert!(row(&app, 1).h > 10.0);
     }
-    assert_eq!(app.settings.divider, crate::settings::Divider::Flourish);
+    assert_eq!(app.settings.divider, crate::settings::Divider::Wave);
     assert!(app.settings.initial);
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
