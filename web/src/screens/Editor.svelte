@@ -448,7 +448,8 @@
 {#if bar && small}{@render toolbar()}{/if}
 
 <style>
-  .editor { min-height: 60vh; }
+  /* A container, for the pictures' widths (theme.ts `cqi`): the text's. */
+  .editor { min-height: 60vh; container-type: inline-size; }
   .chooser { display: none; }
   .editor.barred { padding-bottom: 64px; }
   .bar { z-index: 5; display: flex; flex-direction: column; }

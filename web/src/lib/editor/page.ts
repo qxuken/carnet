@@ -15,7 +15,7 @@ import type { PageEditor } from '../../wasm/carnet_web.js';
 import { HIGHLIGHT, inkCss, washCss } from '../colors';
 import { show, unshown } from '../pictures';
 import { TableWidget, place, type Cell, type TableContext } from './table';
-import { pictureTools } from './picture';
+import { pictureRoom, pictureTools } from './picture';
 
 /// How a line is drawn (`PageEditor.looks`).
 export type Look = {
@@ -199,51 +199,151 @@ class Rule extends WidgetType {
 /// A picture's `src` (an Obsidian embed's, with `wiki`) as a URL to show.
 export type Pictures = (src: string, wiki: boolean) => Promise<string>;
 
-/// Each picture widget's box, and the picture in it (or to be, once it
-/// comes: until then its place is a box of the same size, pictures.ts).
+/// A picture as the note has it: what its widget draws.
+type Pic = { src: string; wiki: boolean; alt: string; width: number | null };
+
+const same = (a: Pic, b: Pic) => a.src === b.src && a.wiki === b.wiki && a.alt === b.alt && a.width === b.width;
+
+/// Each picture's box, and the picture in it (or to be, once it comes:
+/// until then its place is a box of the same size, pictures.ts).
 const shownIn = new WeakMap<HTMLElement, HTMLImageElement>();
 
-class Picture extends WidgetType {
-  constructor(readonly src: string, readonly wiki: boolean, readonly alt: string, readonly width: number | null, readonly pictures: Pictures) {
+/// The pictures of a row, laid out as the reading view lays them out
+/// (styles.css `.pictures`): one on a line of its own, or those at an
+/// edge one after another, side by side there. A block of its own: no
+/// line of text above or below it to put a caret in. A row at an edge is
+/// a float in a wrapper with no height, so CodeMirror measures it as
+/// nothing while the lines after it run beside it (theme.ts); the row's
+/// later pictures each keep a line of their own, drawn as nothing
+/// (`Beside`).
+class PictureRow extends WidgetType {
+  constructor(readonly pics: Pic[], readonly side: number, readonly pictures: Pictures) {
     super();
   }
-  eq(o: Picture) {
-    return o.src === this.src && o.wiki === this.wiki && o.width === this.width && o.alt === this.alt;
+  eq(o: PictureRow) {
+    return o.side === this.side && o.pics.length === this.pics.length && o.pics.every((p, i) => same(p, this.pics[i]));
   }
   toDOM() {
-    const img = document.createElement('img');
-    img.className = 'cm-picture';
-    img.alt = this.alt;
-    if (this.width) img.style.width = `${this.width}px`;
-    // In a box of its own, for the box it takes until it comes (or a card
-    // saying why it isn't shown: not found, or one this browser can't
-    // draw) to take its place in: the reader's, the same size.
-    const box = document.createElement('span');
-    box.className = 'cm-picture-box';
-    box.append(img);
-    unshown(img, this.src);
-    show(img, this.src, () => this.pictures(this.src, this.wiki));
-    shownIn.set(box, img);
-    return box;
-  }
-  /// Another width or alt text for the same picture (it was resized):
-  /// the one shown kept, not fetched and drawn again.
-  updateDOM(dom: HTMLElement, _view: EditorView, from: Picture) {
-    if (from.src !== this.src || from.wiki !== this.wiki) return false;
-    // The picture, drawn or still to come; and its place while it comes.
-    const img = shownIn.get(dom);
-    const width = this.width ? `${this.width}px` : '';
-    if (img) {
-      img.style.width = width;
-      img.alt = this.alt;
+    const wrap = document.createElement('div');
+    const row = document.createElement('div');
+    row.className = 'cm-pics-row';
+    for (const [k, p] of this.pics.entries()) {
+      const img = document.createElement('img');
+      img.className = 'cm-picture';
+      img.alt = p.alt;
+      if (p.width) img.style.width = `${p.width}px`;
+      // In a box of its own, for the box it takes until it comes (or a
+      // card saying why it isn't shown: not found, or one this browser
+      // can't draw) to take its place in: the reader's, the same size.
+      const box = document.createElement('span');
+      box.className = 'cm-picture-box';
+      box.dataset.k = String(k);
+      box.classList.toggle('cm-sized', !!p.width);
+      box.append(img);
+      unshown(img, p.src);
+      show(img, p.src, () => this.pictures(p.src, p.wiki));
+      shownIn.set(box, img);
+      row.append(box);
     }
-    const place = dom.querySelector<HTMLElement>('.picture-card');
-    if (place) place.style.width = width;
+    wrap.append(row);
+    this.dress(wrap);
+    return wrap;
+  }
+  /// The row's edge, and how many share it.
+  dress(wrap: HTMLElement) {
+    wrap.classList.add('cm-pics');
+    wrap.classList.toggle('cm-float', !!this.side);
+    wrap.classList.toggle('cm-left', this.side === 1);
+    wrap.classList.toggle('cm-right', this.side === 2);
+    wrap.style.setProperty('--n', String(this.pics.length));
+  }
+  /// The same pictures with another width, alt text or edge (resized, or
+  /// moved): the ones shown kept, not fetched and drawn again.
+  updateDOM(dom: HTMLElement, _view: EditorView, from: PictureRow) {
+    if (from.pics.length !== this.pics.length || from.pics.some((p, i) => p.src !== this.pics[i].src || p.wiki !== this.pics[i].wiki)) return false;
+    const boxes = dom.querySelectorAll<HTMLElement>('.cm-picture-box');
+    if (boxes.length !== this.pics.length) return false;
+    for (const [k, p] of this.pics.entries()) {
+      const box = boxes[k];
+      const width = p.width ? `${p.width}px` : '';
+      box.classList.toggle('cm-sized', !!p.width);
+      // The picture, drawn or still to come; and its place while it comes.
+      const img = shownIn.get(box);
+      if (img) {
+        img.style.width = width;
+        img.alt = p.alt;
+      }
+      const place = box.querySelector<HTMLElement>('.picture-card');
+      if (place) place.style.width = width;
+    }
+    this.dress(dom);
     return true;
+  }
+  get estimatedHeight() {
+    return this.side ? 0 : -1;
   }
 }
 
-function build(view: EditorView, pictures: Pictures, toggle: (line: number) => void, tables: TableContext): { deco: DecorationSet; atomic: DecorationSet } {
+/// A picture drawn in the row of the one before it: nothing of its own.
+class Beside extends WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    const d = document.createElement('div');
+    d.className = 'cm-pics-beside';
+    return d;
+  }
+  get estimatedHeight() {
+    return 0;
+  }
+}
+
+/// At the note's end, below any picture at an edge: the page as tall as
+/// what is drawn, the last picture too.
+class Clear extends WidgetType {
+  eq() {
+    return true;
+  }
+  toDOM() {
+    const d = document.createElement('div');
+    d.className = 'cm-clear';
+    return d;
+  }
+  get estimatedHeight() {
+    return 0;
+  }
+}
+
+/// The pictures as blocks, each picture's line replaced whole. `null`
+/// while the page's looks are not yet the text's.
+function pictureBlocks(state: EditorState, pictures: Pictures): DecorationSet | null {
+  const all = state.field(looks);
+  const doc = state.doc;
+  if (all.length !== doc.lines) return null;
+  const out: Range<Decoration>[] = [];
+  const pic = (l: Look): Pic => ({ src: l.src, wiki: l.wk, alt: l.alt, width: l.w });
+  const atEdge = (i: number) => i >= 0 && all[i]?.k === 'image' && !!all[i].fl;
+  for (let i = 0; i < all.length; i++) {
+    const look = all[i];
+    if (look.k !== 'image') continue;
+    let widget: WidgetType;
+    if (!look.fl) widget = new PictureRow([pic(look)], 0, pictures);
+    else if (atEdge(i - 1)) widget = new Beside();
+    else {
+      // A row: the pictures at an edge from here on, at the first's edge.
+      let j = i;
+      while (atEdge(j)) j++;
+      widget = new PictureRow(all.slice(i, j).map(pic), look.fl, pictures);
+    }
+    const line = doc.line(i + 1);
+    out.push(Decoration.replace({ widget, block: true }).range(line.from, line.to));
+  }
+  out.push(Decoration.widget({ widget: new Clear(), block: true, side: 1 }).range(doc.length));
+  return Decoration.set(out, true);
+}
+
+function build(view: EditorView, toggle: (line: number) => void, tables: TableContext): { deco: DecorationSet; atomic: DecorationSet } {
   const all = view.state.field(looks);
   const doc = view.state.doc;
   const out: Range<Decoration>[] = [];
@@ -253,13 +353,11 @@ function build(view: EditorView, pictures: Pictures, toggle: (line: number) => v
     for (let n = doc.lineAt(from).number; n <= doc.lineAt(to).number; n++) {
       const line = doc.line(n);
       const look = all[n - 1];
+      // A picture: a block of its own (`pictureBlocks`).
+      if (look.k === 'image') continue;
       const cls = [`cm-${look.k}`];
       if (look.f && n > 1) cls.push('cm-block');
       if (look.d) cls.push('cm-ticked');
-      // A picture at an edge: there on its line (the words beside it are
-      // the reading view's), at most 45% wide with no width given.
-      if (look.k === 'image' && look.fl) cls.push(look.fl === 2 ? 'cm-float-right' : 'cm-float-left');
-      if (look.k === 'image' && look.w) cls.push('cm-sized');
       const attrs: Record<string, string> = { class: cls.join(' ') };
       if (look.i) attrs.style = `--indent:${look.i}`;
       out.push(Decoration.line({ attributes: attrs }).range(line.from));
@@ -267,8 +365,8 @@ function build(view: EditorView, pictures: Pictures, toggle: (line: number) => v
       if (look.k === 'todo') out.push(Decoration.widget({ widget: new Box(look.d, n - 1, toggle), side: -1 }).range(line.from));
       if (look.k === 'bullet') out.push(Decoration.widget({ widget: new Marker(['•', '◦', '▪'][look.i % 3], 'cm-dot'), side: -1 }).range(line.from));
       if (look.k === 'number') out.push(Decoration.widget({ widget: new Marker(`${look.n}.`, 'cm-num'), side: -1 }).range(line.from));
-      if (look.k === 'divider' || look.k === 'image' || look.k === 'table') {
-        const w = look.k === 'divider' ? new Rule() : look.k === 'image' ? new Picture(look.src, look.wk, look.alt, look.w, pictures) : new TableWidget(look.cells, n - 1, tables);
+      if (look.k === 'divider' || look.k === 'table') {
+        const w = look.k === 'divider' ? new Rule() : new TableWidget(look.cells, n - 1, tables);
         const d = Decoration.replace({ widget: w });
         out.push(d.range(line.from, line.to));
         atomic.push(d.range(line.from, line.to));
@@ -340,11 +438,11 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
       atomic: DecorationSet;
       constructor(v: EditorView) {
         view = v;
-        ({ deco: this.deco, atomic: this.atomic } = build(v, o.pictures, toggle, tables));
+        ({ deco: this.deco, atomic: this.atomic } = build(v, toggle, tables));
       }
       update(u: ViewUpdate) {
         if (u.docChanged || u.viewportChanged || u.transactions.some((t) => t.effects.some((e) => e.is(setLooks)))) {
-          ({ deco: this.deco, atomic: this.atomic } = build(u.view, o.pictures, toggle, tables));
+          ({ deco: this.deco, atomic: this.atomic } = build(u.view, toggle, tables));
         }
         if (u.selectionSet || u.docChanged) o.moved();
       }
@@ -359,10 +457,43 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
   /// made itself, which the page agreed with).
   const relook = () => view?.dispatch({ effects: setLooks.of(JSON.parse(pe.looks())), annotations: own.of(true) });
 
+  /// The pictures, blocks of their own (`pictureBlocks`).
+  const pictureField = StateField.define<DecorationSet>({
+    create: (s) => pictureBlocks(s, o.pictures) ?? Decoration.none,
+    update(v, tr) {
+      if (!tr.docChanged && !tr.effects.some((e) => e.is(setLooks))) return v;
+      return pictureBlocks(tr.state, o.pictures) ?? v.map(tr.changes);
+    },
+    provide: (f) => [EditorView.decorations.from(f), EditorView.atomicRanges.of((v) => v.state.field(f))],
+  });
+
+  /// Up or down onto a picture, which CodeMirror's own motion passes
+  /// over when it is at an edge (measured as nothing, the words beside
+  /// it); and off one, to the line above or below.
+  const vertical = (down: boolean) => (v: EditorView) => {
+    const sel = v.state.selection.main;
+    if (!sel.empty) return false;
+    const all = v.state.field(looks);
+    const doc = v.state.doc;
+    const n = doc.lineAt(sel.head).number;
+    const next = down ? n + 1 : n - 1;
+    if (next < 1 || next > doc.lines) return false;
+    const picture = (k: number) => all[k - 1]?.k === 'image';
+    const to = doc.line(next);
+    if (!picture(n)) {
+      // Still within the line's own rows: CodeMirror's.
+      if (!picture(next) || doc.lineAt(v.moveVertically(sel, down).head).number === n) return false;
+    }
+    v.dispatch({ selection: { anchor: down || picture(next) ? to.from : to.to }, scrollIntoView: true, userEvent: 'select' });
+    return true;
+  };
+
   const extensions: Extension[] = [
     looks.init(() => JSON.parse(pe.looks())),
+    pictureField,
     plugin,
     pictureTools(pe, run),
+    pictureRoom,
     EditorState.transactionFilter.of((tr) => {
       if (tr.annotation(own)) return tr;
       if (!tr.docChanged) {
@@ -387,6 +518,8 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
       return tr;
     }),
     keymap.of([
+      { key: 'ArrowDown', run: vertical(true) },
+      { key: 'ArrowUp', run: vertical(false) },
       { key: 'Enter', run: run(() => pe.enter(false)) },
       { key: 'Shift-Enter', run: run(() => pe.enter(true)) },
       { key: 'Backspace', run: run(() => pe.backspace(false)) },

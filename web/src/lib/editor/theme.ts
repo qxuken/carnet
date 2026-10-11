@@ -9,7 +9,9 @@ export const theme = EditorView.theme({
   '&.cm-focused': { outline: 'none' },
   '.cm-scroller': { fontFamily: 'inherit', lineHeight: 'inherit', overflow: 'visible' },
   '.cm-content': { padding: '0', caretColor: 'var(--accent)' },
-  '.cm-line': { padding: '0' },
+  // Each line a block of its own beside a picture at an edge, as the
+  // reader's paragraphs are (a column, not wrapped round it).
+  '.cm-line': { padding: '0', display: 'flow-root' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '2px' },
   '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': { backgroundColor: 'var(--selection) !important' },
   // A block's space above, as the reader spaces them; items close.
@@ -45,16 +47,51 @@ export const theme = EditorView.theme({
   '.cm-l': { color: 'var(--accent-ink)', textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, var(--accent-ink) 40%, transparent)' },
   '.cm-marked': { borderRadius: '3px' },
   '.cm-rule': { display: 'inline-block', width: '100%', borderTop: '1px solid var(--border-strong)', verticalAlign: 'middle' },
-  '.cm-picture': { display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)', margin: '4px 0' },
+  // Pictures (page.ts `PictureRow`), laid out as the reading view lays
+  // them out (styles.css `.pictures`). Every space is inside what
+  // CodeMirror measures: padding, never a margin, and a line that goes
+  // below a picture at an edge clears it inside itself.
+  //
+  // One on a line of its own: below any at an edge.
+  '.cm-pics': { padding: '16px 0 4px' },
+  '.cm-pics::before, .cm-clear::before, .cm-divider::before': { content: "''", display: 'block', clear: 'both' },
   '.cm-picture-box': { display: 'block' },
-  // A picture at an edge: at that edge of its line, and with no width
-  // given at most 45% of the text's, as the desktop sizes it.
-  '.cm-float-right .cm-picture-box': { textAlign: 'right' },
-  '.cm-float-right .cm-picture': { marginLeft: 'auto' },
-  '.cm-float-left:not(.cm-sized) .cm-picture, .cm-float-right:not(.cm-sized) .cm-picture': { maxWidth: '45%' },
+  '.cm-picture': { display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)' },
+  // At an edge, one after another (`--n` of them): a row floated there,
+  // in a wrapper of no height, below any row before it; each picture its
+  // share of the text's width, and one no width was given at most 45% of
+  // it. The lines after it run beside it, each a column of its own, as
+  // the reader's blocks do. The space above it is the wrapper's, which
+  // the line after it does without: so a row below another is as far
+  // below it as in the reader.
+  '.cm-pics.cm-float': { padding: '12px 0 0' },
+  '.cm-float + .cm-line, .cm-pics-beside + .cm-line': { paddingTop: '0 !important' },
+  '.cm-pics.cm-float::before': { content: 'none' },
+  '.cm-float .cm-pics-row': {
+    '--share': 'calc((100cqi - (var(--n) - 1) * 16px) / var(--n))',
+    display: 'flex', gap: '16px', alignItems: 'flex-start', clear: 'both', maxWidth: '100%',
+  },
+  '.cm-left .cm-pics-row': { float: 'left', margin: '4px 24px 12px 0' },
+  '.cm-right .cm-pics-row': { float: 'right', margin: '4px 0 12px 24px' },
+  '.cm-float .cm-picture-box': { flex: 'none' },
+  '.cm-float .cm-picture': { minWidth: '48px', maxWidth: 'var(--share)' },
+  '.cm-float .cm-picture-box:not(.cm-sized) .cm-picture': { maxWidth: 'min(45cqi, var(--share))' },
+  // Too wide to leave 180px beside it (picture.ts `pictureRoom`): as wide
+  // as the text, its pictures at its edge, and the words below it, as the
+  // reader's go. A line that would start beside it (and a divider, which
+  // goes below every row) is a plain block, whose words move below inside
+  // it, measured; a column moved down would leave a gap CodeMirror can't
+  // see.
+  '.cm-alone .cm-pics-row': { width: '100%', marginLeft: '0', marginRight: '0' },
+  '.cm-right.cm-alone .cm-pics-row': { justifyContent: 'flex-end' },
+  '.cm-alone ~ .cm-line, .cm-divider': { display: 'block' },
   // Its place until it comes (styles.css `.picture-card`) the same.
-  '.cm-float-right .picture-card': { marginLeft: 'auto' },
-  '.cm-float-left:not(.cm-sized) .picture-card, .cm-float-right:not(.cm-sized) .picture-card': { width: '45%' },
+  '.cm-pics .picture-card': { margin: '0' },
+  '.cm-float .picture-card': { flex: 'none', maxWidth: 'var(--share)' },
+  '.cm-float .cm-picture-box:not(.cm-sized) .picture-card': { width: 'min(45cqi, var(--share))' },
+  // Selected: no caret, no wash; its ring says so (picture.ts).
+  '&.cm-picture-picked .cm-content': { caretColor: 'transparent' },
+  '&.cm-picture-picked .cm-pics ::selection, &.cm-picture-picked .cm-pics::selection': { backgroundColor: 'transparent !important' },
   // The selected picture (picture.ts): a ring 5px out in the accent, a bar
   // on each side and a dot at the outer corner, dragged to resize; under
   // the note's header when scrolled beneath it. A finger gets more room

@@ -933,7 +933,8 @@ fn after_removal_up(doc: &mut Doc, i: usize) -> Pos {
 
 /// Delete: the selection, else the character (or word) after the caret.
 /// At the end of a block the next one's text joins it; a divider below
-/// goes, a table below is selected.
+/// goes, a table or a picture below is selected (an empty line above
+/// one goes first).
 pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     if delete_selection(doc, c) {
         return true;
@@ -976,9 +977,17 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
             doc.remove(i + 1);
             true
         }
+        // An empty line above a table or a picture goes, and it is
+        // selected (Backspace's, the other way); a line with words only
+        // selects it.
         Kind::Table(_) | Kind::Image { .. } => {
-            *c = select_blocks(doc, i + 1, i + 1);
-            false
+            let empty = matches!(&doc.blocks()[i].kind, Kind::Text(t) if t.is_empty());
+            if empty {
+                doc.remove(i);
+            }
+            let at = if empty { i } else { i + 1 };
+            *c = select_blocks(doc, at, at);
+            empty
         }
         Kind::Raw(_) => false,
         _ => {
@@ -2634,6 +2643,32 @@ mod tests {
         // ...and the next Backspace takes it.
         backspace(&mut d, &mut c, false);
         assert_eq!(texts(&d), ["Text:before", "Text:"]);
+    }
+
+    /// An empty line beside a picture goes, Backspace from below or
+    /// Delete from above, and the picture is selected; it goes itself
+    /// only at the next press. A line with words only selects it.
+    #[test]
+    fn an_empty_line_by_a_picture_goes_before_the_picture() {
+        let pic = || Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false });
+        let mut d = doc(vec![Block::text("before"), Block::text(""), pic(), Block::text(""), Block::text("after")]);
+        let mut c = at(&d, 1, 0);
+        assert!(delete(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:before", "Imag:", "Text:", "Text:after"]);
+        assert_eq!(picture_at(&d, c), Some(1));
+        let mut c = at(&d, 2, 0);
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:before", "Imag:", "Text:after"]);
+        assert_eq!(picture_at(&d, c), Some(1));
+        // From words: selected, nothing gone; the next press takes it.
+        let mut c = at(&d, 0, 6);
+        assert!(!delete(&mut d, &mut c, false));
+        assert_eq!(picture_at(&d, c), Some(1));
+        let mut c = at(&d, 2, 0);
+        assert!(!backspace(&mut d, &mut c, false));
+        assert_eq!(picture_at(&d, c), Some(1));
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:before", "Text:after"]);
     }
 
     /// A checklist item's words chosen whole copy as the item, its box
