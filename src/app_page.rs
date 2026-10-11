@@ -1292,10 +1292,12 @@ impl Carnet {
             .flatten()
             .filter(|&(f, _)| !(preedit.is_some() && byte <= f));
         let (dark, page_bg) = (l.c.dark, t.bg);
-        let (cap_lines, cap_accent) = (self.settings.initial_lines, self.settings.initial_accent);
+        let (cap_lines, cap_accent, text_w) = (self.settings.initial_lines, self.settings.initial_accent, self.text_w);
         ui.with(row, |ui| {
             let key = ui.child_key_indexed(0);
             let mut spans: Vec<Span<'_>> = Vec::new();
+            // The span holding the first letter, if it may drop.
+            let mut letter: Option<usize> = None;
             if text.is_empty() && preedit.is_none() {
                 // An empty line still has a line's height, and a place for
                 // the caret; its placeholder floats over it, easing in.
@@ -1377,14 +1379,8 @@ impl Carnet {
                         }
                     }
                     if cap.is_some_and(|(f, to)| a >= f && b <= to) {
-                        // In its face (the headings', unless one is
-                        // chosen), in the accent deepened for text or the
-                        // words' own; kui sizes it to the lines it drops
-                        // through.
-                        sp = sp.family(l.initial);
-                        if cap_accent {
-                            sp = sp.color(l.c.accent_ink);
-                        }
+                        // Styled below, once it's known to drop.
+                        letter = Some(spans.len());
                     }
                     if part.is_some_and(|(f, to)| a >= f && b <= to) {
                         sp = sp.bg(t.selection).bg_radius(4.0);
@@ -1400,8 +1396,26 @@ impl Carnet {
                 }
             }
             // A drop cap: the letter as tall as the first lines, which
-            // wrap beside it; the file is as it was.
-            let style = if cap.is_some() { style.initial_letter(cap_lines) } else { style };
+            // wrap beside it; the file is as it was. As tall as the lines
+            // the paragraph fills, up to the setting: a sentence of two
+            // lines drops two, and one of a single line none, rather than
+            // a tall letter beside a short line.
+            let drop = letter.and_then(|i| Some((i, drop_lines(cap_lines, ui.measure_rich_text(&spans, &style, Some(text_w)).lines)?)));
+            let style = match drop {
+                Some((i, n)) => {
+                    // In its face (the headings', unless one is chosen), in
+                    // the accent deepened for text or the words' own; kui
+                    // sizes it to the lines it drops through. Undropped,
+                    // it's a letter like the rest.
+                    let mut sp = spans[i].family(l.initial);
+                    if cap_accent {
+                        sp = sp.color(l.c.accent_ink);
+                    }
+                    spans[i] = sp;
+                    style.initial_letter(n)
+                }
+                None => style,
+            };
             ui.rich_text(&spans, style);
             self.slot_keys.insert(slot, key);
             if let Some(h) = hint.filter(|_| text.is_empty() && preedit.is_none()) {
@@ -2823,6 +2837,13 @@ fn marker(ui: &mut Ui<'_>, l: &Look, id: u64, style: ListStyle, done: bool, n: u
             );
         }
     }
+}
+
+/// How many lines a first letter drops through, for a paragraph that
+/// fills `lines` at the page's width: as many, up to `most`; none for one
+/// line.
+fn drop_lines(most: u32, lines: u32) -> Option<u32> {
+    Some(most.min(lines)).filter(|&n| n >= 2)
 }
 
 /// The first letter of a paragraph's words, with any opening quote or

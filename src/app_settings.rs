@@ -322,7 +322,7 @@ impl Carnet {
                 4 => "four",
                 _ => "three",
             };
-            let note = format!("The note's first paragraph opens with a letter {tall} lines tall");
+            let note = format!("The note's first paragraph opens with a letter as tall as its lines, up to {tall}");
             setting(ui, l, "First letter", Some(&note), |ui| {
                 let cur = if s.initial { 1 } else { 0 };
                 segmented(ui, l, "initial", &["Plain", "Dropped"], cur, |to| Msg::SetInitial { to });
@@ -330,7 +330,7 @@ impl Carnet {
             // The dropped letter's own styles, only while there is one.
             if s.initial {
                 subgroup(ui, l, "initial-styles", "The dropped letter", |ui| {
-                    sub_setting(ui, l, "Height", |ui| {
+                    sub_setting(ui, l, "Up to", |ui| {
                         let cur = (s.initial_lines - crate::settings::INITIAL_LINES.start()) as usize;
                         segmented(ui, l, "height", &["2 lines", "3 lines", "4 lines"], cur, |to| Msg::SetInitialLines { to });
                     });

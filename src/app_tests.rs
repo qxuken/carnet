@@ -3950,6 +3950,33 @@ fn the_first_letter_drops_three_lines_and_the_paragraph_is_written_as_ever() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A short first paragraph gets a short letter: set to drop four lines,
+/// a sentence of one line drops none and one of two lines drops two, so
+/// no tall letter stands beside a line or two of words.
+#[test]
+fn the_first_letter_drops_no_more_lines_than_the_paragraph_fills() {
+    let (mut app, mut d, dir) = body("drop-cap-short");
+    app.on_settings(Msg::SetInitial { to: 1 });
+    app.on_settings(Msg::SetInitialLines { to: 2 });
+    assert_eq!(app.settings.initial_lines, 4);
+    type_in(&mut app, &mut d, "One short line.");
+    let slot = app.caret.head.slot;
+    d_frame_twice(&mut app, &mut d);
+    let at = |app: &Carnet, d: &Drive, b: usize| app.rect_at(&d.core, slot, b).unwrap();
+    let (o, after) = (at(&app, &d, 0), at(&app, &d, 1));
+    assert_eq!(o.h, after.h, "one line: no drop");
+    assert!(after.x - o.x < 20.0, "the letter at its own size: {o:?} {after:?}");
+
+    // Two lines' worth at the page's width: a letter two lines tall.
+    key(&mut app, &mut d, "end");
+    type_in(&mut app, &mut d, " And then a few more words, enough of them to wrap onto a second line of the page here.");
+    d_frame_twice(&mut app, &mut d);
+    let (o, after) = (at(&app, &d, 0), at(&app, &d, 1));
+    let lh = after.h;
+    assert!((o.h - 2.0 * lh).abs() < 1.0, "two lines: {o:?}, a line {lh}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The dropped letter's styles: two lines tall or four, the caret before
 /// it as tall and as many rows moved in past it, the rest at the page's
 /// left; a letter font chosen from the list is kept in the settings and
@@ -3984,7 +4011,7 @@ fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
 
     // The letter's own rows, while it is dropped.
     app.settings_open = true;
-    assert!(drawn(&mut d, &mut app, "Height") && drawn(&mut d, &mut app, "Colour"));
+    assert!(drawn(&mut d, &mut app, "Up to") && drawn(&mut d, &mut app, "Colour"));
     assert!(drawn(&mut d, &mut app, "Same as headings"), "no font chosen: the headings'");
     app.on_settings(Msg::FontMenu { which: 2 });
     app.font_query = "inter".into();
@@ -3998,7 +4025,7 @@ fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
     app.on_settings(Msg::SetInitialColor { to: 1 });
     assert!(!Settings::parse(&app.settings.to_text()).initial_accent);
     app.on_settings(Msg::SetInitial { to: 0 });
-    assert!(!drawn(&mut d, &mut app, "Height"), "plain: no letter to style");
+    assert!(!drawn(&mut d, &mut app, "Up to"), "plain: no letter to style");
     app.on_settings(Msg::SetInitial { to: 1 });
     app.settings_open = false;
     d_frame_twice(&mut app, &mut d);
