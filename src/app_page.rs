@@ -26,6 +26,9 @@ use crate::slash;
 const PICTURE_GAP: f32 = 28.0;
 /// The least room beside a picture worth running words in.
 const BESIDE_MIN: f32 = 180.0;
+/// How strongly a picture that's the user's own file, not Carnet's, is
+/// drawn: faint, so it reads as apart from the note's own.
+const THEIRS_OPACITY: f32 = 0.45;
 /// How long the writing pauses, in seconds, before an empty line says
 /// what can go on it.
 const HINT_AFTER: f64 = 1.2;
@@ -740,7 +743,11 @@ impl Carnet {
         let here = self.editing && self.caret.head.slot == Slot::block(id);
         let selected = here || whole;
         let folder = self.page_folder();
-        let entry = self.store.picture_file(&folder, src, wiki).map(|p| self.images.get(&p));
+        let file = self.store.picture_file(&folder, src, wiki);
+        let entry = file.as_ref().map(|p| self.images.get(p));
+        // The user's own file, not Carnet's (store_owned.rs): drawn faint,
+        // with a mark, and selected, a line saying so with ways in.
+        let theirs = file.as_deref().is_some_and(|p| !self.store.owns(p));
         let label = if alt.is_empty() { "Picture".to_string() } else { format!("Picture: {alt}") };
         let floated = float != Float::None;
         let n = self.float_count.max(1) as f32;
@@ -825,7 +832,7 @@ impl Carnet {
                 ui.with(NodeSpec::row().size(dw, dh), |ui| {
                     match &entry {
                         Some(images::Entry::Ready { id: img, .. }) => {
-                            ui.image(*img, NodeSpec::row().size(dw, dh).radius(7.0));
+                            ui.image(*img, NodeSpec::row().size(dw, dh).radius(7.0).opacity(if theirs { THEIRS_OPACITY } else { 1.0 }));
                         }
                         // Decoding: the well it will fill, a faint picture
                         // in its middle.
@@ -884,6 +891,9 @@ impl Carnet {
                                 .cursor(cursor),
                         );
                     }
+                    if theirs {
+                        self.theirs_mark(ui, l, selected && self.editing && !self.reading(), float == Float::Right);
+                    }
                     if resizing.is_some() {
                         ui.text_in(
                             NodeSpec::row()
@@ -895,6 +905,80 @@ impl Carnet {
                             TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
                         );
                     }
+                });
+            },
+        );
+    }
+
+    /// On a picture that's the user's own file, not Carnet's: a mark in
+    /// its corner saying so, and, selected, a bar below it that says what
+    /// that means and offers to take it in, moved or copied. At the right
+    /// edge the bar hangs from the picture's right side.
+    fn theirs_mark(&self, ui: &mut Ui<'_>, l: &Look, bar: bool, right: bool) {
+        let t = l.t;
+        ui.with_keyed(
+            "theirs",
+            NodeSpec::row()
+                .pad(4.0)
+                .radius(radius::CONTROL)
+                .bg(l.card)
+                .float(FloatConfig::parent().inside(Align::Start, Align::Start).offset(6.0, 6.0).clipped())
+                .label("Your file, not Carnet's")
+                .tooltip("Your file, not Carnet's: it isn't synced, and Carnet won't remove it"),
+            |ui| icons::icon(ui, Glyph::Device, t.muted, 14.0, false),
+        );
+        if !bar {
+            return;
+        }
+        let x = if right { Align::End } else { Align::Start };
+        // As wide as the words need on two lines, the page's width at most.
+        let bar_w = (self.text_w - 10.0).clamp(200.0, 420.0);
+        let action = |ui: &mut Ui<'_>, key: &str, label: &str, msg: Msg, tip: &str| {
+            ui.text_in_keyed(
+                key,
+                NodeSpec::row().pad_xy(8.0, 3.0).radius(6.0).hover_bg(t.accent_soft).on_click(msg).label(label).tooltip(tip),
+                label,
+                TextStyle::new(Type::SMALL.size).color(t.focus_ring).nowrap(),
+            );
+        };
+        ui.with_keyed(
+            "theirs-bar",
+            NodeSpec::column()
+                .min_width(bar_w)
+                .max_width(bar_w)
+                .pad_xy(12.0, 9.0)
+                .gap(6.0)
+                .radius(radius::CARD)
+                .bg(l.card)
+                .border(1.0, t.border)
+                .shadow_color(l.shadow)
+                .shadow_blur(14.0)
+                .shadow_y(3.0)
+                .float(FloatConfig::parent().at(x, Align::End).self_at(x, Align::Start).offset(if right { 5.0 } else { -5.0 }, 22.0).clipped()),
+            |ui| {
+                ui.with(NodeSpec::row().grow_width().gap(8.0).cross_align(Align::Start), |ui| {
+                    icons::icon(ui, Glyph::Device, t.muted, 14.0, false);
+                    ui.text_in(
+                        NodeSpec::row().grow_width().min_width(0.0),
+                        "Your file, not Carnet's: it isn't synced, and Carnet won't remove it",
+                        TextStyle::new(Type::SMALL.size).color(t.fg),
+                    );
+                });
+                ui.with(NodeSpec::row().gap(2.0).pad_xy(14.0, 0.0), |ui| {
+                    action(
+                        ui,
+                        "move-in",
+                        "Move into Carnet",
+                        Msg::IntoCarnet { copy: 0 },
+                        "Into the attachments folder: every note showing it follows, and it syncs",
+                    );
+                    action(
+                        ui,
+                        "copy-in",
+                        "Copy into Carnet",
+                        Msg::IntoCarnet { copy: 1 },
+                        "A copy for this note, which syncs; your file stays where it is",
+                    );
                 });
             },
         );
@@ -1500,11 +1584,14 @@ impl Carnet {
                 }
                 items.push(it);
             }
-            items.extend([
-                MenuItem::separator(),
-                item(super::reveal_label(), "reveal-picture"),
-                item("Remove picture", "remove"),
-            ]);
+            items.push(MenuItem::separator());
+            // The user's own file: ways to make it Carnet's.
+            if self.picture_at_caret().is_some_and(|(src, wiki)| {
+                self.store.picture_file(&self.page_folder(), &src, wiki).is_some_and(|p| p.is_file() && !self.store.owns(&p))
+            }) {
+                items.extend([item("Move into Carnet", "into-carnet:0"), item("Copy into Carnet", "into-carnet:1"), MenuItem::separator()]);
+            }
+            items.extend([item(super::reveal_label(), "reveal-picture"), item("Remove picture", "remove")]);
             return items;
         }
         items.extend([
@@ -1649,6 +1736,8 @@ impl Carnet {
             a => {
                 if let Some(n) = a.strip_prefix("style:").and_then(|n| n.parse().ok()) {
                     self.on_plain(Msg::Style { which: n });
+                } else if let Some(copy) = a.strip_prefix("into-carnet:").and_then(|n| n.parse::<u64>().ok()) {
+                    self.take_in_picture(copy == 1);
                 } else if let Some(pct) = a.strip_prefix("size:").and_then(|n| n.parse::<f32>().ok()) {
                     if let Some((id, _, _)) = self.picture_here() {
                         let w = ((self.text_w - 10.0).max(48.0) * pct / 100.0).round() as u32;

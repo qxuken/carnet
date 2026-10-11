@@ -293,8 +293,10 @@
     base = src[1];
     pe = new PageEditor(src[0]);
     const pictures = (s: string, wiki: boolean) => {
+      if (/^(https?:|data:)/i.test(s)) return Promise.resolve(s);
       const path = sync.picturePath(folder, s, wiki);
-      return path ? sync.picture(path) : Promise.reject(new Error('not a picture in the notes folder'));
+      // Outside the notes folder: only on the device that has it.
+      return path ? sync.picture(path) : Promise.reject(new Error('not in the vault'));
     };
     const page = pageEditor(pe, { pictures, edited, moved });
     run = page.run;

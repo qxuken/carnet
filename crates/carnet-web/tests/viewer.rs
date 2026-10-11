@@ -324,11 +324,12 @@ fn the_browser_lists_draws_and_ticks() {
     desk.docs.insert(shop.to_string(), NoteDoc::new(7));
     desk.docs[&shop.to_string()].record("# Shop\n\n- [ ] milk\n- [x] bread\n\n![](../attachments/p.png)\n\n![The hill at seven](hill.jpg)\n", Origin::Save);
     desk.docs.insert(plan.to_string(), NoteDoc::new(7));
-    desk.docs[&plan.to_string()].record("# Plan\n\nSome ==words== here.\n\n![[photo.png|200]]\n", Origin::Save);
+    desk.docs[&plan.to_string()].record("# Plan\n\nSome ==words== here.\n\n![[photo.png|200]]\n\n![](/Users/me/Pictures/sea.png)\n\n![](https://example.com/a.png)\n", Origin::Save);
     let v = NoteDoc::new(7);
     // A picture the plan names the Obsidian way, by its name alone.
     v.put_picture("attachments/2026/photo.png", &"ab".repeat(32));
-    // One beside its note, not in the attachments folder.
+    // One beside its note, not in the attachments folder, as an earlier
+    // desktop named it: shown while the vault names it.
     v.put_picture("Home/hill.jpg", &"cd".repeat(32));
     v.set_place(shop, &Place { folder: "Home".into(), name: "Shop".into(), pinned: true, trashed: false });
     v.set_place(plan, &Place { folder: String::new(), name: "Plan".into(), pinned: false, trashed: false });
@@ -372,6 +373,10 @@ fn the_browser_lists_draws_and_ticks() {
     let h = web.html(&plan.to_string());
     assert!(h.contains("<mark>words</mark>"), "{h}");
     assert!(h.contains("<img src=\"carnet-picture:attachments/2026/photo.png\" alt=\"\" width=\"200\">"), "found by its name: {h}");
+    // A file outside the notes folder: the page says it's on the device
+    // that has it; one on the web, as it is.
+    assert!(h.contains("src=\"carnet-picture:/Users/me/Pictures/sea.png\""), "{h}");
+    assert!(h.contains("src=\"https://example.com/a.png\""), "{h}");
     assert_eq!(web.picture_path("", "photo.png", true).as_deref(), Some("attachments/2026/photo.png"));
     assert_eq!(web.picture_path("Home", "../attachments/p.png", false).as_deref(), Some("attachments/p.png"));
     assert_eq!(web.picture_path("Home", "Hill.JPG", false).as_deref(), Some("Home/hill.jpg"), "as the vault spells it");

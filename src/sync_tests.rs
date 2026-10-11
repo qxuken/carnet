@@ -633,17 +633,18 @@ fn pictures_follow_their_notes() {
     assert!(two.sides[1].pictures_arrived());
 }
 
-/// A picture beside its note, not in the attachments folder, goes too: to
-/// the same path on the other device, and in the vault there, which is
-/// where the browser looks for it. One no note shows stays here.
+/// A picture beside its note is the user's: it stays on its device, not
+/// in the vault, and the other device never has it. Moved into Carnet,
+/// it's in the attachments folder, and goes, the note showing it there on
+/// both. One an earlier Carnet named in the vault (it synced those too)
+/// is let go there at the next run, and no file goes anywhere.
 #[test]
-fn a_picture_beside_its_note_follows_it() {
+fn a_picture_beside_its_note_stays_until_moved_into_carnet() {
     let mut two = Two::new("beside");
     let hill: Vec<u8> = (0..40_000u32).map(|i| (i % 233) as u8).collect();
     two.make(0, "Home", "Weekend", "the view");
     let a = &mut two.sides[0];
     std::fs::write(a.dir.join("Home/hill.jpg"), &hill).unwrap();
-    std::fs::write(a.dir.join("Home/unshown.jpg"), b"not shown").unwrap();
     let i = a.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
     let n = &mut a.store.notes[i];
     n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: "hill.jpg".into(), alt: "The hill at seven".into(), float: Default::default(), width: None, wiki: false }));
@@ -653,15 +654,90 @@ fn a_picture_beside_its_note_follows_it() {
     for _ in 0..4 {
         two.pump();
     }
+    for side in 0..2 {
+        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().pictures();
+        assert!(vault.is_empty(), "not in {side}'s vault: {vault:?}");
+    }
+    assert!(!two.sides[1].dir.join("Home/hill.jpg").exists());
+    assert!(two.file(1, "Weekend").contains("![The hill at seven](hill.jpg)"));
+
+    // Moved into Carnet: it goes.
+    let a = &mut two.sides[0];
+    let from = a.dir.join("Home/hill.jpg");
+    let moved = a.store.move_picture(&from).unwrap();
+    assert!(!from.exists() && moved.to == a.dir.join("attachments/hill.jpg"));
+    for _ in 0..4 {
+        two.pump();
+    }
     let id = crate::pictures::hex(&two.sides[0].session.blob_id(&hill));
     for side in 0..2 {
         let vault = two.sides[side].store.replica.as_ref().unwrap().vault().pictures();
-        assert_eq!(vault.get("Home/hill.jpg"), Some(&id), "in {side}'s vault");
-        assert!(!vault.contains_key("Home/unshown.jpg"), "no note shows it");
+        assert_eq!(vault.get("attachments/hill.jpg"), Some(&id), "in {side}'s vault");
     }
-    assert_eq!(std::fs::read(two.sides[1].dir.join("Home/hill.jpg")).ok(), Some(hill));
-    assert!(!two.sides[1].dir.join("Home/unshown.jpg").exists());
-    assert!(two.file(1, "Weekend").contains("![The hill at seven](hill.jpg)"));
+    assert_eq!(std::fs::read(two.sides[1].dir.join("attachments/hill.jpg")).ok(), Some(hill.clone()));
+    assert!(two.file(1, "Weekend").contains("![The hill at seven](../attachments/hill.jpg)"));
+
+    // As an earlier Carnet left it: a picture beside a note, named.
+    let b = &mut two.sides[1];
+    std::fs::write(b.dir.join("Home/old.jpg"), b"old").unwrap();
+    assert!(b.store.set_picture("Home/old.jpg", &id));
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(!two.sides[0].dir.join("Home/old.jpg").exists(), "never fetched: it isn't Carnet's");
+    // The next run lets it go.
+    let a = &mut two.sides[0];
+    a.pictures = crate::pictures::Pictures::open(a.store.replica_dir().as_deref());
+    for _ in 0..4 {
+        two.pump();
+    }
+    for side in 0..2 {
+        let r = two.sides[side].store.replica.as_ref().unwrap();
+        assert!(!r.vault().pictures().contains_key("Home/old.jpg"), "let go in {side}'s vault");
+        assert!(r.vault().pictures().contains_key("attachments/hill.jpg"));
+    }
+    assert!(two.sides[1].dir.join("Home/old.jpg").exists(), "the file stays");
+}
+
+/// A picture of Carnet's no note shows, nor any version of one, after the
+/// grace period: to the trash on the device that swept it, dropped in the
+/// vault, so the other device lets go of its copy too. A note saved
+/// showing it again brings it back from the trash, and it goes again.
+#[test]
+fn a_picture_no_note_shows_is_swept_everywhere_and_comes_back_when_shown() {
+    let mut two = Two::new("sweep");
+    let photo: Vec<u8> = (0..30_000u32).map(|i| (i % 211) as u8).collect();
+    // Pasted, and the paste undone before the note was saved.
+    let src = two.sides[0].store.save_attachment("", "png", &photo).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(two.sides[1].dir.join(&src).exists(), "it went, as every picture of Carnet's does");
+    let t0 = std::time::SystemTime::now();
+    let none = std::collections::BTreeSet::new();
+    let a = &mut two.sides[0];
+    assert!(a.store.sweep_pictures(&none, t0).unwrap().is_empty());
+    assert_eq!(a.store.sweep_pictures(&none, t0 + crate::store::SWEEP_GRACE + std::time::Duration::from_secs(60)).unwrap(), vec![src.clone()]);
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(!two.sides[0].dir.join(&src).exists() && two.sides[0].dir.join(".trash").join(&src).exists());
+    assert!(!two.sides[1].dir.join(&src).exists(), "the other device let go of it");
+    for side in 0..2 {
+        assert!(two.sides[side].store.replica.as_ref().unwrap().vault().dropped_pictures().contains(&src));
+    }
+
+    // Shown again: back, and named again.
+    let i = two.make(0, "", "Album", "the view");
+    let a = &mut two.sides[0].store;
+    a.notes[i].doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.clone(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    a.notes[i].touch();
+    a.save(i, true).unwrap();
+    assert!(two.sides[0].dir.join(&src).exists(), "back from the trash");
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok(), Some(photo));
 }
 
 /// A notes folder that synced with one account, then set up with another
@@ -683,13 +759,15 @@ fn pictures_go_to_a_new_account_too() {
     for src in ["hill.jpg", src.as_str()] {
         n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.into(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
     }
+    // Home/hill.jpg, beside the note, is the user's: it stays here.
     n.touch();
     a.store.save(i, true).unwrap();
     a.store.rescan();
     for _ in 0..4 {
         first.pump();
     }
-    let old = first.sides[0].session.blob_id(&hill);
+    let old = first.sides[0].session.blob_id(&photo);
+    assert!(first.worker.blobs.get(ACCOUNT, &first.sides[0].session.blob_id(&hill)).is_none(), "the user's own stays on its device");
     assert!(first.worker.blobs.get(ACCOUNT, &old).is_some(), "on the first account's server");
     // The first account's other device goes with it; this folder stays,
     // its replica and pictures index as they were.
@@ -704,7 +782,8 @@ fn pictures_go_to_a_new_account_too() {
         second.pump();
     }
     let attached = src.trim_start_matches("../").to_string();
-    for (bytes, path) in [(&hill, "Home/hill.jpg"), (&photo, attached.as_str())] {
+    assert!(!second.sides[1].dir.join("Home/hill.jpg").exists());
+    for (bytes, path) in [(&photo, attached.as_str())] {
         let id = second.sides[0].session.blob_id(bytes);
         assert_ne!(id, old, "ids are the account's");
         assert!(second.worker.blobs.get(ACCOUNT, &id).is_some(), "{path} on the new account's server");

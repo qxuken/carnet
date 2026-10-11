@@ -801,6 +801,22 @@ impl Sync {
         matches!(&self.phase, Phase::On { session, .. } if session.is_idle())
     }
 
+    /// Whether the sweep of pictures no note shows may run now, and the
+    /// pictures it must leave (being sent, or wanted back): with sync off,
+    /// at any time; with it on, once this device has caught up with the
+    /// account and no picture is on its way, up or down. `None`: later.
+    pub fn sweep_may_run(&self) -> Option<std::collections::BTreeSet<String>> {
+        match &self.phase {
+            Phase::Off => Some(Default::default()),
+            Phase::On { session, .. } if session.is_idle() && session.has_joined(vault::ROOM) => match &self.pictures {
+                Some(p) if p.busy() => None,
+                Some(p) => Some(p.busy_paths()),
+                None => Some(Default::default()),
+            },
+            _ => None,
+        }
+    }
+
     /// How long until sync wants a turn though nothing wakes the app: the
     /// notes' places and pictures compared with the vault after what
     /// happened (a first login, a save, something come), and the notes

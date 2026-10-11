@@ -5484,3 +5484,68 @@ fn list_tools_turn_every_selected_line_and_back() {
     assert_eq!(kinds(&app), ["text"; 3]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A picture that's the user's own file, beside the note: drawn faint with
+/// a mark, and selected, a bar that says so. Moved into Carnet, it's in
+/// the attachments folder and the note shows it there; the notice's Undo
+/// (Ctrl+Z) puts the file back, and an undo of the typing before never
+/// brings back a path that leads nowhere. Copied, only this note shows
+/// the copy, and Ctrl+Z takes the edit back.
+#[test]
+fn the_users_own_picture_is_marked_and_taken_into_carnet() {
+    let (mut app, mut d, dir) = body("theirs");
+    type_in(&mut app, &mut d, "Above");
+    let hill = png_file(&dir, "hill.png");
+    let n = app.current;
+    let image = Block::new(Kind::Image { src: "hill.png".into(), alt: String::new(), float: Float::None, width: None, wiki: false });
+    app.edit(Step::Other, |doc, _| {
+        doc.push(image);
+        true
+    });
+    app.save_current();
+    let i = blocks(&app).iter().position(|b| matches!(b.kind, Kind::Image { .. })).unwrap();
+    app.caret = page::select_blocks(app.doc(), i, i);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    assert!(d.key_of("theirs").is_some(), "marked");
+    let into = d.key_of("move-in").expect("the bar's Move into Carnet");
+    assert!(d.key_of("copy-in").is_some());
+    d.click_key(&mut app, into);
+    d.frame(&mut app);
+    let moved = dir.join("attachments/hill.png");
+    assert!(moved.is_file() && !hill.exists(), "{:?} {:?}", app.error, app.notice.as_ref().map(|n| &n.text));
+    assert_eq!(image_blocks(&app), ["attachments/hill.png"]);
+    let md = std::fs::read_to_string(app.store.notes[n].path.clone().unwrap()).unwrap();
+    assert!(md.contains("](attachments/hill.png)"), "{md}");
+    for _ in 0..2 {
+        d.frame(&mut app);
+    }
+    assert!(d.key_of("theirs").is_none(), "Carnet's now");
+    // The notice's Undo: back where it was.
+    let undo = d.key_of("undo").expect("the notice's Undo");
+    d.click_key(&mut app, undo);
+    d.frame(&mut app);
+    assert!(hill.is_file() && !moved.exists(), "{:?}", app.error);
+    assert_eq!(image_blocks(&app), ["hill.png"]);
+    // An undo of the edit before (the picture put in) takes it out, as it
+    // would have; one more and nothing is left to undo.
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert!(image_blocks(&app).is_empty());
+    key_with(&mut app, &mut d, "y", CTRL);
+    assert_eq!(image_blocks(&app), ["hill.png"], "redone as it is now");
+
+    // Copied: this note shows the copy; the file stays.
+    let i = blocks(&app).iter().position(|b| matches!(b.kind, Kind::Image { .. })).unwrap();
+    app.caret = page::select_blocks(app.doc(), i, i);
+    d.frame(&mut app);
+    d.frame(&mut app);
+    let copy = d.key_of("copy-in").expect("the bar's Copy into Carnet");
+    d.click_key(&mut app, copy);
+    d.frame(&mut app);
+    assert!(hill.is_file() && moved.is_file());
+    assert_eq!(image_blocks(&app), ["attachments/hill.png"]);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(image_blocks(&app), ["hill.png"], "the edit taken back");
+    let _ = std::fs::remove_dir_all(dir);
+}

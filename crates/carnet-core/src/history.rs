@@ -114,6 +114,19 @@ impl History {
         Some(ahead)
     }
 
+    /// Every state kept, to undo and to redo, with each block `f` gives
+    /// another for in its place: a file the note links to moved, say, and
+    /// no state should bring back the path it had.
+    pub fn rewrite(&mut self, mut f: impl FnMut(&Block) -> Option<Block>) {
+        for state in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            for b in state.blocks.iter_mut() {
+                if let Some(new) = f(b) {
+                    *b = Rc::new(new);
+                }
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]

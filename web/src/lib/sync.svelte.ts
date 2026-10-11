@@ -65,6 +65,10 @@ const PICTURE = 'picture:';
 /// Said on `window` when the notes change: pictures.ts asks again for
 /// those not found.
 export const NOTES_CHANGED = 'carnet-notes-changed';
+/// Why `picture` fails for a picture the vault names and the server
+/// hasn't got; any other failure is one the vault doesn't name
+/// (pictures.ts says which).
+export const NOT_ON_SERVER = 'not on the server';
 /// Pictures put in here and not yet on the server: `[path, id]`s.
 const UPLOADS = 'uploads';
 /// The name this browser was given, if one was (sealed like the rest):
@@ -368,7 +372,7 @@ class Sync {
     // Asked for and not come (the server hasn't it yet, say): the page
     // says so, and asks again when the notes change (pictures.ts).
     for (const id of v.take_missing()) {
-      for (const w of this.wanted.get(id) ?? []) w.fail(new Error('not on the server'));
+      for (const w of this.wanted.get(id) ?? []) w.fail(new Error(NOT_ON_SERVER));
       this.wanted.delete(id);
     }
     for (const t of v.take_transfers() as Transfer[]) void this.transfer(t);
