@@ -525,7 +525,7 @@ fuzz/                   cargo-fuzz targets (§12)
 
 | Field | Self-hosted default | What a host can do |
 |---|---|---|
-| `routes` | none | merge its own axum routes beside the API. A `/` among them replaces the web app's page there (a landing page); the web app is still served everywhere else, and unknown `/v1/` paths stay 404. |
+| `routes` | none | merge its own axum routes beside the API. A `/` among them replaces the web app's page there (a landing page); the web app is still served everywhere else, and unknown `/v1/` paths stay 404. The web app's service worker answers only `/` from its cache, so a host's pages (a signup at `/start`) reach the server even once the app is installed. |
 | `quota: Arc<dyn Quota>` | `Unlimited` | per account, a byte limit (notes and pictures, as sealed), whether it may write, a plan name and an end date (`quota::Limit`) |
 | `admission: Arc<dyn Admission>` | `ByInvite` | be told which invite made which account (`admitted`), and when an account is deleted or removed (`removed`) |
 | `signup: Option<String>` | none | a URL where newcomers make an account: `/v1/info` returns it, and the web app's first screen links to it |
