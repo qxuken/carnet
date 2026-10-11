@@ -5066,6 +5066,85 @@ fn the_history_and_deleted_lists_draw_each_node_once() {
     remove_test_dir(dir);
 }
 
+/// Settings → Sync → Notes on the server, on a device alone in a new
+/// account: the vault (where the notes go) is not "a note not on this
+/// device" with edits this device lacks, nor offered a way to fix it;
+/// a room the server has and this device hasn't is said to be one. What's
+/// shown says when it was checked, and is checked again on its own once
+/// the account's notes change, without "Check again". And after a save,
+/// sync asks for a turn though nothing else would wake the app.
+#[test]
+fn the_inspector_knows_the_vault_and_keeps_up() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-inspect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let (mut a, mut da, dir_a) = fresh("inspect");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut da, &|a| a.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Ferry times");
+    a.save_current();
+    da.frame(&mut a);
+    assert!(a.sync.due().is_some(), "a turn asked for after a save");
+    until("all sent and done", &mut a, &mut da, &|a| a.sync.due().is_none() && a.sync.is_idle());
+    a.settings_open = true;
+    a.on_plain(Msg::SyncInspector);
+    until("inspected", &mut a, &mut da, &|a| {
+        a.sync.inspection.as_ref().is_some_and(|(rooms, _)| rooms.len() >= 2 && rooms.iter().any(|r| r.room == carnet_sync::vault::ROOM))
+    });
+    let shows = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.contains(s)));
+    let _ = drawn(&mut da, &mut a, "");
+    assert!(!shows(&da, "not on this device"), "the vault taken for a note this device lacks");
+    assert!(!shows(&da, "Ways to fix"), "nothing to fix");
+    assert!(shows(&da, "notes are up to date"));
+    assert!(shows(&da, "Checked just now"));
+    assert_eq!(super::settings_view::sync_room_title(&a.store, carnet_sync::vault::ROOM), "Folders and note names");
+    assert_eq!(super::settings_view::sync_room_title(&a.store, &carnet_sync::Key::random().to_string()), "A note not on this device yet");
+
+    // A note saved: the list is out of date, says so, and is asked again
+    // on its own; so is what the account keeps.
+    until("what the account keeps", &mut a, &mut da, &|a| a.sync.usage.is_some());
+    let kept = a.sync.usage.as_ref().unwrap().notes;
+    let before = a.sync.inspection.as_ref().unwrap().0.len();
+    a.new_note();
+    da.frame(&mut a);
+    type_in(&mut a, &mut da, "Packing");
+    a.save_current();
+    a.settings_open = true;
+    until("changed since", &mut a, &mut da, &|a| a.sync.inspection_stale());
+    let _ = drawn(&mut da, &mut a, "");
+    assert!(shows(&da, "Changed since"));
+    until("checked again, the new note in it", &mut a, &mut da, &|a| {
+        !a.sync.inspection_stale() && a.sync.inspection.as_ref().is_some_and(|(rooms, _)| rooms.len() > before)
+    });
+    until("more kept", &mut a, &mut da, &|a| a.sync.usage.as_ref().is_some_and(|u| u.notes > kept));
+
+    drop(a);
+    let _ = stop.send(());
+    let _ = rt.block_on(served);
+    remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// Five quick clicks on the Settings page's title turn the debug
 /// information (the frame-time graph) on, and say so; five more, off.
 /// Slow clicks don't count, and nothing of it is saved.

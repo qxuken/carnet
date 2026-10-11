@@ -124,7 +124,7 @@ index.log        a line per change: note key, text hash, version, path
 notes/<key>.loro each note's doc, history and all; loaded only when needed
 vault.loro       the vault doc
 vault.applied    the vault's version last applied to the files here
-pictures.txt     path, size, modified time and blob id of each picture
+pictures.txt     path, size, modified time and blob id of each picture, and whose ids they are
 forgotten.txt    rooms and pictures the server still has to be told are gone
 version          the layout of this folder (§14)
 ```
@@ -135,6 +135,8 @@ version          the layout of this folder (§14)
 - **Memory:** only the index and up to 32 recently used docs stay loaded. On a folder of 5,000 notes the first open, which makes every doc, costs a few hundred milliseconds more than plain files, once; later opens cost about the same as plain files.
 
 The replica exists even with sync off: it's what gives every note its history (§9) and lets a save merge with an outside edit (§5).
+
+**The replica outlives an account.** Sync turned off and set up again, with another server or afresh on the same one, the notes keep their keys and their history, and the vault doc its layout: they go up to the new account as they are. A picture's id is not the same there, though: it's made under the account's vault key (§7). So `pictures.txt` says whose ids it holds, and one made under another key is started again: every picture hashed anew, offered, put, and named in the vault by its new id.
 
 ## 5. The engine on the desktop
 
@@ -155,7 +157,7 @@ This needs no server. Only when there's no version to merge from (no replica, or
 
 **An update from another device.** It's decrypted and imported, and the store writes the merged text atomically. The outcome is one of: *same* (the file has it already), *updated* (no edits here), *merged* (edits here, both kept, and a notice says so), or *created* (a note new to this device). An open note is redrawn with the caret kept where it can be. The note list doesn't re-sort under the pointer: order is recalculated on navigation.
 
-**The vault doc.** Each tick (at once when the vault changed, otherwise every second) the store compares three layouts: the files here, the vault, and the vault as last applied here (`vault.applied`, so a restart knows what changed meanwhile). Field by field, what changed here is written to the vault, and the rest is taken from it and done to the files: moved, renamed, pinned, trashed, restored, folders made, empty ones removed. A note with unsaved edits waits. Nothing of this device's is written before the account's vault has arrived, or a new device's layout would overwrite the others'.
+**The vault doc.** Each tick (at once when the vault changed, otherwise every second, and a second after anything happened: a login, a save, something come or the folder looked at again, though nothing else wakes the app) the store compares three layouts: the files here, the vault, and the vault as last applied here (`vault.applied`, so a restart knows what changed meanwhile). Field by field, what changed here is written to the vault, and the rest is taken from it and done to the files: moved, renamed, pinned, trashed, restored, folders made, empty ones removed. A note with unsaved edits waits. Nothing of this device's is written before the account's vault has arrived, or a new device's layout would overwrite the others'.
 
 **Peers.** Each run of the app is a fresh Loro peer, so two runs never write as one. The device that wrote a change is recorded in its commit message instead (§9).
 
@@ -485,7 +487,7 @@ On the desktop it opens from the note's menu (History). The library column becom
 
 ### Sync repair: Settings → Sync → Notes on the server
 
-It lists each note the server holds that's worth a look, by title, in plain words with an icon per line:
+It lists each note the server holds that's worth a look, by title, in plain words with an icon per line. The vault is listed too, as "Folders and note names"; a room this device has no copy of yet, as "A note not on this device yet", and it is never offered **Replace with this device's copy**: there is nothing here to replace the server's with.
 
 | Shown | Comes from |
 |---|---|
@@ -493,6 +495,9 @@ It lists each note the server holds that's worth a look, by title, in plain word
 | packed into one copy (the base snapshot): when and by which device, and saves since; or kept as N saves | the server's bases |
 | whether another device has checked the packed copy | the base's check state |
 | lately: packing undone, a copy replaced, a packed copy found wrong | the server's log |
+| when it was checked ("Checked 2 minutes ago"), or that the notes changed since ("checking again") | when the server answered, against the session's count of changes kept and taken in |
+
+What it shows is the server's answer when asked, so it's asked again on its own: whenever the account's notes change as this device sees them (a save of its own kept, another device's taken in, a room removed), once they have been quiet for two seconds. What the account keeps ("… kept on the server") is asked again the same way.
 
 Each note's ways to fix it, each confirmed before it runs:
 
