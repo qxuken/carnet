@@ -94,6 +94,10 @@ pub enum Glyph {
     Person,
     /// A passkey: a fingertip's ridges.
     Passkey,
+    /// Show the password: an open eye.
+    Eye,
+    /// Hide it again: the eye struck through.
+    EyeOff,
 }
 
 // The rounded frames several icons share, corners of radius 1.5.
@@ -237,6 +241,16 @@ impl Glyph {
             Key => ("M7.5 15a3.5 3.5 0 1 0 0-7a3.5 3.5 0 1 0 0 7z M11 11.5h9 M17 11.5v3 M20 11.5v2", ""),
             Edit => ("M4.5 19.5h3.8L19 8.8a2.1 2.1 0 0 0-3-3L5.3 16.5z M14.3 7.5l2.2 2.2", ""),
             Person => ("M12 12a3.5 3.5 0 1 0 0-7a3.5 3.5 0 1 0 0 7z M5 20c0-3.6 3.1-5.5 7-5.5s7 1.9 7 5.5", ""),
+            Eye => (
+                "M2.5 12C4.7 7.8 8.1 5.5 12 5.5s7.3 2.3 9.5 6.5c-2.2 4.2-5.6 6.5-9.5 6.5s-7.3-2.3-9.5-6.5z \
+                 M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z",
+                "",
+            ),
+            EyeOff => (
+                "M2.5 12C4.7 7.8 8.1 5.5 12 5.5s7.3 2.3 9.5 6.5c-2.2 4.2-5.6 6.5-9.5 6.5s-7.3-2.3-9.5-6.5z \
+                 M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z M4.5 4.5l15 15",
+                "",
+            ),
             Passkey => ("M5 16.5v-4.5a7 7 0 0 1 14 0v2 M8.5 19.5v-7.5a3.5 3.5 0 0 1 7 0v5 M12 12v8", ""),
             Link => (
                 "M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1 M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1",
@@ -259,7 +273,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 60] = [
+    pub const ALL: [Glyph; 62] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -268,7 +282,7 @@ impl Glyph {
         Glyph::ChevronUp, Glyph::ChevronRight, Glyph::More, Glyph::Quote, Glyph::TextColor, Glyph::Highlight, Glyph::FloatLeft,
         Glyph::FloatRight, Glyph::Inline, Glyph::Sidebar, Glyph::Zen, Glyph::Check, Glyph::Undo, Glyph::Upload,
         Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
-        Glyph::Person, Glyph::Passkey,
+        Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.

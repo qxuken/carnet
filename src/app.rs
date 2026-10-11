@@ -114,8 +114,14 @@ pub enum Msg {
     SetPairing { to: u64 },
     /// 0 narrow, 1 medium, 2 wide.
     SetWidth { to: u64 },
-    /// 0 last edited, 1 title.
+    /// 0 last edited, 1 title, 2 created.
     SetSort { to: u64 },
+    /// The date a note shows: 0 when last edited, 1 when made.
+    SetDates { to: u64 },
+    /// How the page looks and behaves, back as it first was: asked
+    /// first, then done; or not.
+    ResetLook,
+    ResetLookCancel,
     /// The window: 0 solid, 1 the desktop showing through the library.
     SetWindow { to: u64 },
     /// While typing, the toolbar: 0 stays, 1 fades.
@@ -190,6 +196,8 @@ pub enum Msg {
     SyncInvite,
     SyncInviteDone,
     SyncInviteDrop { at: u64 },
+    /// The waiting invite at this place, its code on the clipboard.
+    SyncInviteCopy { at: u64 },
     /// Remove the account at this place in the owner's list (asked twice).
     SyncAccountRemove { at: u64 },
     /// Make a recovery code, its words shown once.
@@ -516,6 +524,13 @@ pub struct Carnet {
     pub settings: Settings,
     /// The settings show in place of the note.
     pub settings_open: bool,
+    /// Reset in Settings pressed: its line asks to be sure.
+    pub reset_armed: bool,
+    /// The font list's search to be emptied on the next frame: it opens
+    /// afresh each time.
+    font_search_reset: bool,
+    /// Notes whose made time was looked up in their history.
+    dated: std::collections::HashSet<u64>,
     /// What the font list is narrowed to.
     font_query: String,
     /// The font list open in the settings: for the body (0), the headings
@@ -842,6 +857,9 @@ impl Carnet {
             folders_clicked: false,
             settings,
             settings_open: false,
+            reset_armed: false,
+            font_search_reset: false,
+            dated: Default::default(),
             font_query: String::new(),
             font_pick: None,
             font_rows: Vec::new(),
@@ -1014,6 +1032,21 @@ impl Carnet {
             notes[b].pinned.cmp(&notes[a].pinned).then(then)
         });
         self.order = order;
+    }
+
+    /// When the open note was made: its file's birth time, or its
+    /// history's first version where that is older (a file saved before
+    /// births were kept was born at its last save). Looked up once a note.
+    pub(crate) fn date_created(&mut self) -> SystemTime {
+        let i = self.current;
+        let id = self.store.notes[i].id;
+        if self.dated.insert(id)
+            && let Some(first) = self.store.first_version(i)
+        {
+            let note = &mut self.store.notes[i];
+            note.created = note.created.min(first);
+        }
+        self.store.notes[i].created
     }
 
     fn edited(&mut self) {
@@ -2460,6 +2493,9 @@ impl Carnet {
         if !matches!(msg, Msg::SyncPasskeyRemove { .. }) {
             self.sync_passkey_armed = None;
         }
+        if !matches!(msg, Msg::ResetLook) {
+            self.reset_armed = false;
+        }
         if !matches!(msg, Msg::SyncRollBack { .. } | Msg::SyncRepair { .. } | Msg::SyncInspectConfirm) {
             self.sync_inspect_armed = None;
         }
@@ -2659,6 +2695,13 @@ impl Carnet {
                     self.sync.drop_invite(hash);
                 }
             }
+            Msg::SyncInviteCopy { at } => {
+                let code = self.sync.invites.as_ref().and_then(|i| i.waiting.get(at as usize)).and_then(|w| self.sync.invite_code(&w.hash));
+                if let Some(code) = code {
+                    self.clip_out = Some((code, None));
+                    self.say = Some("Copied".into());
+                }
+            }
             // Asked twice: everything the account keeps on the server goes.
             Msg::SyncAccountRemove { at } => {
                 let Some(id) = self.sync.invites.as_ref().and_then(|i| i.accounts.get(at as usize)).map(|a| a.id.clone()) else { return };
@@ -2823,6 +2866,9 @@ impl Carnet {
             | Msg::SetPairing { .. }
             | Msg::SetWidth { .. }
             | Msg::SetSort { .. }
+            | Msg::SetDates { .. }
+            | Msg::ResetLook
+            | Msg::ResetLookCancel
             | Msg::SetWindow { .. }
             | Msg::SetToolbar { .. }
             | Msg::SetFocus { .. }

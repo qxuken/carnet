@@ -56,6 +56,7 @@ fn hash(s: &str) -> u64 {
 impl Carnet {
     pub(super) fn page(&mut self, ui: &mut Ui<'_>, l: &Look, main_w: f32) {
         let t = l.t;
+        let created = self.settings.dates_created.then(|| self.date_created());
         let note = &self.store.notes[self.current];
         let (note_id, modified, rev) = (note.id, note.modified, note.rev);
         if self.words.0 != note_id || self.words.1 != rev {
@@ -65,9 +66,12 @@ impl Carnet {
         let words = self.words.2;
         // Calm on purpose: saving is invisible, as it should be when it
         // always works; only a failure says anything.
+        let when = match created {
+            Some(at) => format!("Created {}", ago(SystemTime::now(), at)),
+            None => ago(SystemTime::now(), modified),
+        };
         let mut meta = format!(
-            "{}  ·  {} {}",
-            ago(SystemTime::now(), modified),
+            "{when}  ·  {} {}",
             words,
             if words == 1 { "word" } else { "words" }
         );

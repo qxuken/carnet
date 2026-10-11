@@ -163,6 +163,7 @@ impl Carnet {
                 return;
             }
             let now = SystemTime::now();
+            let created = self.settings.dates_created;
             let away = !ui.env().focused;
             let (order, notes, current) = (&self.order, &self.store.notes, self.current);
             // Every note at once (all of them, or a search): each card says
@@ -198,7 +199,7 @@ impl Carnet {
                     let n = order[i];
                     let note = &notes[n];
                     let selected = n == current;
-                    let ago = short_ago(now, note.modified);
+                    let ago = short_ago(now, if created { note.created } else { note.modified });
                     let snippet = note.doc.snippet();
                     let place = if all && !note.folder.is_empty() {
                         Some(folder_name(&note.folder))
@@ -222,8 +223,9 @@ impl Carnet {
                         .label(note.display_title())
                         .selected(selected)
                         .description(format!(
-                            "{}{} · {}",
+                            "{}{}{} · {}",
                             if note.pinned { "Pinned · " } else { "" },
+                            if created { "Created " } else { "" },
                             ago,
                             snippet
                         ));

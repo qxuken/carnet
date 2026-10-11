@@ -103,6 +103,9 @@ pub struct Settings {
     pub size: u32,
     pub width: Width,
     pub sort: Sort,
+    /// A note's date, on the page and in the library: when it was made;
+    /// or when last edited.
+    pub dates_created: bool,
     /// How a divider is drawn.
     pub divider: Divider,
     /// The note's first paragraph opens with a dropped letter (`large`
@@ -152,6 +155,7 @@ impl Default for Settings {
             size: 16,
             width: Width::Medium,
             sort: Sort::Edited,
+            dates_created: false,
             divider: Divider::Dots,
             initial: false,
             initial_lines: 3,
@@ -227,6 +231,7 @@ impl Settings {
                         _ => Sort::Edited,
                     }
                 }
+                "dates" => s.dates_created = v == "created",
                 "divider" => s.divider = Divider::from_key(v).unwrap_or(Divider::Dots),
                 "initial" => s.initial = v == "large",
                 "initial_lines" => {
@@ -274,12 +279,13 @@ impl Settings {
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndivider = {}\ninitial = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
             self.heading_font,
             self.size,
+            if self.dates_created { "created" } else { "edited" },
             self.divider.key(),
             if self.initial { "large" } else { "plain" },
             self.initial_lines,
@@ -293,6 +299,30 @@ impl Settings {
             if self.sidebar { "shown" } else { "hidden" },
             self.colors.iter().map(|&c| carnet_core::inline::css_color(c)).collect::<Vec<_>>().join(","),
         )
+    }
+
+    /// How the page looks and behaves back as they first were: the
+    /// colours, faces, size, width, the letter and dividers, the window
+    /// and the writing aids. Not the notes folder, the library (its
+    /// order, dates, width, whether it shows) nor the colours given lately.
+    pub fn reset_look(&mut self) {
+        *self = Settings {
+            sort: self.sort,
+            dates_created: self.dates_created,
+            library_w: self.library_w,
+            sidebar: self.sidebar,
+            colors: std::mem::take(&mut self.colors),
+            dir: self.dir.take(),
+            file: self.file.take(),
+            ..Settings::default()
+        };
+    }
+
+    /// Whether [`reset_look`](Self::reset_look) would change anything.
+    pub fn look_is_default(&self) -> bool {
+        let mut d = self.clone();
+        d.reset_look();
+        d == *self
     }
 
     /// Writes them back, when they have a file.
@@ -339,6 +369,7 @@ mod tests {
             size: 18,
             width: Width::Wide,
             sort: Sort::Title,
+            dates_created: true,
             divider: Divider::Flourish,
             initial: true,
             initial_lines: 4,
@@ -366,5 +397,24 @@ mod tests {
         assert_eq!((old.initial, old.initial_lines, old.initial_font.as_str(), old.initial_accent), (true, 3, "", true));
         assert_eq!(Settings::parse("initial_lines = 9\n").initial_lines, 4);
         assert_eq!(Settings::parse("initial_lines = 1\n").initial_lines, 2);
+    }
+
+    #[test]
+    fn a_reset_puts_back_the_look_and_keeps_the_rest() {
+        let mut s = Settings::parse(
+            "theme = dark\npalette = sage\nfont = Georgia\nsize = 20\nwidth = wide\ninitial = large\nfocus = on\n\
+             window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncolors = #c0504d\ndir = /notes\n",
+        );
+        s.file = Some(PathBuf::from("/c/settings.txt"));
+        assert!(!s.look_is_default());
+        s.reset_look();
+        assert!(s.look_is_default());
+        let d = Settings::default();
+        assert_eq!((s.theme, s.palette, s.font.as_str(), s.size, s.width), (d.theme, d.palette, "", 16, Width::Medium));
+        assert_eq!((s.initial, s.focus, s.translucent), (false, false, true));
+        assert_eq!((s.sort, s.dates_created, s.library_w, s.sidebar), (Sort::Title, true, 300, false));
+        assert_eq!(s.colors, vec![0xc0504dff]);
+        assert_eq!(s.dir.as_deref(), Some(Path::new("/notes")));
+        assert_eq!(s.file.as_deref(), Some(Path::new("/c/settings.txt")));
     }
 }

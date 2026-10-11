@@ -3085,7 +3085,17 @@ fn settings_sync_says_what_is_wrong_in_place() {
     assert!(drawn(&mut d, &mut app, "Use email and password"));
     app.on_plain(Msg::SyncHow { to: 2 });
     d.frame(&mut app);
-    assert!(drawn(&mut d, &mut app, "Sign in") && drawn(&mut d, &mut app, "Show"));
+    assert!(drawn(&mut d, &mut app, "Sign in"));
+    // Show is an eye at the password field's end, not a button beside it.
+    assert!(!drawn(&mut d, &mut app, "Show"));
+    let field = d.rect_of(app_field(&app, Field::SyncPassword).unwrap()).unwrap();
+    let eye = d.key_of("sync-password-eye").expect("the eye");
+    assert_eq!(d.key_named("Show password"), Some(eye), "named for what it does");
+    let r = d.rect_of(eye).unwrap();
+    assert!(r.x > field.x + field.w && r.x + r.w < field.x + field.w + 40.0, "{field:?} {r:?}");
+    app.on_plain(Msg::SyncShowPassword);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.sync_show_password && d.key_named("Hide password") == Some(eye));
     app.sync_email = "not an email".into();
     app.sync_password = "secret".into();
     app.on_plain(Msg::SyncStart);
@@ -3572,6 +3582,25 @@ fn the_owner_invites_someone_and_removes_their_account() {
     let code = a.sync.invite.clone().expect("the code shown");
     assert!(drawn(&mut da, &mut a, &code), "the code, big");
     assert!(drawn(&mut da, &mut a, "Not used yet \u{b7} good for 7 more days"));
+    // Waiting, its code is words to select, and a Copy beside it.
+    let nodes = da.core.nodes();
+    let selectable = |key: Key| {
+        let mut at = nodes.iter().find(|n| n.key == key);
+        while let Some(n) = at {
+            if n.flags.contains(&"selectable") {
+                return true;
+            }
+            at = n.parent.and_then(|p| nodes.iter().find(|x| x.key == p));
+        }
+        false
+    };
+    let shown: Vec<Key> = nodes.iter().filter(|n| n.text.as_deref() == Some(code.as_str())).map(|n| n.key).collect();
+    assert!(shown.len() == 2 && shown.iter().all(|k| selectable(*k)), "big, and in the list: {shown:?}");
+    let copy = da.key_of("sync-invite-copy-0").expect("Copy");
+    assert!(da.rect_of(copy).is_some());
+    a.on_plain(Msg::SyncInviteCopy { at: 0 });
+    da.frame(&mut a);
+    assert_eq!(copied(&mut da).as_deref(), Some(code.as_str()));
 
     // Someone else makes their own account with it.
     let (mut b, mut db, dir_b) = fresh("invite-b");
@@ -4392,7 +4421,8 @@ fn a_font_lists_default_row_is_chosen_by_a_click() {
     app.settings.heading_font = "Inter".into();
     app.settings_open = true;
     d.core.set_inspect(true);
-    for (which, name) in [(2, "Same as headings"), (1, "Source Serif 4 (built in)")] {
+    app.settings.font = "Georgia".into();
+    for (which, name) in [(2, "Same as headings"), (1, "Source Serif 4 (built in)"), (0, "Inter (built in)")] {
         app.on_settings(Msg::FontMenu { which });
         d_frame_twice(&mut app, &mut d);
         let r = d.core.nodes().iter().find(|n| n.text.as_deref() == Some(name)).map(|n| n.rect).unwrap();
@@ -4400,6 +4430,192 @@ fn a_font_lists_default_row_is_chosen_by_a_click() {
         d.frame(&mut app);
         assert_eq!(app.font_pick, None, "{name}: the list closes");
     }
-    assert_eq!((app.settings.initial_font.as_str(), app.settings.heading_font.as_str()), ("", ""));
+    assert_eq!((app.settings.initial_font.as_str(), app.settings.heading_font.as_str(), app.settings.font.as_str()), ("", "", ""));
+    // And each pill says so.
+    d_frame_twice(&mut app, &mut d);
+    for (pill, name) in [("font-body", "Inter (built in)"), ("font-head", "Source Serif 4 (built in)"), ("font-initial", "Same as headings")] {
+        assert_eq!(d.texts_under(pill), [name]);
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The built-in face shows once in its list, as the default: installed
+/// under its own name it is the same face, and a setting naming it is
+/// the default. The other lists keep it by name.
+#[test]
+fn a_built_in_face_is_listed_once() {
+    let (store, dir) = temp_store("font-once");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings.font = "Inter".into();
+    app.settings.initial = true;
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(d.texts_under("font-body"), ["Inter (built in)"], "named as the default");
+    app.on_settings(Msg::FontMenu { which: 0 });
+    d_frame_twice(&mut app, &mut d);
+    assert!(!app.font_rows.iter().any(|f| f == "Inter"), "not again among the installed");
+    assert!(app.font_rows.iter().any(|f| f == "Source Serif 4"), "the headings' face is a choice for text");
+    let row = d.key_named("Inter (built in)").expect("the default row");
+    let chosen = d.core.nodes().into_iter().find(|n| n.key == row);
+    assert!(chosen.as_ref().is_some_and(|n| n.bg != Color::TRANSPARENT), "the default row is the one chosen: {chosen:?}");
+    app.on_settings(Msg::FontMenu { which: 1 });
+    d_frame_twice(&mut app, &mut d);
+    assert!(!app.font_rows.iter().any(|f| f == "Source Serif 4"));
+    assert!(app.font_rows.iter().any(|f| f == "Inter"));
+    app.on_settings(Msg::FontMenu { which: 2 });
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.font_rows.iter().any(|f| f == "Inter") && app.font_rows.iter().any(|f| f == "Source Serif 4"), "the letter's has both");
+    // Searched for by its name, the default is what Enter takes.
+    app.on_settings(Msg::FontMenu { which: 0 });
+    app.settings.font = "Georgia".into();
+    app.font_query = "inter".into();
+    d_frame_twice(&mut app, &mut d);
+    if app.font_rows.is_empty() {
+        app.apply_typed_font();
+        assert_eq!(app.settings.font, "");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A font list opens afresh: its search empty and every font listed,
+/// whatever was searched for the last time.
+#[test]
+fn a_font_list_opens_with_its_search_empty() {
+    let (store, dir) = temp_store("font-search");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    app.on_settings(Msg::FontMenu { which: 1 });
+    d_frame_twice(&mut app, &mut d);
+    let all = app.font_rows.len();
+    let k = app_field(&app, Field::Font).expect("the search");
+    d.focus(&mut app, k);
+    d.text(&mut app, "inte");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.font_query, "inte");
+    assert!(app.font_rows.len() < all);
+    // Chosen from the search: the list closes.
+    key(&mut app, &mut d, "enter");
+    assert_eq!(app.font_pick, None);
+    app.on_settings(Msg::FontMenu { which: 1 });
+    d_frame_twice(&mut app, &mut d);
+    let k = app_field(&app, Field::Font).expect("the search again");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some(""), "the field empty");
+    assert_eq!((app.font_query.as_str(), app.font_rows.len()), ("", all), "and the list whole");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn app_field(app: &Carnet, f: Field) -> Option<Key> {
+    app.fields.iter().find(|(_, x)| **x == f).map(|(k, _)| *k)
+}
+
+/// The page is as wide as chosen whatever the text's size: smaller text
+/// doesn't narrow it. A narrow window still holds it.
+#[test]
+fn the_page_keeps_its_width_whatever_the_text_size() {
+    let (store, dir) = temp_store("page-width");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1600.0, 900.0).framing();
+    let mut widths = Vec::new();
+    for size in [12, 16, 24] {
+        app.settings.size = size;
+        d_frame_twice(&mut app, &mut d);
+        widths.push(app.text_w);
+    }
+    assert!(widths.iter().all(|w| *w == widths[0]), "{widths:?}");
+    app.on_settings(Msg::SetWidth { to: 2 });
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.text_w > widths[0], "wide is wider");
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 360.0, 700.0).framing();
+    for size in [12, 24] {
+        app.settings.size = size;
+        d_frame_twice(&mut app, &mut d);
+        assert!(app.text_w > 280.0 && app.text_w < 360.0, "{size}: {}", app.text_w);
+    }
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Settings → Library → Dates: the date over the title and on the cards
+/// is when the note was made, read from its history where its file's is
+/// later (a file saved before births were kept).
+#[test]
+fn the_date_shown_can_be_when_the_note_was_made() {
+    let (mut app, mut d, dir) = body("dates");
+    type_in(&mut app, &mut d, "words");
+    app.save_current();
+    let now = SystemTime::now();
+    let note = app.current;
+    app.store.notes[note].created = now - Duration::from_secs(3 * 86_400);
+    let meta = |d: &mut Drive, app: &mut Carnet| {
+        d.core.set_inspect(true);
+        d.frame(app);
+        d.core.nodes().iter().filter_map(|n| n.text.clone()).find(|t| t.contains("  \u{b7}  1 word")).unwrap_or_default()
+    };
+    assert!(meta(&mut d, &mut app).starts_with("just now"), "last edited, at first");
+    app.on_plain(Msg::SetDates { to: 1 });
+    assert!(app.settings.dates_created);
+    assert!(Settings::parse(&app.settings.to_text()).dates_created, "kept");
+    let m = meta(&mut d, &mut app);
+    assert!(m.starts_with("Created 3 days ago"), "{m}");
+    assert!(drawn(&mut d, &mut app, "3d"), "the card too");
+    // A file born at its last save: the history knows better.
+    let other = app.store.notes.iter().position(|n| n.title == "Welcome to Carnet").unwrap();
+    app.store.notes[other].created = now + Duration::from_secs(3600);
+    app.dated.clear();
+    app.on_plain(Msg::OpenNote { note: other as u64 });
+    d.frame(&mut app);
+    // (Its time is in whole seconds, rounded.)
+    assert!(app.store.notes[other].created <= SystemTime::now() + Duration::from_secs(1), "its first version's");
+    app.on_plain(Msg::SetDates { to: 0 });
+    assert!(!app.settings.dates_created);
+    remove_test_dir(dir);
+}
+
+/// Reset puts the Appearance and Writing cards back as they first were,
+/// asked first; the library and the notes folder stay.
+#[test]
+fn a_reset_puts_the_look_back_when_asked_twice() {
+    let (store, dir) = temp_store("reset-look");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 3200.0).framing();
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    let enabled = |d: &mut Drive, label: &str| d.core.nodes().iter().any(|n| n.label.as_deref() == Some(label) && !n.flags.contains(&"disabled"));
+    assert!(!enabled(&mut d, "Reset"), "nothing to reset yet");
+    app.on_plain(Msg::SetSize { by: 3 });
+    app.on_plain(Msg::SetPalette { to: 2 });
+    app.on_plain(Msg::SetFocus { to: 1 });
+    app.on_plain(Msg::SetSort { to: 1 });
+    d_frame_twice(&mut app, &mut d);
+    let reset = d.key_of("reset").expect("the button");
+    d.click_key(&mut app, reset);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.reset_armed && drawn(&mut d, &mut app, "Yes, reset") && drawn(&mut d, &mut app, "Cancel"));
+    assert_eq!(app.settings.size, 19, "asked first: nothing yet");
+    // Anything else done first: asked again.
+    app.on_plain(Msg::SetTheme { to: 2 });
+    assert!(!app.reset_armed);
+    app.on_plain(Msg::ResetLook);
+    app.on_plain(Msg::ResetLookCancel);
+    assert!(!app.reset_armed && app.settings.size == 19);
+    app.on_plain(Msg::ResetLook);
+    d_frame_twice(&mut app, &mut d);
+    let yes = d.key_of("reset-yes").unwrap();
+    d.click_key(&mut app, yes);
+    d_frame_twice(&mut app, &mut d);
+    let s = &app.settings;
+    assert_eq!((s.size, s.palette, s.focus, s.theme), (16, crate::design::Palette::Linen, false, ThemePref::System));
+    assert_eq!(s.sort, Sort::Title, "the library's order stays");
+    assert!(!app.reset_armed && !enabled(&mut d, "Reset"));
+    assert!(app.notice.as_ref().is_some_and(|n| n.text.starts_with("Appearance and writing are back")));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
