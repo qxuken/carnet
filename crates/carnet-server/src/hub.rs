@@ -881,6 +881,28 @@ impl<S: Storage> Hub<S> {
         rows
     }
 
+    /// `account`'s limit changed (a plan set or ended, a suspension put on
+    /// or lifted: docs/SYNC.md §11): each of its sockets logged in is told
+    /// now, unasked, as a `UsageIs` (by way of the picture worker, which
+    /// counts the pictures). A device read only until now joins its rooms
+    /// again, writable, and sends what waited; one read only from now on
+    /// stops sending. The host calls it once the quota answers anew.
+    pub fn limit_changed(&mut self, account: &[u8]) -> Vec<Out> {
+        let mut conns: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| matches!(&c.state, State::Ready { account: a, .. } if a == account))
+            .map(|(id, _)| *id)
+            .collect();
+        if conns.is_empty() {
+            return Vec::new();
+        }
+        conns.sort_unstable();
+        let limit = self.quota.limit(account);
+        let notes = self.store.usage(account);
+        conns.into_iter().map(|conn| Out::Blob(Job::Usage { conn, account: account.to_vec(), notes, limit: limit.clone() })).collect()
+    }
+
     pub fn online(&self, account: &[u8]) -> Vec<Vec<u8>> {
         let mut ids: Vec<Vec<u8>> = self
             .conns

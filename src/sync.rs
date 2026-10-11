@@ -417,6 +417,9 @@ pub struct Sync {
     saved_cursor: u64,
 }
 
+/// What Settings says while the account can't write.
+const READ_ONLY: &str = "This account is read only for now: what's written here stays here, and syncs once the account can write again.";
+
 /// What the server says of invites (§6): whether this account is the
 /// owner's; if so, the invites waiting and every account.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1113,12 +1116,26 @@ impl Sync {
                             self.usage = Some(u);
                             self.asked_usage = false;
                         }
-                        Event::ReadOnly => {
-                            self.error = Some("This account is read only for now: what's written here stays here, and syncs once the account can write again.".into());
+                        Event::ReadOnly => self.error = Some(READ_ONLY.into()),
+                        // Writable again: what waited is on its way, and
+                        // the plan's line is asked for again.
+                        Event::Writable => {
+                            if self.error.as_deref() == Some(READ_ONLY) {
+                                self.error = None;
+                            }
+                            self.usage = None;
+                            self.asked_usage = false;
                         }
                         Event::RoomRemoved(room) => {
                             if let Some(p) = self.pending.as_mut() {
                                 p.done_room(&room);
+                            }
+                            // A room told of and gone before its note came
+                            // here: no room of this device's any more.
+                            if let (Some(key), Some(r)) = (Key::parse(&room), store.replica.as_mut())
+                                && r.entry(key).is_none()
+                            {
+                                let _ = r.forget(key);
                             }
                         }
                         Event::BlobsDropped(ids) => {

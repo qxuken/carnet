@@ -737,6 +737,100 @@ fn a_picture_the_server_lacks_is_said_missing_then_comes() {
 /// `CARNET_BIG` says, to load into the viewer and time it (docs/SYNC.md,
 /// phase 3). `CARNET_BIG=/tmp/big cargo test -p carnet-web --test viewer
 /// -- --ignored ten_thousand`.
+/// A plan the test changes as it goes.
+struct Plan(std::sync::Mutex<carnet_server::quota::Limit>);
+
+impl carnet_server::quota::Quota for Plan {
+    fn limit(&self, _: &[u8]) -> carnet_server::quota::Limit {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// The account suspended and the suspension lifted while the page is
+/// open: it's told each at once (the host calls `limit_changed`), says
+/// read only, then takes the words back; what was typed meanwhile goes
+/// to the desktop without a reload; the plan's line is the new one.
+#[test]
+fn an_open_browser_learns_its_account_can_write_again() {
+    use carnet_server::quota::Limit;
+    let mut rng = Seeded(11);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let plan = std::sync::Arc::new(Plan(std::sync::Mutex::new(Limit::default())));
+    hub.set_quota(plan.clone());
+    let k = Key::random();
+    let ks = k.to_string();
+    desk.docs.insert(ks.clone(), NoteDoc::new(7));
+    desk.docs[&ks].record("# Plan\n\nA walk.\n", Origin::Save);
+    desk.session.saved(&ks, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    web.said.clear();
+
+    // The page's socket is told as the host says: through the worker.
+    let tell = |hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, rng: &mut Seeded| {
+        let outs = WORKER.with(|w| w.borrow_mut().done(hub.limit_changed(ACCOUNT)));
+        for o in outs {
+            if let Out::Send(conn, bytes) = o {
+                match conn {
+                    1 => desk.session.receive(&bytes, &mut DeskDocs(&mut desk.docs), rng),
+                    _ => web.receive(&bytes, rng),
+                }
+            }
+        }
+        pump(hub, desk, web, rng);
+    };
+    plan.0.lock().unwrap().writable = false;
+    tell(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.errors, [carnet_web::notes::READ_ONLY.to_string()]);
+    let (_, base) = web.source(&ks).unwrap();
+    web.edit(&ks, &base, "# Plan\n\nA walk. Typed while suspended.\n", &mut rng).unwrap();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(!desk.docs[&ks].text().contains("suspended"), "nothing sent");
+
+    *plan.0.lock().unwrap() = Limit { bytes: Some(5_000_000), writable: true, plan: "Personal".into(), until: 0 };
+    tell(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.said.contains(&Said::Writable), "{:?}", web.said);
+    assert!(web.said.iter().any(|s| matches!(s, Said::Usage(u) if u.writable && u.plan == "Personal")));
+    assert!(desk.docs[&ks].text().contains("Typed while suspended."), "what waited went");
+}
+
+/// A browser opened on an account that already has many notes (more
+/// than the desktop's replica keeps in memory) lists every one.
+#[test]
+fn a_browser_new_to_an_account_gets_every_note() {
+    let mut rng = Seeded(9);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let me = web.me.clone();
+    web.session.disconnected();
+    let _ = hub.disconnect(2);
+    let mut rooms = vec![vault::ROOM.to_string()];
+    desk.docs.entry(vault::ROOM.to_string()).or_insert_with(|| NoteDoc::new(7));
+    for i in 0..70 {
+        let k = Key::random();
+        let d = NoteDoc::new(7);
+        d.record(&format!("# Note {i}\n\nWords {i}.\n"), Origin::Save);
+        desk.docs[vault::ROOM].set_place(k, &Place { folder: String::new(), name: format!("Note {i}"), pinned: false, trashed: false });
+        desk.docs.insert(k.to_string(), d);
+        rooms.push(k.to_string());
+    }
+    for room in &rooms {
+        desk.session.saved(room, &mut DeskDocs(&mut desk.docs), &mut rng);
+    }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+
+    // A browser with nothing kept, this account's.
+    let mut fresh = Notes::open(ORIGIN, me, "Phone", &[], 98).unwrap();
+    fresh.session.connected();
+    for o in hub.connect(2, &mut rng) {
+        if let Out::Send(_, b) = o {
+            fresh.receive(&b, &mut rng);
+        }
+    }
+    pump(&mut hub, &mut desk, &mut fresh, &mut rng);
+    let listed = fresh.notes();
+    assert_eq!(listed.len(), 70, "every note");
+    assert!(listed.iter().any(|n| n.title == "Note 69"));
+}
+
 #[test]
 #[ignore]
 fn ten_thousand_notes_state() {

@@ -134,9 +134,14 @@ pub enum Event {
     BlobsDropped(Vec<BlobId>),
     /// What the account keeps, and may, as [`Session::usage`] asked.
     Usage(Usage),
-    /// The account can't write for now (its plan lapsed): what's written
-    /// here stays here until it can. Said once a login.
+    /// The account can't write for now (its plan lapsed, or it's
+    /// suspended): what's written here stays here until it can. Said once
+    /// a login, or as soon as the server says so.
     ReadOnly,
+    /// The account can write again, after [`Event::ReadOnly`]: what waited
+    /// here is on its way. Said as soon as the server says so (a plan
+    /// renewed, a suspension lifted), or at the next login that finds it.
+    Writable,
     /// With the devices: whether the server takes passwords, the email
     /// this account's password signs in as, if it has one, and the only
     /// email one may sign in as here, if the server holds it to one (a
@@ -230,6 +235,8 @@ pub struct Session {
     /// Rooms the server lets this device read, not write (the account's
     /// plan lapsed): nothing is sent to them until the next login.
     read_only: HashSet<String>,
+    /// Said [`Event::ReadOnly`], and not [`Event::Writable`] since.
+    limited: bool,
     /// A password being set: the email, the password, OPAQUE's state,
     /// until the server answers.
     setting: Option<(String, String, crate::password::Pending)>,
@@ -277,6 +284,7 @@ impl Session {
             removing: BTreeSet::new(),
             dropping: BTreeSet::new(),
             read_only: HashSet::new(),
+            limited: false,
             setting: None,
             server: None,
         }
@@ -938,6 +946,36 @@ impl Session {
             }
             Frame::Carnet(Carnet::BlobStored { id }) => self.events.push(Event::BlobStored(id)),
             Frame::Carnet(Carnet::UsageIs { notes, pictures, limit, writable, plan, until }) => {
+                // Asked, or told unasked when the account's limit changed
+                // (§11): read only now, or writable again.
+                if self.state == State::Ready {
+                    if writable {
+                        // The rooms joined to read are joined again: the
+                        // server lets them be written now, and what waited
+                        // here goes (`send_missing` on the answer).
+                        let mut rooms: Vec<String> = self.read_only.drain().collect();
+                        rooms.sort_unstable();
+                        for room in rooms {
+                            if self.joined.contains_key(&room) && !self.removing.contains(&room) {
+                                self.join(&room, docs);
+                            }
+                        }
+                        if self.limited {
+                            self.limited = false;
+                            self.events.push(Event::Writable);
+                        }
+                    } else {
+                        // Every room joined is read only from now on: no
+                        // write is sent to be refused.
+                        let joined: Vec<String> = self.joined.keys().cloned().collect();
+                        let new = !self.limited && self.read_only.is_empty();
+                        self.read_only.extend(joined);
+                        if new {
+                            self.limited = true;
+                            self.events.push(Event::ReadOnly);
+                        }
+                    }
+                }
                 self.events.push(Event::Usage(Usage {
                     notes,
                     pictures,
@@ -998,12 +1036,17 @@ impl Session {
                 // Read only (a plan lapsed): what's here waits here.
                 if permission == loro_protocol::Permission::Read {
                     if self.read_only.is_empty() {
+                        self.limited = true;
                         self.events.push(Event::ReadOnly);
                     }
                     self.read_only.insert(room_id);
                     return;
                 }
                 self.read_only.remove(&room_id);
+                if self.limited && self.read_only.is_empty() {
+                    self.limited = false;
+                    self.events.push(Event::Writable);
+                }
                 self.send_missing(&room_id, docs, rng);
             }
             ProtocolMessage::JoinError { room_id, .. } => {

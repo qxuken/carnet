@@ -94,3 +94,58 @@ fn a_plan_limits_pictures_and_a_lapsed_one_reads_only() {
         let _ = Origin::Save;
     }
 }
+
+/// A suspension put on and lifted while the account's devices are online
+/// (the host says so: `Hub::limit_changed`): each is told at once, with
+/// no login between. Suspended, it sends nothing; lifted, what it wrote
+/// meanwhile goes, and it writes on as ever; its plan's line is the new
+/// one without asking.
+#[test]
+fn a_limit_changed_is_told_to_the_devices_online() {
+    for store in stores() {
+        let mut net = Net::new(81, store);
+        let plan = Arc::new(Plan(Mutex::new(Limit { bytes: Some(10_000), writable: true, plan: "Personal".into(), until: 0 })));
+        net.hub.set_quota(plan.clone());
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        let b = net.pair(a, b"laptop", 2);
+        net.write(a, "before. ");
+        let _ = (events(&mut net, a), events(&mut net, b));
+        let account = net.hub.store().account_list()[0].0.clone();
+
+        // Suspended: told now, unasked, both devices; nothing more taken.
+        plan.0.lock().unwrap().writable = false;
+        let outs = net.hub.limit_changed(&account);
+        assert_eq!(outs.len(), 2, "one for each socket of the account");
+        net.route(outs);
+        net.pump();
+        for d in [a, b] {
+            let said = events(&mut net, d);
+            assert_eq!(said.iter().filter(|e| matches!(e, Event::ReadOnly)).count(), 1, "{said:?}");
+            assert!(said.iter().any(|e| matches!(e, Event::Usage(u) if !u.writable)));
+        }
+        let before = net.hub.store().usage(&account);
+        let refused = net.hub.stats().batches_refused;
+        net.write(a, "while suspended. ");
+        assert_eq!(net.hub.store().usage(&account), before, "nothing taken");
+        assert_eq!(net.hub.stats().batches_refused, refused, "nor even sent to be refused");
+        assert!(!net.device(b).notes.doc(ROOM).text().contains("while suspended"));
+
+        // Lifted, on a bigger plan: told now; what waited goes, and the
+        // other device has it, with no login between.
+        *plan.0.lock().unwrap() = Limit { bytes: Some(1 << 30), writable: true, plan: "Family".into(), until: 0 };
+        let outs = net.hub.limit_changed(&account);
+        net.route(outs);
+        net.pump();
+        let said = events(&mut net, a);
+        assert!(said.contains(&Event::Writable), "{said:?}");
+        assert!(said.iter().any(|e| matches!(e, Event::Usage(u) if u.writable && u.plan == "Family" && u.limit == Some(1 << 30))));
+        assert!(net.hub.store().usage(&account) > before, "what waited went");
+        assert!(net.device(b).notes.doc(ROOM).text().contains("while suspended"));
+        assert!(events(&mut net, b).contains(&Event::Writable));
+        net.write(a, "after.");
+        assert!(net.device(b).notes.doc(ROOM).text().contains("after."));
+        // Another account's sockets aren't told anything.
+        assert!(net.hub.limit_changed(b"someone else").is_empty());
+    }
+}

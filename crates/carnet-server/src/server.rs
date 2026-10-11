@@ -226,6 +226,14 @@ impl HubHandle {
         self.tx.send(ToHub::Run(job)).ok()?;
         rx.await.ok()
     }
+
+    /// `account`'s limit changed (`Hub::limit_changed`): its devices online
+    /// are told now. For a host, after it changed what its `Quota` says
+    /// (a plan set, a suspension lifted), and forgot what it kept of it.
+    /// `None` if the hub has stopped.
+    pub async fn limit_changed(&self, account: Vec<u8>) -> Option<()> {
+        self.run(move |hub, outs| outs.extend(hub.limit_changed(&account))).await
+    }
 }
 
 /// The server's numbers at one moment: the hub's, and the traffic and

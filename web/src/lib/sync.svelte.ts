@@ -57,7 +57,8 @@ type Said =
   | { password: { allowed: boolean; id: string | null; only: string | null } }
   | { passwordSet: true }
   | { passkeys: Passkey[] }
-  | { passkeySet: true };
+  | { passkeySet: true }
+  | { writable: true };
 
 const IDENTITY = 'identity';
 const STATE = 'state';
@@ -408,6 +409,11 @@ class Sync {
     }
     else if ('passkeys' in s) this.passkeys = s.passkeys;
     else if ('passkeySet' in s) this.addingPasskey = false;
+    else if ('writable' in s) {
+      // Writable again (a plan renewed, a suspension lifted): the
+      // read-only words go; what waited is on its way.
+      if (this.error?.startsWith('This account is read only')) this.error = null;
+    }
     else if ('invites' in s) this.invites = s.invites;
     else if ('code' in s) {
       this.code = s.code;

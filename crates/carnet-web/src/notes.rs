@@ -145,7 +145,14 @@ pub enum Said {
     Passkeys(Vec<PasskeyInfo>),
     /// A passkey is added, or taken away, as asked.
     PasskeySet,
+    /// The account can write again (a plan renewed, a suspension lifted):
+    /// what waited here is on its way, and the read-only words go.
+    Writable,
 }
+
+/// What the page says while the account can't write; it goes once it can
+/// ([`Said::Writable`]).
+pub const READ_ONLY: &str = "This account is read only for now: what's written here stays here, and syncs once the account can write again.";
 
 /// A version of a note, as its history lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -379,7 +386,8 @@ impl Notes {
                 Event::PasswordSet => self.said.push(Said::PasswordSet),
                 Event::Passkeys(list) => self.said.push(Said::Passkeys(list)),
                 Event::PasskeySet => self.said.push(Said::PasskeySet),
-                Event::ReadOnly => self.errors.push("This account is read only for now: what's written here stays here, and syncs once the account can write again.".into()),
+                Event::ReadOnly => self.errors.push(READ_ONLY.into()),
+                Event::Writable => self.said.push(Said::Writable),
                 Event::Devices(mut list) => {
                     list.sort_by(|a, b| b.you.cmp(&a.you).then_with(|| a.name.cmp(&b.name)));
                     self.said.push(Said::Devices(list));
