@@ -39,7 +39,7 @@
 
 <aside>
   <header>
-    <h1>{trash ? 'Deleted' : (folder?.split('/').at(-1) ?? 'Notes')}</h1>
+    <h1 title={folder ?? undefined}>{trash ? 'Deleted' : (folder?.split('/').at(-1) ?? 'Notes')}</h1>
     {#if !trash}
       <button class="new" onclick={() => create(folder)} aria-label="New note" title="New note"><Icon name="plus" size={20} /></button>
     {/if}
@@ -51,16 +51,16 @@
   {#if !query}
     <nav>
       <button class:on={folder === null && !trash} onclick={() => { folder = null; trash = false; }}>
-        <Icon name="folder" size={16} /> All notes <span>{sync.notes.filter((n) => !n.trashed).length}</span>
+        <Icon name="folder" size={16} /> <span class="name">All notes</span> <span class="count">{sync.notes.filter((n) => !n.trashed).length}</span>
       </button>
       {#each sync.folders as f (f)}
-        <button class:on={folder === f && !trash} class="sub" style:padding-left="{14 + 14 * f.split('/').length}px" onclick={() => { folder = f; trash = false; }}>
-          <Icon name="folder" size={16} /> {f.split('/').at(-1)} <span>{count(f)}</span>
+        <button class:on={folder === f && !trash} class="sub" style:padding-left="{14 + 14 * f.split('/').length}px" title={f} onclick={() => { folder = f; trash = false; }}>
+          <Icon name="folder" size={16} /> <span class="name">{f.split('/').at(-1)}</span> <span class="count">{count(f)}</span>
         </button>
       {/each}
       {#if deleted}
         <button class:on={trash} onclick={() => { trash = true; folder = null; }}>
-          <Icon name="trash" size={16} /> Deleted <span>{deleted}</span>
+          <Icon name="trash" size={16} /> <span class="name">Deleted</span> <span class="count">{deleted}</span>
         </button>
       {/if}
     </nav>
@@ -77,7 +77,7 @@
               <span class="when">{shortAgo(n.modified)}</span>
             </span>
             <span class="under">
-              {#if n.folder && folder === null}<span class="folder">{n.folder}</span>{/if}
+              {#if n.folder && folder === null}<span class="folder" title={n.folder}>{n.folder}</span>{/if}
               {#if n.todos}<span class="todo">{n.done} of {n.todos} done</span>{/if}
               <span class="snippet">{n.snippet || 'No text'}</span>
             </span>
@@ -100,24 +100,26 @@
   .search { display: flex; align-items: center; gap: 8px; margin: 8px 14px; padding: 8px 12px; border-radius: var(--radius); background: var(--sunken); color: var(--muted); }
   .search input { border: 0; background: none; color: var(--ink); font: inherit; width: 100%; outline: none; }
   /* Many folders scroll in their own space: the notes stay in sight. */
-  nav { display: flex; flex-direction: column; padding: 4px 8px; flex: none; max-height: 34%; overflow-y: auto; border-bottom: 1px solid transparent; }
+  /* Never sideways: a long name is cut short, whole on hover. */
+  nav { display: flex; flex-direction: column; padding: 4px 8px; flex: none; max-height: 34%; overflow: hidden auto; border-bottom: 1px solid transparent; }
   nav:has(button:nth-child(9)) { border-bottom-color: var(--border); }
-  nav button { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border: 0; background: none; border-radius: var(--radius); cursor: pointer; text-align: left; color: var(--ink); }
-  nav button span { margin-left: auto; color: var(--faint); font-size: 13px; }
+  nav button { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 14px; border: 0; background: none; border-radius: var(--radius); cursor: pointer; text-align: left; color: var(--ink); }
+  nav .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav .count { flex: none; color: var(--faint); font-size: 13px; }
   nav button:hover { background: var(--hover); }
   nav button.on { background: var(--pressed); }
-  ul { list-style: none; margin: 0; padding: 6px 8px 24px; overflow-y: auto; flex: 1; min-height: 0; }
+  ul { list-style: none; margin: 0; padding: 6px 8px 24px; overflow: hidden auto; flex: 1; min-height: 0; }
   li { list-style: none; }
   .pad { pointer-events: none; }
   .row { display: flex; flex-direction: column; justify-content: center; gap: 3px; width: 100%; height: 64px; padding: 0 14px; border: 0; border-radius: var(--radius-card); background: none; text-align: left; cursor: pointer; }
   .row:hover { background: var(--hover); }
   .row.on { background: var(--card); box-shadow: 0 1px 3px #0000000f; }
-  .top { display: flex; align-items: center; gap: 6px; color: var(--accent-ink); }
-  .title { font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--accent-ink); }
+  .title { min-width: 0; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .when { margin-left: auto; color: var(--faint); font-size: 12.5px; flex: none; }
   .under { display: flex; gap: 8px; color: var(--muted); font-size: 13.5px; min-width: 0; }
-  .folder { color: var(--accent-ink); flex: none; }
+  .folder { flex: 0 1 auto; min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent-ink); }
   .todo { flex: none; }
-  .snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .snippet { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { color: var(--muted); padding: 24px 14px; }
 </style>

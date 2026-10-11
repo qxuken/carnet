@@ -1,6 +1,7 @@
 //! Pictures between devices (docs/SYNC.md §4): the files in the notes
-//! folder's `attachments/`, each a sealed blob on the server by its id,
-//! and the vault doc saying which picture is at which path.
+//! folder's `attachments/`, and any other a note shows (one beside its
+//! note), each a sealed blob on the server by its id, and the vault doc
+//! saying which picture is at which path.
 //!
 //! A picture here and not in the vault is offered; the server says
 //! whether it lacks it, and if so it is sent. Only once the server has it
@@ -17,7 +18,7 @@
 //! Hashing a picture to know its id is done once: an index of path, size,
 //! modified time and id is kept beside the replica (`pictures.txt`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -110,8 +111,10 @@ impl Pictures {
     }
 
     /// The pictures in the notes folder: their paths from it (`/` between
-    /// parts), with their size and modified time.
-    fn scan(store: &Store) -> Vec<(String, PathBuf, u64, u64)> {
+    /// parts), with their size and modified time. Those in the attachments
+    /// folder, and those among the notes that a note shows or the vault
+    /// names (`named`, [`Store::pictures_among_notes`]).
+    fn scan(store: &Store, named: &BTreeSet<String>) -> Vec<(String, PathBuf, u64, u64)> {
         let mut out = Vec::new();
         let mut stack = vec![(store.dir.join(ATTACHMENTS), ATTACHMENTS.to_string(), 0)];
         while let Some((dir, rel, depth)) = stack.pop() {
@@ -132,6 +135,13 @@ impl Pictures {
                 }
             }
         }
+        for rel in store.pictures_among_notes(named) {
+            let path = store.dir.join(&rel);
+            let Ok(meta) = fs::metadata(&path) else { continue };
+            if meta.is_file() && meta.len() as usize <= MAX_BLOB {
+                out.push((rel, path, meta.len(), meta.modified().map_or(0, millis)));
+            }
+        }
         out
     }
 
@@ -145,7 +155,8 @@ impl Pictures {
 
         // Dropped on another device: gone here, or, shown by a note here,
         // offered again.
-        let mut here = Self::scan(store);
+        let named: BTreeSet<String> = vault.keys().chain(&dropped).cloned().collect();
+        let mut here = Self::scan(store, &named);
         if here.iter().any(|(rel, ..)| dropped.contains(rel)) {
             let used = store.pictures_in_use();
             here.retain(|(rel, path, ..)| {

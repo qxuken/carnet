@@ -459,7 +459,7 @@ impl Notes {
     fn draw(&self, key: &str, md: &str) -> String {
         let folder = self.place(key).map(|p| p.folder).unwrap_or_default();
         let files = self.picture_files();
-        carnet_core::export::viewer(md, |src, wiki| match doc::find_picture(&folder, src, wiki, &files) {
+        carnet_core::export::viewer(md, |src, wiki| match find(&folder, src, wiki, &files) {
             Some(path) => format!("carnet-picture:{path}"),
             None => src.to_string(),
         })
@@ -472,9 +472,9 @@ impl Notes {
     }
 
     /// Where a picture is, as a path from the notes folder, for a note in
-    /// `folder` ([`doc::find_picture`]).
+    /// `folder` ([`find`]).
     pub fn picture_path(&self, folder: &str, src: &str, wiki: bool) -> Option<String> {
-        doc::find_picture(folder, src, wiki, &self.picture_files())
+        find(folder, src, wiki, &self.picture_files())
     }
 
     /// The note's `n`th checkbox ticked or unticked: a one-character edit,
@@ -871,6 +871,14 @@ impl Notes {
 /// release changes what follows, with a step in [`STATE_UPGRADES`] from
 /// the one before.
 pub const STATE: u32 = 1;
+
+/// Where a picture is ([`doc::find_picture`]), spelled as the vault
+/// spells it: a desktop on a disk that doesn't mind case shows
+/// `Hill.JPG` for `hill.jpg`, and so does this.
+fn find(folder: &str, src: &str, wiki: bool, files: &doc::Files) -> Option<String> {
+    let path = doc::find_picture(folder, src, wiki, files)?;
+    Some(files.get(&path).map_or(path, str::to_string))
+}
 
 /// A step from one layout to the next: what follows the header in one,
 /// as the next has it, or `None` if it doesn't read.

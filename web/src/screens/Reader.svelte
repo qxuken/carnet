@@ -113,7 +113,7 @@
     </div>
   {:else}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="note" bind:this={box} onclick={click}>{@html html}</div>
+    <div class="note reading" bind:this={box} onclick={click}>{@html html}</div>
   {/if}
 </article>
 
@@ -121,7 +121,7 @@
   article { height: 100%; overflow-y: auto; background: var(--page); }
   header { position: sticky; top: 0; display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 16px; padding-top: max(8px, env(safe-area-inset-top)); background: color-mix(in srgb, var(--page) 88%, transparent); backdrop-filter: blur(10px); z-index: 1; }
   .back { display: inline-flex; padding: 6px; margin-left: -6px; border: 0; background: none; color: var(--ink); border-radius: var(--radius); cursor: pointer; }
-  .meta { color: var(--muted); font-size: 13.5px; flex: 1; min-width: 0; }
+  .meta { color: var(--muted); font-size: 13.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tool { display: inline-flex; padding: 6px; border: 0; background: none; color: var(--muted); border-radius: var(--radius); cursor: pointer; }
   .tool:hover { background: var(--hover); color: var(--ink); }
   .done { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--primary); color: var(--on-accent); font-weight: 600; cursor: pointer; }
@@ -132,4 +132,6 @@
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--hover); color: var(--ink); font-weight: 600; cursor: pointer; }
   .pill.danger { background: var(--danger); color: var(--on-accent); }
   .note { max-width: 720px; margin: 0 auto; padding: 8px 20px calc(48px + env(safe-area-inset-bottom)); }
+  /* What pictures at an edge are sized by (styles.css `.pictures`). */
+  .reading { container-type: inline-size; }
 </style>

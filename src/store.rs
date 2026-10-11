@@ -1278,6 +1278,39 @@ impl Store {
         used
     }
 
+    /// The pictures among the notes, out of the attachments folder, that
+    /// sync keeps as it keeps those in it (pictures.rs): one a note shows
+    /// (a picture beside its note, say), and one the vault names
+    /// (`named`), so that one dropped on another device goes here too.
+    /// Not those in an export's pictures folder: gathering moves them into
+    /// the attachments folder. Paths from the notes folder, as on disk.
+    pub fn pictures_among_notes(&self, named: &BTreeSet<String>) -> Vec<String> {
+        let low = |p: &str| p.to_lowercase();
+        let out_of = |p: &str| {
+            let p = low(p);
+            !p.starts_with(&format!("{ATTACHMENTS}/")) && !self.picture_folders.iter().any(|f| p.starts_with(&format!("{}/", low(f))))
+        };
+        let lying: Vec<&str> = self.files.paths().filter(|p| doc::is_picture_name(p) && out_of(p)).collect();
+        let mut out: Vec<String> = named.iter().filter(|p| out_of(p) && self.dir.join(p).is_file()).cloned().collect();
+        if !lying.is_empty() {
+            // Only blocks are looked at, not the Markdown written out: this
+            // is asked every second or so.
+            let shown: HashSet<String> = self
+                .notes
+                .iter()
+                .flat_map(|n| {
+                    n.doc.blocks().iter().filter_map(|b| match &b.kind {
+                        Kind::Image { src, wiki, .. } => doc::find_picture(&n.folder, src, *wiki, &self.files).map(|p| low(&p)),
+                        _ => None,
+                    })
+                })
+                .collect();
+            let have: HashSet<String> = out.iter().map(|p| low(p)).collect();
+            out.extend(lying.into_iter().filter(|p| shown.contains(&low(p)) && !have.contains(&low(p))).map(str::to_string));
+        }
+        out
+    }
+
     /// The titles of the notes in a folder in the trash.
     pub fn trashed_titles(&self, t: &Trashed) -> Vec<String> {
         let mut found = Found::default();

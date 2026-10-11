@@ -40,6 +40,76 @@
     addEventListener('hashchange', () => (route = read()));
   });
 
+  // The library's width on a wide screen: its edge dragged (or moved
+  // with the arrow keys) between the desktop's bounds, and kept in this
+  // browser; a double-click puts back the usual width.
+  const SIDE = 320;
+  const SIDE_MIN = 200;
+  const SIDE_MAX = 480;
+  /// The least room the note keeps beside it.
+  const PAGE_MIN = 440;
+  const SIDE_KEY = 'carnet.libraryWidth';
+  let sideW = $state(readSide());
+  let dragFrom: { x: number; w: number } | null = $state(null);
+
+  function readSide(): number {
+    try {
+      const v = Number(localStorage.getItem(SIDE_KEY));
+      return v ? Math.min(SIDE_MAX, Math.max(SIDE_MIN, Math.round(v))) : SIDE;
+    } catch {
+      return SIDE;
+    }
+  }
+
+  function keepSide() {
+    try {
+      if (sideW === SIDE) localStorage.removeItem(SIDE_KEY);
+      else localStorage.setItem(SIDE_KEY, String(sideW));
+    } catch {
+      // Not kept: a private window, storage refused. Only a convenience.
+    }
+  }
+
+  /// `w` within the bounds, and within what the window leaves the note.
+  const fit = (w: number) => Math.round(Math.max(SIDE_MIN, Math.min(SIDE_MAX, innerWidth - PAGE_MIN, w)));
+
+  function edgeDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    dragFrom = { x: e.clientX, w: sideW };
+  }
+
+  function edgeMove(e: PointerEvent) {
+    if (dragFrom) sideW = fit(dragFrom.w + e.clientX - dragFrom.x);
+  }
+
+  function edgeUp() {
+    if (!dragFrom) return;
+    dragFrom = null;
+    keepSide();
+  }
+
+  function edgeReset() {
+    sideW = fit(SIDE);
+    keepSide();
+  }
+
+  function edgeKey(e: KeyboardEvent) {
+    const step = e.shiftKey ? 48 : 16;
+    const to =
+      e.key === 'ArrowLeft' ? sideW - step
+      : e.key === 'ArrowRight' ? sideW + step
+      : e.key === 'Home' ? SIDE_MIN
+      : e.key === 'End' ? SIDE_MAX
+      : e.key === 'Enter' ? SIDE
+      : null;
+    if (to === null) return;
+    e.preventDefault();
+    sideW = fit(to);
+    keepSide();
+  }
+
   const go = (hash: string) => (location.hash = hash);
   /// The address changed without a step for Back: into or out of writing.
   const swap = (hash: string) => location.replace(`#${hash}`);
@@ -72,9 +142,9 @@
 {:else if sync.phase === 'setup'}
   <Pair />
 {:else}
-  <div class="shell" class:wide>
+  <div class="shell" class:wide class:resizing={dragFrom !== null}>
     {#if wide || route.kind === 'list'}
-      <div class="side">
+      <div class="side" style:--side-w={wide ? `${sideW}px` : null}>
         <Library open={(key) => go(`note/${key}`)} {current} {create} />
         <footer>
           <span class="status" class:ok={sync.status === 'Up to date'}>
@@ -83,6 +153,29 @@
           <button class:on={route.kind === 'settings'} onclick={() => go('settings')} aria-label="Settings" title="Settings"><Icon name="settings" size={18} /></button>
         </footer>
         {#if sync.error && route.kind !== 'settings'}<p class="error" role="alert">{sync.error}</p>{/if}
+        {#if wide}
+          <!-- Its edge: dragged, the library wider or narrower. A focusable
+               separator is a control (WAI-ARIA), which Svelte doesn't know. -->
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+          <div
+            class="edge"
+            class:on={dragFrom !== null}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Library width"
+            aria-valuenow={sideW}
+            aria-valuemin={SIDE_MIN}
+            aria-valuemax={SIDE_MAX}
+            tabindex="0"
+            title="Drag to make the notes wider or narrower · double-click for the usual width"
+            onpointerdown={edgeDown}
+            onpointermove={edgeMove}
+            onpointerup={edgeUp}
+            onpointercancel={edgeUp}
+            ondblclick={edgeReset}
+            onkeydown={edgeKey}
+          ></div>
+        {/if}
       </div>
     {/if}
     {#if route.kind === 'note'}
@@ -129,8 +222,15 @@
   .wait { opacity: 0; animation: show 0.2s ease 0.4s forwards; }
   @keyframes show { to { opacity: 1; } }
   .shell { height: 100%; display: flex; }
-  .side { width: 100%; height: 100%; display: flex; flex-direction: column; background: var(--side); position: relative; }
-  .shell.wide .side { width: 320px; flex: none; border-right: 1px solid var(--border); }
+  .side { width: 100%; min-width: 0; height: 100%; display: flex; flex-direction: column; background: var(--side); position: relative; }
+  .shell.wide .side { width: var(--side-w); max-width: max(200px, calc(100% - 440px)); flex: none; border-right: 1px solid var(--border); }
+  .edge { position: absolute; top: 0; right: -4px; bottom: 0; width: 7px; cursor: ew-resize; z-index: 2; touch-action: none; }
+  .edge::after { content: ''; position: absolute; top: 0; bottom: 0; left: 2px; width: 3px; background: transparent; transition: background 0.15s; }
+  .edge:hover::after { background: var(--border-strong); }
+  .edge.on::after, .edge:focus-visible::after { background: var(--focus); }
+  .edge:focus-visible { outline: none; }
+  /* While its edge is dragged: nothing selected, the cursor kept. */
+  .shell.resizing { cursor: ew-resize; user-select: none; }
   .side :global(aside) { flex: 1; min-height: 0; }
   main { flex: 1; min-width: 0; height: 100%; }
   main.none { display: grid; place-items: center; color: var(--faint); }

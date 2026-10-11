@@ -624,6 +624,37 @@ fn pictures_follow_their_notes() {
     assert!(two.sides[1].pictures_arrived());
 }
 
+/// A picture beside its note, not in the attachments folder, goes too: to
+/// the same path on the other device, and in the vault there, which is
+/// where the browser looks for it. One no note shows stays here.
+#[test]
+fn a_picture_beside_its_note_follows_it() {
+    let mut two = Two::new("beside");
+    let hill: Vec<u8> = (0..40_000u32).map(|i| (i % 233) as u8).collect();
+    two.make(0, "Home", "Weekend", "the view");
+    let a = &mut two.sides[0];
+    std::fs::write(a.dir.join("Home/hill.jpg"), &hill).unwrap();
+    std::fs::write(a.dir.join("Home/unshown.jpg"), b"not shown").unwrap();
+    let i = a.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    let n = &mut a.store.notes[i];
+    n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: "hill.jpg".into(), alt: "The hill at seven".into(), float: Default::default(), width: None, wiki: false }));
+    n.touch();
+    a.store.save(i, true).unwrap();
+    a.store.rescan();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&hill));
+    for side in 0..2 {
+        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().pictures();
+        assert_eq!(vault.get("Home/hill.jpg"), Some(&id), "in {side}'s vault");
+        assert!(!vault.contains_key("Home/unshown.jpg"), "no note shows it");
+    }
+    assert_eq!(std::fs::read(two.sides[1].dir.join("Home/hill.jpg")).ok(), Some(hill));
+    assert!(!two.sides[1].dir.join("Home/unshown.jpg").exists());
+    assert!(two.file(1, "Weekend").contains("![The hill at seven](hill.jpg)"));
+}
+
 impl Side {
     fn pictures_arrived(&mut self) -> bool {
         std::mem::take(&mut self.pictures.arrived)

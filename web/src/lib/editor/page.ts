@@ -13,7 +13,7 @@ import { Annotation, EditorSelection, EditorState, StateEffect, StateField, type
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { PageEditor } from '../../wasm/carnet_web.js';
 import { HIGHLIGHT, inkCss, washCss } from '../colors';
-import { isHeic, unshown } from '../pictures';
+import { missing, unshown } from '../pictures';
 import { TableWidget, place, type Cell, type TableContext } from './table';
 
 /// How a line is drawn (`PageEditor.looks`).
@@ -208,20 +208,19 @@ class Picture extends WidgetType {
     img.className = 'cm-picture waiting';
     img.alt = this.alt;
     if (this.width) img.style.width = `${this.width}px`;
+    // In a box of its own, for a card saying why it isn't shown (not
+    // found, or one this browser can't draw) to take its place in.
+    const box = document.createElement('span');
+    box.className = 'cm-picture-box';
+    box.append(img);
+    unshown(img, this.src);
     this.pictures(this.src, this.wiki).then(
       (url) => {
         img.src = url;
         img.classList.remove('waiting');
       },
-      () => (img.alt ||= 'This picture isn’t on the server'),
+      () => missing(img, this.src),
     );
-    if (!isHeic(this.src)) return img;
-    // One this browser may not draw: in a box of its own, for the card
-    // saying so to take the picture's place in.
-    const box = document.createElement('span');
-    box.className = 'cm-picture-box';
-    box.append(img);
-    unshown(img, this.src);
     return box;
   }
 }
