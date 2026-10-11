@@ -2152,7 +2152,9 @@ pub fn contains(doc: &Doc, c: Caret, p: Pos) -> bool {
 // ------------------------------------------------------------ clipboard
 
 /// What Ctrl+C takes: the text, within one slot; across blocks, the
-/// blocks it covers as Markdown, cut to the selection at both ends.
+/// blocks it covers as Markdown, cut to the selection at both ends. A list
+/// item's words chosen whole are the item: `- [ ] milk`, its box (or
+/// bullet, or number) and all, as a copy of several items is.
 pub fn copy(doc: &Doc, c: Caret) -> Option<String> {
     if c.is_empty() {
         return None;
@@ -2160,6 +2162,12 @@ pub fn copy(doc: &Doc, c: Caret) -> Option<String> {
     let (a, b) = ordered(doc, c);
     if a.slot == b.slot && !is_atomic(doc, a.slot) {
         let t = text(doc, a.slot);
+        let item = a.slot.cell.is_none() && matches!(kind_at(doc, a.slot), Some(Kind::Item { .. }));
+        let v = visible(doc, a.slot);
+        if item && v.drawn_len() > 0 && v.drawn(a.byte) == 0 && v.drawn(b.byte) == v.drawn_len() {
+            let block = doc.get(a.slot.block).map(|b| (*b).clone())?;
+            return Some(doc::to_markdown(None, &Doc::new(vec![block])));
+        }
         // A part of a line keeps the styles it was in, its marks whole.
         return Some(if styled(doc, a.slot) { inline::slice(t, a.byte, b.byte) } else { t[a.byte..b.byte].to_string() });
     }
@@ -2508,6 +2516,41 @@ mod tests {
         // ...and the next Backspace takes it.
         backspace(&mut d, &mut c, false);
         assert_eq!(texts(&d), ["Text:before", "Text:"]);
+    }
+
+    /// A checklist item's words chosen whole copy as the item, its box
+    /// with them; part of them, as words. A bullet and a number alike.
+    #[test]
+    fn a_whole_list_item_copies_with_its_marker() {
+        let mut done = Block::new(Kind::item(ListStyle::Todo, 0, "**milk** and eggs"));
+        if let Kind::Item { done: d, .. } = &mut done.kind {
+            *d = true;
+        }
+        let d = doc(vec![
+            Block::new(Kind::item(ListStyle::Todo, 1, "bread")),
+            done,
+            Block::new(Kind::item(ListStyle::Bullet, 0, "a point")),
+            Block::new(Kind::Item { style: ListStyle::Number, indent: 0, done: false, num: 3, text: "third".into() }),
+        ]);
+        let whole = |i: usize| {
+            let s = block_slots(&d.blocks()[i])[0];
+            Caret { anchor: start(s), head: end(&d, s) }
+        };
+        assert_eq!(copy(&d, whole(0)).as_deref(), Some("- [ ] bread\n"));
+        assert_eq!(copy(&d, whole(1)).as_deref(), Some("- [x] **milk** and eggs\n"));
+        assert_eq!(copy(&d, whole(2)).as_deref(), Some("- a point\n"));
+        assert_eq!(copy(&d, whole(3)).as_deref(), Some("3. third\n"));
+        // From inside the bold marks to the end: still the whole words.
+        let s = block_slots(&d.blocks()[1])[0];
+        let c = Caret { anchor: Pos { slot: s, byte: 2 }, head: end(&d, s) };
+        assert_eq!(copy(&d, c).as_deref(), Some("- [x] **milk** and eggs\n"));
+        // Part of the words: the words alone.
+        let c = Caret { anchor: Pos { slot: s, byte: 2 }, head: Pos { slot: s, byte: 6 } };
+        assert_eq!(copy(&d, c).as_deref(), Some("**milk**"));
+        // Two items: both with their boxes, as ever.
+        let s0 = block_slots(&d.blocks()[0])[0];
+        let c = Caret { anchor: start(s0), head: end(&d, s) };
+        assert_eq!(copy(&d, c).as_deref(), Some("- [ ] bread\n- [x] **milk** and eggs\n"));
     }
 
     #[test]

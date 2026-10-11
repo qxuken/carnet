@@ -247,6 +247,42 @@ fn a_selection_runs_across_blocks_and_copies_as_markdown() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A checklist item's words chosen whole copy with the box, so a paste
+/// elsewhere is a checklist item again; a numbered one with its number.
+#[test]
+fn a_whole_checklist_item_copies_as_one() {
+    let (mut app, mut d, dir) = body("copy-item");
+    type_in(&mut app, &mut d, "[] milk");
+    key_with(&mut app, &mut d, "home", SHIFT);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("- [ ] milk\n"));
+    // Ticked, and chosen with Ctrl+A (the block's text): the tick too.
+    key_with(&mut app, &mut d, "enter", CTRL);
+    key_with(&mut app, &mut d, "a", CTRL);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("- [x] milk\n"));
+    // A word of it: the word.
+    key(&mut app, &mut d, "end");
+    key_with(&mut app, &mut d, "left", SHIFT);
+    key_with(&mut app, &mut d, "left", SHIFT);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("lk"));
+    // Pasted on an empty line: a checklist item.
+    key(&mut app, &mut d, "end");
+    key(&mut app, &mut d, "enter");
+    key(&mut app, &mut d, "enter");
+    app.edit(Step::Other, |doc, c| page::paste(doc, c, "- [x] milk\n"));
+    assert_eq!(texts(&app)[..2], ["[x]milk", "[x]milk"], "{:?}", texts(&app));
+    // A numbered item, with its number.
+    let (mut app, mut d, dir2) = body("copy-number");
+    type_in(&mut app, &mut d, "1. first");
+    key_with(&mut app, &mut d, "home", SHIFT);
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("1. first\n"));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
 #[test]
 fn a_drag_in_the_margin_selects_blocks() {
     let (mut app, mut d, dir) = body("margin");
