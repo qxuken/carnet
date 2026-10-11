@@ -14,7 +14,9 @@ impl Carnet {
         let shown = self.side_shown();
         let key = ui.child_key("library-pane");
         let open = ui.layout_of(key).is_some_and(|r| r.w > 0.5);
-        let dragging = self.library_from.is_some();
+        // Its edge dragged, or the window resized (which a library held
+        // to the window's width follows): at once.
+        let dragging = self.library_from.is_some() || self.view_resized;
         ui.with_keyed(
             "library-pane",
             NodeSpec::column()

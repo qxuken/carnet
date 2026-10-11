@@ -818,6 +818,33 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
+/// Dropped under the words, past the empty line after them: in that
+/// line's place, as a paste is, so the file has one blank line between
+/// the words and the picture.
+#[test]
+fn a_picture_dropped_under_the_words_leaves_no_gap() {
+    let (mut app, mut d, dir) = body("drop-gap");
+    type_in(&mut app, &mut d, "A dropped photo:");
+    key(&mut app, &mut d, "enter");
+    d.frame(&mut app);
+    let outside = std::env::temp_dir().join(format!("carnet-drop-gap-{}", std::process::id()));
+    let pic = png_file(&outside, "leaf-big.png");
+    let last = app.row_rects.last().unwrap().1;
+    let at = Vec2::new(last.x + 40.0, last.y + last.h + 60.0);
+    let paths = vec![pic.display().to_string()];
+    d.input(&mut app, InputEvent::DragFiles { paths: paths.clone(), at });
+    d.frame(&mut app);
+    d.frame(&mut app);
+    assert_eq!(app.drop_index, Some(2), "past the empty line");
+    d.input(&mut app, InputEvent::DropFiles { paths, at });
+    d.frame(&mut app);
+    app.save_current();
+    let md = std::fs::read_to_string(app.store.notes[app.current].path.clone().unwrap()).unwrap();
+    assert!(md.contains("A dropped photo:\n\n![](attachments/leaf-big.png)"), "{md:?}");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
 #[test]
 fn a_note_moved_to_a_folder_keeps_its_pictures() {
     let (mut app, mut d, dir) = body("relink");
@@ -3339,6 +3366,55 @@ fn on_a_narrow_window_the_history_is_where_the_list_would_be() {
     remove_test_dir(dir);
 }
 
+/// The line over a version read: its words whole, never cut short, and
+/// its actions on the same line where they fit, else together on the
+/// next, and in the page's width at every window size.
+#[test]
+fn a_versions_line_wraps_whole_and_never_cuts_its_words() {
+    for (w, one_line) in [(1500.0, true), (860.0, false), (640.0, false), (360.0, false)] {
+        let (mut app, mut d, dir) = a_library_and_two_versions(&format!("history-line-{w}"), w);
+        // A wide page has room for the whole line.
+        if one_line {
+            app.settings.width = crate::settings::Width::Wide;
+        }
+        app.on_plain(Msg::ShowHistory);
+        app.on_plain(Msg::ShowVersion { index: 1 });
+        d.core.set_inspect(true);
+        d_frame_twice(&mut app, &mut d);
+        d_frame_twice(&mut app, &mut d);
+        let what = keyed_rect(&mut d, "version-what");
+        let actions = keyed_rect(&mut d, "version-actions");
+        let (restore, done) = (keyed_rect(&mut d, "restore"), keyed_rect(&mut d, "close-history"));
+        let page = app.page_rect.expect("the page");
+        let right = page.x + page.w;
+        for (name, r) in [("words", what), ("actions", actions), ("Restore", restore), ("Done", done)] {
+            assert!(r.x >= page.x && r.x + r.w <= right + 0.5, "{w}: {name} inside the page: {r:?} {page:?}");
+        }
+        // Its words are drawn whole: as wide as they are measured, or
+        // wrapped onto more rows than one, never "…".
+        let node = d.core.nodes().iter().find(|n| n.text.as_deref().is_some_and(|t| t.starts_with("The version from"))).cloned();
+        let node = node.expect("the version's words");
+        assert!(!node.text.as_deref().unwrap().contains('\u{2026}'), "{w}: not cut short");
+        if one_line {
+            assert!((restore.y + restore.h / 2.0 - (what.y + what.h / 2.0)).abs() < 2.0, "{w}: one line: {what:?} {restore:?}");
+        } else {
+            assert!(actions.y >= what.y + what.h - 0.5, "{w}: the actions under the words: {what:?} {actions:?}");
+            assert!(actions.x <= what.x + 0.5, "{w}: from the line's start");
+            // Together: Restore and Done on one row, where it fits.
+            if w >= 640.0 {
+                assert!((restore.y - done.y).abs() < 1.0, "{w}: the actions stay together: {restore:?} {done:?}");
+            }
+        }
+        // The note stays under the line, whatever its height.
+        let words = d.core.nodes().iter().find(|n| n.text.as_deref().is_some_and(|t| t.starts_with("First words"))).map(|n| n.rect);
+        let words = words.expect("the version's text");
+        assert!(words.y >= actions.y + actions.h, "{w}: the note below: {words:?} {actions:?}");
+        let warnings = d.warnings();
+        assert!(warnings.is_empty(), "{w}: {warnings:?}");
+        remove_test_dir(dir);
+    }
+}
+
 #[test]
 fn the_history_shows_with_the_library_hidden_and_goes_with_it() {
     let (mut app, mut d, dir) = two_versions("history-hidden");
@@ -4954,6 +5030,64 @@ fn the_library_is_as_wide_as_its_edge_is_dragged() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A drag never folds the library away: on a window with no room for a
+/// wider one, the edge stops where the page keeps its least, every frame
+/// of the drag; a width saved on a wider window is drawn as wide as this
+/// one allows, and comes back on a wider one.
+#[test]
+fn the_library_edge_stops_where_the_page_would_be_too_narrow() {
+    let (store, dir) = temp_store("library-edge-stops");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 900.0, 700.0).framing();
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    let pane = |d: &mut Drive| d.key_of("library-pane").and_then(|k| d.rect_of(k)).map(|r| r.w);
+    let most = 900.0 - super::PAGE_MIN;
+    assert_eq!(pane(&mut d), Some(268.0));
+    let edge = d.key_of("library-edge").and_then(|k| d.rect_of(k)).unwrap();
+    let x0 = edge.x + 3.0;
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(x0, 300.0)));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    for dx in [20.0, 40.0, 60.0, 120.0, 300.0] {
+        d.move_to(&mut app, x0 + dx, 300.0);
+        d_frame_twice(&mut app, &mut d);
+        let w = pane(&mut d).unwrap_or_else(|| panic!("the library still shows at +{dx}"));
+        assert_eq!(w, (268.0 + dx).min(most), "+{dx}");
+        assert!(d.key_of("t-back").is_none(), "not folded to a button at +{dx}");
+    }
+    d.input(&mut app, InputEvent::mouse_up());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.library_w as f32, most, "saved as drawn");
+    // Saved wider than this window allows: drawn as wide as it can be.
+    app.settings.library_w = 480;
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(pane(&mut d), Some(most));
+    // A wider window: as saved.
+    d.viewport.w = 1300.0;
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(pane(&mut d), Some(480.0));
+    // Narrower: from the width drawn, a drag narrows it at once.
+    d.viewport.w = 900.0;
+    d_frame_twice(&mut app, &mut d);
+    let edge = d.key_of("library-edge").and_then(|k| d.rect_of(k)).unwrap();
+    d.drag(&mut app, Vec2::new(edge.x + 3.0, 300.0), Vec2::new(edge.x + 3.0 - 30.0, 300.0));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.library_w as f32, most - 30.0);
+    assert_eq!(pane(&mut d), Some(most - 30.0));
+    // Only a window too narrow for the design's width (or a narrower
+    // one dragged) folds it, as ever.
+    d.viewport.w = 268.0 + super::PAGE_MIN;
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(pane(&mut d), Some(268.0));
+    d.viewport.w = 268.0 + super::PAGE_MIN - 1.0;
+    d_frame_twice(&mut app, &mut d);
+    assert!(pane(&mut d).is_none() && d.key_of("t-back").is_some(), "folded");
+    app.settings.library_w = 220;
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(pane(&mut d), Some(220.0), "dragged narrower, it stays beside the page");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The library's edge sits just past the column, clear of its lists'
 /// scrollbars; its hint shows by the pointer once it has rested there,
 /// never while the edge is dragged, and not again after a drag until the
@@ -5556,5 +5690,126 @@ fn the_users_own_picture_is_marked_and_taken_into_carnet() {
     assert_eq!(image_blocks(&app), ["attachments/hill.png"]);
     key_with(&mut app, &mut d, "z", CTRL);
     assert_eq!(image_blocks(&app), ["hill.png"], "the edit taken back");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A note showing the user's own picture `hill.png`, the picture selected,
+/// copied into Carnet from its bar.
+fn copied_in(name: &str) -> (Carnet, Drive, std::path::PathBuf) {
+    let (mut app, mut d, dir) = body(name);
+    type_in(&mut app, &mut d, "Above");
+    png_file(&dir, "hill.png");
+    let image = Block::new(Kind::Image { src: "hill.png".into(), alt: String::new(), float: Float::None, width: None, wiki: false });
+    app.edit(Step::Other, |doc, _| {
+        doc.push(image);
+        true
+    });
+    app.save_current();
+    let i = blocks(&app).iter().position(|b| matches!(b.kind, Kind::Image { .. })).unwrap();
+    app.caret = page::select_blocks(app.doc(), i, i);
+    d.core.set_inspect(true);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let copy = d.key_of("copy-in").expect("the bar's Copy into Carnet");
+    d.click_key(&mut app, copy);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(image_blocks(&app), ["attachments/hill.png"]);
+    assert!(dir.join("attachments/hill.png").is_file() && dir.join("hill.png").is_file());
+    (app, d, dir)
+}
+
+/// The notice's Undo of a copy into Carnet: the note shows the user's
+/// file again, and the copy, which nothing else shows, goes — to the
+/// trash, where the sweep would have put it — even when another app
+/// changed another note while the window was in the background (which
+/// once took the open note's undo with it, and the Undo did nothing).
+#[test]
+fn a_copy_into_carnet_undone_takes_the_copy_away() {
+    let (mut app, mut d, dir) = copied_in("copy-undone");
+    d.core.set_focused(false);
+    d.frame(&mut app);
+    std::fs::write(dir.join("Elsewhere.md"), "# Elsewhere\n\nWritten by another app.\n").unwrap();
+    d.core.set_focused(true);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.store.notes.iter().any(|n| n.title == "Elsewhere"), "the other app's note read");
+    let undo = keyed_rect(&mut d, "undo");
+    d.click(&mut app, undo.x + undo.w / 2.0, undo.y + undo.h / 2.0);
+    d.frame(&mut app);
+    assert_eq!(image_blocks(&app), ["hill.png"], "the user's file again");
+    assert!(dir.join("hill.png").is_file(), "the user's file stays");
+    assert!(!dir.join("attachments/hill.png").exists(), "the copy goes");
+    assert!(dir.join(".trash/attachments/hill.png").is_file(), "to the trash");
+    let md = std::fs::read_to_string(app.store.notes[app.current].path.clone().unwrap()).unwrap();
+    assert!(md.contains("](hill.png)"), "{md}");
+    // A redo brings back no path to the copy, gone.
+    key_with(&mut app, &mut d, "y", CTRL);
+    assert_eq!(image_blocks(&app), ["hill.png"]);
+
+    // ⌘Z while the notice shows is its Undo: the copy goes too.
+    let i = blocks(&app).iter().position(|b| matches!(b.kind, Kind::Image { .. })).unwrap();
+    app.caret = page::select_blocks(app.doc(), i, i);
+    d_frame_twice(&mut app, &mut d);
+    let copy = d.key_of("copy-in").expect("the bar's Copy into Carnet");
+    d.click_key(&mut app, copy);
+    d.frame(&mut app);
+    assert_eq!(image_blocks(&app), ["attachments/hill.png"]);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(image_blocks(&app), ["hill.png"]);
+    assert!(!dir.join("attachments/hill.png").exists() && dir.join("hill.png").is_file());
+
+    // Another note showing the copy keeps it: the Undo takes back the
+    // edit alone.
+    let again = d.key_of("copy-in").expect("the bar again");
+    d.click_key(&mut app, again);
+    d.frame(&mut app);
+    let other = app.store.notes.iter().position(|n| n.title == "Elsewhere").unwrap();
+    std::fs::write(app.store.notes[other].path.clone().unwrap(), "# Elsewhere\n\n![](attachments/hill.png)\n").unwrap();
+    app.store.rescan();
+    app.on_plain(Msg::Undo);
+    d.frame(&mut app);
+    assert_eq!(image_blocks(&app), ["hill.png"]);
+    assert!(dir.join("attachments/hill.png").is_file(), "shown elsewhere, kept");
+    let _ = std::fs::remove_dir_all(dir.join(".trash"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A notice stays while the pointer is on it, on its way to its Undo,
+/// and while the window is in the background; else it goes after its
+/// while.
+#[test]
+fn a_notice_stays_while_pointed_at_or_unseen() {
+    let (mut app, mut d, dir) = copied_in("notice-stays");
+    let long_ago = || Instant::now() - Duration::from_secs(60);
+    let undo = keyed_rect(&mut d, "undo");
+    d.move_to(&mut app, undo.x + undo.w / 2.0, undo.y + undo.h / 2.0);
+    d.frame(&mut app);
+    app.notice.as_mut().unwrap().at = long_ago();
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_some(), "pointed at its Undo");
+    let words = keyed_rect(&mut d, "notice");
+    d.move_to(&mut app, words.x + 10.0, words.y + words.h / 2.0);
+    d.frame(&mut app);
+    app.notice.as_mut().unwrap().at = long_ago();
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_some(), "pointed at its words");
+    // The click lands: its Undo, at once.
+    d.click(&mut app, undo.x + undo.w / 2.0, undo.y + undo.h / 2.0);
+    d.frame(&mut app);
+    assert_eq!(image_blocks(&app), ["hill.png"]);
+    // Unseen, in the background: it waits.
+    app.notify("Something happened", Some(Undo::Edit));
+    d.move_to(&mut app, 700.0, 600.0);
+    d.core.set_focused(false);
+    d.frame(&mut app);
+    app.notice.as_mut().unwrap().at = long_ago();
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_some(), "the window in the background");
+    d.core.set_focused(true);
+    d.frame(&mut app);
+    app.notice.as_mut().unwrap().at = long_ago();
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_none(), "seen, and not pointed at: gone after its while");
+    let _ = std::fs::remove_dir_all(dir.join(".trash"));
     let _ = std::fs::remove_dir_all(dir);
 }

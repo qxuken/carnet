@@ -137,18 +137,20 @@ impl Carnet {
                         // the blocks inside their wash-ready rows.
                         // Selectable: the words, the error and the notice
                         // copy like any text.
+                        let line = NodeSpec::row()
+                            .grow_width()
+                            .pad_xy(8.0, 0.0)
+                            .gap(10.0)
+                            .cross_align(Align::Center)
+                            .selectable()
+                            .clip();
+                        // A version's line wraps: which version, then what
+                        // can be done with it, each going down a line
+                        // whole when the page has no room for both.
+                        let line = if history.is_some() { line.wrap().cross_gap(4.0) } else { line };
+                        let mut notice_keys = Vec::new();
                         ui.with(
-                            step_back(
-                                NodeSpec::row()
-                                    .grow_width()
-                                    .pad_xy(8.0, 0.0)
-                                    .gap(10.0)
-                                    .cross_align(Align::Center)
-                                    .selectable()
-                                    .clip(),
-                                self.focus_on(),
-                                dim_head,
-                            ),
+                            step_back(line, self.focus_on(), dim_head),
                             |ui| {
                                 if let Some((what, armed, is_folder)) = &peek {
                                     self.peek_line(ui, l, what, *armed, *is_folder);
@@ -167,16 +169,18 @@ impl Carnet {
                                         TextStyle::new(Type::SMALL.size).color(t.danger).nowrap(),
                                     );
                                 } else if let Some((text, can_undo)) = &notice {
-                                    ui.text_in_keyed(
+                                    // Pointed at, it stays (see `view`).
+                                    notice_keys.push(ui.text_in_keyed(
                                         "notice",
                                         NodeSpec::row()
                                             .enter(kui_native::Enter::from(-6.0, 0.0).opacity(0.0))
-                                            .transition(220.0),
+                                            .transition(220.0)
+                                            .hoverable(),
                                         text,
                                         TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
-                                    );
+                                    ));
                                     if *can_undo {
-                                        ui.text_in_keyed(
+                                        notice_keys.push(ui.text_in_keyed(
                                             "undo",
                                             NodeSpec::row()
                                                 .pad_xy(8.0, 2.0)
@@ -187,11 +191,12 @@ impl Carnet {
                                                 .tooltip(&keys::hint("Undo", keys::UNDO)),
                                             "Undo",
                                             TextStyle::new(Type::SMALL.size).color(t.focus_ring).nowrap(),
-                                        );
+                                        ));
                                     }
                                 }
                             },
                         );
+                        self.notice_keys = notice_keys;
                         ui.leaf(NodeSpec::row().height(l.px(6.0)));
                         self.title(ui, l, dim_head);
                         ui.leaf(NodeSpec::row().height(l.px(18.0)));
@@ -280,24 +285,27 @@ impl Carnet {
 
     /// The meta line while a version is read: which one, what its marks
     /// mean, then what can be done with it — the actions are words in the
-    /// line, as Undo is.
+    /// line, as Undo is. Three parts that the line wraps whole: where they
+    /// don't all fit, the actions go down a line together (and wrap among
+    /// themselves only when even that line is too narrow for them), and
+    /// the words break between words, never cut short.
     fn history_line(&self, ui: &mut Ui<'_>, l: &Look, what: &str, can_restore: bool, against_now: bool) {
         let t = l.t;
-        // It gives way to the actions: cut short with "…" rather than
-        // mid-word when the line is full.
-        ui.text_in(NodeSpec::row().grow_width().min_width(0.0), what, TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis());
+        ui.text_in_keyed("version-what", NodeSpec::row(), what, TextStyle::new(Type::SMALL.size).color(t.muted));
         // Against now, the marks mean something else than the list's line
         // says: their key, drawn as they are.
         if against_now {
             use carnet_core::compare::{ADDED, REMOVED};
             let (dark, small) = (l.c.dark, Type::SMALL.size);
             let (came, went) = ("comes back", "goes");
-            ui.text_in(
-                NodeSpec::row().pad_xy(4.0, 0.0).radius(3.0).bg(crate::design::tint::wash(ADDED, dark, t.bg)),
-                came,
-                TextStyle::new(small).color(t.fg).nowrap(),
-            );
-            ui.text(went, TextStyle::new(small).color(crate::design::tint::ink(REMOVED, dark)).strikethrough().nowrap());
+            ui.with_keyed("version-marks", NodeSpec::row().gap(10.0).cross_align(Align::Center), |ui| {
+                ui.text_in(
+                    NodeSpec::row().pad_xy(4.0, 0.0).radius(3.0).bg(crate::design::tint::wash(ADDED, dark, t.bg)),
+                    came,
+                    TextStyle::new(small).color(t.fg).nowrap(),
+                );
+                ui.text(went, TextStyle::new(small).color(crate::design::tint::ink(REMOVED, dark)).strikethrough().nowrap());
+            });
         }
         let action = |ui: &mut Ui<'_>, key: &str, label: &str, msg: Msg, tip: &str| {
             ui.text_in_keyed(
@@ -307,19 +315,19 @@ impl Carnet {
                 TextStyle::new(Type::SMALL.size).color(t.focus_ring).nowrap(),
             );
         };
-        if can_restore {
-            action(ui, "restore", "Restore", Msg::RestoreVersion, "The note becomes this version; Undo brings it back");
-            action(ui, "restore-copy", "Restore as a copy", Msg::RestoreVersionCopy, "A new note with this version's text");
-        }
-        if can_restore {
-            let (label, tip) = if against_now {
-                ("Compare with the one before", "Mark what this version changed")
-            } else {
-                ("Compare with now", "Mark what restoring it would bring back and take away")
-            };
-            action(ui, "compare", label, Msg::CompareWithNow, tip);
-        }
-        action(ui, "close-history", "Done", Msg::CloseHistory, "Back to the note (Esc)");
+        ui.with_keyed("version-actions", NodeSpec::row().gap(10.0).wrap().cross_gap(4.0).cross_align(Align::Center), |ui| {
+            if can_restore {
+                action(ui, "restore", "Restore", Msg::RestoreVersion, "The note becomes this version; Undo brings it back");
+                action(ui, "restore-copy", "Restore as a copy", Msg::RestoreVersionCopy, "A new note with this version's text");
+                let (label, tip) = if against_now {
+                    ("Compare with the one before", "Mark what this version changed")
+                } else {
+                    ("Compare with now", "Mark what restoring it would bring back and take away")
+                };
+                action(ui, "compare", label, Msg::CompareWithNow, tip);
+            }
+            action(ui, "close-history", "Done", Msg::CloseHistory, "Back to the note (Esc)");
+        });
     }
 
     /// The meta line while a deleted note (or folder) is read: when it

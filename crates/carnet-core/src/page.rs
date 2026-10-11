@@ -1503,16 +1503,24 @@ pub fn turned(kind: &Kind, to: u64) -> Option<Kind> {
     })
 }
 
-/// Puts a new block of `kind` below the caret's block (in place of an
-/// empty paragraph), with the caret in it.
 /// Blocks dropped before block `at` (the end for `at` past the last),
 /// whatever the caret was doing: the last of them is selected, so what
-/// came in is what the keyboard acts on next.
+/// came in is what the keyboard acts on next. As a paste does on an
+/// empty line, they take the place of an empty paragraph beside the drop
+/// (the one before it, else the one after), so no blank line is left
+/// between them and the words.
 pub fn insert_blocks_at(doc: &mut Doc, c: &mut Caret, at: usize, kinds: Vec<Kind>) -> bool {
     if kinds.is_empty() {
         return false;
     }
-    let at = at.min(doc.len());
+    let mut at = at.min(doc.len());
+    let empty = |doc: &Doc, i: usize| matches!(doc.blocks().get(i).map(|b| &b.kind), Some(Kind::Text(t)) if t.is_empty());
+    if at > 0 && empty(doc, at - 1) {
+        at -= 1;
+        doc.remove(at);
+    } else if empty(doc, at) {
+        doc.remove(at);
+    }
     let n = kinds.len();
     for (k, kind) in kinds.into_iter().enumerate() {
         doc.insert(at + k, Block::new(kind));
@@ -1648,6 +1656,8 @@ pub fn move_picture(doc: &mut Doc, c: &mut Caret, id: u64, to: PicDrop) -> bool 
     true
 }
 
+/// Puts a new block of `kind` below the caret's block (in place of an
+/// empty paragraph), with the caret in it.
 pub fn insert_block(doc: &mut Doc, c: &mut Caret, kind: Kind) -> bool {
     if kind == Kind::Divider {
         return insert_divider(doc, c);
@@ -2480,6 +2490,35 @@ mod tests {
             num: 0,
             text: text.into(),
         })
+    }
+
+    /// A picture dropped goes in as a pasted one does: in place of an
+    /// empty line beside the drop, so the file has one blank line between
+    /// it and the words, never two.
+    #[test]
+    fn a_dropped_picture_takes_the_place_of_an_empty_line_beside_it() {
+        let pic = |src: &str| Kind::Image { src: src.into(), alt: String::new(), width: None, float: Float::None, wiki: false };
+        let md = |d: &Doc| crate::doc::to_markdown(None, d);
+        // Under the words, on the empty line after them (the drop line at
+        // the end, past it).
+        let mut d = doc(vec![Block::text("A dropped photo:"), Block::text("")]);
+        let mut c = at(&d, 1, 0);
+        assert!(insert_blocks_at(&mut d, &mut c, 2, vec![pic("attachments/leaf.jpg")]));
+        assert_eq!(md(&d).trim_end(), "A dropped photo:\n\n![](attachments/leaf.jpg)");
+        assert_eq!(texts(&d), ["Text:A dropped photo:", "Imag:", "Text:"], "an empty line after it to type on");
+        // Before an empty line between paragraphs: in its place.
+        let mut d = doc(vec![Block::text("one"), Block::text(""), Block::text("two")]);
+        insert_blocks_at(&mut d, &mut c, 1, vec![pic("a.png"), pic("b.png")]);
+        assert_eq!(texts(&d), ["Text:one", "Imag:", "Imag:", "Text:two"]);
+        // Between words: between them, nothing taken.
+        let mut d = doc(vec![Block::text("one"), Block::text("two")]);
+        insert_blocks_at(&mut d, &mut c, 1, vec![pic("a.png")]);
+        assert_eq!(texts(&d), ["Text:one", "Imag:", "Text:two"]);
+        // As a paste does after the words.
+        let mut d = doc(vec![Block::text("A pasted photo:"), Block::text("")]);
+        let mut c = at(&d, 0, 15);
+        insert_block(&mut d, &mut c, pic("attachments/leaf.jpg"));
+        assert_eq!(md(&d).trim_end(), "A pasted photo:\n\n![](attachments/leaf.jpg)");
     }
 
     #[test]
