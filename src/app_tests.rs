@@ -3044,6 +3044,9 @@ fn remove_test_dir(dir: std::path::PathBuf) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The web app's line over its history, a click for a tap.
+const HISTORY_HINT_WORDS: [&str; 3] = ["Click one to read it.", "added words in green", "removed ones struck through in red"];
+
 #[test]
 fn a_notes_history_shows_its_versions_read_only_and_brings_one_back() {
     let (mut app, mut d, dir) = two_versions("history");
@@ -3058,9 +3061,21 @@ fn a_notes_history_shows_its_versions_read_only_and_brings_one_back() {
     // It opens on the note as it is, its last change marked: the words
     // the last save added, washed green.
     assert_eq!(texts(&app)[0], "First words <mark style=\"background: #D8EAC0CC\">and more</mark>");
-    assert!(drawn(&mut d, &mut app, "added"), "the key to the marks");
+    // Listed as the web app lists them: what made each, when, and the
+    // words it changed, under a line saying what the marks mean.
+    // (The snapshot keeps a node's first 60 characters.)
+    d.frame(&mut app);
+    assert!(
+        d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with("Click one to read it. What changed is marked"))),
+        "how to read them"
+    );
+    assert!(HISTORY_HINT_WORDS.iter().all(|w| super::chrome::HISTORY_HINT.contains(w)));
+    assert!(!drawn(&mut d, &mut app, "added"), "the list's line says what the marks mean");
     assert!(drawn(&mut d, &mut app, "History"));
     assert!(drawn(&mut d, &mut app, "Edited here"));
+    assert!(drawn(&mut d, &mut app, "The note as it is · +2 words"));
+    assert!(drawn(&mut d, &mut app, "Where its history starts"));
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.ends_with(" · +2 words") && t != "The note as it is · +2 words")), "the first version: when, and its words");
     assert!(drawn(&mut d, &mut app, "Done"));
     assert!(!drawn(&mut d, &mut app, "Restore"), "the note as it is has nothing to restore");
 
@@ -3898,6 +3913,24 @@ fn sizes_and_days_read_as_people_say_them() {
     assert_eq!(super::chrome::date_words(UNIX_EPOCH), "1 January 1970");
 }
 
+/// A note's date: within a day, how long ago; older, the day, its year
+/// only when it is not this one's — on the page and, shorter, on a card.
+#[test]
+fn a_date_past_a_day_is_the_day() {
+    use super::chrome::{short_when, when_words};
+    use std::time::{Duration, UNIX_EPOCH};
+    // Noon on 12 January 2027.
+    let now = UNIX_EPOCH + Duration::from_secs(1_799_712_000 + 12 * 3600);
+    let before = |s: u64| now - Duration::from_secs(s);
+    assert_eq!(when_words(now, before(3 * 3600)), "3 hours ago");
+    assert_eq!(short_when(now, before(3 * 3600)), "3h");
+    assert_eq!(when_words(now, before(30)), "just now");
+    assert_eq!(when_words(now, before(3 * 86_400)), "9 January");
+    assert_eq!(short_when(now, before(3 * 86_400)), "9 Jan");
+    assert_eq!(when_words(now, before(35 * 86_400)), "8 December 2026");
+    assert_eq!(short_when(now, before(35 * 86_400)), "8 Dec 2026");
+}
+
 /// Notes exported from Apple Notes put in the notes folder: their own
 /// `Attachments` is no folder in the list, its pictures move to the
 /// attachments folder with the links, it says so, and they show.
@@ -4125,8 +4158,8 @@ fn drawn_rows(app: &Carnet, d: &Drive, slot: Slot, len: usize) -> Vec<(f32, f32)
     rows
 }
 
-/// First letter: Dropped. The note's first paragraph opens with its
-/// letter three lines tall, the lines beside it moved in past it and the
+/// A paragraph's first letter dropped (the toolbar's toggle) opens it
+/// three lines tall, the lines beside it moved in past it and the
 /// rest back at the page's left — and the paragraph is written as any
 /// other: a caret before the letter as tall as it, typing there or
 /// deleting the letter drops the next one, a click on it lands before or
@@ -4134,11 +4167,11 @@ fn drawn_rows(app: &Carnet, d: &Drive, slot: Slot, len: usize) -> Vec<(f32, f32)
 #[test]
 fn the_first_letter_drops_three_lines_and_the_paragraph_is_written_as_ever() {
     let (mut app, mut d, dir) = body("drop-cap");
-    app.on_settings(Msg::SetInitial { to: 1 });
     let words = "Once upon a time there was a lighthouse on a rock at the edge of the map, and a keeper who \
                  wrote down every ship that passed, one line each, with the hour and the colour of the sea, \
                  for years and years and years.";
     type_in(&mut app, &mut d, words);
+    app.page_action("initial");
     let slot = app.caret.head.slot;
     d_frame_twice(&mut app, &mut d);
     let at = |app: &Carnet, d: &Drive, b: usize| app.rect_at(&d.core, slot, b).unwrap();
@@ -4195,8 +4228,9 @@ fn the_first_letter_drops_three_lines_and_the_paragraph_is_written_as_ever() {
     }
     assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (0, 4));
 
-    // Plain: no drop, every row at the page's left.
-    app.on_settings(Msg::SetInitial { to: 0 });
+    // Taken back: no drop, every row at the page's left.
+    app.page_action("initial");
+    assert!(!blocks(&app)[0].initial);
     d_frame_twice(&mut app, &mut d);
     assert_eq!(at(&app, &d, 0).h, lh);
     let rows = drawn_rows(&app, &d, slot, words.len());
@@ -4205,8 +4239,8 @@ fn the_first_letter_drops_three_lines_and_the_paragraph_is_written_as_ever() {
 }
 
 /// Any paragraph drops its first letter from the toolbar (or ⌥⌘8, or the
-/// page's menu), the note's first paragraph not unless the settings say:
-/// as tall as the lines it fills. The file keeps it as a tag around the
+/// page's menu), and only one that asks: the note's first paragraph is
+/// as any other. As tall as the lines it fills. The file keeps it as a tag around the
 /// letter, which the note reads back; the letter coloured from the
 /// toolbar is written with its colour in that tag, and drops in it.
 #[test]
@@ -4279,10 +4313,10 @@ fn any_paragraph_drops_its_first_letter_from_the_toolbar() {
 #[test]
 fn the_first_letter_drops_no_more_lines_than_the_paragraph_fills() {
     let (mut app, mut d, dir) = body("drop-cap-short");
-    app.on_settings(Msg::SetInitial { to: 1 });
     app.on_settings(Msg::SetInitialLines { to: 2 });
     assert_eq!(app.settings.initial_lines, 4);
     type_in(&mut app, &mut d, "One short line.");
+    app.page_action("initial");
     let slot = app.caret.head.slot;
     d_frame_twice(&mut app, &mut d);
     let at = |app: &Carnet, d: &Drive, b: usize| app.rect_at(&d.core, slot, b).unwrap();
@@ -4303,17 +4337,17 @@ fn the_first_letter_drops_no_more_lines_than_the_paragraph_fills() {
 /// The dropped letter's styles: two lines tall or four, the caret before
 /// it as tall and as many rows moved in past it, the rest at the page's
 /// left; a letter font chosen from the list is kept in the settings and
-/// the letter drawn in it. Its rows show in the settings whether or not
-/// every note's first letter drops.
+/// the letter drawn in it. Its rows show in the settings, under "Dropped
+/// letters", with no switch to drop every note's first.
 #[test]
 fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
     let (mut app, mut d, dir) = body("drop-cap-styles");
-    app.on_settings(Msg::SetInitial { to: 1 });
     let words = "In the old days there was a lighthouse on a rock at the edge of the map, and a keeper who \
                  wrote down every ship that passed, one line each, with the hour and the colour of the sea, \
                  for years and years and years, until the book was full and another came on the boat with \
                  the bread and the oil, and then another, and the shelf by the stove was all books.";
     type_in(&mut app, &mut d, words);
+    app.page_action("initial");
     let slot = app.caret.head.slot;
     let at = |app: &Carnet, d: &Drive, b: usize| app.rect_at(&d.core, slot, b).unwrap();
     let mut wide = 0.0;
@@ -4332,9 +4366,11 @@ fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
         wide = after.x - o.x;
     }
 
-    // The letter's own rows, while it is dropped.
+    // The letters' own rows, and no Plain / Dropped switch over them.
     app.settings_open = true;
+    assert!(drawn(&mut d, &mut app, "Dropped letters"));
     assert!(drawn(&mut d, &mut app, "Up to") && drawn(&mut d, &mut app, "Colour"));
+    assert!(!drawn(&mut d, &mut app, "First letters") && d.key_of("initial").is_none(), "no switch for every note's first");
     assert!(drawn(&mut d, &mut app, "Same as headings"), "no font chosen: the headings'");
     app.on_settings(Msg::FontMenu { which: 2 });
     app.font_query = "inter".into();
@@ -4347,9 +4383,6 @@ fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
     assert_eq!((back.initial_font.as_str(), back.initial_lines, back.initial_accent), ("Inter", 4, true));
     app.on_settings(Msg::SetInitialColor { to: 1 });
     assert!(!Settings::parse(&app.settings.to_text()).initial_accent);
-    app.on_settings(Msg::SetInitial { to: 0 });
-    assert!(drawn(&mut d, &mut app, "Up to"), "plain: still there, for a paragraph's dropped from the toolbar");
-    app.on_settings(Msg::SetInitial { to: 1 });
     app.settings_open = false;
     d_frame_twice(&mut app, &mut d);
     let (o, after) = (at(&app, &d, 0), at(&app, &d, 1));
@@ -4414,15 +4447,15 @@ fn the_page_follows_the_text_size_down_to_12px() {
     let (item12, rule12) = (row(&app, 0), row(&app, 1));
     assert!(rule12.h < rule16.h * 0.85, "the divider's room shrinks: {} → {}", rule16.h, rule12.h);
     assert!(item12.h < item16.h * 0.85, "and a list item's: {} → {}", item16.h, item12.h);
-    // Each way of drawing a divider, and the large first letter, draw.
-    app.on_settings(Msg::SetInitial { to: 1 });
+    // Each way of drawing a divider, and a dropped first letter, draw.
+    app.page_action("initial");
     for to in 0..crate::settings::Divider::ALL.len() as u64 {
         app.on_settings(Msg::SetDivider { to });
         d_frame_twice(&mut app, &mut d);
         assert!(row(&app, 1).h > 10.0);
     }
     assert_eq!(app.settings.divider, crate::settings::Divider::Wave);
-    assert!(app.settings.initial);
+    assert!(blocks(&app)[2].initial);
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
@@ -4633,6 +4666,71 @@ fn the_library_is_as_wide_as_its_edge_is_dragged() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The library's edge sits just past the column, clear of its lists'
+/// scrollbars; its hint shows by the pointer once it has rested there,
+/// never while the edge is dragged, and not again after a drag until the
+/// pointer has left it.
+#[test]
+fn the_library_edge_keeps_off_the_scrollbar_and_hints_by_the_pointer() {
+    let (mut app, mut d, dir) = fresh("library-edge-hint");
+    // Enough notes for the library to scroll.
+    for _ in 0..30 {
+        app.new_note();
+    }
+    d_frame_twice(&mut app, &mut d);
+    let rect = |d: &mut Drive, k: &str| d.key_of(k).and_then(|k| d.rect_of(k));
+    let pane = rect(&mut d, "library-pane").unwrap();
+    let list = rect(&mut d, "library").expect("the notes list");
+    let edge = rect(&mut d, "library-edge").unwrap();
+    assert!(edge.x >= pane.x + pane.w - 0.5, "past the column: {edge:?} {pane:?}");
+    assert!(edge.x >= list.x + list.w - 0.5, "clear of the list and its scrollbar: {edge:?} {list:?}");
+    let hint = |d: &mut Drive| rect(d, "library-edge-hint");
+
+    // Rested on: nothing at once; after a moment, by the pointer.
+    let at = Vec2::new(edge.x + 3.0, 300.0);
+    d.move_to(&mut app, at.x, at.y);
+    d_frame_twice(&mut app, &mut d);
+    assert!(hint(&mut d).is_none(), "not at once");
+    d.advance(0.6);
+    d_frame_twice(&mut app, &mut d);
+    let h = hint(&mut d).expect("after a moment");
+    assert!((h.x - at.x).abs() < 20.0 && h.y > at.y && h.y - at.y < 30.0, "by the pointer: {h:?} {at:?}");
+    // Near the window's foot: above the pointer.
+    d.move_to(&mut app, at.x, d.viewport.h - 10.0);
+    d_frame_twice(&mut app, &mut d);
+    let h = hint(&mut d).expect("still on the edge");
+    assert!(h.y + h.h <= d.viewport.h - 10.0, "above the pointer: {h:?}");
+
+    // Dragged: gone, every frame of it, and after it while the pointer
+    // stays on the edge.
+    let edge = rect(&mut d, "library-edge").unwrap();
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(edge.x + 3.0, 300.0)));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    for x in [10.0, 20.0, 30.0, 40.0] {
+        d.move_to(&mut app, edge.x + 3.0 + x, 300.0);
+        d.advance(0.3);
+        d_frame_twice(&mut app, &mut d);
+        assert!(hint(&mut d).is_none(), "while dragged, at +{x}");
+    }
+    d.input(&mut app, InputEvent::mouse_up());
+    assert_eq!(app.settings.library_w, 268 + 40, "it was dragged");
+    d.advance(1.0);
+    d_frame_twice(&mut app, &mut d);
+    assert!(hint(&mut d).is_none(), "not straight after the drag");
+    // Off it and back: the hint again, after its moment.
+    d.move_to(&mut app, 700.0, 300.0);
+    d_frame_twice(&mut app, &mut d);
+    let edge = rect(&mut d, "library-edge").unwrap();
+    d.move_to(&mut app, edge.x + 3.0, 300.0);
+    d_frame_twice(&mut app, &mut d);
+    d.advance(0.6);
+    d_frame_twice(&mut app, &mut d);
+    assert!(hint(&mut d).is_some());
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A replica a newer Carnet wrote: the notes open from their files, with
 /// no History, and the window says why.
 #[test]
@@ -4664,7 +4762,6 @@ fn a_font_lists_default_row_is_chosen_by_a_click() {
     let mut app = Carnet::new(store);
     // Tall enough for the lists without scrolling.
     let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
-    app.settings.initial = true;
     app.settings.initial_font = "Inter".into();
     app.settings.heading_font = "Inter".into();
     app.settings_open = true;
@@ -4696,7 +4793,6 @@ fn a_built_in_face_is_listed_once() {
     let mut app = Carnet::new(store);
     let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
     app.settings.font = "Inter".into();
-    app.settings.initial = true;
     app.settings_open = true;
     d.core.set_inspect(true);
     d_frame_twice(&mut app, &mut d);
@@ -4811,8 +4907,18 @@ fn the_date_shown_can_be_when_the_note_was_made() {
     assert!(app.settings.dates_created);
     assert!(Settings::parse(&app.settings.to_text()).dates_created, "kept");
     let m = meta(&mut d, &mut app);
-    assert!(m.starts_with("Created 3 days ago"), "{m}");
-    assert!(drawn(&mut d, &mut app, "3d"), "the card too");
+    let created = app.store.notes[note].created;
+    let day = super::chrome::when_words(now, created);
+    assert!(!day.contains("ago") && m.starts_with(&format!("Created {day}  ")), "past a day, the day: {m}");
+    let short = super::chrome::short_when(now, created);
+    assert!(drawn(&mut d, &mut app, &short), "the card too: {short}");
+    // Last edited, the same way: past a day, the day it was.
+    app.on_plain(Msg::SetDates { to: 0 });
+    app.store.notes[note].modified = created;
+    let m = meta(&mut d, &mut app);
+    assert!(m.starts_with(&format!("Edited {day}  ")), "{m}");
+    assert!(drawn(&mut d, &mut app, &short), "and its card");
+    app.on_plain(Msg::SetDates { to: 1 });
     // A file born at its last save: the history knows better.
     let other = app.store.notes.iter().position(|n| n.title == "Welcome to Carnet").unwrap();
     app.store.notes[other].created = now + Duration::from_secs(3600);
@@ -4891,4 +4997,132 @@ fn the_history_and_deleted_lists_draw_each_node_once() {
     check("Deleted", &mut app, &mut d);
     assert_eq!(app.trash.len(), 2);
     remove_test_dir(dir);
+}
+
+/// Five quick clicks on the Settings page's title turn the debug
+/// information (the frame-time graph) on, and say so; five more, off.
+/// Slow clicks don't count, and nothing of it is saved.
+#[test]
+fn five_quick_clicks_on_the_settings_title_turn_the_debug_information_on_and_off() {
+    let (mut app, mut d, dir) = body("debug-clicks");
+    app.on_settings(Msg::ShowSettings);
+    d_frame_twice(&mut app, &mut d);
+    let title = d.key_of("settings-title").expect("the page's title");
+    for _ in 0..4 {
+        d.click_key(&mut app, title);
+    }
+    assert!(!app.hud, "four are not enough");
+    d.click_key(&mut app, title);
+    assert!(app.hud, "the fifth turns it on");
+    d_frame_twice(&mut app, &mut d);
+    assert!(drawn(&mut d, &mut app, "Debug information on"));
+    // With it on, F12 opens kui's devtools in any build.
+    key(&mut app, &mut d, "f12");
+    assert!(d.core.devtools());
+    key(&mut app, &mut d, "f12");
+    for _ in 0..5 {
+        d.click_key(&mut app, title);
+    }
+    assert!(!app.hud);
+    d_frame_twice(&mut app, &mut d);
+    assert!(drawn(&mut d, &mut app, "Debug information off"));
+    assert!(!app.settings.to_text().contains("debug"), "for this run only");
+
+    // A pause longer than the run allows starts counting again.
+    let t0 = Instant::now();
+    for i in 0..5 {
+        app.title_click(t0 + TITLE_CLICKS * 2 * i, &mut d.core);
+    }
+    assert!(!app.hud, "slow clicks");
+    for i in 0..5 {
+        app.title_click(t0 + TITLE_CLICKS * 20 + TITLE_CLICKS / 2 * i, &mut d.core);
+    }
+    assert!(app.hud, "quick ones");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A selection over several lines: the toolbar's list tools and their
+/// shortcuts make every one of them an item; again, every one back into
+/// a paragraph. A mix is made all one kind first. Headings and quotes
+/// the same way.
+#[test]
+fn list_tools_turn_every_selected_line_and_back() {
+    let (mut app, mut d, dir) = body("turn-many");
+    for (i, w) in ["milk", "eggs", "bread"].iter().enumerate() {
+        if i > 0 {
+            key(&mut app, &mut d, "enter");
+        }
+        type_in(&mut app, &mut d, w);
+    }
+    // From the end of the last line up into the first, by the keyboard.
+    key_with(&mut app, &mut d, "up", SHIFT);
+    key_with(&mut app, &mut d, "up", SHIFT);
+    key_with(&mut app, &mut d, "home", SHIFT);
+    d_frame_twice(&mut app, &mut d);
+    let kinds = |app: &Carnet| -> Vec<&'static str> {
+        blocks(app)[..3]
+            .iter()
+            .map(|b| match &b.kind {
+                Kind::Item { style: ListStyle::Bullet, .. } => "bullet",
+                Kind::Item { style: ListStyle::Number, .. } => "number",
+                Kind::Item { style: ListStyle::Todo, .. } => "todo",
+                Kind::Heading { .. } => "heading",
+                Kind::Quote(_) => "quote",
+                Kind::Text(_) => "text",
+                _ => "other",
+            })
+            .collect()
+    };
+    let tool = d.key_of("t-bullet").expect("the toolbar's Bulleted list");
+    d.click_key(&mut app, tool);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(kinds(&app), ["bullet"; 3], "every line, not the caret's");
+    assert_eq!(page::touched(app.doc(), app.caret), 0..=2, "still all selected");
+    assert!(page::turned_to(app.doc(), app.caret, TURN_BULLET), "the tool shows on");
+    let tool = d.key_of("t-bullet").unwrap();
+    d.click_key(&mut app, tool);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(kinds(&app), ["text"; 3], "all back to paragraphs");
+    assert_eq!(texts(&app)[..3], ["milk", "eggs", "bread"]);
+
+    // The shortcuts: ⌥⌘4 a checklist of all three, and back.
+    key_with(&mut app, &mut d, "4", CTRL_ALT);
+    assert_eq!(kinds(&app), ["todo"; 3]);
+    key_with(&mut app, &mut d, "4", CTRL_ALT);
+    assert_eq!(kinds(&app), ["text"; 3]);
+    key_with(&mut app, &mut d, "6", CTRL_ALT);
+    assert_eq!(kinds(&app), ["number"; 3]);
+    key_with(&mut app, &mut d, "6", CTRL_ALT);
+    assert_eq!(kinds(&app), ["text"; 3]);
+
+    // A mix: one a bullet, the others not — all made bullets first.
+    app.caret = page::select_blocks(app.doc(), 1, 1);
+    key_with(&mut app, &mut d, "5", CTRL_ALT);
+    assert_eq!(kinds(&app), ["text", "bullet", "text"]);
+    app.caret = page::select_blocks(app.doc(), 0, 2);
+    key_with(&mut app, &mut d, "5", CTRL_ALT);
+    assert_eq!(kinds(&app), ["bullet"; 3]);
+    // Bullets made a checklist: all of them, and not back to text.
+    key_with(&mut app, &mut d, "4", CTRL_ALT);
+    assert_eq!(kinds(&app), ["todo"; 3]);
+    key_with(&mut app, &mut d, "4", CTRL_ALT);
+    assert_eq!(kinds(&app), ["text"; 3]);
+
+    // Headings and quotes share the way.
+    key_with(&mut app, &mut d, "2", CTRL_ALT);
+    assert_eq!(kinds(&app), ["heading"; 3]);
+    key_with(&mut app, &mut d, "2", CTRL_ALT);
+    assert_eq!(kinds(&app), ["text"; 3]);
+    key_with(&mut app, &mut d, "7", CTRL_ALT);
+    assert_eq!(kinds(&app), ["quote"; 3]);
+    key_with(&mut app, &mut d, "7", CTRL_ALT);
+    assert_eq!(kinds(&app), ["text"; 3]);
+    // Text on text stays text.
+    key_with(&mut app, &mut d, "0", CTRL_ALT);
+    assert_eq!(kinds(&app), ["text"; 3]);
+    // Undone in one step.
+    key_with(&mut app, &mut d, "5", CTRL_ALT);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(kinds(&app), ["text"; 3]);
+    let _ = std::fs::remove_dir_all(dir);
 }

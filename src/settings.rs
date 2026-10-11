@@ -134,10 +134,9 @@ pub struct Settings {
     pub dates_created: bool,
     /// How a divider is drawn.
     pub divider: Divider,
-    /// The note's first paragraph opens with a dropped letter (`large`
-    /// in the file, as it was).
-    pub initial: bool,
-    /// How many lines that letter is tall.
+    /// How many lines a dropped letter is tall, at most. A letter drops
+    /// only where its paragraph asks (the toolbar's toggle); an old file's
+    /// `initial = large`, which dropped every note's first, is passed over.
     pub initial_lines: u32,
     /// Its face by family name; empty for the headings'.
     pub initial_font: String,
@@ -183,7 +182,6 @@ impl Default for Settings {
             sort: Sort::Edited,
             dates_created: false,
             divider: Divider::Dots,
-            initial: false,
             initial_lines: 3,
             initial_font: String::new(),
             initial_accent: true,
@@ -259,7 +257,6 @@ impl Settings {
                 }
                 "dates" => s.dates_created = v == "created",
                 "divider" => s.divider = Divider::from_key(v).unwrap_or(Divider::Dots),
-                "initial" => s.initial = v == "large",
                 "initial_lines" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.initial_lines = n.clamp(*INITIAL_LINES.start(), *INITIAL_LINES.end());
@@ -305,7 +302,7 @@ impl Settings {
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
@@ -313,7 +310,6 @@ impl Settings {
             self.size,
             if self.dates_created { "created" } else { "edited" },
             self.divider.key(),
-            if self.initial { "large" } else { "plain" },
             self.initial_lines,
             self.initial_font,
             if self.initial_accent { "accent" } else { "text" },
@@ -397,7 +393,6 @@ mod tests {
             sort: Sort::Title,
             dates_created: true,
             divider: Divider::Flourish,
-            initial: true,
             initial_lines: 4,
             initial_font: "Zapfino".into(),
             initial_accent: false,
@@ -417,10 +412,12 @@ mod tests {
         assert_eq!(odd.theme, ThemePref::System);
         let odd = Settings::parse("size = 2\nlibrary_width = 9000\ndivider = wavy\n");
         assert_eq!((odd.size, odd.library_w, odd.divider), (12, 480, Divider::Dots));
-        // A file from before the letter's styles: three lines, the
-        // headings' face, the accent; and a height out of range held in.
+        // A file from before the letter's styles, which dropped every
+        // note's first letter: read, the old key passed over; three lines,
+        // the headings' face, the accent; and a height out of range held in.
         let old = Settings::parse("initial = large\n");
-        assert_eq!((old.initial, old.initial_lines, old.initial_font.as_str(), old.initial_accent), (true, 3, "", true));
+        assert_eq!(old, Settings::default());
+        assert!(!old.to_text().contains("initial ="));
         assert_eq!(Settings::parse("initial_lines = 9\n").initial_lines, 4);
         assert_eq!(Settings::parse("initial_lines = 1\n").initial_lines, 2);
     }
@@ -428,7 +425,7 @@ mod tests {
     #[test]
     fn a_reset_puts_back_the_look_and_keeps_the_rest() {
         let mut s = Settings::parse(
-            "theme = dark\npalette = sage\nfont = Georgia\nsize = 20\nwidth = wide\ninitial = large\nfocus = on\n\
+            "theme = dark\npalette = sage\nfont = Georgia\nsize = 20\nwidth = wide\ninitial_lines = 4\nfocus = on\n\
              window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncolors = #c0504d\ndir = /notes\n",
         );
         s.file = Some(PathBuf::from("/c/settings.txt"));
@@ -437,7 +434,7 @@ mod tests {
         assert!(s.look_is_default());
         let d = Settings::default();
         assert_eq!((s.theme, s.palette, s.font.as_str(), s.size, s.width), (d.theme, d.palette, "", 16, Width::Medium));
-        assert_eq!((s.initial, s.focus, s.translucent), (false, false, true));
+        assert_eq!((s.initial_lines, s.focus, s.translucent), (3, false, true));
         assert_eq!((s.sort, s.dates_created, s.library_w, s.sidebar), (Sort::Title, true, 300, false));
         assert_eq!(s.colors, vec![0xc0504dff]);
         assert_eq!(s.dir.as_deref(), Some(Path::new("/notes")));
