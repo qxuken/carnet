@@ -791,6 +791,19 @@ impl Carnet {
             d.toggle = Some(on(to));
             turn.push(d);
         }
+        // A paragraph's first letter dropped, a few lines tall.
+        let initial = page::initial_at(self.doc(), self.caret);
+        let mut d = def(
+            "t-initial",
+            Icon::Initial,
+            "Drop the first letter",
+            keys::hint("Drop the first letter", keys::INITIAL),
+            Msg::ToggleInitial,
+        );
+        d.spec = Some(keys::INITIAL);
+        d.enabled = editing && initial.is_some();
+        d.toggle = Some(initial == Some(true));
+        turn.push(d);
         groups.push(turn);
         let mut styles = Vec::new();
         let caret_style = self.writing.style_at(self.doc(), self.caret);

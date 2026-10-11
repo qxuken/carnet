@@ -111,12 +111,13 @@ The toolbar's highlighter and text-colour buttons offer ten calm hues. They are 
 | Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z | undo / redo anything: typing, ticks, removed blocks and tables |
 | Alt+↑ / Alt+↓ | move the block (or the selected blocks) |
 | Ctrl+Alt+0 … 7 | turn the block into text, heading 1–3, checklist, bullets, numbers or a quote |
+| Ctrl+Alt+8 | drop the paragraph's first letter, or put it back |
 | Ctrl+Alt+T / Ctrl+Alt+- | insert a table / a divider |
 | Ctrl+D / Ctrl+Shift+K | duplicate / remove the block (or the selected blocks) |
 | drag in the margin | select whole blocks |
 | right-click on the page | cut, copy, paste, styles, and what the toolbar does for the block |
 
-The toolbar acts on the blocks the caret touches: turn them into another kind, indent them, move them, remove them. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
+The toolbar acts on the blocks the caret touches: turn them into another kind, drop a paragraph's first letter, indent them, move them, remove them. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
 
 ### Notes and folders
 
@@ -159,7 +160,7 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 - **Fonts**: a pairing (Book, Modern, Classic, System); under it, **Text** and **Headings**: any installed family, searchable, each name shown in its own face.
 - **Page width**: Narrow, Medium or Wide; **Text size**: 12 to 24 px.
 - **Dividers**: three dots, a short line, three stars, stars in a triangle, a flourish, a printer's leaf (❧), three diamonds, a diamond between lines, or a wave. Only the look changes: the file still says `---`.
-- **First letter**: plain, or dropped: the note's first paragraph opens with a large letter, the first lines beside it, as tall as the paragraph's lines up to a limit: a two-line paragraph drops two, a one-line one none. Under it, while it's dropped: **Up to** (two, three or four lines), **Font** (the heading face, or any other) and **Colour** (the accent's or the text's). The settings' preview shows it.
+- **First letters**: plain, or dropped: the note's first paragraph opens with a large letter, the first lines beside it, as tall as the paragraph's lines up to a limit: a two-line paragraph drops two, a one-line one none. Any other paragraph drops its own from the toolbar's **Drop the first letter** (Ctrl+Alt+8); the file keeps it as `<span class="initial">O</span>nce`, which other Markdown apps show as a plain letter. Under it, for every dropped letter: **Up to** (two, three or four lines), **Font** (the heading face, or any other) and **Colour** (the accent's or the text's; a letter given a colour of its own with the text-colour tool keeps it). The settings' preview shows it.
 - **Toolbar**: always shown, or fading while you type; **Focus** and **Typewriter**, as above.
 - **Window**: the notes list shows the desktop through it, blurred, where the system can (macOS, Windows 11, KDE); **Solid** turns that off from the next start.
 - **Sort notes by**: last edited or title (pinned notes stay on top).

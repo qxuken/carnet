@@ -79,6 +79,8 @@ pub enum Msg {
     /// A click on a divider, which has no text to put a caret in.
     Select { id: u64 },
     Turn { to: u64 },
+    /// Drop the first letter of the paragraphs the caret touches, or not.
+    ToggleInitial,
     Indent { by: i64 },
     Move { by: i64 },
     DeleteBlock,
@@ -534,8 +536,8 @@ pub struct Carnet {
     images: Images,
     /// The page's text width, as last laid out: what a picture fits.
     text_w: f32,
-    /// The paragraph whose first letter is dropped, this frame.
-    initial: Option<Slot>,
+    /// The paragraphs whose first letters are dropped, this frame.
+    initial: std::collections::HashSet<Slot>,
     /// How far the leftmost strip's content keeps from the window's left
     /// edge: past the macOS traffic lights under custom chrome, else 0.
     pub lights: f32,
@@ -844,7 +846,7 @@ impl Carnet {
             dir_change: None,
             images: Images::default(),
             text_w: 600.0,
-            initial: None,
+            initial: Default::default(),
             menu_open: false,
             lights: 0.0,
             refocus: false,
@@ -2458,6 +2460,7 @@ impl Carnet {
         let toolbar = matches!(
             msg,
             Msg::Turn { .. }
+                | Msg::ToggleInitial
                 | Msg::Style { .. }
                 | Msg::Indent { .. }
                 | Msg::Move { .. }
@@ -2507,6 +2510,9 @@ impl Carnet {
             }
             Msg::Turn { to } => {
                 self.edit(Step::Other, |d, c| page::turn(d, c, to));
+            }
+            Msg::ToggleInitial => {
+                self.edit(Step::Other, page::toggle_initial);
             }
             Msg::Indent { by } => {
                 self.edit(Step::Other, |d, c| page::indent(d, *c, by));

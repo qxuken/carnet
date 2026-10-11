@@ -1038,6 +1038,12 @@ pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
                 return insert(doc, c, "\n");
             }
         }
+        // Enter at the start of a paragraph whose first letter drops: a
+        // line above it, the letter still the paragraph's.
+        Kind::Text(_) if at_start && !t.is_empty() && doc.blocks()[i].initial => {
+            put(doc, c, i, Block::text(""), 0);
+            *c = Caret::at(start(p.slot));
+        }
         Kind::Text(_) => {
             if let Some(t) = text_mut(doc, p.slot) {
                 *t = head.clone();
@@ -1652,6 +1658,29 @@ pub fn insert_divider(doc: &mut Doc, c: &mut Caret) -> bool {
         *c = Caret::at(start(Slot::block(id)));
     }
     doc.ensure_tail();
+    true
+}
+
+// ------------------------------------------------------------ first letters
+
+/// Whether the paragraphs the caret touches have their first letters
+/// dropped: `Some(true)` when all do, `Some(false)` when not all, `None`
+/// when it touches no paragraph.
+pub fn initial_at(doc: &Doc, c: Caret) -> Option<bool> {
+    let mut paras = touched(doc, c).map(|i| &doc.blocks()[i]).filter(|b| matches!(b.kind, Kind::Text(_))).peekable();
+    paras.peek()?;
+    Some(paras.all(|b| b.initial))
+}
+
+/// Drop the first letter: on for every paragraph the caret touches, or
+/// off where they all have it. False when it touches no paragraph.
+pub fn toggle_initial(doc: &mut Doc, c: &mut Caret) -> bool {
+    let Some(all) = initial_at(doc, *c) else { return false };
+    for i in touched(doc, *c) {
+        if matches!(doc.blocks()[i].kind, Kind::Text(_)) {
+            doc.block_mut(i).initial = !all;
+        }
+    }
     true
 }
 
@@ -2682,6 +2711,45 @@ mod tests {
         let mut t = Typing::default();
         t.type_text(&mut d, &mut c, "---");
         assert_eq!(texts(&d)[..2], ["---", "Head:Next"]);
+    }
+
+    /// Drop the first letter, on the paragraphs the caret touches and off
+    /// again; written to the file as the letter's tag, read back as the
+    /// flag; Enter at its start keeps the letter with its paragraph.
+    #[test]
+    fn a_paragraphs_first_letter_drops_and_is_kept_in_the_file() {
+        let mut d = doc(vec![Block::text("One"), Block::new(Kind::Heading { level: 2, text: "H".into() }), Block::text("Two")]);
+        let mut c = at(&d, 0, 1);
+        assert_eq!(initial_at(&d, c), Some(false));
+        assert!(toggle_initial(&mut d, &mut c));
+        assert!(d.blocks()[0].initial && !d.blocks()[2].initial);
+        // Across all three: the heading has none to drop; both paragraphs.
+        let mut all = Caret { anchor: at(&d, 0, 0).head, head: at(&d, 2, 3).head };
+        assert_eq!(initial_at(&d, all), Some(false));
+        toggle_initial(&mut d, &mut all);
+        assert!(d.blocks()[0].initial && d.blocks()[2].initial && !d.blocks()[1].initial);
+        let md = doc::to_markdown(None, &d);
+        assert_eq!(md, "<span class=\"initial\">O</span>ne\n\n## H\n\n<span class=\"initial\">T</span>wo\n");
+        let back = doc::parse_blocks(&md);
+        assert_eq!(back.iter().map(|b| (b.text_ref().unwrap_or(""), b.initial)).collect::<Vec<_>>(), [("One", true), ("H", false), ("Two", true)]);
+        toggle_initial(&mut d, &mut all);
+        assert!(d.blocks().iter().all(|b| !b.initial));
+        // On a heading alone: nothing to do.
+        let mut h = at(&d, 1, 0);
+        assert_eq!(initial_at(&d, h), None);
+        assert!(!toggle_initial(&mut d, &mut h));
+        // Enter at the start of a dropped paragraph: an empty line above.
+        let mut d = doc(vec![Block::text("Words")]);
+        d.block_mut(0).initial = true;
+        let id = d.blocks()[0].id;
+        let mut c = at(&d, 0, 0);
+        enter(&mut d, &mut c, false);
+        assert_eq!(texts(&d)[..2], ["Text:", "Text:Words"]);
+        assert!(d.blocks()[1].initial && d.blocks()[1].id == id && c.head.slot.block == id);
+        // Enter in its middle: the first half keeps it, the second not.
+        let mut c = Caret::at(Pos { slot: Slot::block(id), byte: 2 });
+        enter(&mut d, &mut c, false);
+        assert!(d.blocks()[1].initial && !d.blocks()[2].initial);
     }
 
     /// Two pictures at the left edge and one on its own line below: a

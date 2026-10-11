@@ -87,3 +87,20 @@ button { font: inherit; color: inherit; }
 .picture-card-icon svg { width: 100%; height: 100%; }
 .note mark { background: var(--mark, var(--highlight)); color: inherit; border-radius: 3px; padding: 0 2px; }
 .note .ink { color: var(--ink); }
+/* A paragraph's dropped first letter (export::viewer's `p.initial`, the
+   file's `<span class="initial">`): three lines tall in the serif, in the
+   accent, unless the letter has a colour of its own (`own`), which the
+   letter's own span then gives it. The paragraph holds it whole, so a short
+   one does not spill it into the next. */
+.note p.initial { display: flow-root; }
+.note p.initial::first-letter {
+  float: left; font-family: var(--serif); font-weight: 600; font-size: 4.3em; line-height: 0.8;
+  margin: 0.04em 0.08em 0 0; color: var(--accent-ink);
+}
+@supports (initial-letter: 3) or (-webkit-initial-letter: 3) {
+  .note p.initial::first-letter {
+    float: none; font-size: inherit; line-height: inherit; margin: 0 0.1em 0 0;
+    -webkit-initial-letter: 3; initial-letter: 3;
+  }
+}
+.note p.initial.own::first-letter { color: inherit; }

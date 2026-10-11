@@ -92,6 +92,8 @@ pub enum Glyph {
     Person,
     /// A passkey: a fingertip's ridges.
     Passkey,
+    /// A dropped first letter: a tall A, lines beside it and under it.
+    Initial,
 }
 
 // The rounded frames several icons share, corners of radius 1.5.
@@ -235,6 +237,7 @@ impl Glyph {
             Edit => ("M4.5 19.5h3.8L19 8.8a2.1 2.1 0 0 0-3-3L5.3 16.5z M14.3 7.5l2.2 2.2", ""),
             Person => ("M12 12a3.5 3.5 0 1 0 0-7a3.5 3.5 0 1 0 0 7z M5 20c0-3.6 3.1-5.5 7-5.5s7 1.9 7 5.5", ""),
             Passkey => ("M5 16.5v-4.5a7 7 0 0 1 14 0v2 M8.5 19.5v-7.5a3.5 3.5 0 0 1 7 0v5 M12 12v8", ""),
+            Initial => ("M3.5 14.5L7.25 4.5l3.75 10 M4.9 10.8h4.7 M14 5.5h6.5 M14 10h6.5 M14 14.5h6.5 M3.5 19h17", ""),
             Link => (
                 "M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1 M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1",
                 "",
@@ -256,7 +259,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 59] = [
+    pub const ALL: [Glyph; 60] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -265,7 +268,7 @@ impl Glyph {
         Glyph::ChevronUp, Glyph::More, Glyph::Quote, Glyph::TextColor, Glyph::Highlight, Glyph::FloatLeft,
         Glyph::FloatRight, Glyph::Inline, Glyph::Sidebar, Glyph::Zen, Glyph::Check, Glyph::Undo, Glyph::Upload,
         Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
-        Glyph::Person, Glyph::Passkey,
+        Glyph::Person, Glyph::Passkey, Glyph::Initial,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.

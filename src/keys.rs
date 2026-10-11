@@ -13,6 +13,8 @@ pub const TODO: &str = "mod+alt+4";
 pub const BULLETS: &str = "mod+alt+5";
 pub const NUMBERS: &str = "mod+alt+6";
 pub const QUOTE: &str = "mod+alt+7";
+/// A paragraph's first letter dropped, or not: beside the block kinds.
+pub const INITIAL: &str = "mod+alt+8";
 // Inserting.
 pub const TABLE: &str = "mod+alt+t";
 pub const DIVIDER: &str = "mod+alt+-";
@@ -56,7 +58,7 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 42] = [
+pub const ALL: [(&str, &str); 43] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
     ("Rename folder", RENAME_FOLDER),
@@ -81,6 +83,7 @@ pub const ALL: [(&str, &str); 42] = [
     ("Bulleted list", BULLETS),
     ("Numbered list", NUMBERS),
     ("Quote", QUOTE),
+    ("Drop the first letter", INITIAL),
     ("Tick or untick", TICK),
     ("Indent, or a tab in text", INDENT),
     ("Outdent, or a tab taken back", OUTDENT),

@@ -420,15 +420,21 @@ impl Carnet {
         // Pointers, not text: the blocks stay shared with the note.
         let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
         let drop_at = self.drop_index;
-        // The first letter dropped, when the settings ask: of the note's
-        // first paragraph, past the headings (and front matter) at its top.
-        self.initial = self
+        // First letters dropped: of each paragraph that asks for it, and,
+        // when the settings ask, of the note's first paragraph, past the
+        // headings (and front matter) at its top.
+        let first = self
             .settings
             .initial
             .then(|| blocks.iter().find(|b| !matches!(&b.kind, Kind::Heading { .. }) && !matches!(&b.kind, Kind::Raw(t) if t.starts_with("---\n"))))
             .flatten()
+            .map(|b| b.id);
+        self.initial = blocks
+            .iter()
+            .filter(|b| b.initial || Some(b.id) == first)
             .filter(|b| matches!(&b.kind, Kind::Text(t) if !t.trim().is_empty()))
-            .map(|b| Slot::block(b.id));
+            .map(|b| Slot::block(b.id))
+            .collect();
         let lone = blocks.len() == 1;
         let focus = (self.focus_on() && self.in_flow()).then_some(self.caret.head.slot.block);
         let mut cx = Cx { cov, slash, numbers: Vec::new(), body, lone, focus };
@@ -1167,8 +1173,8 @@ impl Carnet {
         // The dropped first letter: where it is in the source, with any
         // opening quote before it. Not while a composition stands in
         // front of it, which would be dropped in its place.
-        let cap = (self.initial == Some(slot) && !code_block)
-            .then(|| initial_letter(text))
+        let cap = (self.initial.contains(&slot) && !code_block)
+            .then(|| inline::initial_letter(text))
             .flatten()
             .filter(|&(f, _)| !(preedit.is_some() && byte <= f));
         let (dark, page_bg) = (l.c.dark, t.bg);
@@ -1176,8 +1182,10 @@ impl Carnet {
         ui.with(row, |ui| {
             let key = ui.child_key_indexed(0);
             let mut spans: Vec<Span<'_>> = Vec::new();
-            // The span holding the first letter, if it may drop.
+            // The span holding the first letter, if it may drop, and
+            // whether the letter has a colour of its own.
             let mut letter: Option<usize> = None;
+            let mut letter_own = false;
             if text.is_empty() && preedit.is_none() {
                 // An empty line still has a line's height, and a place for
                 // the caret; its placeholder floats over it, easing in.
@@ -1261,6 +1269,7 @@ impl Carnet {
                     if cap.is_some_and(|(f, to)| a >= f && b <= to) {
                         // Styled below, once it's known to drop.
                         letter = Some(spans.len());
+                        letter_own |= !s.marker && s.ink != 0;
                     }
                     if part.is_some_and(|(f, to)| a >= f && b <= to) {
                         sp = sp.bg(t.selection).bg_radius(4.0);
@@ -1284,11 +1293,12 @@ impl Carnet {
             let style = match drop {
                 Some((i, n)) => {
                     // In its face (the headings', unless one is chosen), in
-                    // the accent deepened for text or the words' own; kui
-                    // sizes it to the lines it drops through. Undropped,
-                    // it's a letter like the rest.
+                    // its own colour if it was given one, else the accent
+                    // deepened for text or the words'; kui sizes it to the
+                    // lines it drops through. Undropped, it's a letter
+                    // like the rest.
                     let mut sp = spans[i].family(l.initial);
-                    if cap_accent {
+                    if cap_accent && !letter_own {
                         sp = sp.color(l.c.accent_ink);
                     }
                     spans[i] = sp;
@@ -1534,6 +1544,13 @@ impl Carnet {
             ] {
                 items.push(item(label, &format!("turn:{to}")).accel(spec).enabled(convertible));
             }
+            let initial = page::initial_at(doc, self.caret);
+            items.push(
+                item("Drop the first letter", "initial")
+                    .accel(keys::INITIAL)
+                    .enabled(initial.is_some())
+                    .checked(initial == Some(true)),
+            );
             items.extend([
                 MenuItem::separator(),
                 item("Insert table", "table").accel(keys::TABLE),
@@ -1631,6 +1648,7 @@ impl Carnet {
             "remove" => self.on_plain(Msg::DeleteBlock),
             "table" => self.on_plain(Msg::InsertTable),
             "rule" => self.on_plain(Msg::InsertDivider),
+            "initial" => self.on_plain(Msg::ToggleInitial),
             a => {
                 if let Some(n) = a.strip_prefix("style:").and_then(|n| n.parse().ok()) {
                     self.on_plain(Msg::Style { which: n });
@@ -1849,6 +1867,7 @@ impl Carnet {
                 };
                 self.on_plain(Msg::Turn { to });
             }
+            KeyCode::Char('8') if chord && m.alt => self.on_plain(Msg::ToggleInitial),
             KeyCode::Char('t') if chord && m.alt => self.on_plain(Msg::InsertTable),
             KeyCode::Char('-') if chord && m.alt => self.on_plain(Msg::InsertDivider),
             KeyCode::Char('d') if chord => {
@@ -2708,28 +2727,6 @@ fn marker(ui: &mut Ui<'_>, l: &Look, id: u64, style: ListStyle, done: bool, n: u
 /// line.
 fn drop_lines(most: u32, lines: u32) -> Option<u32> {
     Some(most.min(lines)).filter(|&n| n >= 2)
-}
-
-/// The first letter of a paragraph's words, with any opening quote or
-/// bracket before it: its range in the source, marks left out — the
-/// letter kui drops (`TextStyle::initial_letter`), which takes the same
-/// openers.
-fn initial_letter(text: &str) -> Option<(usize, usize)> {
-    let v = inline::Visible::of(text);
-    let words = v.text(text);
-    let mut chars = words.char_indices().skip_while(|(_, c)| c.is_whitespace()).peekable();
-    let (start, _) = *chars.peek()?;
-    let (at, ch) = chars.find(|(_, c)| {
-        !matches!(
-            c,
-            '"' | '\'' | '(' | '[' | '{' | '¿' | '¡' | '\u{201c}' | '\u{2018}' | '\u{201e}' | '\u{201a}' | '\u{ab}' | '\u{2039}'
-        )
-    })?;
-    if !ch.is_alphanumeric() {
-        return None;
-    }
-    let end = v.source(at) + ch.len_utf8();
-    Some((v.source(start), end))
 }
 
 /// What colour words are drawn in. The colour the reader gave them, on
