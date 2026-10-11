@@ -18,8 +18,9 @@ pub fn html(md: &str, image_url: impl Fn(&str, bool) -> String) -> String {
 /// `data-task="n"` (its place among the note's checkboxes, from 0) so a
 /// tap names it; highlights as `<mark>` (a colour of its own as its
 /// `--mark`), the words' colours as `--ink`, for the page's styles to draw
-/// in the theme's hues. An image's `src` is whatever `image_url` makes of
-/// it, as for [`html`].
+/// in the theme's hues; pictures at an edge, one after another, as a row
+/// there (`<div class="pictures left">`, `--n` of them). An image's `src`
+/// is whatever `image_url` makes of it, as for [`html`].
 ///
 /// The note is read whole, as the desktop reads it: its title is its
 /// `<h1>`, and front matter is not shown.
@@ -43,7 +44,10 @@ fn render(blocks: &[Block], image_url: impl Fn(&str, bool) -> String, viewer: bo
             out.push_str(&format!("</{tag}>"));
         }
     };
-    for b in blocks {
+    // Floated pictures in a row, the viewer's: how many are still to go
+    // in the row open.
+    let mut row = 0;
+    for (i, b) in blocks.iter().enumerate() {
         if let Kind::Item {
             style,
             indent,
@@ -108,6 +112,22 @@ fn render(blocks: &[Block], image_url: impl Fn(&str, bool) -> String, viewer: bo
                 out.push_str("</table>");
             }
             Kind::Divider => out.push_str("<hr>"),
+            // The viewer's: pictures at an edge, one after another, in a
+            // row there as the desktop has them, the blocks after running
+            // beside it (styles.css `.pictures`).
+            Kind::Image { src, alt, width, float, wiki } if viewer && *float != crate::doc::Float::None => {
+                if row == 0 {
+                    row = blocks[i..].iter().take_while(|b| matches!(b.kind, Kind::Image { float, .. } if float != crate::doc::Float::None)).count();
+                    let side = if *float == crate::doc::Float::Right { "right" } else { "left" };
+                    out.push_str(&format!("<div class=\"pictures {side}\" style=\"--n:{row}\">"));
+                }
+                let w = width.map(|w| format!(" width=\"{w}\"")).unwrap_or_default();
+                out.push_str(&format!("<img src=\"{}\" alt=\"{}\"{w}>", escape(&image_url(src, *wiki)), escape(alt)));
+                row -= 1;
+                if row == 0 {
+                    out.push_str("</div>");
+                }
+            }
             Kind::Image { src, alt, width, float, wiki } => {
                 let mut w = width.map(|w| format!(" width=\"{w}\"")).unwrap_or_default();
                 match float {
@@ -226,6 +246,13 @@ mod tests {
         let v = viewer(fm, |s, _| s.to_string());
         assert!(v.starts_with("<h1>Title</h1>") && v.contains("data-task=\"0\"><span>real") && !v.contains("front matter"), "{v}");
         assert_eq!(crate::doc::toggle_task(fm, 0).unwrap(), fm.replacen("- [ ] real", "- [x] real", 1));
+        // Pictures at an edge, one after another: a row at that edge.
+        let row = viewer("![a|left](a.png)\n![b|right|300](b.png)\n\n---\n\nWords.\n\n![c|right](c.png)\n", |s, _| s.to_string());
+        assert!(
+            row.contains("<div class=\"pictures left\" style=\"--n:2\"><img src=\"a.png\" alt=\"a\"><img src=\"b.png\" alt=\"b\" width=\"300\"></div><hr><p>Words.</p><div class=\"pictures right\" style=\"--n:1\"><img src=\"c.png\" alt=\"c\"></div>"),
+            "{row}"
+        );
+        assert!(html("![a|left](a.png)", |s, _| s.to_string()).contains("<p><img src=\"a.png\" alt=\"a\" align=\"left\"></p>"), "the copy keeps align");
         // The copy for mail stays as it was.
         assert!(html(md, |s, _| s.to_string()).contains("\u{2610} milk"));
     }

@@ -17,7 +17,7 @@ export function pictures(box: HTMLElement) {
         img.src = url;
         img.classList.remove('waiting');
       },
-      () => (img.alt ||= 'This picture isn’t on the server'),
+      () => missing(img, path),
     );
   }
   for (const a of box.querySelectorAll('a')) {
@@ -35,17 +35,36 @@ export function unshown(img: HTMLImageElement, name: string) {
   if (!isHeic(name)) return;
   img.addEventListener('error', () => {
     if (!img.getAttribute('src')) return;
-    const card = document.createElement('span');
-    card.className = 'picture-card';
-    card.setAttribute('role', 'img');
-    const icon = document.createElement('span');
-    icon.className = 'picture-card-icon';
-    icon.setAttribute('aria-hidden', 'true');
-    icon.innerHTML = warning;
-    const words = document.createElement('span');
-    words.textContent = 'This picture is HEIC, which this browser can’t show';
-    card.append(icon, words);
-    card.title = name.split('/').pop() ?? name;
-    img.replaceWith(card);
+    img.replaceWith(card('This picture is HEIC, which this browser can’t show', name));
   });
+}
+
+/// A picture the notes don't have (no device has sent it): a small card
+/// saying so, with its name, as the desktop shows one it can't find, not
+/// an empty box.
+export function missing(img: HTMLImageElement, name: string) {
+  img.replaceWith(card('Picture not found', name, true));
+}
+
+function card(why: string, path: string, named = false): HTMLElement {
+  const name = path.split('/').pop() ?? path;
+  const card = document.createElement('span');
+  card.className = 'picture-card';
+  card.setAttribute('role', 'img');
+  card.title = name;
+  card.setAttribute('aria-label', named ? `${why}: ${name}` : why);
+  const icon = document.createElement('span');
+  icon.className = 'picture-card-icon';
+  icon.setAttribute('aria-hidden', 'true');
+  icon.innerHTML = warning;
+  const words = document.createElement('span');
+  words.className = 'picture-card-words';
+  words.textContent = why;
+  if (named) {
+    const small = document.createElement('small');
+    small.textContent = name;
+    words.append(small);
+  }
+  card.append(icon, words);
+  return card;
 }

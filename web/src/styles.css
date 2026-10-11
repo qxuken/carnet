@@ -52,11 +52,21 @@ button { font: inherit; color: inherit; }
 .note { font: 400 17px/1.65 var(--sans); overflow-wrap: anywhere; }
 .note h1, .note h2, .note h3 { font-family: var(--serif); font-weight: 600; line-height: 1.25; }
 .note h1 { font-size: 32px; margin: 0 0 18px; }
+/* A heading of the first level under the title: the editor's size. */
+.note h1:not(:first-child) { font-size: 26px; line-height: 1.3; margin: 28px 0 10px; }
 .note h2 { font-size: 24px; margin: 28px 0 10px; }
 .note h3, .note h4, .note h5, .note h6 { font-size: 19px; margin: 22px 0 8px; }
 .note p { margin: 0 0 12px; }
 .note ul, .note ol { margin: 0 0 12px; padding-left: 24px; }
 .note li { margin: 3px 0; }
+.note > :is(ul, ol) > li:first-child { margin-top: 0; }
+.note > :is(ul, ol) > li:last-child { margin-bottom: 0; }
+/* The editor's marks: a dot, a ring, a square by depth, in the accent. */
+.note ul { list-style: disc; }
+.note ul ul { list-style: circle; }
+.note ul ul ul { list-style: square; }
+.note ul > li::marker { color: var(--accent); }
+.note ol > li::marker { color: var(--muted); }
 .note li.task { list-style: none; margin-left: -24px; display: flex; gap: 10px; align-items: flex-start; }
 .note li.task.done { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--faint); }
 .note li.task input {
@@ -69,21 +79,36 @@ button { font: inherit; color: inherit; }
   border: solid var(--on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg);
 }
 .note blockquote { margin: 0 0 12px; padding-left: 14px; border-left: 3px solid var(--border-strong); color: var(--muted); }
+.note blockquote > p:last-child { margin-bottom: 0; }
 .note code { font: 14px/1.5 ui-monospace, Menlo, monospace; background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
 .note pre { background: var(--sunken); padding: 12px 14px; border-radius: var(--radius); overflow-x: auto; }
 .note pre code { background: none; padding: 0; }
-.note table { border-collapse: collapse; margin: 0 0 14px; width: 100%; display: block; overflow-x: auto; border: 0 !important; }
-.note th, .note td { border: 1px solid var(--border-strong); padding: 7px 10px; text-align: left; vertical-align: top; }
+.note table { border-collapse: collapse; margin: 0 0 14px; width: 100%; display: block; overflow-x: auto; border: 0 !important; font-size: 15px; line-height: 1.5; }
+.note th, .note td { border: 1px solid var(--border-strong); padding: 6px 10px; text-align: left; vertical-align: top; }
 .note th { background: var(--sunken); font-weight: 600; color: var(--muted); font-size: 14px; }
-.note hr { border: 0; border-top: 1px solid var(--border-strong); margin: 20px 0; }
-.note a { color: var(--accent-ink); }
+/* A divider goes below the pictures at an edge, as on the desktop. */
+.note hr { border: 0; border-top: 1px solid var(--border-strong); margin: 20px 0; clear: both; }
+.note a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent-ink) 40%, transparent); }
 .note img { max-width: 100%; height: auto; border-radius: var(--radius); background: var(--sunken); }
-.note img[align='left'] { float: left; margin: 4px 16px 8px 0; max-width: 50%; }
-.note img[align='right'] { float: right; margin: 4px 0 8px 16px; max-width: 50%; }
+/* Pictures at an edge, one after another (`--n` of them): a row there,
+   side by side, each its share of the page's width, and one no width was
+   given at most 45% of it, as the desktop sizes them. What follows runs
+   beside the row, a block at a time, where 180px or more is left; else
+   it goes below. A picture on a line of its own, or another row, starts
+   below. Widths are of the note (Reader's `.reading`, a container). */
+.note .pictures { --share: calc((100cqi - (var(--n) - 1) * 16px) / var(--n)); display: flex; gap: 16px; align-items: flex-start; max-width: 100%; margin: 4px 0 12px; }
+.note .pictures.left { float: left; margin-right: 24px; }
+.note .pictures.right { float: right; margin-left: 24px; }
+.note .pictures img { flex: none; min-width: 48px; max-width: var(--share); }
+.note .pictures img:not([width]) { max-width: min(45cqi, var(--share)); }
+.note .pictures ~ :is(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote) { display: flow-root; min-width: min(180px, 100%); }
+.note .pictures ~ :is(.pictures, p:has(> img)) { clear: both; }
 .note img.waiting { min-height: 120px; min-width: 160px; }
 /* A picture this browser can't draw (HEIC, outside Safari): a small card. */
 .picture-card { display: inline-flex; align-items: center; gap: 10px; max-width: 100%; margin: 4px 0; padding: 10px 12px; border-radius: var(--radius); background: var(--sunken); color: var(--muted); font: 400 15px/1.4 var(--sans); }
 .picture-card-icon { display: inline-flex; flex: none; width: 18px; height: 18px; }
 .picture-card-icon svg { width: 100%; height: 100%; }
+.picture-card-words { display: grid; min-width: 0; }
+.picture-card-words small { font-size: 13px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .note mark { background: var(--mark, var(--highlight)); color: inherit; border-radius: 3px; padding: 0 2px; }
 .note .ink { color: var(--ink); }
