@@ -17,6 +17,13 @@
 //!
 //! Hashing a picture to know its id is done once: an index of path, size,
 //! modified time and id is kept beside the replica (`pictures.txt`).
+//!
+//! A picture's id is made under the account's vault key, and the notes
+//! folder (its replica, this index) outlives an account: set up anew, with
+//! another server or afresh, its pictures have other ids there, and none of
+//! them is on that server yet. So the index says whose ids it holds, and
+//! one made under another key is started again: every picture hashed
+//! anew, offered, and named in the vault by its new id.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -28,6 +35,9 @@ use carnet_sync::crypto::{BlobId, MAX_BLOB, Random};
 use carnet_sync::session::{Event, Session};
 
 use crate::store::{ATTACHMENTS, Store};
+
+/// The index's first line: whose ids it holds ([`Pictures::mark`]).
+const UNDER: &str = "under\t";
 
 /// A picture asked for and not come is asked again after this.
 const RETRY: Duration = Duration::from_secs(30);
@@ -45,6 +55,9 @@ struct Known {
 #[derive(Default)]
 pub struct Pictures {
     index: BTreeMap<String, Known>,
+    /// Whose ids the index holds: [`Pictures::mark`] of the session they
+    /// were made in. `None` in an index from before it was kept.
+    under: Option<String>,
     /// Where the index is kept; none in tests that don't keep it.
     file: Option<PathBuf>,
     /// Offered or being sent, the server's word awaited.
@@ -85,6 +98,10 @@ impl Pictures {
         let mut p = Pictures { file, ..Default::default() };
         if let Some(text) = p.file.as_ref().and_then(|f| fs::read_to_string(f).ok()) {
             for line in text.lines() {
+                if let Some(mark) = line.strip_prefix(UNDER) {
+                    p.under = Some(mark.to_string());
+                    continue;
+                }
                 let mut f = line.split('\t');
                 let (Some(path), Some(size), Some(modified), Some(id), Some(stored)) = (f.next(), f.next(), f.next(), f.next(), f.next()) else {
                     continue;
@@ -98,11 +115,16 @@ impl Pictures {
 
     fn keep(&self) {
         let Some(file) = &self.file else { return };
-        let text: String = self
-            .index
-            .iter()
-            .filter(|(p, _)| !p.contains(['\t', '\n']))
-            .map(|(p, k)| format!("{p}\t{}\t{}\t{}\t{}\n", k.size, k.modified, hex(&k.id), u8::from(k.stored)))
+        // Its first line says whose ids these are; a Carnet from before
+        // reads it as a line that isn't a picture's, and skips it.
+        let under = self.under.iter().map(|m| format!("{UNDER}{m}\n"));
+        let text: String = under
+            .chain(
+                self.index
+                    .iter()
+                    .filter(|(p, _)| !p.contains(['\t', '\n']))
+                    .map(|(p, k)| format!("{p}\t{}\t{}\t{}\t{}\n", k.size, k.modified, hex(&k.id), u8::from(k.stored))),
+            )
             .collect();
         let tmp = file.with_extension("tmp");
         if fs::write(&tmp, text).is_ok() {
@@ -145,9 +167,33 @@ impl Pictures {
         out
     }
 
+    /// What names the key a session's picture ids are made under: the id
+    /// it gives no bytes at all. Two sessions of one account give the
+    /// same; of two accounts, not.
+    fn mark(session: &Session) -> String {
+        hex(&session.blob_id(&[]))
+    }
+
+    /// The index, if its ids were made under another key than `session`'s
+    /// (another account's; or kept before it said), started again: what
+    /// it knew is of no use here.
+    fn under(&mut self, session: &Session) {
+        let mark = Self::mark(session);
+        if self.under.as_deref() == Some(mark.as_str()) {
+            return;
+        }
+        self.index.clear();
+        self.waiting.clear();
+        self.asked.clear();
+        self.reviving.clear();
+        self.under = Some(mark);
+        self.keep();
+    }
+
     /// One round: new pictures here hashed and offered, sent ones put in
     /// the vault, missing ones asked for. True if the vault changed.
     pub fn tick(&mut self, store: &mut Store, session: &mut Session) -> bool {
+        self.under(session);
         let Some(replica) = store.replica.as_ref() else { return false };
         let vault = replica.vault().pictures();
         let dropped = replica.vault().dropped_pictures();
@@ -244,6 +290,7 @@ impl Pictures {
 
     /// What the session said of a picture. True if the vault changed.
     pub fn event(&mut self, e: &Event, store: &mut Store, session: &mut Session, rng: &mut impl Random) -> io::Result<bool> {
+        self.under(session);
         match e {
             Event::BlobWanted(id) => {
                 let path = self.index.iter().find(|(_, k)| k.id == *id).map(|(p, _)| store.dir.join(p));

@@ -61,6 +61,8 @@ const NOTICE_FOR: Duration = Duration::from_secs(8);
 const POINTER_NUDGE: f32 = 6.0;
 /// How soon a save that failed is tried again.
 const RETRY_AFTER: Duration = Duration::from_millis(350);
+/// How often the inspector's "Checked …" is drawn again while it shows.
+const INSPECTED_EVERY: Duration = Duration::from_secs(20);
 /// The longest pause between two clicks on the Settings page's title
 /// that still counts them as one run.
 const TITLE_CLICKS: Duration = Duration::from_millis(600);
@@ -1271,6 +1273,8 @@ impl Carnet {
         let open = self.store.notes.get(self.current).map(|n| n.id);
         let changed = self.store.rescan();
         self.gather_pictures();
+        // A picture put beside a note meanwhile goes to the vault soon.
+        self.sync.poke();
         if !changed {
             return;
         }
@@ -3383,6 +3387,14 @@ impl App for Carnet {
         }
         if let Some(n) = &self.notice {
             due.push(NOTICE_FOR.saturating_sub(n.at.elapsed()));
+        }
+        // Sync's turn after what happened: the notes' places and pictures
+        // to the vault (a first login, a picture beside a note), the notes
+        // on the server asked again; and the inspector's "Checked …" kept
+        // true while it shows.
+        due.extend(self.sync.due());
+        if self.settings_open && self.sync_inspector && self.sync.inspected_at.is_some() {
+            due.push(INSPECTED_EVERY);
         }
         if let Some(wait) = due.into_iter().min() {
             let wait = if wait.is_zero() { RETRY_AFTER } else { wait };

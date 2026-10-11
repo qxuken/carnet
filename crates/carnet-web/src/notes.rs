@@ -200,6 +200,10 @@ pub struct Notes {
     pub changed: Vec<String>,
     /// Pictures come, by id: the page shows them.
     pub pictures: Vec<([u8; 32], Vec<u8>)>,
+    /// Pictures asked for that didn't come (the server hasn't one, or it
+    /// didn't open, or the fetch failed): the page says so, and asks
+    /// again when the notes change.
+    pub missing: Vec<[u8; 32]>,
     /// What went wrong, for the page to say.
     pub errors: Vec<String>,
     /// What else happened, for the page to show.
@@ -260,7 +264,7 @@ impl Notes {
             ring: me.ring.clone(),
             name: name.to_string(),
         };
-        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), made: Vec::new(), reviving: HashMap::new() };
+        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), made: Vec::new(), reviving: HashMap::new() };
         // Deleted forever, and pictures dropped, the server hasn't said
         // done: said again once in.
         for line in forgotten.lines() {
@@ -397,6 +401,12 @@ impl Notes {
                         self.session.drop_blobs(&unused);
                         self.said.push(Said::Uploaded(hex(&id)));
                     }
+                }
+                // One being put is offered again at the next login; one
+                // asked for, the page is told of.
+                Event::BlobFailed(id) if !self.uploads.contains_key(&id) => {
+                    self.reviving.remove(&id);
+                    self.missing.push(id);
                 }
                 _ => {}
             }

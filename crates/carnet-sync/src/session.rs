@@ -208,6 +208,9 @@ pub struct Session {
     held: HashMap<String, HashMap<u64, u64>>,
     /// Batches sent and not yet acknowledged, with their rooms.
     unacked: HashMap<BatchId, String>,
+    /// How many times the account's notes changed as this device saw:
+    /// [`Session::moves`].
+    moves: u64,
     next_batch: u64,
     out: Vec<Vec<u8>>,
     events: Vec<Event>,
@@ -262,6 +265,7 @@ impl Session {
             joined: HashMap::new(),
             held: HashMap::new(),
             unacked: HashMap::new(),
+            moves: 0,
             next_batch: 0,
             out: Vec::new(),
             events: Vec::new(),
@@ -698,6 +702,14 @@ impl Session {
         self.cursor
     }
 
+    /// A count that grows each time the account's notes change on the
+    /// server as far as this device sees: a write of its own kept, one
+    /// from another device taken in, a room removed. What the server says
+    /// of them (the inspector, §9) is out of date once it has grown.
+    pub fn moves(&self) -> u64 {
+        self.moves
+    }
+
     pub fn is_ready(&self) -> bool {
         self.state == State::Ready
     }
@@ -936,6 +948,7 @@ impl Session {
                 }));
             }
             Frame::Carnet(Carnet::RoomRemoved { room }) => {
+                self.moves += 1;
                 self.removing.remove(&room);
                 self.joined.remove(&room);
                 self.held.remove(&room);
@@ -1043,11 +1056,15 @@ impl Session {
                     self.join(&room_id, docs);
                 }
                 if took {
+                    self.moves += 1;
                     self.events.push(Event::Changed(room_id));
                 }
             }
             ProtocolMessage::Ack { ref_id, status, .. } => {
                 let room = self.unacked.remove(&ref_id);
+                if room.is_some() && status == UpdateStatusCode::Ok {
+                    self.moves += 1;
+                }
                 if status != UpdateStatusCode::Ok
                     && let Some(room) = room
                     && !self.read_only.contains(&room)

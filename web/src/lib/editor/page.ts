@@ -13,7 +13,7 @@ import { Annotation, EditorSelection, EditorState, StateEffect, StateField, type
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { PageEditor } from '../../wasm/carnet_web.js';
 import { HIGHLIGHT, inkCss, washCss } from '../colors';
-import { missing, unshown } from '../pictures';
+import { show, unshown } from '../pictures';
 import { TableWidget, place, type Cell, type TableContext } from './table';
 import { pictureTools } from './picture';
 
@@ -199,6 +199,10 @@ class Rule extends WidgetType {
 /// A picture's `src` (an Obsidian embed's, with `wiki`) as a URL to show.
 export type Pictures = (src: string, wiki: boolean) => Promise<string>;
 
+/// Each picture widget's box, and the picture in it (or to be, once it
+/// comes: until then its place is a box of the same size, pictures.ts).
+const shownIn = new WeakMap<HTMLElement, HTMLImageElement>();
+
 class Picture extends WidgetType {
   constructor(readonly src: string, readonly wiki: boolean, readonly alt: string, readonly width: number | null, readonly pictures: Pictures) {
     super();
@@ -208,33 +212,33 @@ class Picture extends WidgetType {
   }
   toDOM() {
     const img = document.createElement('img');
-    img.className = 'cm-picture waiting';
+    img.className = 'cm-picture';
     img.alt = this.alt;
     if (this.width) img.style.width = `${this.width}px`;
-    // In a box of its own, for a card saying why it isn't shown (not
-    // found, or one this browser can't draw) to take its place in.
+    // In a box of its own, for the box it takes until it comes (or a card
+    // saying why it isn't shown: not found, or one this browser can't
+    // draw) to take its place in: the reader's, the same size.
     const box = document.createElement('span');
     box.className = 'cm-picture-box';
     box.append(img);
     unshown(img, this.src);
-    this.pictures(this.src, this.wiki).then(
-      (url) => {
-        img.src = url;
-        img.classList.remove('waiting');
-      },
-      () => missing(img, this.src),
-    );
+    show(img, this.src, () => this.pictures(this.src, this.wiki));
+    shownIn.set(box, img);
     return box;
   }
   /// Another width or alt text for the same picture (it was resized):
   /// the one shown kept, not fetched and drawn again.
   updateDOM(dom: HTMLElement, _view: EditorView, from: Picture) {
     if (from.src !== this.src || from.wiki !== this.wiki) return false;
-    const img = dom.querySelector<HTMLImageElement>('img.cm-picture');
+    // The picture, drawn or still to come; and its place while it comes.
+    const img = shownIn.get(dom);
+    const width = this.width ? `${this.width}px` : '';
     if (img) {
-      img.style.width = this.width ? `${this.width}px` : '';
+      img.style.width = width;
       img.alt = this.alt;
     }
+    const place = dom.querySelector<HTMLElement>('.picture-card');
+    if (place) place.style.width = width;
     return true;
   }
 }

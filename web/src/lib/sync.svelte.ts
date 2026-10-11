@@ -62,6 +62,9 @@ type Said =
 const IDENTITY = 'identity';
 const STATE = 'state';
 const PICTURE = 'picture:';
+/// Said on `window` when the notes change: pictures.ts asks again for
+/// those not found.
+export const NOTES_CHANGED = 'carnet-notes-changed';
 /// Pictures put in here and not yet on the server: `[path, id]`s.
 const UPLOADS = 'uploads';
 /// The name this browser was given, if one was (sealed like the rest):
@@ -155,7 +158,7 @@ class Sync {
   private wait = 1000;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private pictures = new Shown();
-  private wanted = new Map<string, { path: string; done: (url: string) => void }[]>();
+  private wanted = new Map<string, { path: string; done: (url: string) => void; fail: (e: Error) => void }[]>();
   private pruneTimer: ReturnType<typeof setTimeout> | undefined;
   private wantDevices = false;
   /// The passkey a sign-in is using, by its credential id: forgotten in
@@ -362,6 +365,12 @@ class Sync {
       }
       this.wanted.delete(id);
     }
+    // Asked for and not come (the server hasn't it yet, say): the page
+    // says so, and asks again when the notes change (pictures.ts).
+    for (const id of v.take_missing()) {
+      for (const w of this.wanted.get(id) ?? []) w.fail(new Error('not on the server'));
+      this.wanted.delete(id);
+    }
     for (const t of v.take_transfers() as Transfer[]) void this.transfer(t);
   }
 
@@ -436,6 +445,8 @@ class Sync {
     this.notes = JSON.parse(this.vault.notes());
     this.folders = this.vault.folders();
     this.version++;
+    // Pictures not found may be there now.
+    dispatchEvent(new Event(NOTES_CHANGED));
     this.prune();
   }
 
@@ -617,7 +628,7 @@ class Sync {
           if (!this.vault?.get_picture(path)) return fail(new Error('not in the vault'));
           this.flush();
           const list = this.wanted.get(id) ?? [];
-          list.push({ path, done });
+          list.push({ path, done, fail });
           this.wanted.set(id, list);
         }),
     );

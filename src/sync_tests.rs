@@ -41,16 +41,25 @@ fn temp(name: &str) -> PathBuf {
 
 impl Two {
     fn new(name: &str) -> Self {
+        Self::with_folders(name, [None, None])
+    }
+
+    /// Two devices of a new account (a vault key of its own), each with
+    /// the notes folder given, as earlier runs left it (its replica and
+    /// pictures index too), or a new one.
+    fn with_folders(name: &str, dirs: [Option<PathBuf>; 2]) -> Self {
         let mut hub = Hub::new(ORIGIN, Memory::default());
         hub.store_mut().add_account(ACCOUNT, true).unwrap();
         let vault = VaultKey::generate(&mut OsRandom);
-        let sides = (0..2)
-            .map(|i| {
+        let sides = dirs
+            .into_iter()
+            .enumerate()
+            .map(|(i, dir)| {
                 let key = DeviceKey::generate(&mut OsRandom);
                 let device = format!("d{i}").into_bytes();
                 hub.store_mut().add_device(ACCOUNT, &device, key.public()).unwrap();
                 let id = Identity { origin: ORIGIN.into(), account: ACCOUNT.to_vec(), device, key, ring: Ring::new(vault.clone()), name: String::new() };
-                let dir = temp(&format!("{name}-{i}"));
+                let dir = dir.unwrap_or_else(|| temp(&format!("{name}-{i}")));
                 let store = Store::open(dir.clone()).unwrap();
                 Side {
                     pictures: crate::pictures::Pictures::open(store.replica_dir().as_deref()),
@@ -653,6 +662,58 @@ fn a_picture_beside_its_note_follows_it() {
     assert_eq!(std::fs::read(two.sides[1].dir.join("Home/hill.jpg")).ok(), Some(hill));
     assert!(!two.sides[1].dir.join("Home/unshown.jpg").exists());
     assert!(two.file(1, "Weekend").contains("![The hill at seven](hill.jpg)"));
+}
+
+/// A notes folder that synced with one account, then set up with another
+/// (a new server, or the same one afresh): its pictures go to the new
+/// account too. Their ids there are the new vault key's, so the vault and
+/// the pictures index carried over from the old account name ids the new
+/// server never had.
+#[test]
+fn pictures_go_to_a_new_account_too() {
+    let hill: Vec<u8> = (0..40_000u32).map(|i| (i % 233) as u8).collect();
+    let photo: Vec<u8> = (0..30_000u32).map(|i| (i % 211) as u8).collect();
+    let mut first = Two::new("new-account");
+    first.make(0, "Home", "Weekend", "the view");
+    let a = &mut first.sides[0];
+    std::fs::write(a.dir.join("Home/hill.jpg"), &hill).unwrap();
+    let src = a.store.save_attachment("Home", "jpg", &photo).unwrap();
+    let i = a.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    let n = &mut a.store.notes[i];
+    for src in ["hill.jpg", src.as_str()] {
+        n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.into(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    }
+    n.touch();
+    a.store.save(i, true).unwrap();
+    a.store.rescan();
+    for _ in 0..4 {
+        first.pump();
+    }
+    let old = first.sides[0].session.blob_id(&hill);
+    assert!(first.worker.blobs.get(ACCOUNT, &old).is_some(), "on the first account's server");
+    // The first account's other device goes with it; this folder stays,
+    // its replica and pictures index as they were.
+    let side = first.sides.remove(0);
+    drop(first);
+    let dir = side.dir.clone();
+    drop(side);
+
+    // The same folder in a new account, a new device beside it.
+    let mut second = Two::with_folders("new-account-2", [Some(dir), None]);
+    for _ in 0..4 {
+        second.pump();
+    }
+    let attached = src.trim_start_matches("../").to_string();
+    for (bytes, path) in [(&hill, "Home/hill.jpg"), (&photo, attached.as_str())] {
+        let id = second.sides[0].session.blob_id(bytes);
+        assert_ne!(id, old, "ids are the account's");
+        assert!(second.worker.blobs.get(ACCOUNT, &id).is_some(), "{path} on the new account's server");
+        for side in 0..2 {
+            let vault = second.sides[side].store.replica.as_ref().unwrap().vault().pictures();
+            assert_eq!(vault.get(path), Some(&crate::pictures::hex(&id)), "{path} named by its new id in {side}'s vault");
+        }
+        assert_eq!(std::fs::read(second.sides[1].dir.join(path)).ok().as_ref(), Some(bytes), "{path} on the new device");
+    }
 }
 
 impl Side {

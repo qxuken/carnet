@@ -587,12 +587,10 @@ impl Carnet {
             .map(|d| (d.id.clone(), if d.you { "this device".into() } else { d.name.clone().unwrap_or_else(|| "another device".into()) }))
             .collect();
         let name_of = |id: &[u8]| names.get(id).cloned().unwrap_or_else(|| "a device no longer in the account".into());
-        let title_of = |me: &Self, room: &str| {
-            carnet_sync::Key::parse(room)
-                .and_then(|k| me.store.notes.iter().find(|n| n.key == Some(k)))
-                .map(|n| n.display_title().to_string())
-                .unwrap_or_else(|| "A note not on this device".into())
-        };
+        // The rooms this device has a copy of: every note's, those in
+        // Deleted too, and the vault's (where the notes go).
+        let have: std::collections::HashSet<String> = self.store.replica.as_ref().map(|r| carnet_sync::session::Docs::rooms(r).into_iter().collect()).unwrap_or_default();
+        let title_of = |me: &Self, room: &str| sync_room_title(&me.store, room);
         let saves = |n: u64| if n == 1 { "1 save".to_string() } else { format!("{n} saves") };
         let edits = |n: u64| if n == 1 { "1 edit".to_string() } else { format!("{n} edits") };
         // A line: an icon, then words.
@@ -602,14 +600,26 @@ impl Carnet {
                 ui.text_in(NodeSpec::row().grow_width(), words, style);
             });
         };
+        // When the server said this, and whether the notes have changed
+        // since (it's asked again once they're quiet).
+        let checked = match (self.sync.inspection_stale(), self.sync.inspected_at) {
+            (true, _) => "Changed since: checking again\u{2026}".to_string(),
+            (false, Some(at)) => format!("Checked {}", super::chrome::ago(now, at)),
+            (false, None) => String::new(),
+        };
+        if !checked.is_empty() {
+            ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 8.0, b: 2.0 }), |ui| line(ui, Icon::Clock, t.muted, &checked, small(t.muted)));
+        }
         let (mut quiet, mut shown) = (0, 0);
         for (i, r) in rooms.iter().enumerate() {
-            // This device's copy against the server's, by peer.
-            let here = carnet_sync::Key::parse(&r.room)
-                .filter(|k| self.store.replica.as_ref().is_some_and(|rep| rep.entry(*k).is_some()))
-                .and(self.store.replica.as_mut())
-                .map(|rep| carnet_sync::session::Docs::doc(rep, &r.room).version_vector())
-                .unwrap_or_default();
+            // This device's copy against the server's, by peer. One this
+            // device has no copy of has nothing here to compare, nor to
+            // replace the server's with.
+            let mine_here = have.contains(&r.room);
+            let here = match (mine_here, self.store.replica.as_mut()) {
+                (true, Some(rep)) => carnet_sync::session::Docs::doc(rep, &r.room).version_vector(),
+                _ => Vec::new(),
+            };
             let ahead = |a: &[(u64, u64)], b: &[(u64, u64)]| -> u64 {
                 let b: HashMap<u64, u64> = b.iter().copied().collect();
                 a.iter().map(|(p, c)| c.saturating_sub(b.get(p).copied().unwrap_or(0))).sum()
@@ -631,12 +641,17 @@ impl Carnet {
             let armed = self.sync_inspect_armed.as_ref().filter(|(room, _)| *room == r.room).map(|(_, repair)| *repair);
             let days_left = (r.shelved_since + KEEP_DAYS * 86_400).saturating_sub(secs).div_ceil(86_400).max(1);
             let undoable = r.base.as_ref().is_some_and(|b| b.undoable) && r.shelved > 0;
+            // Its ways to fix it: undo packing, if it's packed; replace the
+            // server's copy with this device's, if this device has one.
+            let ways = r.base.is_some() || mine_here;
             ui.with_key(ui.child_key("sync-room").index(i as u64), NodeSpec::column().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 10.0, b: 10.0 }).gap(6.0), |ui| {
                 // The note, and More.
                 ui.with(NodeSpec::row().grow_width().gap(10.0).cross_align(Align::Center), |ui| {
                     ui.text_in(NodeSpec::row().grow_width(), &title, TextStyle::new(Type::STRONG.size).color(t.fg));
-                    let word = if open { "Hide ways to fix" } else { "Ways to fix" };
-                    icon_pill(ui, l, &format!("sync-more-{i}"), Icon::More, word, false, true, Msg::SyncInspectMore { at: i as u64 });
+                    if ways {
+                        let word = if open { "Hide ways to fix" } else { "Ways to fix" };
+                        icon_pill(ui, l, &format!("sync-more-{i}"), Icon::More, word, false, true, Msg::SyncInspectMore { at: i as u64 });
+                    }
                 });
                 line(ui, g, ink, &state, small(t.fg));
                 match &r.base {
@@ -651,7 +666,7 @@ impl Carnet {
                     }
                     None => line(ui, Icon::Layers, t.muted, &format!("Kept as {}", saves(r.live)), small(t.muted)),
                 }
-                if !open {
+                if !open || !ways {
                     return;
                 }
                 // The ways to fix it, each with what it does.
@@ -696,17 +711,14 @@ impl Carnet {
                     };
                     way(ui, &format!("sync-undo-{i}"), Icon::Undo, "Undo packing", "Undo", &what, undoable, Msg::SyncRollBack { at: i as u64 }, false);
                 }
-                way(
-                    ui,
-                    &format!("sync-replace-{i}"),
-                    Icon::Upload,
-                    "Replace with this device's copy",
-                    "Replace",
-                    "Make the server's copy of this note the same as this device's. For when the note looks wrong on your other devices.",
-                    true,
-                    Msg::SyncRepair { at: i as u64 },
-                    true,
-                );
+                if mine_here {
+                    let what = if r.room == carnet_sync::vault::ROOM {
+                        "Make the server's folders and note names the same as this device's. For when notes are in the wrong place on your other devices."
+                    } else {
+                        "Make the server's copy of this note the same as this device's. For when the note looks wrong on your other devices."
+                    };
+                    way(ui, &format!("sync-replace-{i}"), Icon::Upload, "Replace with this device's copy", "Replace", what, true, Msg::SyncRepair { at: i as u64 }, true);
+                }
             });
         }
         if quiet > 0 || rooms.is_empty() {
@@ -1818,5 +1830,27 @@ fn left(now: u64, until: u64) -> String {
         0..3600 => unit(s.div_ceil(60).max(1), "minute"),
         3600..86_400 => unit(s.div_ceil(3600), "hour"),
         _ => unit(s.div_ceil(86_400), "day"),
+    }
+}
+
+/// What the inspector calls a room on the server (docs/SYNC.md §9): a
+/// note by its title (one in Deleted by its file's name, and said so);
+/// the vault as what it holds; and one this device has no copy of, as
+/// such.
+pub(super) fn sync_room_title(store: &crate::store::Store, room: &str) -> String {
+    if room == carnet_sync::vault::ROOM {
+        return "Folders and note names".into();
+    }
+    let Some(key) = carnet_sync::Key::parse(room) else { return "A note not on this device yet".into() };
+    if let Some(n) = store.notes.iter().find(|n| n.key == Some(key)) {
+        return n.display_title().to_string();
+    }
+    match store.replica.as_ref().and_then(|r| r.entry(key)) {
+        Some(e) => {
+            let name = e.path.rsplit('/').next().unwrap_or(&e.path);
+            let name = name.strip_suffix(".md").unwrap_or(name);
+            if e.path.starts_with(".trash/") { format!("{name} (in Deleted)") } else { name.to_string() }
+        }
+        None => "A note not on this device yet".into(),
     }
 }

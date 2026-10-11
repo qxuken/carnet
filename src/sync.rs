@@ -312,6 +312,11 @@ fn socket_url(origin: &str) -> Option<String> {
 /// How often moves made here are looked for, to go to the vault.
 const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The notes on the server are asked for again this long after the
+/// account's notes last changed, while the inspector shows them: once a
+/// burst of saves is over, not at each.
+const INSPECT_QUIET: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub struct Sync {
     phase: Phase,
     /// Where `sync.txt` is; `None`: kept nowhere (the tests').
@@ -375,9 +380,24 @@ pub struct Sync {
     pub invite: Option<String>,
     /// The server's rooms and log, as last inspected (§9).
     pub inspection: Option<(Vec<RoomRow>, Vec<LogRow>)>,
-    /// The inspector is open: inspect when there's nothing to show.
+    /// When the server said them.
+    pub inspected_at: Option<std::time::SystemTime>,
+    /// The inspector is open: inspect when there's nothing to show, and
+    /// again once the account's notes have changed since.
     pub want_inspection: bool,
     asked_inspection: bool,
+    /// The session's [`Session::moves`] when the inspection shown was
+    /// asked for, and when the one on its way was.
+    inspected_moves: u64,
+    asked_moves: u64,
+    /// The same for what the account keeps ([`Sync::usage`]).
+    usage_moves: u64,
+    /// The session's moves as last seen, and when they last grew.
+    last_moves: (u64, std::time::Instant),
+    /// Something happened since the notes' places and the pictures were
+    /// last compared with the vault: they are to be again, soon, though
+    /// nothing else wakes the app ([`Sync::due`]).
+    layout_due: bool,
     /// The server this device was set up with, when its keys couldn't be
     /// read: Settings offers it again.
     pub last_origin: Option<String>,
@@ -438,8 +458,14 @@ impl Sync {
             made: Vec::new(),
             invite: None,
             inspection: None,
+            inspected_at: None,
             want_inspection: false,
             asked_inspection: false,
+            inspected_moves: 0,
+            asked_moves: 0,
+            usage_moves: 0,
+            last_moves: (0, std::time::Instant::now()),
+            layout_due: false,
             name: None,
             last_origin: None,
             last_layout: std::time::Instant::now(),
@@ -745,10 +771,61 @@ impl Sync {
         }
     }
 
-    /// Asks the server again how it keeps the rooms.
+    /// Asks the server again how it keeps the rooms: what's shown stays
+    /// until the answer comes.
     pub fn refresh_inspection(&mut self) {
-        self.inspection = None;
         self.asked_inspection = false;
+        self.inspected_moves = u64::MAX;
+        self.last_moves.1 = std::time::Instant::now() - INSPECT_QUIET;
+    }
+
+    /// Whether the inspection shown is out of date: the account's notes
+    /// have changed since the server said it (it's asked again shortly).
+    pub fn inspection_stale(&self) -> bool {
+        match &self.phase {
+            Phase::On { session, .. } => self.inspection.is_some() && session.moves() != self.inspected_moves,
+            _ => false,
+        }
+    }
+
+    /// The notes folder may have changed outside sync's sight (another
+    /// app, looked at again): the places and pictures are compared with
+    /// the vault soon.
+    pub fn poke(&mut self) {
+        self.layout_due = true;
+    }
+
+    /// Logged in, every room joined, everything sent acknowledged.
+    #[cfg(test)]
+    pub fn is_idle(&self) -> bool {
+        matches!(&self.phase, Phase::On { session, .. } if session.is_idle())
+    }
+
+    /// How long until sync wants a turn though nothing wakes the app: the
+    /// notes' places and pictures compared with the vault after what
+    /// happened (a first login, a save, something come), and the notes
+    /// on the server asked again once the account is quiet. `None`: only
+    /// when woken.
+    pub fn due(&self) -> Option<std::time::Duration> {
+        let Phase::On { session, .. } = &self.phase else { return None };
+        if !session.has_joined(vault::ROOM) {
+            return None;
+        }
+        let mut due = None::<std::time::Duration>;
+        let mut at = |d: std::time::Duration| due = Some(due.map_or(d, |e| e.min(d)));
+        if self.layout_due {
+            at(LAYOUT_EVERY.saturating_sub(self.last_layout.elapsed()));
+        }
+        let m = session.moves();
+        let inspect = self.want_inspection && !self.asked_inspection && self.inspection.is_some() && m != self.inspected_moves;
+        let usage = self.want_devices && !self.asked_usage && self.usage.is_some() && m != self.usage_moves;
+        if inspect || usage {
+            // Quiet long enough, and still waiting for what's in flight:
+            // looked at again in a while, not at every frame.
+            let wait = INSPECT_QUIET.saturating_sub(self.last_moves.1.elapsed());
+            at(if wait.is_zero() { LAYOUT_EVERY } else { wait });
+        }
+        due
     }
 
     /// `room`'s base on the server dropped, and what it stood for put back
@@ -782,6 +859,7 @@ impl Sync {
         self.joined = None;
         self.passkeys.clear();
         self.inspection = None;
+        self.inspected_at = None;
         self.invites = None;
         self.made.clear();
         self.invite = None;
@@ -889,8 +967,12 @@ impl Sync {
                 };
                 // What's written here names this device in the history.
                 replica.set_author(Some(&config.device));
+                // Anything at all happening: the places and pictures are
+                // compared with the vault again soon ([`Sync::due`]).
+                let mut busy = false;
                 if let Some(l) = link.as_ref() {
                     for e in l.poll() {
+                        busy = true;
                         match e {
                             NetEvent::Connected => {
                                 session.connected();
@@ -918,13 +1000,16 @@ impl Sync {
                 }
                 if let Some(http) = &self.http {
                     for d in http.poll() {
+                        busy = true;
                         session.transferred(d.id, d.put, d.result);
                     }
                 }
                 let mut rooms = Vec::new();
                 let mut gone = None;
                 let mut blobs = Vec::new();
-                for e in session.take_events() {
+                let events = session.take_events();
+                self.layout_due |= busy || !events.is_empty();
+                for e in events {
                     match e {
                         Event::LoggedIn => {
                             self.status = Status::Online;
@@ -975,6 +1060,9 @@ impl Sync {
                         }
                         Event::Inspected(rooms, log) => {
                             self.inspection = Some((rooms, log));
+                            self.inspected_at = Some(std::time::SystemTime::now());
+                            // Unasked, after a roll back or a repair: as of now.
+                            self.inspected_moves = if self.asked_inspection { self.asked_moves } else { session.moves() };
                             self.asked_inspection = false;
                         }
                         // Told to the server, which rolls it back; the room
@@ -1029,17 +1117,31 @@ impl Sync {
                     session.list_devices();
                     self.asked_devices = true;
                 }
-                if self.want_devices && self.usage.is_none() && !self.asked_usage && session.is_ready() {
-                    session.usage();
-                    self.asked_usage = true;
-                }
                 if self.want_invites && self.invites.is_none() && !self.asked_invites && session.is_ready() {
                     session.list_invites();
                     self.asked_invites = true;
                 }
-                if self.want_inspection && self.inspection.is_none() && !self.asked_inspection && session.is_ready() {
+                // The notes on the server: asked when the inspector opens,
+                // and again once the account's notes have changed since and
+                // gone quiet, so what it shows is never long out of date.
+                let moves = session.moves();
+                if moves != self.last_moves.0 {
+                    self.last_moves = (moves, std::time::Instant::now());
+                }
+                let stale = self.inspection.is_some() && moves != self.inspected_moves;
+                let quiet = session.is_idle() && self.last_moves.1.elapsed() >= INSPECT_QUIET;
+                if self.want_inspection && !self.asked_inspection && session.is_ready() && (self.inspection.is_none() || (stale && quiet)) {
                     session.inspect();
                     self.asked_inspection = true;
+                    self.asked_moves = moves;
+                }
+                // What the account keeps, likewise: "0 bytes kept" isn't
+                // left standing once the notes have gone up.
+                let usage_stale = self.usage.is_some() && moves != self.usage_moves && quiet;
+                if self.want_devices && !self.asked_usage && session.is_ready() && (self.usage.is_none() || usage_stale) {
+                    session.usage();
+                    self.asked_usage = true;
+                    self.usage_moves = moves;
                 }
                 if let Some(account) = gone {
                     self.forget();
@@ -1081,6 +1183,7 @@ impl Sync {
                 }
                 if vault_in || !changed.is_empty() || self.last_layout.elapsed() >= LAYOUT_EVERY {
                     self.last_layout = std::time::Instant::now();
+                    self.layout_due = !session.has_joined(vault::ROOM);
                     match store.reconcile(session.has_joined(vault::ROOM)) {
                         Ok(true) => changed.push(Remote::Layout),
                         Ok(false) => {}
@@ -1103,6 +1206,7 @@ impl Sync {
                 let ids: Vec<BlobId> = pending.pictures.iter().filter_map(|h| unhex32(h)).collect();
                 session.drop_blobs(&ids);
                 let keys = store.take_changed();
+                self.layout_due |= !keys.is_empty();
                 // A note saved (or a version restored) showing a picture
                 // dropped since: fetched back while the server keeps it.
                 if !keys.is_empty() && store.replica.as_ref().is_some_and(|r| !r.vault().dropped_pictures().is_empty()) {

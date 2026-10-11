@@ -103,9 +103,12 @@ button { font: inherit; color: inherit; }
 .note .pictures img:not([width]) { max-width: min(45cqi, var(--share)); }
 .note .pictures ~ :is(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote) { display: flow-root; min-width: min(180px, 100%); }
 .note .pictures ~ :is(.pictures, p:has(> img)) { clear: both; }
-.note img.waiting { min-height: 120px; min-width: 160px; }
-/* A picture this browser can't draw (HEIC, outside Safari): a small card. */
-.picture-card { display: inline-flex; align-items: center; gap: 10px; max-width: 100%; margin: 4px 0; padding: 10px 12px; border-radius: var(--radius); background: var(--sunken); color: var(--muted); font: 400 15px/1.4 var(--sans); }
+/* A picture's place until it comes, and the card saying why one isn't
+   shown (not found; HEIC, outside Safari) in that same place: as wide as
+   the picture will be laid out (the page, or the width the note gives
+   it), in the reader and the editor alike (pictures.ts). */
+.picture-card { display: flex; align-items: center; justify-content: center; gap: 10px; box-sizing: border-box; width: 100%; max-width: 100%; min-height: 120px; margin: 4px 0; padding: 10px 12px; border-radius: var(--radius); background: var(--sunken); color: var(--muted); font: 400 15px/1.4 var(--sans); }
+.note .pictures .picture-card { flex: none; width: min(45cqi, var(--share)); max-width: var(--share); }
 .picture-card-icon { display: inline-flex; flex: none; width: 18px; height: 18px; }
 .picture-card-icon svg { width: 100%; height: 100%; }
 .picture-card-words { display: grid; min-width: 0; }
