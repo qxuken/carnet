@@ -3362,6 +3362,11 @@ impl App for Carnet {
         if let Some((text, html)) = self.clip_out.take() {
             ui.set_clipboard(text, html);
         }
+        // Pictures the last frame didn't draw may go; a frame is asked
+        // for when the next could, should nothing else draw one.
+        if let Some(wait) = self.images.sweep(ui.core(), std::time::Instant::now()) {
+            ui.request_frame_at(ui.now() + wait.as_secs_f64());
+        }
         if self.images.pump(ui.core()) {
             self.reveal = self.reveal || self.editing;
         }

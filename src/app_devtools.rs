@@ -89,8 +89,10 @@ impl Carnet {
         row(&mut rows, "focus", format!("{:?}", ui.focused()));
 
         head(&mut rows, "Pictures");
-        let (loading, ready, failed) = self.images.counts();
-        row(&mut rows, "cache", format!("{ready} shown, {loading} reading, {failed} failed"));
+        let (loading, ready, failed, gone) = self.images.counts();
+        row(&mut rows, "cache", format!("{ready} shown, {loading} reading, {failed} failed, {gone} let go"));
+        let mb = |b: u64| b as f64 / (1 << 20) as f64;
+        row(&mut rows, "memory", format!("{:.0} of {:.0} MB", mb(self.images.bytes()), mb(images::BUDGET)));
         row(&mut rows, "drop", format!("{:?}", self.drop_index));
         row(&mut rows, "dragging", self.note_drag.as_ref().map_or("no".into(), |d| format!("note {} → {:?}", d.id, d.target)));
 
