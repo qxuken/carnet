@@ -8,7 +8,7 @@
 //! lets the arrows cross blocks and table cells, Backspace join lines and
 //! take empty ones, and one undo history cover every change.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime};
 
 use kui_native::widgets;
@@ -52,7 +52,9 @@ use crate::design::{Type, radius, size};
 const STRIP_H: f32 = size::STRIP;
 const BODY_LH: f32 = Type::BODY.line;
 /// The least the page keeps beside the library: below the library's
-/// width and this, the library folds away, to a button.
+/// least width (`Carnet::library_least`) and this, the library folds
+/// away, to a button. Above it, the library is as wide as dragged, as far
+/// as the page keeps this.
 const PAGE_MIN: f32 = 592.0;
 /// How long typing has to pause before the note is written.
 const SAVE_AFTER: Duration = Duration::from_millis(600);
@@ -374,6 +376,19 @@ pub enum Undo {
     /// A picture moved into Carnet: back where it was, and its notes
     /// showing it there.
     Picture(Box<store::Moved>),
+    /// A picture copied into Carnet: the edit that showed the copy taken
+    /// back — the open note's last, as `Edit` — and the copy with it, when
+    /// nothing else shows it. `srcs`: the note's pictures as they were
+    /// (block id, src), what an undo of the copy's path gives back.
+    Copied { note: u64, copy: std::path::PathBuf, srcs: Vec<(u64, String)> },
+}
+
+impl Undo {
+    /// It takes back the open note's last edit: another edit, or another
+    /// note opened, and it no longer means anything.
+    fn is_edit(&self) -> bool {
+        matches!(self, Undo::Edit | Undo::Copied { .. })
+    }
 }
 
 /// A note's history, shown in place of the library: its versions, and
@@ -516,6 +531,9 @@ pub struct Carnet {
     clear_search: bool,
     /// One line under the title for what just happened, with the way back.
     notice: Option<Notice>,
+    /// The notice's words and its Undo, as last drawn: pointed at, it
+    /// stays.
+    notice_keys: Vec<Key>,
     /// Said once by a screen reader on the next frame.
     say: Option<String>,
     /// Move along the Tab ring on the next frame: forward, or back.
@@ -586,6 +604,12 @@ pub struct Carnet {
     /// How far the leftmost strip's content keeps from the window's left
     /// edge: past the macOS traffic lights under custom chrome, else 0.
     pub lights: f32,
+    /// The window's width, as the last frame laid it out: how wide the
+    /// library can be beside the page.
+    view_w: f32,
+    /// The window's width changed this frame: the library, held to it,
+    /// follows at once rather than gliding behind.
+    view_resized: bool,
     /// A context menu is up: the window's drag regions stand down, so a
     /// press on them dismisses it (the OS would take it for a drag).
     menu_open: bool,
@@ -877,6 +901,7 @@ impl Carnet {
             title_focused: false,
             clear_search: false,
             notice: None,
+            notice_keys: Vec::new(),
             say: None,
             step: None,
             blur: false,
@@ -908,6 +933,8 @@ impl Carnet {
             initial: Default::default(),
             menu_open: false,
             lights: 0.0,
+            view_w: f32::INFINITY,
+            view_resized: false,
             refocus: false,
             slash_sel: 0,
             slash_word: String::new(),
@@ -1033,11 +1060,13 @@ impl Carnet {
 
     /// The selected picture, the user's own file, into the attachments
     /// folder, where it's Carnet's and syncs. Copied, this note shows the
-    /// copy: an edit like any, which Undo takes back (the copy then goes
-    /// unshown, and the sweep takes it in time, once no version shows
-    /// it). Moved, every note that showed it shows it there, saved; their
-    /// undo histories say so too, so an undo never brings back a path
-    /// that leads nowhere; the notice's Undo moves it back.
+    /// copy: an edit like any, which the notice's Undo (or ⌘Z while it
+    /// shows) takes back with the copy, which nothing else shows yet; an
+    /// undo after the notice has gone leaves the copy, as any picture a
+    /// version of a note shows. Moved, every note that showed it shows it
+    /// there, saved; their undo histories say so too, so an undo never
+    /// brings back a path that leads nowhere; the notice's Undo moves it
+    /// back.
     fn take_in_picture(&mut self, copy: bool) {
         let Some((src, wiki)) = self.picture_at_caret() else { return };
         let folder = self.page_folder();
@@ -1058,11 +1087,20 @@ impl Carnet {
                 }
             };
             let edits = self.store.relinks(self.current, &from, &to);
+            let doc = self.doc();
+            let srcs: Vec<(u64, String)> = edits
+                .iter()
+                .filter_map(|(id, _)| match &doc.blocks()[doc.index_of(*id)?].kind {
+                    Kind::Image { src, .. } => Some((*id, src.clone())),
+                    _ => None,
+                })
+                .collect();
             self.edit(Step::Other, |d, _| store::set_srcs(d, &edits));
             self.save_current();
             self.store.index_files();
             self.sync.poke();
-            self.notify(format!("Copied \u{201c}{name}\u{201d} into Carnet: this note shows the copy, which syncs"), Some(Undo::Edit));
+            let undo = Undo::Copied { note: self.store.notes[self.current].id, copy: to, srcs };
+            self.notify(format!("Copied \u{201c}{name}\u{201d} into Carnet: this note shows the copy, which syncs"), Some(undo));
             return;
         }
         // Edits not saved yet go first: every note is written from what
@@ -1226,9 +1264,28 @@ impl Carnet {
         if narrow || !self.side_shown() { 0.0 } else { self.library_w() }
     }
 
-    /// The library's width, as last dragged.
+    /// The library's width: as last dragged, as far as the window leaves
+    /// the page its least ([`PAGE_MIN`]) — a width saved on a wider window
+    /// is drawn narrower here, and comes back on a wider one.
     pub(super) fn library_w(&self) -> f32 {
-        self.settings.library_w as f32
+        (self.settings.library_w as f32).min(self.library_most())
+    }
+
+    /// The narrowest the library is drawn beside the page: as dragged, but
+    /// no narrower than the design's width for a library dragged wider —
+    /// a window too narrow for that shows one or the other, as it did. A
+    /// drag never changes which: it stops short of the page's least
+    /// ([`library_most`](Self::library_most)), and the least follows a
+    /// library dragged narrower.
+    fn library_least(&self) -> f32 {
+        (self.settings.library_w as f32).min(size::SIDEBAR)
+    }
+
+    /// The widest the library can be beside the page in this window, and
+    /// never less than its least.
+    fn library_most(&self) -> f32 {
+        let (lo, hi) = (*crate::settings::LIBRARY_WIDTHS.start() as f32, *crate::settings::LIBRARY_WIDTHS.end() as f32);
+        (self.view_w - PAGE_MIN).floor().clamp(lo, hi)
     }
 
     /// The library beside the page: as the settings say, and never in zen.
@@ -1288,7 +1345,7 @@ impl Carnet {
         }
         if changed {
             // A notice's Undo of the last edit means that edit, no other.
-            if self.notice.as_ref().is_some_and(|n| matches!(n.undo, Some(Undo::Edit))) {
+            if self.notice.as_ref().is_some_and(|n| n.undo.as_ref().is_some_and(Undo::is_edit)) {
                 self.notice = None;
             }
             self.histories.entry(id).or_default().record(step, block, before);
@@ -1406,6 +1463,9 @@ impl Carnet {
     /// note is followed by id; if it went, the first in the list opens.
     fn rescan(&mut self) {
         let open = self.store.notes.get(self.current).map(|n| n.id);
+        // Each note as it is before: one reread from disk comes back
+        // with its `rev` moved on.
+        let revs: HashMap<u64, _> = self.store.notes.iter().map(|n| (n.id, n.rev)).collect();
         let changed = self.store.rescan();
         self.gather_pictures();
         // A picture put beside a note meanwhile goes to the vault soon.
@@ -1421,16 +1481,18 @@ impl Carnet {
         {
             self.folder = None;
         }
-        // A note reread from disk is not the one its history describes:
-        // only a note still being edited here keeps its history.
-        let editing: Vec<u64> = self
+        // A note reread from disk is not the one its history describes,
+        // and one gone has none: every other note keeps its history — a
+        // change to another file (another app's, sync's) takes nothing
+        // from the open note's undo, nor from its notice's Undo.
+        let kept: HashSet<u64> = self
             .store
             .notes
             .iter()
-            .filter(|n| n.dirty)
+            .filter(|n| n.dirty || revs.get(&n.id) == Some(&n.rev))
             .map(|n| n.id)
             .collect();
-        self.histories.retain(|id, _| editing.contains(id));
+        self.histories.retain(|id, _| kept.contains(id));
         self.reorder();
         match open.and_then(|id| self.store.notes.iter().position(|n| n.id == id)) {
             Some(i) => self.current = i,
@@ -1478,7 +1540,7 @@ impl Carnet {
             return;
         }
         // "Removed · Undo" was about the note being left.
-        if self.notice.as_ref().is_some_and(|n| matches!(n.undo, Some(Undo::Edit))) {
+        if self.notice.as_ref().is_some_and(|n| n.undo.as_ref().is_some_and(Undo::is_edit)) {
             self.notice = None;
         }
         let id = self.store.notes[note].id;
@@ -1624,6 +1686,22 @@ impl Carnet {
                         }
                         Err(e) => self.error = Some(format!("Couldn't restore: {e}")),
                     }
+                }
+            }
+            Undo::Copied { note, copy, srcs } => {
+                if self.store.notes[self.current].id != note {
+                    return;
+                }
+                self.undo_edit();
+                self.save_current();
+                // No undo or redo brings back a path to the copy, gone.
+                self.picture_moved(&copy, &[(note, srcs)], |_, _| None);
+                match self.store.take_back_copy(&copy) {
+                    Ok(_) => {
+                        self.sync.poke();
+                        self.say = Some("Restored".into());
+                    }
+                    Err(e) => self.error = Some(format!("Couldn't take the copy away: {}", store::plain_error(&e))),
                 }
             }
             Undo::Picture(m) => match self.store.unmove_picture(&m) {
@@ -2115,19 +2193,22 @@ impl Carnet {
     }
 
     /// The library's edge dragged: the width follows the pointer, within
-    /// `LIBRARY_WIDTHS`, and is saved when it is let go. A double-click
-    /// puts it back to the design's.
+    /// `LIBRARY_WIDTHS` and short of leaving the page less than its least
+    /// — so a drag never folds the library away — and is saved when it is
+    /// let go. A double-click puts it back to the design's.
     fn library_drag(&mut self, ev: &UiEvent) {
         let p = &ev.payload;
         let x = p.get_float("x").or_else(|| p.get_int("x").map(|v| v as f64)).unwrap_or(0.0) as f32;
-        let (lo, hi) = (*crate::settings::LIBRARY_WIDTHS.start(), *crate::settings::LIBRARY_WIDTHS.end());
+        let (lo, hi) = (*crate::settings::LIBRARY_WIDTHS.start(), self.library_most() as u32);
         match p.get_str("phase") {
             Some("start") if p.get_int("clicks").unwrap_or(1) >= 2 => {
                 self.library_from = None;
                 self.settings.library_w = size::SIDEBAR as u32;
                 self.save_library_w();
             }
-            Some("start") => self.library_from = Some((x, self.settings.library_w)),
+            // From the width drawn, which a narrower window may have
+            // made less than the one saved.
+            Some("start") => self.library_from = Some((x, self.library_w() as u32)),
             Some("move") => {
                 if let Some((x0, w0)) = self.library_from {
                     self.settings.library_w = (w0 as f32 + x - x0).round().clamp(lo as f32, hi as f32) as u32;
@@ -3271,7 +3352,7 @@ impl Carnet {
             // notice's Undo says — not an edit in the note that took its
             // place.
             KeyCode::Char('z') | KeyCode::Char('Z')
-                if self.notice.as_ref().is_some_and(|n| matches!(n.undo, Some(Undo::Note { .. } | Undo::Many(_) | Undo::Picture(_)))) =>
+                if self.notice.as_ref().is_some_and(|n| matches!(n.undo, Some(Undo::Note { .. } | Undo::Many(_) | Undo::Picture(_) | Undo::Copied { .. }))) =>
             {
                 self.notice_undo()
             }
@@ -3535,6 +3616,13 @@ impl App for Carnet {
         self.sync_tick();
         self.signup_tick();
         // A notice lasts a while, then goes; Undo lasts as long as it shows.
+        // Its while starts again as long as the pointer is on it, on its way
+        // to its Undo, or the window is in the background, where it can't
+        // be read: it never goes from under a click, nor unseen.
+        let held = !ui.env().focused || self.notice_keys.iter().any(|&k| ui.is_hovered(k));
+        if held && let Some(n) = self.notice.as_mut() {
+            n.at = Instant::now();
+        }
         if self.notice.as_ref().is_some_and(|n| n.at.elapsed() >= NOTICE_FOR) {
             self.notice = None;
         }
@@ -3701,9 +3789,14 @@ impl App for Carnet {
 
         self.lights = ui.env().window.native_controls.map_or(0.0, |r| r.x + r.w + 12.0);
         let vw = ui.viewport().w;
+        self.view_resized = vw != self.view_w;
+        self.view_w = vw;
         // Wide: the library beside the note. Narrow: one or the other —
         // the list, until a note is chosen; the note, with a way back.
-        let narrow = vw < self.library_w() + PAGE_MIN;
+        // Narrow by the library's least width, not its own: a library
+        // dragged wide narrows on a smaller window before it folds, and a
+        // drag never folds it.
+        let narrow = vw < self.library_least() + PAGE_MIN;
         ui.configure_root(
             NodeSpec::row()
                 .fill()

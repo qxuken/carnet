@@ -436,6 +436,25 @@ impl Store {
         Ok(swept)
     }
 
+    /// Copy into Carnet taken back: the copy it made (`copy`, in the
+    /// attachments folder) goes where the sweep puts what nothing shows —
+    /// `.trash/`, from where a version restored that shows it brings it
+    /// back — and is dropped in the vault. Not while a note shows it (one
+    /// in Deleted too): then it stays, for the sweep to judge in time. True
+    /// if it went.
+    pub fn take_back_copy(&mut self, copy: &Path) -> io::Result<bool> {
+        let Some(rel) = rel_under(&self.dir, copy) else { return Ok(false) };
+        if !is_owned(&rel) || !copy.is_file() {
+            return Ok(false);
+        }
+        if self.pictures_in_use().iter().any(|p| p.eq_ignore_ascii_case(&rel)) {
+            return Ok(false);
+        }
+        self.sweep_one(&rel, copy)?;
+        self.index_files();
+        Ok(true)
+    }
+
     /// One picture swept: to `.trash/` under its path from the notes
     /// folder (or the first name free there), and dropped in the vault.
     fn sweep_one(&mut self, rel: &str, path: &Path) -> io::Result<()> {
