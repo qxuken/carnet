@@ -43,6 +43,9 @@ pub enum Sort {
 
 pub const SIZES: std::ops::RangeInclusive<u32> = 12..=24;
 
+/// How many lines a dropped first letter can be tall.
+pub const INITIAL_LINES: std::ops::RangeInclusive<u32> = 2..=4;
+
 /// How wide the library can be dragged, in px.
 pub const LIBRARY_WIDTHS: std::ops::RangeInclusive<u32> = 200..=480;
 
@@ -102,8 +105,15 @@ pub struct Settings {
     pub sort: Sort,
     /// How a divider is drawn.
     pub divider: Divider,
-    /// The note's first paragraph starts with a large letter.
+    /// The note's first paragraph opens with a dropped letter (`large`
+    /// in the file, as it was).
     pub initial: bool,
+    /// How many lines that letter is tall.
+    pub initial_lines: u32,
+    /// Its face by family name; empty for the headings'.
+    pub initial_font: String,
+    /// In the accent's ink; or the text's.
+    pub initial_accent: bool,
     /// The library's width in px, as dragged.
     pub library_w: u32,
 
@@ -144,6 +154,9 @@ impl Default for Settings {
             sort: Sort::Edited,
             divider: Divider::Dots,
             initial: false,
+            initial_lines: 3,
+            initial_font: String::new(),
+            initial_accent: true,
             library_w: crate::design::size::SIDEBAR as u32,
             translucent: true,
             fade_tools: true,
@@ -216,6 +229,13 @@ impl Settings {
                 }
                 "divider" => s.divider = Divider::from_key(v).unwrap_or(Divider::Dots),
                 "initial" => s.initial = v == "large",
+                "initial_lines" => {
+                    if let Ok(n) = v.parse::<u32>() {
+                        s.initial_lines = n.clamp(*INITIAL_LINES.start(), *INITIAL_LINES.end());
+                    }
+                }
+                "initial_font" => s.initial_font = v.to_string(),
+                "initial_color" => s.initial_accent = v != "text",
                 "library_width" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.library_w = n.clamp(*LIBRARY_WIDTHS.start(), *LIBRARY_WIDTHS.end());
@@ -254,7 +274,7 @@ impl Settings {
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndivider = {}\ninitial = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndivider = {}\ninitial = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
@@ -262,6 +282,9 @@ impl Settings {
             self.size,
             self.divider.key(),
             if self.initial { "large" } else { "plain" },
+            self.initial_lines,
+            self.initial_font,
+            if self.initial_accent { "accent" } else { "text" },
             self.library_w,
             if self.translucent { "translucent" } else { "solid" },
             if self.fade_tools { "fades" } else { "stays" },
@@ -318,6 +341,9 @@ mod tests {
             sort: Sort::Title,
             divider: Divider::Flourish,
             initial: true,
+            initial_lines: 4,
+            initial_font: "Zapfino".into(),
+            initial_accent: false,
             library_w: 320,
             translucent: false,
             fade_tools: false,
@@ -334,5 +360,11 @@ mod tests {
         assert_eq!(odd.theme, ThemePref::System);
         let odd = Settings::parse("size = 2\nlibrary_width = 9000\ndivider = wavy\n");
         assert_eq!((odd.size, odd.library_w, odd.divider), (12, 480, Divider::Dots));
+        // A file from before the letter's styles: three lines, the
+        // headings' face, the accent; and a height out of range held in.
+        let old = Settings::parse("initial = large\n");
+        assert_eq!((old.initial, old.initial_lines, old.initial_font.as_str(), old.initial_accent), (true, 3, "", true));
+        assert_eq!(Settings::parse("initial_lines = 9\n").initial_lines, 4);
+        assert_eq!(Settings::parse("initial_lines = 1\n").initial_lines, 2);
     }
 }

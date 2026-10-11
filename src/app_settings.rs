@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use kui_native::FontFamily;
+use kui_native::{FontFamily, Span};
 
 use super::chrome::{Icon, Tool};
 use super::*;
@@ -81,6 +81,10 @@ impl Carnet {
                 s.divider = crate::settings::Divider::ALL[(to as usize).min(crate::settings::Divider::ALL.len() - 1)];
             }
             Msg::SetInitial { to } => s.initial = to == 1,
+            Msg::SetInitialLines { to } => {
+                s.initial_lines = (to as u32 + 2).clamp(*crate::settings::INITIAL_LINES.start(), *crate::settings::INITIAL_LINES.end());
+            }
+            Msg::SetInitialColor { to } => s.initial_accent = to == 0,
             Msg::FontMenu { which } => {
                 self.font_pick = if self.font_pick == Some(which) { None } else { Some(which) };
                 self.font_query.clear();
@@ -95,10 +99,10 @@ impl Carnet {
                         None => return,
                     }
                 };
-                if which == 0 {
-                    s.font = name;
-                } else {
-                    s.heading_font = name;
+                match which {
+                    0 => s.font = name,
+                    1 => s.heading_font = name,
+                    _ => s.initial_font = name,
                 }
                 self.font_pick = None;
             }
@@ -313,10 +317,36 @@ impl Carnet {
                 );
             });
             rule(ui, l);
-            setting(ui, l, "First letter", Some("The note's first paragraph starts with a large letter"), |ui| {
+            let tall = match s.initial_lines {
+                2 => "two",
+                4 => "four",
+                _ => "three",
+            };
+            let note = format!("The note's first paragraph opens with a letter {tall} lines tall");
+            setting(ui, l, "First letter", Some(&note), |ui| {
                 let cur = if s.initial { 1 } else { 0 };
-                segmented(ui, l, "initial", &["Plain", "Large"], cur, |to| Msg::SetInitial { to });
+                segmented(ui, l, "initial", &["Plain", "Dropped"], cur, |to| Msg::SetInitial { to });
             });
+            // The dropped letter's own styles, only while there is one.
+            if s.initial {
+                subgroup(ui, l, "initial-styles", "The dropped letter", |ui| {
+                    sub_setting(ui, l, "Height", |ui| {
+                        let cur = (s.initial_lines - crate::settings::INITIAL_LINES.start()) as usize;
+                        segmented(ui, l, "height", &["2 lines", "3 lines", "4 lines"], cur, |to| Msg::SetInitialLines { to });
+                    });
+                    let name = if s.initial_font.is_empty() { "Same as headings".to_string() } else { s.initial_font.clone() };
+                    sub_setting(ui, l, "Font", |ui| {
+                        font_pill(ui, l, "font-initial", &name, l.initial, self.font_pick == Some(2), Msg::FontMenu { which: 2 });
+                    });
+                    if self.font_pick == Some(2) {
+                        self.font_list(ui, l, 2, &s.initial_font);
+                    }
+                    sub_setting(ui, l, "Colour", |ui| {
+                        let cur = if s.initial_accent { 0 } else { 1 };
+                        segmented(ui, l, "colour", &["Accent", "Text"], cur, |to| Msg::SetInitialColor { to });
+                    });
+                });
+            }
             rule(ui, l);
             setting(ui, l, "Fonts", Some("A pairing, or choose each below"), |ui| {
                 let names: Vec<&str> = design::PAIRINGS.iter().map(|p| p.0).collect();
@@ -326,22 +356,23 @@ impl Carnet {
                     .unwrap_or(usize::MAX);
                 segmented(ui, l, "pairing", &names, cur, |to| Msg::SetPairing { to });
             });
-            rule(ui, l);
-            let body_name = if s.font.is_empty() { look::BODY_FACE.to_string() } else { s.font.clone() };
-            setting(ui, l, "Text font", None, |ui| {
-                font_pill(ui, l, "font-body", &body_name, l.body, self.font_pick == Some(0), Msg::FontMenu { which: 0 });
+            // Each face of the pairing, chosen on its own.
+            subgroup(ui, l, "faces", "Each font", |ui| {
+                let body_name = if s.font.is_empty() { look::BODY_FACE.to_string() } else { s.font.clone() };
+                sub_setting(ui, l, "Text", |ui| {
+                    font_pill(ui, l, "font-body", &body_name, l.body, self.font_pick == Some(0), Msg::FontMenu { which: 0 });
+                });
+                if self.font_pick == Some(0) {
+                    self.font_list(ui, l, 0, &s.font);
+                }
+                let head_name = if s.heading_font.is_empty() { look::HEADING_FACE.to_string() } else { s.heading_font.clone() };
+                sub_setting(ui, l, "Headings", |ui| {
+                    font_pill(ui, l, "font-head", &head_name, l.serif, self.font_pick == Some(1), Msg::FontMenu { which: 1 });
+                });
+                if self.font_pick == Some(1) {
+                    self.font_list(ui, l, 1, &s.heading_font);
+                }
             });
-            if self.font_pick == Some(0) {
-                self.font_list(ui, l, 0, &s.font);
-            }
-            rule(ui, l);
-            let head_name = if s.heading_font.is_empty() { look::HEADING_FACE.to_string() } else { s.heading_font.clone() };
-            setting(ui, l, "Heading font", None, |ui| {
-                font_pill(ui, l, "font-head", &head_name, l.serif, self.font_pick == Some(1), Msg::FontMenu { which: 1 });
-            });
-            if self.font_pick == Some(1) {
-                self.font_list(ui, l, 1, &s.heading_font);
-            }
         });
         // What a note will look like, at the size and in the faces chosen.
         ui.with(
@@ -358,11 +389,27 @@ impl Carnet {
                     "A calm place for notes",
                     l.page_type(Type::H2).family(l.serif).color(t.fg),
                 );
-                ui.text(
-                    "Lists, tables and pictures, kept as plain Markdown files you own. \
-                     Nothing moves unless you move it.",
-                    l.page_type(Type::BODY).family(l.body).color(t.fg),
-                );
+                // Long enough to wrap past a dropped letter four lines
+                // tall, at the widest page.
+                let body = l.page_type(Type::BODY).family(l.body).color(t.fg);
+                let words = "Lists, tables and pictures, kept as plain Markdown files you own. \
+                             Nothing moves unless you move it. Write a line, a page or a book; \
+                             fold a section away under its heading, pin the notes you come back to, \
+                             and find any of them again by a word in it. Every note is a file in \
+                             your folder, readable by any other app, today and in twenty years, \
+                             whatever happens to this one.";
+                if s.initial {
+                    // The first letter as the note's: dropped, in its face
+                    // and ink.
+                    let (cap, rest) = words.split_at(1);
+                    let ink = if s.initial_accent { l.c.accent_ink } else { t.fg };
+                    ui.rich_text(
+                        &[Span::new(cap).family(l.initial).color(ink), Span::new(rest)],
+                        body.initial_letter(s.initial_lines),
+                    );
+                } else {
+                    ui.text(words, body);
+                }
             },
         );
 
@@ -1189,7 +1236,11 @@ impl Carnet {
             .into_iter()
             .filter(|f| q.is_empty() || f.to_lowercase().contains(&q))
             .collect();
-        let default_name = if which == 0 { "Inter (built in)" } else { "Source Serif 4 (built in)" };
+        let default_name = match which {
+            0 => "Inter (built in)",
+            1 => "Source Serif 4 (built in)",
+            _ => "Same as headings",
+        };
         let style = TextStyle::new(Type::UI.size).color(t.fg);
         ui.with(
             NodeSpec::column()
@@ -1207,22 +1258,15 @@ impl Carnet {
                         .bg(t.sunken)
                         .cross_align(Align::Center),
                     |ui| {
+                        // The field's own placeholder, as the library's:
+                        // where the caret and the typed words start.
                         let k = ui.text_edit(
                             "font-search",
                             "",
-                            &EditOptions { style, ..Default::default() },
+                            &EditOptions { style, placeholder: Some("Search fonts".into()), ..Default::default() },
                             NodeSpec::row().grow_width().label("Search fonts"),
                         );
                         self.fields.insert(k, Field::Font);
-                        if self.font_query.is_empty() {
-                            ui.text_in(
-                                NodeSpec::row()
-                                    .role(Role::None)
-                                    .float(FloatConfig::parent().inside(Align::Start, Align::Center)),
-                                "Search fonts",
-                                style.color(t.faint).nowrap(),
-                            );
-                        }
                     },
                 );
                 let row = |ui: &mut Ui<'_>, key: u64, name: &str, face: FontFamily, on: bool, msg: Msg| {
@@ -1248,11 +1292,12 @@ impl Carnet {
                         },
                     );
                 };
-                // The default row in the default face.
-                let fallback = if which == 0 {
-                    Self::face_of(&mut self.font_faces, ui, look::BODY_FACE)
-                } else {
-                    Self::face_of(&mut self.font_faces, ui, look::HEADING_FACE)
+                // The default row in the default face: the letter's is
+                // the headings' as they are now.
+                let fallback = match which {
+                    0 => Self::face_of(&mut self.font_faces, ui, look::BODY_FACE),
+                    1 => Self::face_of(&mut self.font_faces, ui, look::HEADING_FACE),
+                    _ => l.serif,
                 };
                 row(ui, u64::MAX - 1, default_name, fallback, current.is_empty(), Msg::SetFont { which, index: ALL });
                 let (rows, faces) = (&self.font_rows, &mut self.font_faces);
@@ -1266,7 +1311,7 @@ impl Carnet {
                 }
                 widgets::uniform_list_with(
                     ui,
-                    if which == 0 { "fonts-body" } else { "fonts-head" },
+                    ["fonts-body", "fonts-head", "fonts-initial"][(which as usize).min(2)],
                     NodeSpec::column()
                         .grow_width()
                         .height((rows.len() as f32 * FONT_ROW_H).min(FONT_ROW_H * 7.0))
@@ -1341,6 +1386,42 @@ fn setting(ui: &mut Ui<'_>, l: &Look, name: &str, note: Option<&str>, control: i
                     ui.text(n, TextStyle::new(Type::SMALL.size).color(t.muted));
                 }
             });
+            control(ui);
+        },
+    );
+}
+
+/// Settings that belong to the one above them — shown only while it is
+/// on, or choosing its parts one by one: set in under its name, a guide
+/// down their left, no hairlines between them or above.
+fn subgroup(ui: &mut Ui<'_>, l: &Look, key: &str, name: &str, f: impl FnOnce(&mut Ui<'_>)) {
+    ui.with_keyed(
+        key,
+        NodeSpec::row()
+            .grow_width()
+            .padding(Edges { l: 18.0, r: 0.0, t: 0.0, b: design::space::M })
+            .role(Role::Group)
+            .label(name),
+        |ui| {
+            ui.leaf(NodeSpec::column().width(2.0).grow_height().radius(radius::ROUND).bg(l.t.border).role(Role::None));
+            ui.with(NodeSpec::column().grow_width().min_width(0.0), f);
+        },
+    );
+}
+
+/// One setting in a subgroup: a name and its control, a row lower than
+/// a setting's.
+fn sub_setting(ui: &mut Ui<'_>, l: &Look, name: &str, control: impl FnOnce(&mut Ui<'_>)) {
+    ui.with(
+        NodeSpec::row()
+            .grow_width()
+            .min_height(44.0)
+            .padding(Edges { l: design::space::L, r: 18.0, t: design::space::XS, b: design::space::XS })
+            .gap(design::space::M)
+            .cross_align(Align::Center)
+            .wrap(),
+        |ui| {
+            ui.text_in(NodeSpec::row().grow_width().min_width(80.0), name, TextStyle::new(Type::UI.size).color(l.t.fg));
             control(ui);
         },
     );

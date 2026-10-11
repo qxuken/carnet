@@ -3857,6 +3857,159 @@ fn the_highlighter_and_code_shortcuts_take_off_what_they_put_on() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Each drawn row of `slot`, top to bottom: its top and the x its first
+/// place is at, by every byte's caret after the first.
+fn drawn_rows(app: &Carnet, d: &Drive, slot: Slot, len: usize) -> Vec<(f32, f32)> {
+    let mut rows: Vec<(f32, f32)> = Vec::new();
+    for b in 1..=len {
+        let r = app.rect_at(&d.core, slot, b).unwrap();
+        match rows.last_mut() {
+            Some(last) if (last.0 - r.y).abs() < 0.5 => last.1 = last.1.min(r.x),
+            _ => rows.push((r.y, r.x)),
+        }
+    }
+    rows
+}
+
+/// First letter: Dropped. The note's first paragraph opens with its
+/// letter three lines tall, the lines beside it moved in past it and the
+/// rest back at the page's left — and the paragraph is written as any
+/// other: a caret before the letter as tall as it, typing there or
+/// deleting the letter drops the next one, a click on it lands before or
+/// after it, a selection reaches over it. The note keeps plain words.
+#[test]
+fn the_first_letter_drops_three_lines_and_the_paragraph_is_written_as_ever() {
+    let (mut app, mut d, dir) = body("drop-cap");
+    app.on_settings(Msg::SetInitial { to: 1 });
+    let words = "Once upon a time there was a lighthouse on a rock at the edge of the map, and a keeper who \
+                 wrote down every ship that passed, one line each, with the hour and the colour of the sea, \
+                 for years and years and years.";
+    type_in(&mut app, &mut d, words);
+    let slot = app.caret.head.slot;
+    d_frame_twice(&mut app, &mut d);
+    let at = |app: &Carnet, d: &Drive, b: usize| app.rect_at(&d.core, slot, b).unwrap();
+    let (o, after) = (at(&app, &d, 0), at(&app, &d, 1));
+    let lh = after.h;
+    assert!((o.h - 3.0 * lh).abs() < 1.0, "the letter's caret is three lines: {o:?}, a line {lh}");
+    assert!(after.x > o.x + 20.0 && after.y == o.y, "the first line starts past it: {o:?} {after:?}");
+    let rows = drawn_rows(&app, &d, slot, words.len());
+    assert!(rows.len() >= 4, "the paragraph wraps past the letter: {rows:?}");
+    for (i, r) in rows.iter().enumerate() {
+        assert_eq!(r.1, if i < 3 { after.x } else { o.x }, "row {i}: {rows:?}");
+    }
+    assert_eq!(texts(&app)[0], words, "display only");
+
+    // Typed before it, a letter is dropped in its place; taken back, and
+    // the letter deleted, the next one is.
+    app.caret = Caret::at(Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    type_in(&mut app, &mut d, "W");
+    assert_eq!(texts(&app)[0], format!("W{words}"));
+    d_frame_twice(&mut app, &mut d);
+    assert!((at(&app, &d, 0).h - 3.0 * lh).abs() < 1.0);
+    key(&mut app, &mut d, "backspace");
+    key(&mut app, &mut d, "delete");
+    assert_eq!(texts(&app)[0], &words[1..]);
+    d_frame_twice(&mut app, &mut d);
+    assert!((at(&app, &d, 0).h - 3.0 * lh).abs() < 1.0, "the n is dropped now");
+    type_in(&mut app, &mut d, "O");
+    assert_eq!(texts(&app)[0], words);
+    d_frame_twice(&mut app, &mut d);
+
+    // A click on the letter's left half is before it, on its right half
+    // after it, on whichever line it is beside; one under it is on the
+    // fourth row's start.
+    let o = at(&app, &d, 0);
+    for row in [0.5, 2.5] {
+        d.click(&mut app, o.x + 2.0, o.y + row * lh);
+        d_frame_twice(&mut app, &mut d);
+        assert_eq!((app.caret.head.slot, app.caret.head.byte), (slot, 0), "row {row}");
+    }
+    d.click(&mut app, (o.x + after.x) / 2.0 + 2.0, o.y + lh);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.caret.head.byte, 1);
+    d.click(&mut app, o.x + 2.0, o.y + 3.5 * lh);
+    d_frame_twice(&mut app, &mut d);
+    let fourth = at(&app, &d, app.caret.head.byte);
+    assert_eq!((fourth.x, fourth.y), (o.x, o.y + 3.0 * lh));
+    // ↑ from there is the letter's line again: before it.
+    key(&mut app, &mut d, "up");
+    assert_eq!(app.caret.head.byte, 0);
+    // A selection over it and on: the letter and the words beside it.
+    for _ in 0..4 {
+        key_with(&mut app, &mut d, "right", SHIFT);
+    }
+    assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (0, 4));
+
+    // Plain: no drop, every row at the page's left.
+    app.on_settings(Msg::SetInitial { to: 0 });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(at(&app, &d, 0).h, lh);
+    let rows = drawn_rows(&app, &d, slot, words.len());
+    assert!(rows[1..].iter().all(|r| r.1 == o.x), "{rows:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The dropped letter's styles: two lines tall or four, the caret before
+/// it as tall and as many rows moved in past it, the rest at the page's
+/// left; a letter font chosen from the list is kept in the settings and
+/// the letter drawn in it. Its rows show in the settings only while the
+/// letter is dropped.
+#[test]
+fn the_first_letter_drops_as_many_lines_as_chosen_in_the_font_chosen() {
+    let (mut app, mut d, dir) = body("drop-cap-styles");
+    app.on_settings(Msg::SetInitial { to: 1 });
+    let words = "In the old days there was a lighthouse on a rock at the edge of the map, and a keeper who \
+                 wrote down every ship that passed, one line each, with the hour and the colour of the sea, \
+                 for years and years and years, until the book was full and another came on the boat with \
+                 the bread and the oil, and then another, and the shelf by the stove was all books.";
+    type_in(&mut app, &mut d, words);
+    let slot = app.caret.head.slot;
+    let at = |app: &Carnet, d: &Drive, b: usize| app.rect_at(&d.core, slot, b).unwrap();
+    let mut wide = 0.0;
+    for (to, n) in [(0, 2), (2, 4)] {
+        app.on_settings(Msg::SetInitialLines { to });
+        assert_eq!(app.settings.initial_lines, n as u32);
+        d_frame_twice(&mut app, &mut d);
+        let (o, after) = (at(&app, &d, 0), at(&app, &d, 1));
+        let lh = after.h;
+        assert!((o.h - n as f32 * lh).abs() < 1.0, "{n} lines: {o:?}, a line {lh}");
+        let rows = drawn_rows(&app, &d, slot, words.len());
+        assert!(rows.len() > n, "the paragraph wraps past the letter: {rows:?}");
+        for (i, r) in rows.iter().enumerate() {
+            assert_eq!(r.1, if i < n { after.x } else { o.x }, "{n} lines, row {i}: {rows:?}");
+        }
+        wide = after.x - o.x;
+    }
+
+    // The letter's own rows, while it is dropped.
+    app.settings_open = true;
+    assert!(drawn(&mut d, &mut app, "Height") && drawn(&mut d, &mut app, "Colour"));
+    assert!(drawn(&mut d, &mut app, "Same as headings"), "no font chosen: the headings'");
+    app.on_settings(Msg::FontMenu { which: 2 });
+    app.font_query = "inter".into();
+    d.frame(&mut app);
+    let i = app.font_rows.iter().position(|f| f == "Inter").expect("the shipped face is listed");
+    app.on_settings(Msg::SetFont { which: 2, index: i as u64 });
+    assert_eq!((app.settings.initial_font.as_str(), app.font_pick), ("Inter", None));
+    assert_eq!((app.settings.font.as_str(), app.settings.heading_font.as_str()), ("", ""), "the others as they were");
+    let back = Settings::parse(&app.settings.to_text());
+    assert_eq!((back.initial_font.as_str(), back.initial_lines, back.initial_accent), ("Inter", 4, true));
+    app.on_settings(Msg::SetInitialColor { to: 1 });
+    assert!(!Settings::parse(&app.settings.to_text()).initial_accent);
+    app.on_settings(Msg::SetInitial { to: 0 });
+    assert!(!drawn(&mut d, &mut app, "Height"), "plain: no letter to style");
+    app.on_settings(Msg::SetInitial { to: 1 });
+    app.settings_open = false;
+    d_frame_twice(&mut app, &mut d);
+    let (o, after) = (at(&app, &d, 0), at(&app, &d, 1));
+    assert!((o.h - 4.0 * after.h).abs() < 1.0);
+    // An I: Inter's a bare stroke, the serif's with feet.
+    assert!((after.x - o.x - wide).abs() > 1.0, "the I in another face: {} then {}", wide, after.x - o.x);
+    assert_eq!(texts(&app)[0], words, "display only");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn tab_in_text_is_a_tab_and_in_a_list_moves_the_item() {
     let (mut app, mut d, dir) = body("tab-char");
@@ -4195,4 +4348,31 @@ fn a_newer_replica_is_said_and_the_notes_still_open() {
     assert!(app.store.notes[0].key.is_none(), "no History for it");
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(replica);
+}
+
+/// A font list's first row, the face it falls back to, is chosen by a
+/// click as any other: the letter back to the headings' face, the
+/// headings back to the built-in one. (Its message's number once came
+/// back from kui as another.)
+#[test]
+fn a_font_lists_default_row_is_chosen_by_a_click() {
+    let (store, dir) = temp_store("font-default");
+    let mut app = Carnet::new(store);
+    // Tall enough for the lists without scrolling.
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings.initial = true;
+    app.settings.initial_font = "Inter".into();
+    app.settings.heading_font = "Inter".into();
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    for (which, name) in [(2, "Same as headings"), (1, "Source Serif 4 (built in)")] {
+        app.on_settings(Msg::FontMenu { which });
+        d_frame_twice(&mut app, &mut d);
+        let r = d.core.nodes().iter().find(|n| n.text.as_deref() == Some(name)).map(|n| n.rect).unwrap();
+        d.click(&mut app, r.x + 20.0, r.y + r.h / 2.0);
+        d.frame(&mut app);
+        assert_eq!(app.font_pick, None, "{name}: the list closes");
+    }
+    assert_eq!((app.settings.initial_font.as_str(), app.settings.heading_font.as_str()), ("", ""));
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -33,6 +33,8 @@ pub struct Look {
     pub serif: FontFamily,
     /// The body's face.
     pub body: FontFamily,
+    /// A dropped first letter's face: the headings' unless one is chosen.
+    pub initial: FontFamily,
     /// The body's size over the 16px everything was drawn at: headings,
     /// tables and the title scale by it.
     pub k: f32,
@@ -149,6 +151,7 @@ impl Styler {
         };
         let serif = self.face(ui, &s.heading_font, default_serif);
         let body = self.face(ui, &s.font, default_body);
+        let initial = self.face(ui, &s.initial_font, serif);
         let t = ui.theme();
         Look {
             t,
@@ -161,6 +164,7 @@ impl Styler {
             shadow: c.shadow,
             serif,
             body,
+            initial,
             k: s.size as f32 / 16.0,
             // The measure in characters, not pixels: it grows with the text.
             page_w: s.width.px() * (s.size as f32 / 16.0),

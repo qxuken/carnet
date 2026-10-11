@@ -232,10 +232,14 @@ pub enum Msg {
     SetSize { by: i64 },
     /// How dividers are drawn: `settings::Divider::ALL[to]`.
     SetDivider { to: u64 },
-    /// The note's first letter: 0 plain, 1 large.
+    /// The note's first letter: 0 plain, 1 dropped.
     SetInitial { to: u64 },
-    /// Opens (or closes) the list of faces for the body (0) or the
-    /// headings (1).
+    /// How tall the dropped letter is: `to + 2` lines.
+    SetInitialLines { to: u64 },
+    /// The dropped letter's ink: 0 the accent's, 1 the text's.
+    SetInitialColor { to: u64 },
+    /// Opens (or closes) the list of faces for the body (0), the
+    /// headings (1) or the dropped letter (2).
     FontMenu { which: u64 },
     /// Chooses a face from that list (`ALL` for the default).
     SetFont { which: u64, index: u64 },
@@ -265,8 +269,10 @@ pub enum Msg {
     CopyText { what: u64 },
 }
 
-/// `Msg::SelectFolder`'s every note.
-pub const ALL: u64 = u64::MAX;
+/// `Msg::SelectFolder`'s every note, and `Msg::SetFont`'s default face:
+/// the largest number a message carries whole (kui keeps it as an
+/// `i64`), or a click on it arrives as another.
+pub const ALL: u64 = i64::MAX as u64;
 
 /// The inline styles, as `Msg::Style` names them.
 pub const STYLES: [carnet_core::inline::Kind; 4] =
@@ -513,7 +519,7 @@ pub struct Carnet {
     /// What the font list is narrowed to.
     font_query: String,
     /// The font list open in the settings: for the body (0), the headings
-    /// (1).
+    /// (1), the dropped letter (2).
     font_pick: Option<u64>,
     /// The font list's rows as last drawn: what `Msg::SetFont` indexes.
     font_rows: Vec<String>,
@@ -530,7 +536,7 @@ pub struct Carnet {
     images: Images,
     /// The page's text width, as last laid out: what a picture fits.
     text_w: f32,
-    /// The paragraph whose first letter is drawn large, this frame.
+    /// The paragraph whose first letter is dropped, this frame.
     initial: Option<Slot>,
     /// Headings whose sections are collapsed, by block id: what the page
     /// shows, never what the file says. For as long as the app runs.
@@ -2825,6 +2831,8 @@ impl Carnet {
             | Msg::SetSize { .. }
             | Msg::SetDivider { .. }
             | Msg::SetInitial { .. }
+            | Msg::SetInitialLines { .. }
+            | Msg::SetInitialColor { .. }
             | Msg::FontMenu { .. }
             | Msg::SetFont { .. }
             | Msg::PickDir

@@ -442,7 +442,7 @@ impl Carnet {
         self.hidden = under.iter().flat_map(|(_, hid)| hid.iter().copied()).collect();
         let folds: HashMap<u64, usize> = under.iter().filter(|(_, hid)| !hid.is_empty()).map(|(h, hid)| (*h, hid.len())).collect();
         let drop_at = self.drop_index;
-        // The first letter set large, when the settings ask: of the note's
+        // The first letter dropped, when the settings ask: of the note's
         // first paragraph, past the headings (and front matter) at its top.
         self.initial = self
             .settings
@@ -1284,10 +1284,15 @@ impl Carnet {
             self.caret_fresh = fresh;
         }
         let blink = ui.caret_visible();
-        // The large first letter: where it is in the source, with any
-        // opening quote before it.
-        let cap = (self.initial == Some(slot) && !code_block).then(|| initial_letter(text)).flatten();
+        // The dropped first letter: where it is in the source, with any
+        // opening quote before it. Not while a composition stands in
+        // front of it, which would be dropped in its place.
+        let cap = (self.initial == Some(slot) && !code_block)
+            .then(|| initial_letter(text))
+            .flatten()
+            .filter(|&(f, _)| !(preedit.is_some() && byte <= f));
         let (dark, page_bg) = (l.c.dark, t.bg);
+        let (cap_lines, cap_accent) = (self.settings.initial_lines, self.settings.initial_accent);
         ui.with(row, |ui| {
             let key = ui.child_key_indexed(0);
             let mut spans: Vec<Span<'_>> = Vec::new();
@@ -1372,9 +1377,14 @@ impl Carnet {
                         }
                     }
                     if cap.is_some_and(|(f, to)| a >= f && b <= to) {
-                        // In the heading face, two lines
-                        // tall, in the accent deepened for text.
-                        sp = sp.size((style.size * 2.0).round()).family(l.serif).color(l.c.accent_ink);
+                        // In its face (the headings', unless one is
+                        // chosen), in the accent deepened for text or the
+                        // words' own; kui sizes it to the lines it drops
+                        // through.
+                        sp = sp.family(l.initial);
+                        if cap_accent {
+                            sp = sp.color(l.c.accent_ink);
+                        }
                     }
                     if part.is_some_and(|(f, to)| a >= f && b <= to) {
                         sp = sp.bg(t.selection).bg_radius(4.0);
@@ -1389,6 +1399,9 @@ impl Carnet {
                     spans.push(Span::new("\u{200B}"));
                 }
             }
+            // A drop cap: the letter as tall as the first lines, which
+            // wrap beside it; the file is as it was.
+            let style = if cap.is_some() { style.initial_letter(cap_lines) } else { style };
             ui.rich_text(&spans, style);
             self.slot_keys.insert(slot, key);
             if let Some(h) = hint.filter(|_| text.is_empty() && preedit.is_none()) {
@@ -2813,13 +2826,20 @@ fn marker(ui: &mut Ui<'_>, l: &Look, id: u64, style: ListStyle, done: bool, n: u
 }
 
 /// The first letter of a paragraph's words, with any opening quote or
-/// bracket before it: its range in the source, marks left out.
+/// bracket before it: its range in the source, marks left out — the
+/// letter kui drops (`TextStyle::initial_letter`), which takes the same
+/// openers.
 fn initial_letter(text: &str) -> Option<(usize, usize)> {
     let v = inline::Visible::of(text);
     let words = v.text(text);
     let mut chars = words.char_indices().skip_while(|(_, c)| c.is_whitespace()).peekable();
     let (start, _) = *chars.peek()?;
-    let (at, ch) = chars.find(|(_, c)| !matches!(c, '"' | '\'' | '\u{201c}' | '\u{2018}' | '\u{ab}' | '\u{201e}' | '(' | '['))?;
+    let (at, ch) = chars.find(|(_, c)| {
+        !matches!(
+            c,
+            '"' | '\'' | '(' | '[' | '{' | '¿' | '¡' | '\u{201c}' | '\u{2018}' | '\u{201e}' | '\u{201a}' | '\u{ab}' | '\u{2039}'
+        )
+    })?;
     if !ch.is_alphanumeric() {
         return None;
     }
