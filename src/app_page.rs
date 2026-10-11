@@ -64,9 +64,12 @@ impl Carnet {
         let words = self.words.2;
         // Calm on purpose: saving is invisible, as it should be when it
         // always works; only a failure says anything.
+        // Within a day, how long ago; older, the day.
+        let now = SystemTime::now();
         let when = match created {
-            Some(at) => format!("Created {}", ago(SystemTime::now(), at)),
-            None => ago(SystemTime::now(), modified),
+            Some(at) => format!("Created {}", super::chrome::when_words(now, at)),
+            None if now.duration_since(modified).unwrap_or_default().as_secs() < 86_400 => ago(now, modified),
+            None => format!("Edited {}", super::chrome::when_words(now, modified)),
         };
         let mut meta = format!(
             "{when}  ·  {} {}",
@@ -85,7 +88,7 @@ impl Carnet {
             let r = &v.list[v.shown];
             let when = if v.shown == 0 { "The note as it is".to_string() } else { format!("The version from {}", super::revision_ago(r)) };
             let what = format!("{when}  ·  {}", super::lower_first(&self.version_label(r)));
-            (what, v.shown != 0, v.against_now && v.shown != 0, v.shown + 1 < v.list.len())
+            (what, v.shown != 0, v.against_now && v.shown != 0)
         });
         // A narrow window keeps less margin, so the text keeps its width.
         let pad = if main_w < 640.0 { 18.0 } else { 48.0 };
@@ -148,8 +151,8 @@ impl Carnet {
                                     self.peek_line(ui, l, what, *armed, *is_folder);
                                     return;
                                 }
-                                if let Some((what, can_restore, against_now, marked)) = &history {
-                                    self.history_line(ui, l, what, *can_restore, *against_now, *marked);
+                                if let Some((what, can_restore, against_now)) = &history {
+                                    self.history_line(ui, l, what, *can_restore, *against_now);
                                     return;
                                 }
                                 ui.text(&meta, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
@@ -275,14 +278,15 @@ impl Carnet {
     /// The meta line while a version is read: which one, what its marks
     /// mean, then what can be done with it — the actions are words in the
     /// line, as Undo is.
-    fn history_line(&self, ui: &mut Ui<'_>, l: &Look, what: &str, can_restore: bool, against_now: bool, marked: bool) {
+    fn history_line(&self, ui: &mut Ui<'_>, l: &Look, what: &str, can_restore: bool, against_now: bool) {
         let t = l.t;
         ui.text(what, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
-        // The key to the marks, drawn as the marks are.
-        if marked || against_now {
+        // Against now, the marks mean something else than the list's line
+        // says: their key, drawn as they are.
+        if against_now {
             use carnet_core::compare::{ADDED, REMOVED};
             let (dark, small) = (l.c.dark, Type::SMALL.size);
-            let (came, went) = if against_now { ("comes back", "goes") } else { ("added", "removed") };
+            let (came, went) = ("comes back", "goes");
             ui.text_in(
                 NodeSpec::row().pad_xy(4.0, 0.0).radius(3.0).bg(crate::design::tint::wash(ADDED, dark, t.bg)),
                 came,
@@ -424,18 +428,10 @@ impl Carnet {
         // Pointers, not text: the blocks stay shared with the note.
         let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
         let drop_at = self.drop_index;
-        // First letters dropped: of each paragraph that asks for it, and,
-        // when the settings ask, of the note's first paragraph, past the
-        // headings (and front matter) at its top.
-        let first = self
-            .settings
-            .initial
-            .then(|| blocks.iter().find(|b| !matches!(&b.kind, Kind::Heading { .. }) && !matches!(&b.kind, Kind::Raw(t) if t.starts_with("---\n"))))
-            .flatten()
-            .map(|b| b.id);
+        // First letters dropped: of each paragraph that asks for it.
         self.initial = blocks
             .iter()
-            .filter(|b| b.initial || Some(b.id) == first)
+            .filter(|b| b.initial)
             .filter(|b| matches!(&b.kind, Kind::Text(t) if !t.trim().is_empty()))
             .map(|b| Slot::block(b.id))
             .collect();

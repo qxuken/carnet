@@ -28,22 +28,28 @@ impl Carnet {
                 if shown || open {
                     self.sidebar(ui, l, false);
                 }
-                // Its edge: dragged, the library wider or narrower.
+                // Its edge: dragged, the library wider or narrower. Just
+                // past the column, over the page's margin, so it never
+                // sits on the lists' scrollbars at the column's right.
                 if shown {
                     let t = l.t;
                     let h = ui.viewport().h;
+                    let edge = ui.child_key("library-edge");
+                    let hovered = ui.is_hovered(edge);
                     ui.leaf_keyed(
                         "library-edge",
                         NodeSpec::row()
-                            .size(6.0, h)
-                            .float(FloatConfig::parent().inside(Align::End, Align::Start))
+                            .size(EDGE_W, h)
+                            .float(FloatConfig::parent().inside(Align::End, Align::Start).offset(EDGE_W, 0.0))
                             .bg(if dragging { t.border_strong } else { Color::TRANSPARENT })
                             .hover_bg(t.border)
                             .cursor(kui_native::CursorShape::EwResize)
                             .on_drag(Msg::LibraryDrag)
                             .label("Library width")
-                            .tooltip("Drag to make the notes wider or narrower  \u{b7}  double-click for the usual width"),
+                            // Said by a reader; drawn by `edge_hint`.
+                            .description(EDGE_HINT),
                     );
+                    self.edge_hint(ui, hovered, dragging);
                 }
             },
         );
@@ -57,6 +63,44 @@ impl Carnet {
                 self.folder_rects.clear();
             }
         }
+    }
+
+    /// What the library's edge does, by the pointer: once it has rested
+    /// there a moment, in the style of a tooltip, below and right of it
+    /// (above it near the window's foot). Not while the edge is dragged,
+    /// nor again after a drag until the pointer has left it — a hint
+    /// that came and went with every move of a drag flickered, and kui's
+    /// own, hung below a node the window's height, sat at its foot.
+    fn edge_hint(&mut self, ui: &mut Ui<'_>, hovered: bool, dragging: bool) {
+        if dragging {
+            self.edge_hover = Some(f64::INFINITY);
+            return;
+        }
+        if !hovered {
+            self.edge_hover = None;
+            return;
+        }
+        let now = ui.now();
+        let since = *self.edge_hover.get_or_insert(now);
+        if now - since < EDGE_HINT_DELAY {
+            ui.request_frame_at(since + EDGE_HINT_DELAY);
+            return;
+        }
+        let Some(at) = ui.core().cursor() else { return };
+        let (th, m) = (ui.theme(), ui.metrics());
+        let y = if at.y + 48.0 > ui.viewport().h { at.y - 34.0 } else { at.y + 20.0 };
+        ui.text_in_keyed(
+            "library-edge-hint",
+            NodeSpec::row()
+                .float(FloatConfig::viewport().offset(at.x + 12.0, y))
+                .pad_xy(m.hint_pad_x, m.hint_pad_y)
+                .bg(th.raised)
+                .radius(m.radius)
+                .border(1.0, th.border_strong)
+                .role(Role::None),
+            EDGE_HINT,
+            TextStyle::new(m.hint_text).color(th.fg).nowrap(),
+        );
     }
 
     /// The library. Beside the page on a wide window; on a narrow one it
@@ -199,7 +243,7 @@ impl Carnet {
                     let n = order[i];
                     let note = &notes[n];
                     let selected = n == current;
-                    let ago = short_ago(now, if created { note.created } else { note.modified });
+                    let ago = short_when(now, if created { note.created } else { note.modified });
                     let snippet = note.doc.snippet();
                     let place = if all && !note.folder.is_empty() {
                         Some(folder_name(&note.folder))
@@ -382,9 +426,10 @@ impl Carnet {
         );
     }
 
-    /// The open note's versions, newest first, as the Deleted folder lists
-    /// what is in the trash: what made each, when, and how many words it
-    /// added and took away. A click shows one on the page.
+    /// The open note's versions, newest first, as the web app lists them:
+    /// what made each, when, and how many words it added and took away,
+    /// under a line saying how to read them and what the marks mean. A
+    /// click shows one on the page.
     fn history_list(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let t = l.t;
         let Some(v) = &self.versions else { return };
@@ -411,7 +456,7 @@ impl Carnet {
             |ui| {
                 ui.text_in(
                     NodeSpec::row().pad_xy(14.0, 4.0),
-                    "Click one to read it. Esc goes back to the note.",
+                    HISTORY_HINT,
                     TextStyle::new(Type::SMALL.size).color(t.muted),
                 );
                 for (i, r) in rows.iter().enumerate() {
@@ -733,24 +778,20 @@ impl Carnet {
         } else {
             Vec::new()
         };
-        let single = kinds.len() == 1;
         let in_table = editing && self.caret.head.slot.cell.is_some();
         let convertible = !in_table && kinds.iter().any(|k| page::turned(k, TURN_TEXT).is_some());
         let is_item = kinds.iter().any(|k| matches!(k, Kind::Item { .. }));
         let pinned = self.store.notes[self.current].pinned;
+        // On when every block the caret touches is that already: a click
+        // then takes them all back to paragraphs.
         let on = |to: u64| -> bool {
-            if !single {
+            if kinds.is_empty() {
                 return false;
             }
-            match (&kinds[0], to) {
-                (Kind::Text(_), TURN_TEXT) => true,
-                (Kind::Heading { level, .. }, l) => (*level as u64).min(3) == l,
-                (Kind::Item { style, .. }, TURN_BULLET) => *style == ListStyle::Bullet,
-                (Kind::Item { style, .. }, TURN_NUMBER) => *style == ListStyle::Number,
-                (Kind::Item { style, .. }, TURN_TODO) => *style == ListStyle::Todo,
-                (Kind::Quote(_), TURN_QUOTE) => true,
-                _ => false,
+            if to == TURN_TEXT {
+                return kinds.iter().all(|k| matches!(k, Kind::Text(_)));
             }
+            page::turned_to(doc, self.caret, to)
         };
         let sorted = match (in_table, self.caret.head.slot.cell, self.last_sort) {
             (true, Some((_, col)), Some((c, desc))) if c == col => Some(desc),
@@ -1351,6 +1392,17 @@ impl<'a> Tool<'a> {
         });
     }
 }
+/// The library's edge: how wide a band the pointer takes it by.
+pub(super) const EDGE_W: f32 = 6.0;
+/// What it does, by the pointer.
+pub(super) const EDGE_HINT: &str = "Drag to make the notes wider or narrower  \u{b7}  double-click for the usual width";
+/// How long the pointer rests on the edge before that shows, seconds.
+pub(super) const EDGE_HINT_DELAY: f64 = 0.5;
+
+/// Over the history's versions: the web app's words, for a pointer.
+pub(super) const HISTORY_HINT: &str =
+    "Click one to read it. What changed is marked: added words in green, removed ones struck through in red.";
+
 /// "just now", "5 minutes ago", "3 hours ago", "2 days ago".
 pub(super) fn ago(now: SystemTime, then: SystemTime) -> String {
     let s = now.duration_since(then).unwrap_or_default().as_secs();
@@ -1370,9 +1422,39 @@ pub(super) fn ago(now: SystemTime, then: SystemTime) -> String {
     }
 }
 
+const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
 /// A day as people write it: "12 January 2027" (UTC).
 pub(super) fn date_words(t: SystemTime) -> String {
-    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let (year, month, day) = civil(t);
+    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
+}
+
+/// When, as a note's line says it: within a day, how long ago ("3 hours
+/// ago"); older, the day ("9 October"), with its year when that is not
+/// this one's ("9 October 2025").
+pub(super) fn when_words(now: SystemTime, then: SystemTime) -> String {
+    if now.duration_since(then).unwrap_or_default().as_secs() < 86_400 {
+        return ago(now, then);
+    }
+    let ((y, m, d), (this, _, _)) = (civil(then), civil(now));
+    let month = MONTHS[(m - 1) as usize];
+    if y == this { format!("{d} {month}") } else { format!("{d} {month} {y}") }
+}
+
+/// The library's terse form of the same: "now", "5m", "3h"; older, "9
+/// Oct" ("9 Oct 2025").
+pub(super) fn short_when(now: SystemTime, then: SystemTime) -> String {
+    if now.duration_since(then).unwrap_or_default().as_secs() < 86_400 {
+        return short_ago(now, then);
+    }
+    let ((y, m, d), (this, _, _)) = (civil(then), civil(now));
+    let month = &MONTHS[(m - 1) as usize][..3];
+    if y == this { format!("{d} {month}") } else { format!("{d} {month} {y}") }
+}
+
+/// The year, month (1–12) and day of `t` (UTC).
+fn civil(t: SystemTime) -> (i64, i64, i64) {
     let days = (t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() / 86_400) as i64;
     // Days to a civil date (Howard Hinnant's algorithm).
     let z = days + 719_468;
@@ -1384,7 +1466,7 @@ pub(super) fn date_words(t: SystemTime) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{day} {} {year}", MONTHS[(month - 1) as usize])
+    (year, month, day)
 }
 
 /// The library's terse form: "now", "5m", "3h", "2d", "6w".

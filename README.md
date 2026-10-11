@@ -160,10 +160,11 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 - **Fonts**: a pairing (Book, Modern, Classic, System); under it, **Text** and **Headings**: any installed family, searchable, each name shown in its own face.
 - **Page width**: Narrow, Medium or Wide; **Text size**: 12 to 24 px.
 - **Dividers**: three dots, a short line, three stars, stars in a triangle, a flourish, a printer's leaf (❧), three diamonds, a diamond between lines, or a wave. Only the look changes: the file still says `---`.
-- **First letters**: plain, or dropped: the note's first paragraph opens with a large letter, the first lines beside it, as tall as the paragraph's lines up to a limit: a two-line paragraph drops two, a one-line one none. Any other paragraph drops its own from the toolbar's **Drop the first letter** (Ctrl+Alt+8); the file keeps it as `<span class="initial">O</span>nce`, which other Markdown apps show as a plain letter. Under it, for every dropped letter: **Up to** (two, three or four lines), **Font** (the heading face, or any other) and **Colour** (the accent's or the text's; a letter given a colour of its own with the text-colour tool keeps it). The settings' preview shows it.
+- **Dropped letters**: a paragraph drops its first letter only when you ask, with the toolbar's **Drop the first letter** (Ctrl+Alt+8): a large letter, the first lines beside it, as tall as the paragraph's lines up to a limit: a two-line paragraph drops two, a one-line one none. The file keeps it as `<span class="initial">O</span>nce`, which other Markdown apps show as a plain letter. For every dropped letter: **Up to** (two, three or four lines), **Font** (the heading face, or any other) and **Colour** (the accent's or the text's; a letter given a colour of its own with the text-colour tool keeps it). The settings' preview shows one.
 - **Toolbar**: always shown, or fading while you type; **Focus** and **Typewriter**, as above.
 - **Window**: the notes list shows the desktop through it, blurred, where the system can (macOS, Windows 11, KDE); **Solid** turns that off from the next start.
-- **Sort notes by**: last edited or title (pinned notes stay on top).
+- **Sort notes by**: last edited, title or created (pinned notes stay on top).
+- **Dates**: on the page and the cards, when a note was last edited or when it was created: how long ago within a day ("3 hours ago"), the day after that ("Created 9 October", the year too when it is not this one).
 - **Notes folder**: change it, show it, copy its path, or go back to `Documents/Carnet`.
 - **Sync**: see below.
 

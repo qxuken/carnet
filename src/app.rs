@@ -61,6 +61,9 @@ const NOTICE_FOR: Duration = Duration::from_secs(8);
 const POINTER_NUDGE: f32 = 6.0;
 /// How soon a save that failed is tried again.
 const RETRY_AFTER: Duration = Duration::from_millis(350);
+/// The longest pause between two clicks on the Settings page's title
+/// that still counts them as one run.
+const TITLE_CLICKS: Duration = Duration::from_millis(600);
 
 #[derive(Message, Clone, Debug, PartialEq)]
 pub enum Msg {
@@ -71,6 +74,9 @@ pub enum Msg {
     Page,
     /// A press or drag on the page: in text, or in the margin.
     PageDrag,
+    /// A click on the Settings page's title: five in quick succession
+    /// turn the debug information on or off.
+    SettingsTitle,
     OpenNote { note: u64 },
     NewNote,
     PinNote,
@@ -240,8 +246,6 @@ pub enum Msg {
     SetSize { by: i64 },
     /// How dividers are drawn: `settings::Divider::ALL[to]`.
     SetDivider { to: u64 },
-    /// The note's first letter: 0 plain, 1 dropped.
-    SetInitial { to: u64 },
     /// How tall the dropped letter is: `to + 2` lines.
     SetInitialLines { to: u64 },
     /// The dropped letter's ink: 0 the accent's, 1 the text's.
@@ -600,6 +604,10 @@ pub struct Carnet {
     /// The library's edge being dragged: where the drag began and the
     /// width then.
     library_from: Option<(f32, u32)>,
+    /// Since when (the frame clock's seconds) the pointer has rested on
+    /// the library's edge, for its hint; infinite after a drag, until the
+    /// pointer leaves it.
+    edge_hover: Option<f64>,
     /// A picture being carried on the page.
     pub pic_drag: Option<PicDrag>,
     /// The folder rows as last laid out, by folder ("" for All notes,
@@ -609,8 +617,14 @@ pub struct Carnet {
     overflow: Vec<chrome::ToolDef>,
     /// The More button, and where its menu opens.
     more: Option<(Key, Vec2)>,
-    /// The frame-time HUD (Shift+F12).
+    /// Debug information: kui's frame-time graph (Shift+F12, or five
+    /// quick clicks on the Settings page's title, so a release build has
+    /// it too); and, while it shows, F12's devtools in a release build.
+    /// For this run only: never saved.
     pub hud: bool,
+    /// The clicks on the Settings page's title so far, and when the last
+    /// was: five in quick succession turn the debug information on or off.
+    title_clicks: (u32, Instant),
     /// Words are going down: the last thing the reader did was type on
     /// the page. The toolbar fades and the other blocks step back while
     /// it holds (as the settings ask); the pointer, a click or anything
@@ -884,11 +898,13 @@ impl Carnet {
             float_ends: HashMap::new(),
             note_drag: None,
             library_from: None,
+            edge_hover: None,
             pic_drag: None,
             folder_rects: Vec::new(),
             overflow: Vec::new(),
             more: None,
             hud: false,
+            title_clicks: (0, Instant::now()),
             typing: false,
             typed_at: 0.0,
             typing_cursor: None,
@@ -2449,6 +2465,7 @@ impl Carnet {
                 self.page_event(ev, core)
             }
             Msg::PageDrag => self.page_drag(ev, core),
+            Msg::SettingsTitle => self.title_click(Instant::now(), core),
             Msg::ResizePicture { id, side } => self.resize_drag(id, side == 1, ev),
             Msg::PictureDrag { id } => self.picture_drag(id, ev),
             Msg::CardDrag { note } => self.card_drag(note, ev),
@@ -2519,7 +2536,7 @@ impl Carnet {
             self.editing = true;
         }
         match msg {
-            Msg::RootKey | Msg::Page | Msg::PageDrag => {}
+            Msg::RootKey | Msg::Page | Msg::PageDrag | Msg::SettingsTitle => {}
             Msg::OpenNote { note } => self.open(note as usize),
             Msg::NewNote => self.new_note(),
             Msg::ToggleZen => {
@@ -2545,7 +2562,7 @@ impl Carnet {
                 }
             }
             Msg::Turn { to } => {
-                self.edit(Step::Other, |d, c| page::turn(d, c, to));
+                self.edit(Step::Other, |d, c| page::toggle_turn(d, c, to));
             }
             Msg::ToggleInitial => {
                 self.edit(Step::Other, page::toggle_initial);
@@ -2876,7 +2893,6 @@ impl Carnet {
             | Msg::ToggleSidebar
             | Msg::SetSize { .. }
             | Msg::SetDivider { .. }
-            | Msg::SetInitial { .. }
             | Msg::SetInitialLines { .. }
             | Msg::SetInitialColor { .. }
             | Msg::FontMenu { .. }
@@ -2967,14 +2983,36 @@ impl Carnet {
             return false;
         }
         if k.mods.shift {
-            self.hud = !self.hud;
-        } else if cfg!(debug_assertions) {
+            self.set_debug(!self.hud, core);
+        } else if cfg!(debug_assertions) || self.hud {
             let on = !core.devtools();
             core.set_devtools(on);
         } else {
             return false;
         }
         true
+    }
+
+    /// A click on the Settings page's title at `at`: the fifth of a run,
+    /// each within [`TITLE_CLICKS`] of the one before, turns the debug
+    /// information on or off and says so.
+    pub(super) fn title_click(&mut self, at: Instant, core: &mut Core) {
+        let (n, last) = self.title_clicks;
+        let n = if n > 0 && at.saturating_duration_since(last) <= TITLE_CLICKS { n + 1 } else { 1 };
+        self.title_clicks = (if n >= 5 { 0 } else { n }, at);
+        if n >= 5 {
+            self.set_debug(!self.hud, core);
+            self.notify(if self.hud { "Debug information on" } else { "Debug information off" }, None);
+        }
+    }
+
+    /// The debug information on or off: the frame-time graph; turned off
+    /// in a release build, F12's devtools close with it.
+    fn set_debug(&mut self, on: bool, core: &mut Core) {
+        self.hud = on;
+        if !on && !cfg!(debug_assertions) && core.devtools() {
+            core.set_devtools(false);
+        }
     }
 
     fn root_key(&mut self, ev: &UiEvent, core: &mut Core) {
@@ -3503,7 +3541,7 @@ impl App for Carnet {
             if self.hud {
                 widgets::latency_hud(ui);
             }
-            if cfg!(debug_assertions) {
+            if cfg!(debug_assertions) || self.hud {
                 self.devtools_tab(ui, &l);
             }
             return;
@@ -3541,7 +3579,7 @@ impl App for Carnet {
         if self.hud {
             widgets::latency_hud(ui);
         }
-        if cfg!(debug_assertions) {
+        if cfg!(debug_assertions) || self.hud {
             self.devtools_tab(ui, &l);
         }
     }

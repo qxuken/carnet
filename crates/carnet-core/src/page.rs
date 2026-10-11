@@ -1401,6 +1401,40 @@ pub fn turn(doc: &mut Doc, c: &mut Caret, to: u64) -> bool {
     true
 }
 
+/// A toolbar's turn: every block the caret touches made `to`; or, when
+/// each of them that can be already is, back into paragraphs — a list
+/// over several lines taken off them all at once, not the caret's line.
+pub fn toggle_turn(doc: &mut Doc, c: &mut Caret, to: u64) -> bool {
+    let to = if turned_to(doc, *c, to) { TURN_TEXT } else { to };
+    turn(doc, c, to)
+}
+
+/// Whether every block the caret touches that can be turned is `to`
+/// already (and there is one). Never for paragraphs: those have nothing
+/// to go back to.
+pub fn turned_to(doc: &Doc, c: Caret, to: u64) -> bool {
+    let mut kinds = touched(doc, c)
+        .map(|i| &doc.blocks()[i].kind)
+        .filter(|k| !matches!(k, Kind::Table(_) | Kind::Raw(_) | Kind::Image { .. }))
+        .peekable();
+    kinds.peek().is_some() && kinds.all(|k| is_turned(k, to))
+}
+
+/// Whether a block of `kind` is what `to` makes (a paragraph is not: see
+/// [`turned_to`]).
+pub fn is_turned(kind: &Kind, to: u64) -> bool {
+    matches!(
+        (kind, to),
+        (Kind::Heading { level: 1, .. }, TURN_H1)
+            | (Kind::Heading { level: 2, .. }, TURN_H2)
+            | (Kind::Heading { level: 3.., .. }, TURN_H3)
+            | (Kind::Item { style: ListStyle::Bullet, .. }, TURN_BULLET)
+            | (Kind::Item { style: ListStyle::Number, .. }, TURN_NUMBER)
+            | (Kind::Item { style: ListStyle::Todo, .. }, TURN_TODO)
+            | (Kind::Quote(_), TURN_QUOTE)
+    )
+}
+
 pub const TURN_TEXT: u64 = 0;
 pub const TURN_H1: u64 = 1;
 pub const TURN_H2: u64 = 2;

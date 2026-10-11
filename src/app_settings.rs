@@ -97,7 +97,6 @@ impl Carnet {
             Msg::SetDivider { to } => {
                 s.divider = crate::settings::Divider::ALL[(to as usize).min(crate::settings::Divider::ALL.len() - 1)];
             }
-            Msg::SetInitial { to } => s.initial = to == 1,
             Msg::SetInitialLines { to } => {
                 s.initial_lines = (to as u32 + 2).clamp(*crate::settings::INITIAL_LINES.start(), *crate::settings::INITIAL_LINES.end());
             }
@@ -248,10 +247,14 @@ impl Carnet {
 
     fn settings_body(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let t = l.t;
-        ui.text(
-            "Settings",
-            TextStyle::new(Type::DISPLAY.size).line_height(Type::DISPLAY.line).family(l.serif).color(t.fg),
-        );
+        // Five quick clicks on it turn the debug information on or off:
+        // hidden, for a release build.
+        ui.with_keyed("settings-title", NodeSpec::row().on_click(Msg::SettingsTitle).role(Role::Heading), |ui| {
+            ui.text(
+                "Settings",
+                TextStyle::new(Type::DISPLAY.size).line_height(Type::DISPLAY.line).family(l.serif).color(t.fg),
+            );
+        });
         if let Some(e) = &self.error {
             ui.text_in(
                 NodeSpec::row().live(kui_native::Live::Assertive).selectable(),
@@ -341,14 +344,11 @@ impl Carnet {
                 );
             });
             rule(ui, l);
-            // Plain or dropped: each note's first paragraph's. Any other
-            // paragraph drops its own from the toolbar; the rows under
-            // this style every dropped letter.
-            setting(ui, l, "First letters", Some("Each note's first paragraph; any other, from the toolbar"), |ui| {
-                let cur = if s.initial { 1 } else { 0 };
-                segmented(ui, l, "initial", &["Plain", "Dropped"], cur, |to| Msg::SetInitial { to });
-            });
-            subgroup(ui, l, "initial-styles", "Every dropped letter", |ui| {
+            // A letter drops only where its paragraph asks, from the
+            // toolbar; these style every one of them.
+            let how = format!("Drop a paragraph's first letter from the toolbar, or {}", crate::keys::label(crate::keys::INITIAL));
+            setting(ui, l, "Dropped letters", Some(&how), |_| {});
+            subgroup(ui, l, "initial-styles", "Dropped letters", |ui| {
                 sub_setting(ui, l, "Up to", |ui| {
                     let cur = (s.initial_lines - crate::settings::INITIAL_LINES.start()) as usize;
                     segmented(ui, l, "height", &["2 lines", "3 lines", "4 lines"], cur, |to| Msg::SetInitialLines { to });
@@ -416,8 +416,8 @@ impl Carnet {
                              and find any of them again by a word in it. Every note is a file in \
                              your folder, readable by any other app, today and in twenty years, \
                              whatever happens to this one.";
-                // The first letter dropped, in its face and ink: as the
-                // note's, or as any paragraph's from the toolbar.
+                // A first letter dropped, in its face and ink, as any
+                // paragraph's from the toolbar.
                 let (cap, rest) = words.split_at(1);
                 let ink = if s.initial_accent { l.c.accent_ink } else { t.fg };
                 ui.rich_text(
