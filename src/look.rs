@@ -38,7 +38,7 @@ pub struct Look {
     /// The body's size over the 16px everything was drawn at: headings,
     /// tables and the title scale by it.
     pub k: f32,
-    /// The page's measure.
+    /// The page's width, padding included: the setting's, in px.
     pub page_w: f32,
 }
 
@@ -166,8 +166,9 @@ impl Styler {
             body,
             initial,
             k: s.size as f32 / 16.0,
-            // The measure in characters, not pixels: it grows with the text.
-            page_w: s.width.px() * (s.size as f32 / 16.0),
+            // As wide as chosen, whatever the text's size: smaller text
+            // doesn't narrow the page, nor bigger text widen it.
+            page_w: s.width.px(),
         }
     }
 }

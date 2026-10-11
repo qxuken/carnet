@@ -73,6 +73,23 @@ impl Carnet {
                 };
                 self.reorder();
             }
+            Msg::SetDates { to } => s.dates_created = to == 1,
+            // Asked first: everything on the Appearance and Writing cards
+            // goes.
+            Msg::ResetLook if !self.reset_armed => {
+                self.reset_armed = true;
+                return;
+            }
+            Msg::ResetLook => {
+                self.reset_armed = false;
+                s.reset_look();
+                self.font_pick = None;
+                self.notify("Appearance and writing are back as they were at first", None);
+            }
+            Msg::ResetLookCancel => {
+                self.reset_armed = false;
+                return;
+            }
             Msg::SetSize { by } => {
                 let (lo, hi) = (*crate::settings::SIZES.start() as i64, *crate::settings::SIZES.end() as i64);
                 s.size = (s.size as i64 + by).clamp(lo, hi) as u32;
@@ -85,9 +102,11 @@ impl Carnet {
                 s.initial_lines = (to as u32 + 2).clamp(*crate::settings::INITIAL_LINES.start(), *crate::settings::INITIAL_LINES.end());
             }
             Msg::SetInitialColor { to } => s.initial_accent = to == 0,
+            // Each time afresh: the whole list, the search empty.
             Msg::FontMenu { which } => {
                 self.font_pick = if self.font_pick == Some(which) { None } else { Some(which) };
                 self.font_query.clear();
+                self.font_search_reset = true;
                 return;
             }
             Msg::SetFont { which, index } => {
@@ -131,10 +150,15 @@ impl Carnet {
         }
     }
 
-    /// Enter in the font list's search: the first match.
+    /// Enter in the font list's search: the first match; the built-in
+    /// face when it is the only one.
     pub(super) fn apply_typed_font(&mut self) {
-        if let (Some(which), false) = (self.font_pick, self.font_rows.is_empty()) {
+        let Some(which) = self.font_pick else { return };
+        let q = self.font_query.trim().to_lowercase();
+        if !self.font_rows.is_empty() {
             self.on_settings(Msg::SetFont { which, index: 0 });
+        } else if built_in(which).is_some_and(|f| f.to_lowercase().contains(&q)) {
+            self.on_settings(Msg::SetFont { which, index: ALL });
         }
     }
 
@@ -334,7 +358,7 @@ impl Carnet {
                         let cur = (s.initial_lines - crate::settings::INITIAL_LINES.start()) as usize;
                         segmented(ui, l, "height", &["2 lines", "3 lines", "4 lines"], cur, |to| Msg::SetInitialLines { to });
                     });
-                    let name = if s.initial_font.is_empty() { "Same as headings".to_string() } else { s.initial_font.clone() };
+                    let name = if s.initial_font.is_empty() { default_font_name(2).to_string() } else { s.initial_font.clone() };
                     sub_setting(ui, l, "Font", |ui| {
                         font_pill(ui, l, "font-initial", &name, l.initial, self.font_pick == Some(2), Msg::FontMenu { which: 2 });
                     });
@@ -358,14 +382,14 @@ impl Carnet {
             });
             // Each face of the pairing, chosen on its own.
             subgroup(ui, l, "faces", "Each font", |ui| {
-                let body_name = if s.font.is_empty() { look::BODY_FACE.to_string() } else { s.font.clone() };
+                let body_name = if is_built_in(0, &s.font) { default_font_name(0).to_string() } else { s.font.clone() };
                 sub_setting(ui, l, "Text", |ui| {
                     font_pill(ui, l, "font-body", &body_name, l.body, self.font_pick == Some(0), Msg::FontMenu { which: 0 });
                 });
                 if self.font_pick == Some(0) {
                     self.font_list(ui, l, 0, &s.font);
                 }
-                let head_name = if s.heading_font.is_empty() { look::HEADING_FACE.to_string() } else { s.heading_font.clone() };
+                let head_name = if is_built_in(1, &s.heading_font) { default_font_name(1).to_string() } else { s.heading_font.clone() };
                 sub_setting(ui, l, "Headings", |ui| {
                     font_pill(ui, l, "font-head", &head_name, l.serif, self.font_pick == Some(1), Msg::FontMenu { which: 1 });
                 });
@@ -431,6 +455,24 @@ impl Carnet {
                 segmented(ui, l, "typewriter", &["Off", "On"], cur, |to| Msg::SetTypewriter { to });
             });
         });
+        // Both cards above as they first were; asked first.
+        let armed = self.reset_armed;
+        card(ui, l, "card-reset", |ui| {
+            setting(
+                ui,
+                l,
+                "Reset appearance and writing",
+                Some("Colors, fonts, sizes and the writing options, back as they were at first. Notes, the library and sync stay as they are."),
+                |ui| {
+                    if armed {
+                        pill_button(ui, l, "reset-cancel", "Cancel", false, true, Msg::ResetLookCancel);
+                        pill_button(ui, l, "reset-yes", "Yes, reset", true, true, Msg::ResetLook);
+                    } else {
+                        pill_button(ui, l, "reset", "Reset", false, !s.look_is_default(), Msg::ResetLook);
+                    }
+                },
+            );
+        });
 
         // -- the library
         section(ui, l, "Library");
@@ -442,6 +484,11 @@ impl Carnet {
                     Sort::Created => 2,
                 };
                 segmented(ui, l, "sort", &["Last edited", "Title", "Created"], cur, |to| Msg::SetSort { to });
+            });
+            rule(ui, l);
+            setting(ui, l, "Dates", Some("The date on each note, in the list and over its title"), |ui| {
+                let cur = if s.dates_created { 1 } else { 0 };
+                segmented(ui, l, "dates", &["Last edited", "Created"], cur, |to| Msg::SetDates { to });
             });
         });
 
@@ -706,14 +753,18 @@ impl Carnet {
         section(ui, l, "Sync");
         let status = self.sync.status.clone();
         let on = self.sync.is_on();
+        // A field; a password's has its Show at its right end, an eye.
         let field = |me: &mut Self, ui: &mut Ui<'_>, key: &str, value: &str, hint: &str, f: Field| {
+            let secret = matches!(f, Field::SyncPassword | Field::PasswordNew);
+            let shown = me.sync_show_password;
             let mut made = None;
             ui.with(
                 NodeSpec::row()
                     .grow_width()
                     .min_width(220.0)
                     .height(34.0)
-                    .padding(Edges { l: 12.0, r: 8.0, t: 0.0, b: 0.0 })
+                    .padding(Edges { l: 12.0, r: if secret { 3.0 } else { 8.0 }, t: 0.0, b: 0.0 })
+                    .gap(4.0)
                     .radius(radius::CONTROL)
                     .bg(t.sunken)
                     .cross_align(Align::Center),
@@ -726,10 +777,28 @@ impl Carnet {
                             placeholder: Some(hint.into()),
                             ..Default::default()
                         },
-                        NodeSpec::row().grow_width().label(hint),
+                        NodeSpec::row().grow_width().min_width(0.0).label(hint),
                     );
                     me.fields.insert(k, f);
                     made = Some(k);
+                    if secret {
+                        let (g, word) = if shown { (Icon::EyeOff, "Hide password") } else { (Icon::Eye, "Show password") };
+                        ui.with_keyed(
+                            &format!("{key}-eye"),
+                            NodeSpec::row()
+                                .size(28.0, 28.0)
+                                .center()
+                                .radius(radius::CONTROL)
+                                .hover_bg(t.sunken.mix(t.fg, 0.06))
+                                .pressed_bg(t.sunken.mix(t.fg, 0.1))
+                                .on_click(Msg::SyncShowPassword)
+                                .role(Role::Checkbox)
+                                .checked(shown)
+                                .label(word)
+                                .tooltip(word),
+                            |ui| crate::icons::icon(ui, g, t.muted, 18.0, false),
+                        );
+                    }
                 },
             );
             made.expect("the field is made")
@@ -777,7 +846,7 @@ impl Carnet {
                     2 => ("you@example.com", "Sign in"),
                     _ => ("Type or paste the code", "Connect"),
                 };
-                ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_align(Align::Center).wrap(), |ui| {
+                ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
                     let reset = std::mem::take(&mut self.sync_reset_fields);
                     if how == 2 {
                         let email = self.sync_email.clone();
@@ -790,8 +859,6 @@ impl Carnet {
                         if std::mem::take(&mut self.sync_mask_reset) || reset {
                             ui.set_edit_text(k, &shown);
                         }
-                        let eye = if self.sync_show_password { "Hide" } else { "Show" };
-                        pill_button(ui, l, "sync-show-pw", eye, false, true, Msg::SyncShowPassword);
                     } else {
                         let code = self.sync_code.clone();
                         let k = field(self, ui, "sync-code", &code, hint, Field::SyncCode);
@@ -1027,7 +1094,7 @@ impl Carnet {
                         }
                     });
                     if let Some((email, password)) = self.pw_edit.clone() {
-                        ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).gap(10.0).cross_align(Align::Center).wrap(), |ui| {
+                        ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 10.0 }).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
                             let k = field(self, ui, "pw-email", &email, "you@example.com", Field::PasswordEmail);
                             if self.focus_req == Some(Field::PasswordEmail) {
                                 ui.focus(k);
@@ -1038,17 +1105,18 @@ impl Carnet {
                             if std::mem::take(&mut self.sync_mask_reset) {
                                 ui.set_edit_text(k, &shown);
                             }
-                            let eye = if self.sync_show_password { "Hide" } else { "Show" };
-                            pill_button(ui, l, "pw-show", eye, false, true, Msg::SyncShowPassword);
-                            pill_button(ui, l, "pw-cancel", "Cancel", false, true, Msg::SyncPasswordCancel);
-                            let ready = email.contains('@') && password.chars().count() >= 8;
-                            pill_button(ui, l, "pw-save", "Save", true, ready && online, Msg::SyncPasswordSave);
                         });
                         ui.text_in(
-                            NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }),
+                            NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 10.0 }),
                             "The password never leaves this device: the server can't read it, nor reset it. Keep the recovery words too.",
                             TextStyle::new(Type::SMALL.size).color(t.muted),
                         );
+                        // The row's own buttons, under its fields, whatever the width.
+                        let ready = email.contains('@') && password.chars().count() >= 8;
+                        ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).gap(10.0).main_align(Align::End), |ui| {
+                            pill_button(ui, l, "pw-cancel", "Cancel", false, true, Msg::SyncPasswordCancel);
+                            pill_button(ui, l, "pw-save", "Save", true, ready && online, Msg::SyncPasswordSave);
+                        });
                     }
                 }
                 // Passkeys, made in a browser on this server's web page (this
@@ -1117,12 +1185,17 @@ impl Carnet {
                     }
                     let now = SystemTime::now();
                     let secs = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    // Each waiting: its code, to select or copy, when this
+                    // device made it (another's is known by its hash only).
                     for (i, w) in inv.waiting.iter().enumerate() {
                         let code = self.sync.invite_code(&w.hash);
                         let title = code.clone().unwrap_or_else(|| "An invite".into());
                         let what = format!("Not used yet \u{b7} {}", left(secs, w.until));
                         ui.with_indexed(i as u64, NodeSpec::column().grow_width(), |ui| {
-                            setting(ui, l, &title, Some(&what), |ui| {
+                            setting_in(ui, l, &title, Some(&what), code.is_some(), |ui| {
+                                if code.is_some() {
+                                    pill_button(ui, l, &format!("sync-invite-copy-{i}"), "Copy", false, true, Msg::SyncInviteCopy { at: i as u64 });
+                                }
                                 pill_button(ui, l, &format!("sync-invite-drop-{i}"), "Take back", false, status == Status::Online, Msg::SyncInviteDrop { at: i as u64 });
                             });
                         });
@@ -1232,15 +1305,15 @@ impl Carnet {
             })
             .clone();
         let q = self.font_query.trim().to_lowercase();
+        // The built-in face once, as the default: installed under its own
+        // name it is the same face.
+        let own = built_in(which);
         self.font_rows = families
             .into_iter()
-            .filter(|f| q.is_empty() || f.to_lowercase().contains(&q))
+            .filter(|f| Some(f.as_str()) != own && (q.is_empty() || f.to_lowercase().contains(&q)))
             .collect();
-        let default_name = match which {
-            0 => "Inter (built in)",
-            1 => "Source Serif 4 (built in)",
-            _ => "Same as headings",
-        };
+        let default_name = default_font_name(which);
+        let default_found = own.is_some_and(|f| f.to_lowercase().contains(&q));
         let style = TextStyle::new(Type::UI.size).color(t.fg);
         ui.with(
             NodeSpec::column()
@@ -1266,6 +1339,9 @@ impl Carnet {
                             &EditOptions { style, placeholder: Some("Search fonts".into()), ..Default::default() },
                             NodeSpec::row().grow_width().label("Search fonts"),
                         );
+                        if std::mem::take(&mut self.font_search_reset) {
+                            ui.set_edit_text(k, "");
+                        }
                         self.fields.insert(k, Field::Font);
                     },
                 );
@@ -1299,8 +1375,11 @@ impl Carnet {
                     1 => Self::face_of(&mut self.font_faces, ui, look::HEADING_FACE),
                     _ => l.serif,
                 };
-                row(ui, u64::MAX - 1, default_name, fallback, current.is_empty(), Msg::SetFont { which, index: ALL });
+                row(ui, u64::MAX - 1, default_name, fallback, is_built_in(which, current), Msg::SetFont { which, index: ALL });
                 let (rows, faces) = (&self.font_rows, &mut self.font_faces);
+                if rows.is_empty() && default_found {
+                    return;
+                }
                 if rows.is_empty() {
                     ui.text_in(
                         NodeSpec::row().pad_xy(12.0, 6.0),
@@ -1330,6 +1409,32 @@ impl Carnet {
             },
         );
     }
+}
+
+/// The face a font list's default row stands for, by its family name:
+/// the text's and the headings' are shipped; the letter's is the
+/// headings', whatever they are.
+fn built_in(which: u64) -> Option<&'static str> {
+    match which {
+        0 => Some(look::BODY_FACE),
+        1 => Some(look::HEADING_FACE),
+        _ => None,
+    }
+}
+
+/// A font list's default row, and its pill while it is chosen.
+fn default_font_name(which: u64) -> &'static str {
+    match which {
+        0 => "Inter (built in)",
+        1 => "Source Serif 4 (built in)",
+        _ => "Same as headings",
+    }
+}
+
+/// `name`, as the settings keep it, is the list's default face: none
+/// chosen, or the built-in one by its name.
+fn is_built_in(which: u64, name: &str) -> bool {
+    name.is_empty() || built_in(which) == Some(name)
 }
 
 fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
@@ -1370,6 +1475,11 @@ fn rule(ui: &mut Ui<'_>, l: &Look) {
 /// One setting: its name (and a word on it) on the left, its control on
 /// the right.
 fn setting(ui: &mut Ui<'_>, l: &Look, name: &str, note: Option<&str>, control: impl FnOnce(&mut Ui<'_>)) {
+    setting_in(ui, l, name, note, false, control);
+}
+
+/// [`setting`], its name and word on it selectable, to copy (a code).
+fn setting_in(ui: &mut Ui<'_>, l: &Look, name: &str, note: Option<&str>, selectable: bool, control: impl FnOnce(&mut Ui<'_>)) {
     let t = l.t;
     ui.with(
         NodeSpec::row()
@@ -1380,7 +1490,8 @@ fn setting(ui: &mut Ui<'_>, l: &Look, name: &str, note: Option<&str>, control: i
             .cross_align(Align::Center)
             .wrap(),
         |ui| {
-            ui.with(NodeSpec::column().grow_width().min_width(120.0).gap(2.0), |ui| {
+            let words = NodeSpec::column().grow_width().min_width(120.0).gap(2.0);
+            ui.with(if selectable { words.selectable() } else { words }, |ui| {
                 ui.text(name, TextStyle::new(Type::STRONG.size).color(t.fg));
                 if let Some(n) = note {
                     ui.text(n, TextStyle::new(Type::SMALL.size).color(t.muted));

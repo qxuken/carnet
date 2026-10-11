@@ -1047,7 +1047,7 @@ impl Store {
             }
         };
         let text = note.markdown();
-        write_atomic(&target, &text)?;
+        write_made(&target, &text, Some(note.created))?;
         if let Some(old) = &current
             && *old != target
         {
@@ -1092,6 +1092,13 @@ impl Store {
             (Some(key), Some(r)) => r.history(key),
             _ => Vec::new(),
         }
+    }
+
+    /// When note `i`'s history starts: its first version, `None` without
+    /// one.
+    pub fn first_version(&mut self, i: usize) -> Option<SystemTime> {
+        let first = self.history(i).last()?.time;
+        Some(UNIX_EPOCH + Duration::from_secs(first.max(0) as u64))
     }
 
     /// Note `i`'s text as it was at `version`.
@@ -2608,10 +2615,21 @@ fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
+    write_made(path, text, None)
+}
+
+/// [`write_atomic`], the file born at `made` (by default when the one it
+/// replaces was) where the system lets that be set: a save is a new file
+/// taking the old one's place, which would be born anew at every save.
+fn write_made(path: &Path, text: &str, made: Option<SystemTime>) -> io::Result<()> {
+    let made = made.or_else(|| fs::metadata(path).and_then(|m| m.created()).ok());
     let tmp = path.with_extension("md.tmp");
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(text.as_bytes())?;
+        if let Some(t) = made.filter(|t| *t > UNIX_EPOCH) {
+            keep_created(&f, t);
+        }
         // On disk before it takes the old file's place: a power cut leaves
         // the old version or the new one, never an empty file.
         f.sync_all()?;
@@ -2619,6 +2637,18 @@ fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     rename_retrying(&tmp, path).inspect_err(|_| {
         let _ = fs::remove_file(&tmp);
     })
+}
+
+/// Sets a file's birth time, where the system has one that can be set.
+fn keep_created(f: &fs::File, t: SystemTime) {
+    #[cfg(target_os = "macos")]
+    use std::os::macos::fs::FileTimesExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::FileTimesExt;
+    #[cfg(any(target_os = "macos", windows))]
+    let _ = f.set_times(fs::FileTimes::new().set_created(t));
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let _ = (f, t);
 }
 
 /// Whether a file a note links to is one to open in its own app: a
@@ -2803,6 +2833,34 @@ mod tests {
     fn edit_elsewhere(path: &Path, text: &str) {
         std::thread::sleep(Duration::from_millis(20));
         fs::write(path, text).unwrap();
+    }
+
+    /// A save is a new file taking the old one's place, and keeps its
+    /// birth time: what a note's Created date is read from. A note that
+    /// knows an older one (from its history) gives the file that.
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn a_save_keeps_the_files_birth_time() {
+        let dir = temp_dir("birth");
+        let mut s = Store::open(dir.clone()).unwrap();
+        let path = s.notes[0].path.clone().unwrap();
+        let secs = |t: SystemTime| t.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let born = secs(fs::metadata(&path).unwrap().created().unwrap());
+        std::thread::sleep(Duration::from_millis(1100));
+        s.notes[0].touch();
+        s.save(0, false).unwrap();
+        let meta = fs::metadata(&path).unwrap();
+        assert_eq!(secs(meta.created().unwrap()), born);
+        assert!(secs(meta.modified().unwrap()) > born, "saved");
+        let older = UNIX_EPOCH + Duration::from_secs(born - 86_400);
+        s.notes[0].created = older;
+        s.notes[0].touch();
+        s.save(0, false).unwrap();
+        assert_eq!(secs(fs::metadata(&path).unwrap().created().unwrap()), born - 86_400);
+        drop(s);
+        assert_eq!(secs(Store::open(dir.clone()).unwrap().notes[0].created), born - 86_400, "and read back");
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A replica a newer Carnet wrote is left alone, and says so; the
