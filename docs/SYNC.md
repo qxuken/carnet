@@ -99,7 +99,7 @@ Each note is one `LoroText` holding the file's Markdown, exactly as Carnet write
 | A note's text (title included, as its `# ` line) | a Loro doc per note (`LoroText`) | character by character |
 | A note's folder, file name, pinned, trashed | the vault doc: one map entry per note and field (`<key>/folder`, `/name`, `/pinned`, `/trashed`) | last writer wins, per field, so a pin on one device and a move on another both hold |
 | Folders, empty ones too | the vault doc: a map of path → present or not | last writer wins, per folder |
-| Pictures in `attachments/` | sealed blobs by content id (§7); the vault maps path → blob id | a blob never changes; a path is last writer wins |
+| Pictures in `attachments/`, and any other a note shows (one beside its note) | sealed blobs by content id (§7); the vault maps path → blob id | a blob never changes; a path is last writer wins |
 | A trashed note | its doc stays; the vault marks it trashed, and its folder and name say where it came from | restoring clears the mark |
 | A note deleted forever | the vault marks it gone (`<key>/gone`), never unmarked; the server deletes its room | gone wins over any other field |
 | A picture no note shows any more | the vault's path keeps `-<id>` instead of the id; the server may drop the blob after 30 days (§6) | a path put back revives it |

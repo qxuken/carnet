@@ -984,6 +984,11 @@ impl Files {
         self.paths.is_empty()
     }
 
+    /// Every file's path, as it is written.
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.paths.values().map(String::as_str)
+    }
+
     /// The file at `path`, as its path is written.
     pub fn get(&self, path: &str) -> Option<&str> {
         self.paths.get(&path.to_lowercase()).map(String::as_str)
