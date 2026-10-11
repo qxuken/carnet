@@ -365,7 +365,7 @@ fn a_card_on_another_devices_row_is_not_believed() {
             you: id == b"first",
         })
         .collect();
-    let forged = wire::encode(&Frame::Carnet(Carnet::Devices { epoch: 0, devices: rows, recovery: Vec::new(), password: Vec::new(), passwords: false, passkeys: Vec::new() }));
+    let forged = wire::encode(&Frame::Carnet(Carnet::Devices { epoch: 0, devices: rows, recovery: Vec::new(), password: Vec::new(), passwords: false, passkeys: Vec::new(), password_email: String::new() }));
     let Net { peers, rng, .. } = &mut net;
     let Some(Peer::Device(d)) = peers.get_mut(&a) else { panic!() };
     d.session.receive(&forged, &mut d.notes, rng);

@@ -387,6 +387,10 @@ It uses **OPAQUE** (the `opaque-ke` crate, which builds for wasm): the password 
 - **Setting one** (a device already in): OPAQUE registration, relayed. Its `export_key`, which never leaves the device, becomes a secret that works like the recovery words: it wraps a copy of the key ring, its signing key's public half names the password's slot, and its box key is in the slot's card. The server keeps OPAQUE's record and the slot, with the email in the directory to find it by. One email signs in to one account. Changing the password replaces the slot.
 - **Signing in** (a new device): OPAQUE login, relayed; an unknown email gets a made-up answer and fails on the device exactly as a wrong password does. Then a recovery signed with the secret. It counts as a try for the rate limit.
 - **A device removed** seals the new epoch to the password's slot too, so a password set before still works after.
+- **Which email.** The email only names the password: a sign-in finds the account by it. Which emails an account may name its password after is the server's policy (`quota::PasswordEmails`, a `Host` field):
+  - `Any` (the default, a server of one's own): any email no other account has. Nobody is mailed, so nothing says it's the person's; on a server of one's own that's fine, since its accounts are invited by hand.
+  - `Account` (a hosted service): only the email the account came in by, as the host says (`Admission::email_of`). A hosted signup mails the invite to that email, so it's confirmed. Any other is refused with the one it must be (`On this service, the password signs in with the email you signed up with: ann@example.com`), so nobody can claim someone else's email for their password. `/v1/info` says `"password_email": "account"`, never an email; the account's own devices are told the email in their `Devices` list (`password_email`, empty for any), and Settings shows it instead of a field to type in. Passwords set before the policy stay as they are.
+  - `Confirm` (not built): any email, once a code mailed to it comes back. It needs a seam to mail by and a frame for the code between `PasswordSetStart` and `PasswordSetFinish`: the server mails the code on the start, keeps it with the account for ten minutes, and takes the finish only with it.
 
 ### Passkeys
 
@@ -525,11 +529,12 @@ fuzz/                   cargo-fuzz targets (§12)
 
 | Field | Self-hosted default | What a host can do |
 |---|---|---|
-| `routes` | none | merge its own axum routes beside the API. A `/` among them replaces the web app's page there (a landing page); the web app is still served everywhere else, and unknown `/v1/` paths stay 404. |
+| `routes` | none | merge its own axum routes beside the API. A `/` among them replaces the web app's page there (a landing page); the web app is still served everywhere else, and unknown `/v1/` paths stay 404. The web app's service worker answers only `/` from its cache, so a host's pages (a signup at `/start`) reach the server even once the app is installed. |
 | `quota: Arc<dyn Quota>` | `Unlimited` | per account, a byte limit (notes and pictures, as sealed), whether it may write, a plan name and an end date (`quota::Limit`) |
-| `admission: Arc<dyn Admission>` | `ByInvite` | be told which invite made which account (`admitted`), and when an account is deleted or removed (`removed`) |
+| `admission: Arc<dyn Admission>` | `ByInvite` | be told which invite made which account (`admitted`), and when an account is deleted or removed (`removed`); say the email an account came in by (`email_of`) |
 | `signup: Option<String>` | none | a URL where newcomers make an account: `/v1/info` returns it, and the web app's first screen links to it |
 | `passwords` | off | accept email and password sign-in (§7) |
+| `password_emails` | `Any` | which email a password may sign in as (§7): any, or `Account`, only the one `admission.email_of` says |
 | `first_invite` | on | print the owner's invite on a start with no accounts |
 | `store` | SQLite files in `data/` | any `Storage`, e.g. `postgres::Postgres` (feature `postgres`) |
 | `blobs` | files in `data/blobs` | any `Blobs`, e.g. `s3::S3Blobs` (feature `s3`), with pre-signed links |

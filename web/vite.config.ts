@@ -30,6 +30,12 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,wasm,woff2,svg,png}'],
         maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        // The app is one page at `/` (its screens are in the hash), so
+        // that's the only address the worker answers from its cache. Any
+        // other is the server's to answer: a hosted service's `/start`
+        // and `/status`, the API. Answering them all with the app's page
+        // made a signup link open the app again.
+        navigateFallbackAllowlist: [/^\/(index\.html)?(\?|$)/],
         navigateFallbackDenylist: [/^\/v1\//],
       },
     }),

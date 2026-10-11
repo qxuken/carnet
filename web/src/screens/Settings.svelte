@@ -269,14 +269,18 @@
                 <span>A new device, or a browser, can come in with this email and the password.</span>
               {:else}
                 <b>No password</b>
-                <span>Set one, and a new device can come in with your email and it, instead of a code.</span>
+                {#if sync.password.only}
+                  <span>Set one, and a new device can come in with {sync.password.only} and it, instead of a code.</span>
+                {:else}
+                  <span>Set one, and a new device can come in with your email and it, instead of a code.</span>
+                {/if}
               {/if}
             </div>
             {#if sync.password.id && !dropping}
               <button class="pill" disabled={!online} onclick={() => (dropping = true)}>Take away</button>
-              <button class="pill" disabled={!online} onclick={() => (pw = { email: sync.password?.id ?? '', password: '' })}>Change</button>
+              <button class="pill" disabled={!online} onclick={() => (pw = { email: sync.password?.only ?? sync.password?.id ?? '', password: '' })}>Change</button>
             {:else if !sync.password.id}
-              <button class="pill" disabled={!online} onclick={() => (pw = { email: '', password: '' })}>Set one</button>
+              <button class="pill" disabled={!online} onclick={() => (pw = { email: sync.password?.only ?? '', password: '' })}>Set one</button>
             {/if}
           </div>
           {#if dropping}
@@ -289,14 +293,25 @@
             </div>
           {/if}
         {:else}
-          <form class="row naming password" onsubmit={(e) => { e.preventDefault(); if (pw && sync.setPassword(pw.email, pw.password)) saving = true; }}>
+          <form class="row naming password" onsubmit={(e) => { e.preventDefault(); if (pw && sync.setPassword(sync.password?.only ?? pw.email, pw.password)) saving = true; }}>
             <Icon name="key" size={20} />
-            <!-- svelte-ignore a11y_autofocus -->
-            <input bind:value={pw.email} type="email" autocomplete="username" placeholder="you@example.com" aria-label="Email" autofocus />
-            <input bind:value={pw.password} type="password" autocomplete="new-password" placeholder="8 letters or more" aria-label="New password" />
+            {#if sync.password.only}
+              <!-- The service holds passwords to the email signed up with:
+                   shown, not asked (and named for the browser's keychain). -->
+              <input value={sync.password.only} type="email" autocomplete="username" aria-label="Email" readonly />
+              <!-- svelte-ignore a11y_autofocus -->
+              <input bind:value={pw.password} type="password" autocomplete="new-password" placeholder="8 letters or more" aria-label="New password" autofocus />
+            {:else}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input bind:value={pw.email} type="email" autocomplete="username" placeholder="you@example.com" aria-label="Email" autofocus />
+              <input bind:value={pw.password} type="password" autocomplete="new-password" placeholder="8 letters or more" aria-label="New password" />
+            {/if}
             <button type="button" class="pill" onclick={() => (pw = null)}>Cancel</button>
-            <button class="pill primary" disabled={!online || saving || !pw.email.includes('@') || pw.password.length < 8}>{saving ? 'Saving…' : 'Save'}</button>
+            <button class="pill primary" disabled={!online || saving || !(sync.password?.only ?? pw.email).includes('@') || pw.password.length < 8}>{saving ? 'Saving…' : 'Save'}</button>
           </form>
+          {#if sync.password.only}
+            <p class="row quiet">On this service, the password signs in with the email you signed up with.</p>
+          {/if}
           <p class="row quiet">The password never leaves this browser: the server can’t read it, nor reset it. Keep the recovery words too.</p>
         {/if}
       </section>
@@ -458,6 +473,7 @@
   .naming input:focus { box-shadow: 0 0 0 2px var(--accent-soft); }
   .naming.password { flex-wrap: wrap; }
   .naming.password input { flex: 1 1 180px; }
+  .naming.password input[readonly] { color: var(--muted); }
   .invite p { margin: 0; font-size: 13px; color: var(--muted); }
   .invite .digits { margin-bottom: 8px; font-size: 26px; }
   .code-text { font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }

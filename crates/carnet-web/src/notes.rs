@@ -134,9 +134,10 @@ pub enum Said {
     Uploaded(String),
     /// What the account keeps on the server, and may, as asked.
     Usage(carnet_sync::session::Usage),
-    /// With the devices: whether the server takes passwords, and the email
-    /// the account's signs in as.
-    Password { allowed: bool, id: Option<String> },
+    /// With the devices: whether the server takes passwords, the email the
+    /// account's signs in as, and the only one it may (a hosted service:
+    /// the email signed up with), if the server holds it to one.
+    Password { allowed: bool, id: Option<String>, only: Option<String> },
     /// The password is set, changed, or gone, as asked.
     PasswordSet,
     /// With the devices: the account's passkeys, the oldest first.
@@ -363,7 +364,7 @@ impl Notes {
                 Event::Denied(why) => self.errors.push(format!("The server turned this browser away: {why}")),
                 Event::Refused(why) => self.errors.push(why),
                 Event::Usage(u) => self.said.push(Said::Usage(u)),
-                Event::Password { allowed, id } => self.said.push(Said::Password { allowed, id }),
+                Event::Password { allowed, id, only } => self.said.push(Said::Password { allowed, id, only }),
                 Event::PasswordSet => self.said.push(Said::PasswordSet),
                 Event::Passkeys(list) => self.said.push(Said::Passkeys(list)),
                 Event::PasskeySet => self.said.push(Said::PasskeySet),

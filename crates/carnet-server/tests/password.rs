@@ -3,6 +3,8 @@
 //! removed (the new key sealed to the password's slot too). A wrong
 //! password, an unknown email, an email another account has, a server
 //! that takes none: nothing let in. The password never reaches the server.
+//! A server holding passwords to the account's email (a hosted service)
+//! takes that one alone, and tells the account's devices which.
 //! On memory and SQLite.
 
 mod common;
@@ -45,7 +47,7 @@ fn a_password_lets_a_new_device_in_with_the_notes() {
         // Set, and said: the list knows the email.
         let said = set(&mut net, a, " Ann@Example.com ", "correct horse battery");
         assert!(said.contains(&Event::PasswordSet), "{said:?}");
-        assert!(said.contains(&Event::Password { allowed: true, id: Some("ann@example.com".into()) }), "{said:?}");
+        assert!(said.contains(&Event::Password { allowed: true, id: Some("ann@example.com".into()), only: None }), "{said:?}");
         assert!(net.hub.store().password_of("ann@example.com").is_some());
         // Never the password itself, anywhere the server keeps.
         let (_, record) = net.hub.store().password_of("ann@example.com").unwrap();
@@ -113,5 +115,86 @@ fn a_server_that_takes_no_passwords_says_so() {
         let (c, _) = sign_in(&mut net, "ann@example.com", "correct horse battery", b"x");
         assert!(net.denied.iter().any(|(d, why)| *d == c && why == carnet_server::hub::NO_PASSWORDS));
         let _ = vault;
+    }
+}
+
+/// A host that knows each account's email: the one its signup confirmed.
+struct Emails(Option<&'static str>);
+
+impl carnet_server::quota::Admission for Emails {
+    fn admitted(&self, _: [u8; 32], _: &[u8]) {}
+    fn email_of(&self, account: &[u8]) -> Option<String> {
+        self.0.filter(|_| account == ACCOUNT).map(str::to_string)
+    }
+}
+
+fn listed(net: &mut Net, conn: carnet_server::ConnId) -> Vec<Event> {
+    {
+        let Some(Peer::Device(d)) = net.peers.get_mut(&conn) else { panic!() };
+        d.session.list_devices();
+    }
+    net.pump();
+    std::mem::take(&mut net.device(conn).events)
+}
+
+/// Held to the account's email: the devices are told it with their list,
+/// another email is refused with the one it must be, that one is taken
+/// (as typed, in any case), and a sign-in with it lets a device in. An
+/// account the host knows no email of can't set one.
+#[test]
+fn a_hosted_service_holds_the_password_to_the_email_signed_up_with() {
+    use carnet_server::quota::{self, PasswordEmails};
+    for store in stores() {
+        let mut net = Net::new(92, store);
+        net.hub.set_passwords(password::Server::generate(&mut net.rng));
+        net.hub.set_password_emails(PasswordEmails::Account);
+        net.hub.set_admission(std::sync::Arc::new(Emails(Some(" Ann@Example.com"))));
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        net.write(a, "# Diary\n\nall of it\n");
+        let _ = std::mem::take(&mut net.device(a).events);
+
+        let said = listed(&mut net, a);
+        assert!(said.contains(&Event::Password { allowed: true, id: None, only: Some("ann@example.com".into()) }), "{said:?}");
+
+        // Another's email: refused, saying which; nothing kept.
+        let said = set(&mut net, a, "bob@example.com", "correct horse battery");
+        let why = quota::password_email_is("ann@example.com");
+        assert!(said.iter().any(|e| matches!(e, Event::Refused(r) if *r == why)), "{said:?}");
+        assert_eq!(why, "On this service, the password signs in with the email you signed up with: ann@example.com");
+        assert!(net.hub.store().password_of("bob@example.com").is_none());
+        assert!(net.hub.store().password_card(ACCOUNT).is_empty());
+
+        // Its own: set, and a new device signs in with it.
+        let said = set(&mut net, a, "ANN@example.com ", "correct horse battery");
+        assert!(said.contains(&Event::PasswordSet), "{said:?}");
+        assert!(said.contains(&Event::Password { allowed: true, id: Some("ann@example.com".into()), only: Some("ann@example.com".into()) }), "{said:?}");
+        let (n, key) = sign_in(&mut net, "ann@example.com", "correct horse battery", b"phone");
+        net.admit(n, b"phone", key, 9);
+        assert!(net.device(n).session.is_ready());
+
+        // The host knows no email for it: none may be set.
+        net.hub.set_admission(std::sync::Arc::new(Emails(None)));
+        let said = set(&mut net, a, "ann@example.com", "another long password");
+        assert!(said.iter().any(|e| matches!(e, Event::Refused(r) if r == quota::NO_ACCOUNT_EMAIL)), "{said:?}");
+    }
+}
+
+/// A server of one's own holds a password to no email in particular, and
+/// says none.
+#[test]
+fn a_server_of_ones_own_takes_any_email() {
+    for store in stores() {
+        let mut net = Net::new(93, store);
+        net.hub.set_passwords(password::Server::generate(&mut net.rng));
+        // Even with a host that knows an email: the policy is Any.
+        net.hub.set_admission(std::sync::Arc::new(Emails(Some("ann@example.com"))));
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        let _ = std::mem::take(&mut net.device(a).events);
+        let said = listed(&mut net, a);
+        assert!(said.contains(&Event::Password { allowed: true, id: None, only: None }), "{said:?}");
+        let said = set(&mut net, a, "bob@example.com", "correct horse battery");
+        assert!(said.contains(&Event::PasswordSet), "{said:?}");
     }
 }

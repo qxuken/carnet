@@ -49,7 +49,7 @@ use crate::blobs::{self as pictures, BlobFiles, Blobs, Counts, FileBlobs, Job, W
 use crate::links::Signer;
 use crate::hub::{ConnId, Hub, Open, Out, Stats};
 use crate::limits::{self, Limiter, Network};
-use crate::quota::{Admission, ByInvite, Quota, Unlimited};
+use crate::quota::{Admission, ByInvite, PasswordEmails, Quota, Unlimited};
 use crate::sqlite::Sharded;
 use crate::storage::{Failed, Storage};
 
@@ -120,7 +120,7 @@ enum ToHub {
 
 /// What a host gives the hub: its limits, who's let in, and its OPAQUE
 /// key if it takes passwords.
-type Seams = (Arc<dyn Quota>, Arc<dyn Admission>, Option<carnet_sync::password::Server>);
+type Seams = (Arc<dyn Quota>, Arc<dyn Admission>, Option<carnet_sync::password::Server>, PasswordEmails);
 
 /// The server's OPAQUE key, made the first time and kept in `data`
 /// (`opaque.key`, readable by the server alone): a new one would make
@@ -171,6 +171,10 @@ pub struct Host {
     /// and password. Its OPAQUE key is made on the first start
     /// (`data/opaque.key`) and never leaves the server.
     pub passwords: bool,
+    /// Which email a password may sign in as: any (a server of one's
+    /// own), or only the one the account came in by, as `admission` says
+    /// (a hosted service, whose signup confirmed it).
+    pub password_emails: PasswordEmails,
     /// Print an invite for the first account when there's none (a server
     /// of one's own: its owner's way in).
     pub first_invite: bool,
@@ -193,6 +197,7 @@ impl Default for Host {
             admission: Arc::new(ByInvite),
             signup: None,
             passwords: false,
+            password_emails: PasswordEmails::Any,
             first_invite: true,
             store: None,
             blobs: None,
@@ -289,6 +294,8 @@ struct App {
     signup: Option<Arc<str>>,
     /// It takes passwords (§7).
     passwords: bool,
+    /// And which email they sign in as.
+    password_emails: PasswordEmails,
     next: Arc<AtomicU64>,
     trusted: Arc<[Network]>,
     gate: Arc<std::sync::Mutex<Gate>>,
@@ -328,8 +335,8 @@ impl Gate {
 
 /// The hub's thread: one thing at a time, from every socket.
 fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, mut rx: mpsc::UnboundedReceiver<ToHub>, worker: std::sync::mpsc::Sender<Job>) {
-    let (quota, admission, passwords) = seams;
-    let mut hub = Hub::new(origin, store).with_quota(quota).with_admission(admission);
+    let (quota, admission, passwords, password_emails) = seams;
+    let mut hub = Hub::new(origin, store).with_quota(quota).with_admission(admission).with_password_emails(password_emails);
     if let Some(p) = passwords {
         hub = hub.with_passwords(p);
     }
@@ -420,7 +427,7 @@ pub async fn serve_with(config: Config, listener: TcpListener, metrics: Option<T
 /// [`serve_with`], with what a host adds.
 pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option<TcpListener>, host: Host, stop: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
     let started = now();
-    let Host { routes, quota, admission, signup, passwords, first_invite, store: hosted_store, blobs: hosted_blobs, ready } = host;
+    let Host { routes, quota, admission, signup, passwords, password_emails, first_invite, store: hosted_store, blobs: hosted_blobs, ready } = host;
     let passwords = if passwords { Some(opaque_key(&config.data)?) } else { None };
     let takes_passwords = passwords.is_some();
     // Pictures: files beside the databases, reached by signed links,
@@ -494,7 +501,7 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
             }
         }
     })?;
-    let hub =std::thread::Builder::new().name("carnet-hub".into()).spawn(move || hub_thread(origin, compact_after, store, (quota, admission, passwords), rx, jobs))?;
+    let hub =std::thread::Builder::new().name("carnet-hub".into()).spawn(move || hub_thread(origin, compact_after, store, (quota, admission, passwords, password_emails), rx, jobs))?;
     if let Some(ready) = ready {
         ready(HubHandle { tx: tx.clone() });
     }
@@ -505,6 +512,7 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
         origin: config.origin.as_str().into(),
         signup: signup.map(|s| s.as_str().into()),
         passwords: takes_passwords,
+        password_emails,
         next: Arc::new(AtomicU64::new(1)),
         trusted: config.trusted.clone().into(),
         gate: Arc::new(std::sync::Mutex::new(gate)),
@@ -587,6 +595,11 @@ struct Info {
     signup: Option<String>,
     /// Whether a device may come in by an email and password here.
     passwords: bool,
+    /// Which email a password signs in as, if it takes them: `any`, or
+    /// `account` (the one the account signed up with). Never an email
+    /// itself: an account's own devices are told theirs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password_email: Option<&'static str>,
     /// The protocol it speaks, the oldest app's it takes, where its
     /// deprecation starts, and what it can do (`compat`, docs/SYNC.md
     /// §14): what an app reads before it connects.
@@ -603,6 +616,7 @@ async fn info(State(app): State<App>) -> impl IntoResponse {
         origin: app.origin.to_string(),
         signup: app.signup.as_deref().map(str::to_string),
         passwords: app.passwords,
+        password_email: app.passwords.then(|| app.password_emails.name()),
         protocol: compat::PROTOCOL,
         oldest: compat::OLDEST,
         deprecated: compat::DEPRECATED,

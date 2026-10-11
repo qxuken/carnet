@@ -137,9 +137,12 @@ pub enum Event {
     /// The account can't write for now (its plan lapsed): what's written
     /// here stays here until it can. Said once a login.
     ReadOnly,
-    /// With the devices: whether the server takes passwords, and the
-    /// email this account's password signs in as, if it has one.
-    Password { allowed: bool, id: Option<String> },
+    /// With the devices: whether the server takes passwords, the email
+    /// this account's password signs in as, if it has one, and the only
+    /// email one may sign in as here, if the server holds it to one (a
+    /// hosted service: the email the account signed up with). The apps
+    /// show that one, not a field to type another in.
+    Password { allowed: bool, id: Option<String>, only: Option<String> },
     /// The password is set (or changed, or gone), as asked.
     PasswordSet,
     /// With the devices: the account's passkeys.
@@ -871,10 +874,11 @@ impl Session {
                 // last list: read again.
                 self.list_devices();
             }
-            Frame::Carnet(Carnet::Devices { epoch, devices, recovery, password, passwords, passkeys }) if self.state == State::Ready => {
+            Frame::Carnet(Carnet::Devices { epoch, devices, recovery, password, passwords, passkeys, password_email }) if self.state == State::Ready => {
                 let listed = self.read_list(epoch, devices, &recovery, &password, passkeys);
                 let id = listed.password.as_ref().ok().and_then(|c| c.as_ref()).map(|c| c.name.clone());
-                self.events.push(Event::Password { allowed: passwords, id });
+                let only = Some(password_email).filter(|e| !e.is_empty());
+                self.events.push(Event::Password { allowed: passwords, id, only });
                 let keys = listed
                     .passkeys
                     .iter()

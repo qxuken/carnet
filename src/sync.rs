@@ -345,6 +345,10 @@ pub struct Sync {
     /// With the devices: whether the server takes passwords, and the email
     /// the account's password signs in as, if it has one.
     pub password: Option<(bool, Option<String>)>,
+    /// With the devices: the only email a password may sign in as on this
+    /// server, if it holds them to one (a hosted service: the email the
+    /// account signed up with). Settings shows it instead of a field.
+    pub password_email: Option<String>,
     /// A password was set (or taken away) since Settings last looked.
     pub password_set: bool,
     /// The account's deletion asked from here: the server's goodbye says
@@ -423,6 +427,7 @@ impl Sync {
             usage: None,
             asked_usage: false,
             password: None,
+            password_email: None,
             password_set: false,
             deleting: false,
             passkeys: Vec::new(),
@@ -989,7 +994,10 @@ impl Sync {
                             self.error = Some(format!("Pairing ended: {why}"));
                         }
                         Event::RecoverySet | Event::Unreadable(_) => {}
-                        Event::Password { allowed, id } => self.password = Some((allowed, id)),
+                        Event::Password { allowed, id, only } => {
+                            self.password = Some((allowed, id));
+                            self.password_email = only;
+                        }
                         Event::PasswordSet => {
                             self.password_set = true;
                             self.devices = None;

@@ -3303,6 +3303,73 @@ fn a_new_device_comes_in_by_email_and_password() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// On a hosted service that holds passwords to the email signed up with,
+/// Settings shows that email instead of a field, Save sets it with that
+/// one, and another (asked by hand) is refused in the service's words.
+#[test]
+fn a_hosted_password_signs_in_with_the_email_signed_up_with() {
+    use carnet_server::quota::{Admission, PasswordEmails};
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    struct Signup;
+    impl Admission for Signup {
+        fn admitted(&self, _: [u8; 32], _: &[u8]) {}
+        fn email_of(&self, _: &[u8]) -> Option<String> {
+            Some("ann@example.com".into())
+        }
+    }
+    let data = std::env::temp_dir().join(format!("carnet-app-pwemail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::invite(&mut carnet_server::Sharded::open(&data).unwrap(), false).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let host = server::Host { passwords: true, password_emails: PasswordEmails::Account, admission: std::sync::Arc::new(Signup), first_invite: false, ..server::Host::default() };
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let (mut a, mut da, dir_a) = fresh("pwemail-a");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut a, &mut da, &|x| x.sync.status == crate::sync::Status::Online);
+    a.settings_open = true;
+    until("A knows the email", &mut a, &mut da, &|x| x.sync.password_email.as_deref() == Some("ann@example.com"));
+    assert!(drawn(&mut da, &mut a, "Set one"));
+
+    // Another email, asked by hand: the service's own words.
+    a.sync.set_password("bob@example.com", "correct horse battery");
+    until("refused", &mut a, &mut da, &|x| x.sync.error.is_some());
+    assert!(a.sync.error.as_deref().is_some_and(|e| e.contains("the email you signed up with: ann@example.com")), "{:?}", a.sync.error);
+
+    // Set one: the email shown, not asked; the password typed.
+    a.on_plain(Msg::SyncPassword);
+    assert_eq!(a.pw_edit.as_ref().map(|(e, _)| e.as_str()), Some("ann@example.com"));
+    assert!(drawn(&mut da, &mut a, "ann@example.com"), "the email shown, not a field");
+    // (The inspector keeps a line's first 60 letters.)
+    assert!(da.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with("On this service, the password signs in with the email"))));
+    assert_eq!(a.focus_req, None, "the password's field has the focus");
+    a.pw_edit = Some(("someone@else.com".into(), "correct horse battery".into()));
+    a.on_plain(Msg::SyncPasswordSave);
+    until("set", &mut a, &mut da, &|x| x.notice.as_ref().is_some_and(|n| n.text.starts_with("Password set")));
+    until("listed", &mut a, &mut da, &|x| x.sync.password == Some((true, Some("ann@example.com".into()))));
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// A passkey made in a browser shows in the app's Settings → Sync by its
 /// name, and goes when Remove is asked twice: Cancel, or Yes, remove.
 #[test]
