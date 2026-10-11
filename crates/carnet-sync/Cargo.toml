@@ -58,7 +58,9 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # headers, both already under tokio-tungstenite.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
 httparse = { version = "1", optional = true }
+# A server's `/v1/info`, and a signup's answer (signup.rs).
+serde_json = { version = "1", optional = true }
 
 [features]
 # The desktop's network driver; the PWA and the server leave it out.
-net = ["dep:tokio", "dep:tokio-tungstenite", "dep:rustls", "dep:webpki-roots", "dep:futures-util", "dep:tokio-rustls", "dep:httparse"]
+net = ["dep:tokio", "dep:tokio-tungstenite", "dep:rustls", "dep:webpki-roots", "dep:futures-util", "dep:tokio-rustls", "dep:httparse", "dep:serde_json"]

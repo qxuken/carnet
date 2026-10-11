@@ -13,6 +13,7 @@ mod keys;
 mod look;
 mod oscursor;
 mod settings;
+mod signup;
 mod slash;
 mod store;
 mod pictures;

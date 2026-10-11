@@ -164,6 +164,10 @@ pub enum Msg {
     /// Settings → Sync: which way in (0 a code: an invite or a pairing
     /// code, 1 the recovery words, 2 an email and password).
     SyncHow { to: u64 },
+    /// Settings → Sync: "New here?", its email field opened or closed; an
+    /// invite asked for, to the email typed.
+    SignupOpen,
+    SignupSend,
     /// Settings → Sync: the password typed shown as it is, or as dots.
     SyncShowPassword,
     /// Settings → Sync: set (or change) the password, its fields opened;
@@ -333,6 +337,8 @@ pub enum Field {
     SyncCode,
     /// Settings → Sync: this device's name, being changed.
     DeviceName,
+    /// Settings → Sync: the email an invite is asked for, new here.
+    SignupEmail,
     /// Settings → Sync: the email and password to come in by.
     SyncEmail,
     SyncPassword,
@@ -688,6 +694,9 @@ pub struct Carnet {
     pub sync_server: String,
     pub sync_code: String,
     pub sync_how: u64,
+    /// "New here?": an account made on the server typed, by an invite to
+    /// an email.
+    pub signup: crate::signup::Signup,
     /// The way in by email and password: what's typed.
     pub sync_email: String,
     pub sync_password: String,
@@ -940,6 +949,7 @@ impl Carnet {
             sync_server: String::new(),
             sync_code: String::new(),
             sync_how: 0,
+            signup: Default::default(),
             sync_email: String::new(),
             sync_password: String::new(),
             sync_show_password: false,
@@ -2786,6 +2796,14 @@ impl Carnet {
                 self.sync_how = to.min(2);
                 self.sync.error = None;
             }
+            Msg::SignupOpen => {
+                self.signup.open = !self.signup.open;
+                self.signup.error = None;
+                if self.signup.open {
+                    self.focus_req = Some(Field::SignupEmail);
+                }
+            }
+            Msg::SignupSend => self.signup.send(),
             Msg::SyncShowPassword => {
                 self.sync_show_password = !self.sync_show_password;
             }
@@ -3330,6 +3348,12 @@ impl Carnet {
                     self.sync_rename = Some(text);
                 }
             }
+            Field::SignupEmail => {
+                if text != self.signup.email {
+                    self.signup.error = None;
+                }
+                self.signup.email = text;
+            }
             Field::SyncEmail => {
                 if text != self.sync_email {
                     self.sync.error = None;
@@ -3381,6 +3405,7 @@ impl Carnet {
             Field::SyncCode | Field::SyncEmail | Field::SyncPassword => self.on_plain(Msg::SyncStart),
             Field::PasswordEmail | Field::PasswordNew => self.on_plain(Msg::SyncPasswordSave),
             Field::DeviceName => self.on_plain(Msg::SyncRenameSave),
+            Field::SignupEmail => self.on_plain(Msg::SignupSend),
             Field::Title => self.edit_at(page::first(self.doc())),
             // Enter on a name: the folder is made, and shown. No name, no
             // folder.
@@ -3497,6 +3522,8 @@ impl App for Carnet {
     fn setup(&mut self, waker: Waker) {
         let wake = waker.clone();
         self.sync.set_wake(move || wake.wake());
+        let wake = waker.clone();
+        self.signup.set_wake(move || wake.wake());
         self.images.set_waker(waker);
     }
 
@@ -3506,6 +3533,7 @@ impl App for Carnet {
             self.save_current();
         }
         self.sync_tick();
+        self.signup_tick();
         // A notice lasts a while, then goes; Undo lasts as long as it shows.
         if self.notice.as_ref().is_some_and(|n| n.at.elapsed() >= NOTICE_FOR) {
             self.notice = None;
@@ -3531,6 +3559,7 @@ impl App for Carnet {
         // on the server asked again; and the inspector's "Checked …" kept
         // true while it shows.
         due.extend(self.sync.due());
+        due.extend(self.signup.due());
         if self.settings_open && self.sync_inspector && self.sync.inspected_at.is_some() {
             due.push(INSPECTED_EVERY);
         }

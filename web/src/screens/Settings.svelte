@@ -121,7 +121,7 @@
       <p class="row danger"><Icon name="warning" size={16} /> {sync.updateSoon}</p>
     {/if}
     {#if space}
-      <p class="row quiet"><Icon name="device" size={16} /> {space.line}</p>
+      <p class="row quiet"><Icon name="cloud" size={16} /> {space.line}</p>
       {#if !space.writable}
         <p class="row danger">Read only for now: what’s written here stays here, and syncs once the account can write again.</p>
       {/if}

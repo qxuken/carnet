@@ -45,6 +45,8 @@ proptest = { version = "1.11", default-features = false, features = ["std", "bit
 # app_tests: two whole apps through the server binary's own code.
 carnet-server = { path = "crates/carnet-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+# A hosted service's signup route, faked beside a real server.
+axum = "0.8"
 
 # The Windows executable's icon and version (packaging/windows/carnet.rc).
 [build-dependencies]

@@ -3,7 +3,7 @@
   // link a QR code opened), an invite for a new account (from a signup's
   // email), a passkey, an email and password, or the twelve words. The
   // kind of code is read from its shape.
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { sync } from '../lib/sync.svelte';
   import Icon from '../lib/Icon.svelte';
   import Scan from './Scan.svelte';
@@ -25,6 +25,15 @@
 
   /// Where someone new makes an account, if this server takes signups.
   let signup = $state<string | null>(null);
+  /// New here: the email field shown, what's typed in it, an invite
+  /// being asked for, the email it was sent to, and what the server said.
+  let newHere = $state(false);
+  let signupAddress = $state('');
+  let sending = $state(false);
+  let sentTo = $state<string | null>(null);
+  let sentSaid = $state('');
+  let signupError = $state('');
+  let codeField = $state<HTMLInputElement | null>(null);
   /// Whether this server takes passwords and passkeys; offered unless it
   /// says not.
   let passwords = $state(true);
@@ -97,6 +106,64 @@
     if (w === 'passkey') void sync.signInWithPasskey();
   }
 
+  /// The email field, focused as it opens.
+  const focused = (el: HTMLInputElement) => el.focus();
+
+  /// The words in a server's answer: its JSON's `error` or `message`, or
+  /// its text if short and not a page.
+  function said(body: string): string {
+    try {
+      const j = JSON.parse(body) as { error?: unknown; message?: unknown };
+      const s = typeof j?.error === 'string' ? j.error : typeof j?.message === 'string' ? j.message : '';
+      return s.trim();
+    } catch {
+      const t = body.trim();
+      return t.length <= 300 && !t.startsWith('<') ? t : '';
+    }
+  }
+
+  /// An invite asked for, here: the server mails it, and its code goes in
+  /// the code field, focused.
+  async function sendInvite(e: SubmitEvent) {
+    e.preventDefault();
+    const to = signupAddress.trim();
+    if (!to || sending) return;
+    if (!/^[^\s@]+@[^\s@]+$/.test(to)) {
+      signupError = 'That doesn’t look like an email address.';
+      return;
+    }
+    sending = true;
+    signupError = '';
+    try {
+      const r = await fetch('/v1/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: to }) });
+      const words = said(await r.text().catch(() => ''));
+      if (r.ok) {
+        sentTo = to;
+        sentSaid = r.status === 204 ? '' : words;
+        newHere = false;
+        way = 'code';
+        code = '';
+        sync.error = null;
+        await tick();
+        codeField?.focus();
+      } else if ((r.status === 404 || r.status === 405) && signup) {
+        signupError = `This server makes accounts on its own page: ${signup}`;
+      } else {
+        signupError =
+          words ||
+          (r.status === 429
+            ? 'Too many tries: wait a minute, then try again.'
+            : r.status < 500
+              ? `The server didn’t take that (error ${r.status}).`
+              : 'Signing up isn’t working just now: try again in a few minutes.');
+      }
+    } catch {
+      signupError = 'Couldn’t reach the server. Check the connection and try again.';
+    } finally {
+      sending = false;
+    }
+  }
+
   function go(e: SubmitEvent) {
     e.preventDefault();
     if (way === 'passkey') {
@@ -123,6 +190,9 @@
       <p>{signupEmail ? 'The email you signed up with, and the password set on another of your devices.' : 'The email and password set on another of your devices.'}</p>
     {:else if way === 'passkey'}
       <p>A passkey added for Carnet on another of your devices, or in this browser before. The browser asks which, and for your face, fingerprint or PIN.</p>
+    {:else if sentTo && !newHere}
+      <p class="sent" role="status"><Icon name="check" size={16} /> We sent an invite to <b>{sentTo}</b>. Paste its code here.</p>
+      {#if sentSaid}<p class="said">{sentSaid}</p>{/if}
     {:else}
       <p>On a device already in, open <b>Settings → Sync → Add a device</b> and choose <b>Show a code</b>. Scan it, or type it here. An invite from your email goes here too.</p>
     {/if}
@@ -138,7 +208,7 @@
       {:else if way === 'passkey'}
         <!-- Nothing to type: the browser asks. -->
       {:else}
-        <input bind:value={code} placeholder="47-381095" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" />
+        <input bind:this={codeField} bind:value={code} placeholder={sentTo ? 'K7QF-2M9D-XW4H-P3TA' : '47-381095'} aria-label="Code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" />
       {/if}
       <button class="main" disabled={sync.joining || (way === 'password' ? !email.trim() || !password : way !== 'passkey' && !code.trim())}>
         {#if way === 'passkey'}<Icon name="passkey" size={18} />{/if}
@@ -150,7 +220,19 @@
     </form>
     {#if outdated}<p class="error" role="alert">{outdated}</p>{:else if sync.error}<p class="error" role="alert">{sync.error}</p>{/if}
     {#if signup && way === 'code'}
-      <a class="link" href={signup}>New here? Make an account</a>
+      {#if newHere}
+        <!-- New here: an invite asked for in place, its code typed above. -->
+        <form class="signup" onsubmit={sendInvite}>
+          <h2>New here? Make an account</h2>
+          <p>Your email: the server sends an invite there, and its code goes in the field above.</p>
+          <input bind:value={signupAddress} use:focused type="email" placeholder="you@example.com" autocomplete="email" aria-label="Email" oninput={() => (signupError = '')} />
+          <button class="main" disabled={sending || !signupAddress.trim()}>{sending ? 'Sending…' : 'Send me an invite'}</button>
+          {#if signupError}<p class="error" role="alert">{signupError}</p>{/if}
+          <button type="button" class="link" onclick={() => { newHere = false; signupError = ''; }}>Cancel</button>
+        </form>
+      {:else}
+        <button class="link" disabled={sync.joining} onclick={() => { newHere = true; signupError = ''; }}>{sentTo ? 'No invite yet? Ask again' : 'New here? Make an account'}</button>
+      {/if}
     {/if}
     {#each ways as [w, label] (w)}
       <button class="link" disabled={sync.joining} onclick={() => choose(w)}>{label}</button>
@@ -184,5 +266,13 @@
   .tip { font-size: 14px; background: var(--accent-soft); color: var(--ink); padding: 10px 14px; border-radius: var(--radius); text-align: left; }
   .link { display: block; background: none; border: 0; color: var(--accent-ink); cursor: pointer; margin: 14px auto; padding: 6px; text-decoration: none; font: inherit; }
   .error { color: var(--danger); margin: 12px 0 0; }
+  .sent { color: var(--ink); }
+  .sent :global(.icon) { vertical-align: -3px; margin-right: 2px; color: var(--success); }
+  .said { font-size: 14px; }
+  .signup { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
+  .signup h2 { font: 600 17px/1.3 var(--sans); margin: 0; }
+  .signup p { margin: 0 0 4px; }
+  .signup .error { margin: 2px 0 0; }
+  .signup .link { margin: 4px auto 0; }
   .note { font-size: 13px; color: var(--faint); margin-top: 18px; }
 </style>
