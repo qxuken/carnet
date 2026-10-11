@@ -1,0 +1,22 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cd8f24c2d6dea9060746671e93834258be8ee40f15b0b2d5f79dcd6094f67304 # shrinks to text = "*wordwordwordwordword", a = Index(1676976733973595602), b = Index(2515465100960393403), which = 0, color = 1
+cc ec43181f1eed1e46ca5a45c7a94baf19b3e9128c59e2a95098181a168b12a566 # shrinks to text = "Ünï==lit====lit==", a = Index(9223372036854775808), b = Index(0), which = 0, color = 1
+cc 98e7ce4a90e1f1607af2d03b8d06edb651cfb97ce6608129f19a934711f69c57 # shrinks to s = "* ---\n"
+cc 15a5aeb36bc8b1fb5899837d80649105e628bfc5dd31b26f6462ace096919cea # shrinks to text = "e\u{301}<mark>wordé==word==word</mark>", a = Index(10248191152060862009), b = Index(0), which = 5, color = 1
+cc 6e619c2b724760e659e05e561c7cbe0c1ffb1dbc10a44d55688ffba9709057f8 # shrinks to text = "  word ~~gone~~ `code` word ~~gone~~ **bold** 👩\u{200d}👩\u{200d}👧 名前", a = Index(8269230102007730035), b = Index(8587277413623411960), which = 5, color = 1
+cc 40d074404e290bb6cb8960613d9c61537fa7a2c192a87c62f8acfa4063f5f93e # shrinks to s = "**- \r\n---\n"
+cc d8a2527ef8f9dbedc4710c9199936864a87b30d22cbec70cf2972742e0d29437 # shrinks to s = "\\\n- "
+cc fe786b29b9373e1d9fe594e7effc735cea1a2278b5f670c16b7399abdf9846d4 # shrinks to text = "*~~**word~~**", a = Index(0), b = Index(0), typed = ""
+cc 133c85aa8d0c0468e180d9fa3b6bf524927f84c27ed9fba70c52fa896c5ec72a # shrinks to text = "  Ünï `code`   word   word   word", a = Index(4882961666570175428), b = Index(0), which = 3, color = 1
+cc 3ac725ad4f800e28d80c8227b3d5c57d29497fa9a1e7aef0effe96089b67477b # shrinks to text = "word word **bold**", a = Index(0), b = Index(13527612320720337852), which = 1, color = 1
+cc 146b02c6e2a77895ba7f0daf2dfab5929f4d6f4bcee03df80982a138edf4c258 # shrinks to s = "----\n**```\ncode\n```\n---\nword"
+cc 73f85c8aaf0a95d2c60f3e4762d566b7a255c2be9ab5a51f88d230e5c20d6e72 # shrinks to s = "\n---\nword```\ncode\n```\n---\nword"
+cc ec74f5c31387a0c1d7940c89faa4b25141cee7097509ae64e8b507c2c331f0ca # shrinks to s = "#\n```\ncode\n```\n# "
+cc 880cd0ccf0609bade575087a6056bb5b317f9805ce76f93e935b203d9540df5d # shrinks to old = "\u{2000}ເ⺀ଅ", edits = [Put(Index(0), " ")]
+cc 99fd70a7ecede353073fc464a89a9a39fe32c2e9706e81afcf84cb19ed4265ce # shrinks to s = "word| a | b |\n|---|---|\n| 1 | 2 |\n|||-"
+cc 579b82ad9819199b763230806554dd14836a89cd52ba8e13fc195d304aeaa235 # shrinks to text = "word**==word`****[é\\Ünï", a = Index(14347467612885206813), b = Index(0), which = 0, color = 1

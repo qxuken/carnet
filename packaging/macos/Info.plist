@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Carnet.app's: scripts/package.nu fills in @VERSION@. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Carnet</string>
+	<key>CFBundleDisplayName</key>
+	<string>Carnet</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.qxuken.carnet</string>
+	<key>CFBundleExecutable</key>
+	<string>carnet</string>
+	<key>CFBundleIconFile</key>
+	<string>carnet</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<!-- What the system's prompt says the first time Carnet opens ~/Documents/Carnet. -->
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Carnet keeps your notes as Markdown files in Documents/Carnet.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Carnet opens notes and pictures you keep on the Desktop.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Carnet opens notes and pictures you keep in Downloads.</string>
+</dict>
+</plist>

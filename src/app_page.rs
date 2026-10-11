@@ -1,0 +1,2882 @@
+//! The page: the note's title and meta line, and its body — every block
+//! drawn by the app as wrapped text, edited through one key sink.
+//!
+//! Each slot is a `line` row (kui's word for a line of a custom editor): it
+//! names the text to a screen reader, carries the caret for the IME and the
+//! blink, and is what a press's `line`/`byte` point into. The caret is a
+//! 2px bar placed where `caret_rect` says the last layout put that byte;
+//! text that changed since is not measured — its caret waits one frame.
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
+use kui_native::{KeyPress, Span};
+
+use super::*;
+use crate::icons::{self, Glyph};
+use crate::keys;
+use carnet_core::inline;
+use carnet_core::doc::Float;
+use crate::page::Coverage;
+use crate::slash;
+
+/// How far apart pictures side by side are, their blocks' insets included:
+/// their rings and handles never meet.
+const PICTURE_GAP: f32 = 28.0;
+/// The least room beside a picture worth running words in.
+const BESIDE_MIN: f32 = 180.0;
+/// How long the writing pauses, in seconds, before an empty line says
+/// what can go on it.
+const HINT_AFTER: f64 = 1.2;
+/// On a typewriter, where the line being written is held: this far down
+/// the page's height.
+const TYPEWRITER_AT: f32 = 0.45;
+
+/// What every block of a page shares as it is drawn: the selection, the
+/// `/` menu, the running list numbers, the body's type.
+struct Cx {
+    cov: Coverage,
+    slash: Option<(u64, Vec<usize>)>,
+    numbers: Vec<u32>,
+    body: TextStyle,
+    lone: bool,
+    /// Focus: the block being written, while the rest steps back.
+    focus: Option<u64>,
+    /// Each collapsed heading, and how many blocks it hides.
+    folds: HashMap<u64, usize>,
+}
+
+fn hash(s: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+impl Carnet {
+    pub(super) fn page(&mut self, ui: &mut Ui<'_>, l: &Look, main_w: f32) {
+        let t = l.t;
+        let note = &self.store.notes[self.current];
+        let (note_id, modified, rev) = (note.id, note.modified, note.rev);
+        if self.words.0 != note_id || self.words.1 != rev {
+            self.words = (note_id, rev, note.doc.word_count());
+            self.todos = note.doc.todos();
+        }
+        let words = self.words.2;
+        // Calm on purpose: saving is invisible, as it should be when it
+        // always works; only a failure says anything.
+        let mut meta = format!(
+            "{}  ·  {} {}",
+            ago(SystemTime::now(), modified),
+            words,
+            if words == 1 { "word" } else { "words" }
+        );
+        if let Some((done, all)) = self.todos {
+            meta.push_str(&format!("  ·  {done} of {all} done"));
+        }
+        let error = self.error.clone();
+        let notice = self.notice.as_ref().map(|n| (n.text.clone(), n.undo.is_some()));
+        // Reading a deleted note: when it went, and the ways out.
+        let peek = self.peek.as_ref().map(|p| (p.what.clone(), p.armed, p.is_folder));
+        // Reading a version: the line says which, and offers it back.
+        let history = self.versions.as_ref().map(|v| {
+            let r = &v.list[v.shown];
+            let when = if v.shown == 0 { "The note as it is".to_string() } else { format!("The version from {}", super::revision_ago(r)) };
+            let what = format!("{when}  ·  {}", super::lower_first(&self.version_label(r)));
+            (what, v.shown != 0, v.against_now && v.shown != 0, v.shown + 1 < v.list.len())
+        });
+        // A narrow window keeps less margin, so the text keeps its width.
+        let pad = if main_w < 640.0 { 18.0 } else { 48.0 };
+        // The text's own width: the page's, less its padding, a block's
+        // inset and the scrollbar. Pictures are sized to it.
+        self.text_w = (main_w.min(l.page_w) - 2.0 * pad - 16.0 - 6.0).max(80.0);
+        // Focus: the title and the meta line step back with the blocks.
+        let dim_head = self.focus_on() && self.in_flow();
+        let scroll_key = ui.child_key_indexed(note_id);
+        self.page_rect = ui.layout_of(scroll_key);
+        let tail = match self.page_rect {
+            Some(r) if self.typewriter_on() => (r.h * (1.0 - TYPEWRITER_AT)).max(240.0),
+            _ => 240.0,
+        };
+        // Keyed by the note: each note keeps its own scroll position.
+        ui.with_indexed(
+            note_id,
+            NodeSpec::column()
+                .grow_width()
+                .grow_height()
+                .scroll_y()
+                .scrollbar_width(5.0)
+                // What follows the caret glides there; the wheel and the
+                // thumb still land at once.
+                .transition(150.0)
+                .cross_align(Align::Center)
+                // The page's pointer, anywhere on it, margins included; its
+                // keys are the body's, below, which Tab reaches after the
+                // title, as it reads.
+                .on_drag(Msg::PageDrag)
+                .on_context_menu(Msg::Page)
+                // Where it is: a dragged file's drop line, and the edges
+                // that scroll it.
+                .on_layout(Value::Null),
+            |ui| {
+                ui.with(
+                    NodeSpec::column()
+                        .grow_width()
+                        .max_width(l.page_w)
+                        .padding(Edges { l: pad, r: pad, t: 30.0, b: 0.0 }),
+                    |ui| {
+                        // Title and meta sit 8px in, level with the text of
+                        // the blocks inside their wash-ready rows.
+                        // Selectable: the words, the error and the notice
+                        // copy like any text.
+                        ui.with(
+                            step_back(
+                                NodeSpec::row()
+                                    .grow_width()
+                                    .pad_xy(8.0, 0.0)
+                                    .gap(10.0)
+                                    .cross_align(Align::Center)
+                                    .selectable()
+                                    .clip(),
+                                self.focus_on(),
+                                dim_head,
+                            ),
+                            |ui| {
+                                if let Some((what, armed, is_folder)) = &peek {
+                                    self.peek_line(ui, l, what, *armed, *is_folder);
+                                    return;
+                                }
+                                if let Some((what, can_restore, against_now, marked)) = &history {
+                                    self.history_line(ui, l, what, *can_restore, *against_now, *marked);
+                                    return;
+                                }
+                                ui.text(&meta, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
+                                if let Some(e) = &error {
+                                    // Read out the moment it appears.
+                                    ui.text_in(
+                                        NodeSpec::row().live(kui_native::Live::Assertive),
+                                        e,
+                                        TextStyle::new(Type::SMALL.size).color(t.danger).nowrap(),
+                                    );
+                                } else if let Some((text, can_undo)) = &notice {
+                                    ui.text_in_keyed(
+                                        "notice",
+                                        NodeSpec::row()
+                                            .enter(kui_native::Enter::from(-6.0, 0.0).opacity(0.0))
+                                            .transition(220.0),
+                                        text,
+                                        TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
+                                    );
+                                    if *can_undo {
+                                        ui.text_in_keyed(
+                                            "undo",
+                                            NodeSpec::row()
+                                                .pad_xy(8.0, 2.0)
+                                                .radius(6.0)
+                                                .hover_bg(t.accent_soft)
+                                                .on_click(Msg::Undo)
+                                                .label("Undo")
+                                                .tooltip(&keys::hint("Undo", keys::UNDO)),
+                                            "Undo",
+                                            TextStyle::new(Type::SMALL.size).color(t.focus_ring).nowrap(),
+                                        );
+                                    }
+                                }
+                            },
+                        );
+                        ui.leaf(NodeSpec::row().height(l.px(6.0)));
+                        self.title(ui, l, dim_head);
+                        ui.leaf(NodeSpec::row().height(l.px(18.0)));
+                        // The body is one editor: its keys, its text. Its own
+                        // container too: blocks are keyed by id, and an id
+                        // must not meet a sibling's auto key (its index).
+                        self.page_key = Some(ui.child_key("body"));
+                        ui.with_keyed(
+                            "body",
+                            NodeSpec::column()
+                                .grow_width()
+                                .on_key(Msg::Page)
+                                // A press in the text is the editor's own,
+                                // as kui sends it; the scroller above takes
+                                // one beside it.
+                                .on_drag(Msg::PageDrag)
+                                .on_context_menu(Msg::Page)
+                                .role(Role::MultilineTextInput)
+                                .label("Note"),
+                            |ui| self.blocks(ui, l),
+                        );
+                        // Room below the last block — on a typewriter, enough
+                        // for the last line to come up to the middle. A
+                        // click here is the page's (`Msg::PageDrag`): it
+                        // puts the caret at the end.
+                        ui.leaf_keyed("tail", NodeSpec::row().grow_width().height(tail));
+                    },
+                );
+            },
+        );
+        if std::mem::take(&mut self.focus_page)
+            && let Some(k) = self.page_key
+        {
+            ui.focus(k);
+            self.editing = true;
+        }
+        self.scroll_key = Some(scroll_key);
+        self.drag_scroll(ui, scroll_key);
+        if std::mem::take(&mut self.reveal) {
+            self.follow_caret(ui, scroll_key);
+        }
+    }
+
+    /// Scrolls the page to the caret. While words are going down it keeps
+    /// room under the line being written, so it is never at the window's
+    /// foot (on a typewriter, holds it near the middle); otherwise it only
+    /// brings it into sight, and a click never scrolls the page under the
+    /// pointer. The caret is read where the last layout drew it: text that
+    /// changed since is measured on the next frame, and scrolled to then.
+    fn follow_caret(&mut self, ui: &mut Ui<'_>, page_key: Key) {
+        let slot = self.caret.head.slot;
+        let Some(&k) = self.slot_keys.get(&slot) else { return };
+        if !self.caret_fresh && self.reveal_wait < 3 {
+            self.reveal_wait += 1;
+            self.reveal = true;
+            ui.request_frame();
+            return;
+        }
+        self.reveal_wait = 0;
+        let byte = self.drawn_byte(slot, self.caret.head.byte.min(page::text(self.doc(), slot).len()));
+        let (Some(g), Some(r)) = (ui.scroll_geometry(page_key), ui.caret_rect(k, byte)) else {
+            ui.reveal(k);
+            return;
+        };
+        let (top, h, off) = (g.rect.y, g.rect.h, g.offset.y);
+        let (bottom, line) = (r.y + r.h, r.y + r.h / 2.0);
+        let target = if self.typing && self.typewriter_on() {
+            off + line - (top + h * TYPEWRITER_AT)
+        } else {
+            // Room kept above and below the caret's line: a breath while
+            // writing, the line itself otherwise.
+            let (above, below) = if self.typing { (32.0, (h * 0.25).clamp(48.0, 220.0)) } else { (8.0, 8.0) };
+            if bottom > top + h - below {
+                off + bottom - (top + h - below)
+            } else if r.y < top + above {
+                off - (top + above - r.y)
+            } else {
+                off
+            }
+        };
+        let target = target.clamp(0.0, g.max_offset.y.max(0.0));
+        if (target - off).abs() > 0.5 {
+            ui.set_scroll(page_key, Vec2::new(g.offset.x, target));
+        }
+    }
+
+    /// The meta line while a version is read: which one, what its marks
+    /// mean, then what can be done with it — the actions are words in the
+    /// line, as Undo is.
+    fn history_line(&self, ui: &mut Ui<'_>, l: &Look, what: &str, can_restore: bool, against_now: bool, marked: bool) {
+        let t = l.t;
+        ui.text(what, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
+        // The key to the marks, drawn as the marks are.
+        if marked || against_now {
+            use carnet_core::compare::{ADDED, REMOVED};
+            let (dark, small) = (l.c.dark, Type::SMALL.size);
+            let (came, went) = if against_now { ("comes back", "goes") } else { ("added", "removed") };
+            ui.text_in(
+                NodeSpec::row().pad_xy(4.0, 0.0).radius(3.0).bg(crate::design::tint::wash(ADDED, dark, t.bg)),
+                came,
+                TextStyle::new(small).color(t.fg).nowrap(),
+            );
+            ui.text(went, TextStyle::new(small).color(crate::design::tint::ink(REMOVED, dark)).strikethrough().nowrap());
+        }
+        let action = |ui: &mut Ui<'_>, key: &str, label: &str, msg: Msg, tip: &str| {
+            ui.text_in_keyed(
+                key,
+                NodeSpec::row().pad_xy(8.0, 2.0).radius(6.0).hover_bg(t.accent_soft).on_click(msg).label(label).tooltip(tip),
+                label,
+                TextStyle::new(Type::SMALL.size).color(t.focus_ring).nowrap(),
+            );
+        };
+        if can_restore {
+            action(ui, "restore", "Restore", Msg::RestoreVersion, "The note becomes this version; Undo brings it back");
+            action(ui, "restore-copy", "Restore as a copy", Msg::RestoreVersionCopy, "A new note with this version's text");
+        }
+        if can_restore {
+            let (label, tip) = if against_now {
+                ("Compare with the one before", "Mark what this version changed")
+            } else {
+                ("Compare with now", "Mark what restoring it would bring back and take away")
+            };
+            action(ui, "compare", label, Msg::CompareWithNow, tip);
+        }
+        action(ui, "close-history", "Done", Msg::CloseHistory, "Back to the note (Esc)");
+    }
+
+    /// The meta line while a deleted note (or folder) is read: when it
+    /// went and where from, then Restore and Delete forever — which asks
+    /// to be sure first, in the line itself.
+    fn peek_line(&self, ui: &mut Ui<'_>, l: &Look, what: &str, armed: bool, is_folder: bool) {
+        let t = l.t;
+        let action = |ui: &mut Ui<'_>, key: &str, label: &str, msg: Msg, tip: &str, ink: kui_native::Color| {
+            ui.text_in_keyed(
+                key,
+                NodeSpec::row().pad_xy(8.0, 2.0).radius(6.0).hover_bg(t.accent_soft).on_click(msg).label(label).tooltip(tip),
+                label,
+                TextStyle::new(Type::SMALL.size).color(ink).nowrap(),
+            );
+        };
+        if armed {
+            let ask = if is_folder {
+                "Delete this folder's notes and their history on every device? This can't be undone."
+            } else {
+                "Delete this note and its history on every device? This can't be undone."
+            };
+            icons::icon(ui, crate::app::chrome::Icon::Trash, t.danger, 14.0, false);
+            ui.text(ask, TextStyle::new(Type::SMALL.size).color(t.fg));
+            action(ui, "forever-cancel", "Cancel", Msg::DeleteForeverCancel, "Keep it in Deleted", t.focus_ring);
+            action(ui, "forever-yes", "Yes, delete forever", Msg::DeleteForever, "Gone for good, here and on every device", t.danger);
+            return;
+        }
+        icons::icon(ui, crate::app::chrome::Icon::Trash, t.muted, 14.0, false);
+        ui.text(what, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
+        action(ui, "peek-restore", "Restore", Msg::RestorePeek, "Put it back where it was", t.focus_ring);
+        action(ui, "forever", "Delete forever", Msg::DeleteForever, "Its history too, on every device", t.danger);
+        action(ui, "peek-close", "Done", Msg::CloseHistory, "Back to the note (Esc)", t.focus_ring);
+    }
+
+    /// The title: kui's own field, "Untitled" while it is empty; a
+    /// version in the history's, or a deleted note's, as text to read.
+    fn title(&mut self, ui: &mut Ui<'_>, l: &Look, dim: bool) {
+        let t = l.t;
+        let title = self.store.notes[self.current].title.clone();
+        let style = l.page_type(Type::TITLE).family(l.serif);
+        let row = step_back(NodeSpec::row().grow_width().pad_xy(8.0, 0.0), self.focus_on(), dim);
+        if let Some(p) = &self.peek {
+            let shown = if p.title.trim().is_empty() { "Untitled" } else { p.title.as_str() };
+            ui.with(row, |ui| {
+                ui.text_in(NodeSpec::row().grow_width().selectable().label("Title"), shown, style.color(t.fg));
+            });
+            return;
+        }
+        if let Some(v) = &self.versions {
+            let shown = if v.title.trim().is_empty() { "Untitled" } else { v.title.as_str() };
+            ui.with(row, |ui| {
+                ui.text_in(NodeSpec::row().grow_width().selectable().label("Title"), shown, style.color(t.fg));
+            });
+            return;
+        }
+        ui.with(row, |ui| {
+            let k = ui.text_edit(
+                "title",
+                &title,
+                &EditOptions {
+                    style: style.color(t.fg),
+                    wrap: true,
+                    placeholder: Some("Untitled".into()),
+                    ..Default::default()
+                },
+                NodeSpec::row().grow_width().label("Title"),
+            );
+            self.fields.insert(k, Field::Title);
+            self.apply_focus(ui, k, Field::Title);
+            // Come up to from the note: the caret at the end, then, for ↑,
+            // along the last line to the column it left.
+            if let Some(column) = self.title_to.take() {
+                let core = ui.core();
+                core.edit.set_selection(k, (usize::MAX, usize::MAX), (usize::MAX, usize::MAX));
+                if let Some(x) = column
+                    && let Some(end) = core.edit_caret_rect(k)
+                {
+                    core.edit_caret_to(k, Vec2::new(x, end.y + end.h * 0.5));
+                }
+            }
+        });
+    }
+
+    fn blocks(&mut self, ui: &mut Ui<'_>, l: &Look) {
+        let t = l.t;
+        let body = l.page_type(Type::BODY).family(l.body).color(t.fg);
+        let cov = page::coverage(self.doc(), self.caret);
+        // Set again where the caret's line is drawn.
+        self.caret_fresh = false;
+        // The `/` menu: a new word highlights its first command; a line
+        // that is no longer a command forgets the Esc that closed it.
+        let slash = self.slash_now();
+        match slash::query(self.doc(), self.caret) {
+            Some((_, word)) if word != self.slash_word => {
+                self.slash_word = word;
+                self.slash_sel = 0;
+            }
+            Some(_) => {}
+            None => {
+                self.slash_word.clear();
+                self.slash_off = None;
+            }
+        }
+        // The rows as last laid out: how tall the blocks beside a picture
+        // are.
+        let prev: HashMap<u64, Rect> = self.row_rects.iter().copied().collect();
+        self.row_rects.clear();
+        self.cell_rects.clear();
+        self.slot_keys.clear();
+        self.shown.clear();
+        // Pointers, not text: the blocks stay shared with the note.
+        let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
+        let mut under = self.sections(&blocks);
+        // A caret that went into a collapsed section (undo, a search, the
+        // arrows across it) opens it.
+        let into = |b: u64| under.iter().filter(move |(_, hid)| hid.contains(&b)).map(|(h, _)| *h).collect::<Vec<_>>();
+        let mut opened = into(self.caret.head.slot.block);
+        opened.extend(into(self.caret.anchor.slot.block));
+        if !opened.is_empty() {
+            for h in opened {
+                self.folded.remove(&h);
+            }
+            under = self.sections(&blocks);
+        }
+        // A heading with nothing left under it is not collapsed.
+        for (h, hid) in &under {
+            if hid.is_empty() {
+                self.folded.remove(h);
+            }
+        }
+        self.hidden = under.iter().flat_map(|(_, hid)| hid.iter().copied()).collect();
+        let folds: HashMap<u64, usize> = under.iter().filter(|(_, hid)| !hid.is_empty()).map(|(h, hid)| (*h, hid.len())).collect();
+        let drop_at = self.drop_index;
+        // The first letter set large, when the settings ask: of the note's
+        // first paragraph, past the headings (and front matter) at its top.
+        self.initial = self
+            .settings
+            .initial
+            .then(|| blocks.iter().find(|b| !matches!(&b.kind, Kind::Heading { .. }) && !matches!(&b.kind, Kind::Raw(t) if t.starts_with("---\n"))))
+            .flatten()
+            .filter(|b| matches!(&b.kind, Kind::Text(t) if !t.trim().is_empty()))
+            .map(|b| Slot::block(b.id));
+        let lone = blocks.len() == 1;
+        let focus = (self.focus_on() && self.in_flow()).then_some(self.caret.head.slot.block);
+        let mut cx = Cx { cov, slash, numbers: Vec::new(), body, lone, focus, folds };
+        let mut bi = 0;
+        while bi < blocks.len() {
+            if drop_at == Some(bi) {
+                drop_line(ui, l);
+            }
+            // A picture at an edge: the pictures in a row with it, and the
+            // blocks after it beside them.
+            if let Some((k, end)) = self.float_group(&blocks, bi, &prev) {
+                // Who sits beside it is read from the last layout: when
+                // that changes, the next frame measures again, until it
+                // settles — a few times at most, should it swing.
+                let e = self.float_ends.entry(blocks[bi].id).or_insert((usize::MAX, 0));
+                if e.0 != end {
+                    *e = (end, e.1.saturating_add(1));
+                    if e.1 < 6 {
+                        ui.request_frame();
+                    }
+                } else {
+                    e.1 = 0;
+                }
+                self.float_row(ui, l, &blocks, (bi, k, end), drop_at, &mut cx);
+                bi = end;
+                continue;
+            }
+            if !self.hidden.contains(&blocks[bi].id) {
+                self.block(ui, l, &blocks[bi], &mut cx);
+            }
+            bi += 1;
+        }
+        if drop_at.is_some_and(|i| i >= blocks.len()) {
+            drop_line(ui, l);
+        }
+        self.picture_ghost(ui, l);
+    }
+
+    /// Each collapsed heading and the blocks it hides: everything under
+    /// it up to the next heading of its level or a higher one. A collapsed
+    /// heading inside a collapsed section hides nothing more of its own.
+    fn sections(&self, blocks: &[Rc<Block>]) -> Vec<(u64, std::collections::HashSet<u64>)> {
+        let mut out: Vec<(u64, std::collections::HashSet<u64>)> = Vec::new();
+        let mut open: Option<(u8, usize)> = None;
+        for b in blocks {
+            if let Kind::Heading { level, .. } = &b.kind {
+                if open.is_some_and(|(l, _)| *level <= l) {
+                    open = None;
+                }
+                if open.is_none() && self.folded.contains(&b.id) {
+                    out.push((b.id, Default::default()));
+                    open = Some((*level, out.len() - 1));
+                    continue;
+                }
+            }
+            if let Some((_, k)) = open {
+                out[k].1.insert(b.id);
+            }
+        }
+        // The empty line kept at the note's end stays, to type on.
+        if let (Some(last), Some((_, k))) = (blocks.last(), open)
+            && matches!(&last.kind, Kind::Text(t) if t.is_empty())
+        {
+            out[k].1.remove(&last.id);
+        }
+        out
+    }
+
+    /// Whether heading `id` has anything under it to collapse.
+    fn would_fold(&self, id: u64) -> bool {
+        let doc = self.doc();
+        let Some(i) = doc.index_of(id) else { return false };
+        let Kind::Heading { level, .. } = &doc.blocks()[i].kind else { return false };
+        doc.blocks()[i + 1..]
+            .iter()
+            .take_while(|b| !matches!(&b.kind, Kind::Heading { level: l, .. } if l <= level))
+            .any(|b| !matches!(&b.kind, Kind::Text(t) if t.is_empty()))
+    }
+
+    /// Heading `id`'s section collapsed, or shown again. A caret inside
+    /// what goes out of sight comes up to the heading's end.
+    pub(super) fn fold(&mut self, id: u64) {
+        if self.folded.remove(&id) {
+            return;
+        }
+        self.folded.insert(id);
+        let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
+        let gone = self.sections(&blocks).into_iter().find(|(h, _)| *h == id).map(|(_, hid)| hid).unwrap_or_default();
+        if gone.contains(&self.caret.head.slot.block) || gone.contains(&self.caret.anchor.slot.block) {
+            let end = page::end(self.doc(), Slot::block(id));
+            self.move_to(Caret::at(end));
+        }
+    }
+
+    /// Where a floated picture's row ends, for one at block `i`: its
+    /// pictures (`i..k`, side by side), and the blocks that run beside
+    /// them (`k..end`) — as many as it takes, by last frame's heights, to
+    /// pass the tallest picture's foot. A picture on a line of its own
+    /// ends it.
+    fn float_group(&self, blocks: &[Rc<Block>], i: usize, prev: &HashMap<u64, Rect>) -> Option<(usize, usize)> {
+        let floated = |b: &Block| matches!(b.kind, Kind::Image { float, .. } if float != Float::None);
+        if !floated(&blocks[i]) {
+            return None;
+        }
+        let k = (i..blocks.len()).find(|&j| !floated(&blocks[j])).unwrap_or(blocks.len());
+        let tall = (i..k)
+            .filter_map(|j| prev.get(&blocks[j].id))
+            .fold(0.0_f32, |a, r| a.max(r.h));
+        // Pictures that leave the words too little room have none beside
+        // them: a row of pictures, side by side.
+        let wide: f32 = (i..k).filter_map(|j| prev.get(&blocks[j].id)).map(|r| r.w + PICTURE_GAP).sum();
+        if self.text_w + 16.0 - wide < BESIDE_MIN {
+            return Some((k, k));
+        }
+        let mut end = k;
+        let mut beside = 0.0;
+        while end < blocks.len() && beside < tall - 8.0 {
+            if matches!(blocks[end].kind, Kind::Image { .. }) {
+                break;
+            }
+            beside += prev.get(&blocks[end].id).map_or(30.0, |r| r.h);
+            end += 1;
+        }
+        Some((k, end))
+    }
+
+    /// A row of pictures at an edge with the blocks `k..end` in a column
+    /// beside them.
+    fn float_row(
+        &mut self,
+        ui: &mut Ui<'_>,
+        l: &Look,
+        blocks: &[Rc<Block>],
+        (i, k, end): (usize, usize, usize),
+        drop_at: Option<usize>,
+        cx: &mut Cx,
+    ) {
+        let right = matches!(blocks[i].kind, Kind::Image { float: Float::Right, .. });
+        self.float_count = k - i;
+        let key = format!("float-{}", blocks[i].id);
+        // The row's own width as last laid out: what its pictures share,
+        // measured, so they never crowd each other however the page's
+        // margins come out.
+        self.float_room = ui.layout_of(ui.child_key(&key)).map_or(self.text_w + 16.0, |r| r.w);
+        ui.with_keyed(&key, NodeSpec::row().grow_width().gap(4.0).cross_align(Align::Start), |ui| {
+            for side in [!right, right] {
+                if side {
+                    ui.with_keyed("pictures", NodeSpec::row().gap(PICTURE_GAP - 16.0), |ui| {
+                        for b in &blocks[i..k] {
+                            self.block(ui, l, b, cx);
+                        }
+                    });
+                } else if end > k {
+                    ui.with_keyed("beside", NodeSpec::column().grow_width().min_width(120.0), |ui| {
+                        for (j, b) in blocks.iter().enumerate().take(end).skip(k) {
+                            if drop_at == Some(j) {
+                                drop_line(ui, l);
+                            }
+                            self.block(ui, l, b, cx);
+                        }
+                    });
+                }
+            }
+        });
+        self.float_count = 0;
+    }
+
+    /// One block, in the row that reports where it was laid out.
+    fn block(&mut self, ui: &mut Ui<'_>, l: &Look, b: &Block, cx: &mut Cx) {
+        let t = l.t;
+        let id = b.id;
+        let (body, lone) = (cx.body, cx.lone);
+        let (cov, slash, numbers) = (&cx.cov, &cx.slash, &mut cx.numbers);
+        if !matches!(b.kind, Kind::Item { .. }) {
+            numbers.clear();
+        }
+        // Every block sits in one row that reports where it was laid
+        // out (what a margin drag's `y` is read against) and wears the
+        // selection's wash when it is covered whole.
+        let row = ui.child_key_indexed(id);
+        if let Some(r) = ui.layout_of(row) {
+            self.row_rects.push((id, r));
+        }
+        let whole = cov.whole.contains(&id);
+        // The caret alone on an empty line: it says what can go there —
+        // once the writing pauses, not on every line Enter makes.
+        let mut empty_here = self.editing
+            && self.caret.is_empty()
+            && self.caret.head.slot == Slot::block(id)
+            && b.text_ref().is_some_and(str::is_empty);
+        if empty_here && self.typing && ui.now() < self.typed_at + HINT_AFTER {
+            empty_here = false;
+            ui.request_frame_at(self.typed_at + HINT_AFTER);
+        }
+        let floated = matches!(b.kind, Kind::Image { float, .. } if float != Float::None);
+        let mut wrap = NodeSpec::column()
+            .width(if floated { Sizing::Fit } else { Sizing::GROW })
+            .pad_xy(8.0, 0.0)
+            .radius(radius::TIGHT)
+            .on_layout(Value::Null);
+        // A picture says it is selected with its own ring, hugging
+        // it: a wash the page's width would mostly cover nothing.
+        if whole && !matches!(b.kind, Kind::Image { .. }) {
+            wrap = wrap.bg(t.selection);
+        } else if self.focus_on() {
+            // Eased with focus: no wash is the wash with no alpha.
+            wrap = wrap.bg(t.selection.with_alpha(0.0));
+        }
+        wrap = step_back(wrap, self.focus_on(), cx.focus.is_some_and(|f| f != id));
+        ui.with_indexed(id, wrap, |ui| match &b.kind {
+            Kind::Text(text) => {
+                // An empty note says what it can do, once, quietly.
+                let hint = if lone && text.is_empty() {
+                    Some("Start writing  —  or type / for blocks")
+                } else if empty_here {
+                    Some("Type / for blocks")
+                } else {
+                    None
+                };
+                // Paragraphs sit 12px apart; list items closer, so a
+                // list reads as one thing and prose as several.
+                ui.with(NodeSpec::row().grow_width().pad_xy(0.0, l.air(6.0)), |ui| {
+                    self.slot_line(ui, l, Slot::block(id), text, body, hint, false, cov);
+                    if let Some((_, shown)) = slash.as_ref().filter(|(b, _)| *b == id) {
+                        self.slash_menu(ui, l, id, shown);
+                    }
+                });
+            }
+            // A quotation: set in from a rule down its left edge, in
+            // the serif, a step quieter than the words around it.
+            Kind::Quote(text) => {
+                ui.with(NodeSpec::row().grow_width().pad_xy(0.0, l.air(8.0)), |ui| {
+                    ui.with(
+                        NodeSpec::row()
+                            .grow_width()
+                            .gap(l.px(14.0))
+                            .label("Quote"),
+                        |ui| {
+                            let rule = l.px(3.0).max(2.0);
+                            ui.leaf(NodeSpec::row().width(rule).grow_height().radius(rule / 2.0).bg(t.border_strong).role(Role::None));
+                            let hint = empty_here.then_some("Quote");
+                            let ink = body.family(l.serif).color(t.muted);
+                            self.slot_line(ui, l, Slot::block(id), text, ink, hint, false, cov);
+                        },
+                    );
+                });
+            }
+            Kind::Heading { level, text } => {
+                // A serif scale of about 1.25: size and face are what
+                // tell a heading from a paragraph.
+                let (style, top) = match level {
+                    1 => (l.page_type(Type::H1).family(l.serif), 28.0),
+                    2 => (l.page_type(Type::H2).family(l.serif), 22.0),
+                    _ => (l.page_type(Type::H3).family(l.serif), 16.0),
+                };
+                let hidden = cx.folds.get(&id).copied();
+                let folded = hidden.is_some();
+                ui.with(
+                    NodeSpec::row()
+                        .grow_width()
+                        .gap(8.0)
+                        .cross_align(Align::Center)
+                        .padding(Edges { l: 0.0, r: 0.0, t: l.air(top), b: l.air(6.0) }),
+                    |ui| {
+                        let hint = empty_here.then_some("Heading");
+                        self.slot_line(ui, l, Slot::block(id), text, style.color(t.fg), hint, false, cov);
+                        // In the margin, a chevron that collapses what is
+                        // under the heading: there while the pointer is
+                        // over it, and while it is collapsed.
+                        let over = self.row_rects.iter().find(|(b, _)| *b == id).is_some_and(|(_, r)| {
+                            ui.core().cursor().is_some_and(|p| p.y >= r.y && p.y < r.y + r.h && p.x >= r.x - 40.0 && p.x < r.x + r.w)
+                        });
+                        if folded || (over && self.would_fold(id)) {
+                            let size = 20.0;
+                            ui.with_keyed(
+                                "fold",
+                                NodeSpec::row()
+                                    .size(size, size)
+                                    .radius(radius::TIGHT)
+                                    .center()
+                                    .hover_bg(t.hover)
+                                    .float(FloatConfig::parent().offset(-size - 10.0, l.air(top) + (style.line_height - size) / 2.0))
+                                    .on_click(Msg::Fold { id })
+                                    .label(if folded { "Expand section" } else { "Collapse section" })
+                                    .tooltip(if folded { "Show what is under this heading" } else { "Hide what is under this heading" }),
+                                |ui| icons::icon(ui, if folded { Glyph::ChevronRight } else { Glyph::ChevronDown }, t.muted, 16.0, false),
+                            );
+                        }
+                        // Collapsed: how much is out of sight, a click away.
+                        if let Some(n) = hidden.filter(|_| folded) {
+                            ui.text_in_keyed(
+                                "folded",
+                                NodeSpec::row()
+                                    .pad_xy(8.0, 2.0)
+                                    .radius(radius::CONTROL)
+                                    .bg(t.sunken)
+                                    .hover_bg(t.hover)
+                                    .on_click(Msg::Fold { id })
+                                    .label(format!("Show {n} hidden"))
+                                    .tooltip("Show what is under this heading"),
+                                &if n == 1 { "1 more block".to_string() } else { format!("{n} more blocks") },
+                                TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
+                            );
+                        }
+                    },
+                );
+            }
+            Kind::Item {
+                style,
+                indent,
+                done,
+                num,
+                text,
+            } => {
+                let depth = *indent as usize;
+                numbers.truncate(depth + 1);
+                numbers.resize(depth + 1, 0);
+                if *style == ListStyle::Number {
+                    // A run starts at the number it was written with
+                    // ("2." after bullets that broke the list), as
+                    // Markdown has it; then counts on.
+                    numbers[depth] = if numbers[depth] == 0 && *num > 0 { *num } else { numbers[depth] + 1 };
+                } else {
+                    numbers[depth] = 0;
+                }
+                let n = numbers[depth];
+                ui.with(
+                    NodeSpec::row()
+                        .grow_width()
+                        .gap(l.px(8.0))
+                        .pad_xy(0.0, l.air(2.0))
+                        .cross_align(Align::Start),
+                    |ui| {
+                        // A child's marker sits under its parent's text:
+                        // marker (22) plus gap (8) per level, the row's
+                        // own gap already one step of it — at 16px.
+                        if depth > 0 {
+                            ui.leaf(NodeSpec::row().width(depth as f32 * (l.px(22.0) + l.px(8.0)) - l.px(8.0)));
+                        }
+                        marker(ui, l, id, *style, *done, n, depth, text);
+                        let ink = if *done { body.color(t.muted) } else { body };
+                        let hint = empty_here.then_some(if *style == ListStyle::Todo { "To-do" } else { "List" });
+                        self.slot_line(ui, l, Slot::block(id), text, ink, hint, *done, cov);
+                    },
+                );
+            }
+            Kind::Divider => {
+                // Drawn as the settings say (three dots, a line, stars, a
+                // flourish); in the accent when the caret is on it, so
+                // Backspace or Delete is seen to have a target.
+                let here = self.editing && self.caret.head.slot == Slot::block(id);
+                let ink = if whole || here { t.accent } else { t.faint };
+                ui.with(
+                    NodeSpec::row()
+                        .grow_width()
+                        .pad_xy(0.0, l.air(20.0))
+                        .radius(radius::CONTROL)
+                        .center()
+                        .hover_bg(t.hover)
+                        .on_click(Msg::Select { id })
+                        .label("Divider"),
+                    |ui| icons::ornament(ui, self.settings.divider, ink, l.k),
+                );
+            }
+            Kind::Image { src, alt, width, float, wiki } => self.picture(ui, l, id, src, *wiki, alt, *width, *float, whole),
+            Kind::Table(table) => self.table(ui, l, id, table, body, cov),
+            // Code and front matter: kept as written, fences and all,
+            // and edited as plain text on a well of their own.
+            Kind::Raw(text) => {
+                let front = text.starts_with("---\n");
+                let style = l.page_type(Type::CODE)
+                    .mono()
+                    .color(if front { t.muted } else { t.fg });
+                ui.with(NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0)), |ui| {
+                    ui.with(
+                        NodeSpec::column()
+                            .grow_width()
+                            .pad_xy(l.px(16.0), l.px(12.0))
+                            .radius(radius::CONTROL)
+                            .bg(t.sunken),
+                        |ui| {
+                            self.slot_line(ui, l, Slot::block(id), text, style, None, false, cov);
+                        },
+                    );
+                });
+            }
+        });
+    }
+
+    /// A picture on its own line: its own width, or the one the reader
+    /// gave it, the text's width at most; the height follows. At an edge,
+    /// under half the text's width unless given more, and its share of the
+    /// row with the pictures beside it at most. Until it is decoded, a
+    /// quiet well of exactly its size holds its place. Selected, a ring in
+    /// the accent, a handle on each side and one at a corner that resize it.
+    #[allow(clippy::too_many_arguments)]
+    fn picture(&mut self, ui: &mut Ui<'_>, l: &Look, id: u64, src: &str, wiki: bool, alt: &str, width: Option<u32>, float: Float, whole: bool) {
+        let t = l.t;
+        let here = self.editing && self.caret.head.slot == Slot::block(id);
+        let selected = here || whole;
+        let folder = self.page_folder();
+        let entry = self.store.picture_file(&folder, src, wiki).map(|p| self.images.get(&p));
+        let label = if alt.is_empty() { "Picture".to_string() } else { format!("Picture: {alt}") };
+        let floated = float != Float::None;
+        let n = self.float_count.max(1) as f32;
+        let max_w = if floated {
+            // Its share of the row: each picture's block is 16 wider than
+            // it, and pictures sit PICTURE_GAP apart.
+            ((self.float_room - 16.0 - PICTURE_GAP * (n - 1.0)) / n - 2.0).floor().max(48.0)
+        } else {
+            (self.text_w - 10.0).max(48.0)
+        };
+        // Its shape, from the pixels or the file's header.
+        let natural = match &entry {
+            Some(images::Entry::Ready { w, h, .. }) | Some(images::Entry::Loading { w, h }) if *w > 0 && *h > 0 => {
+                Some((*w as f32, *h as f32))
+            }
+            _ => None,
+        };
+        let resizing = self.resizing.filter(|r| r.id == id);
+        ui.with(
+            NodeSpec::row()
+                .width(if floated { Sizing::Fit } else { Sizing::GROW })
+                .pad_xy(0.0, l.air(14.0))
+                // A press selects it; a drag carries it between lines, or
+                // beside another picture.
+                .on_drag(Msg::PictureDrag { id })
+                .role(Role::Image)
+                .label(label),
+            |ui| {
+                // The ring is always there, clear when not wanted, so the
+                // picture never moves when it is selected.
+                let ring = if selected { t.accent } else { Color::TRANSPARENT };
+                let Some((nw, nh)) = natural else {
+                    // Nothing to show: a small card saying why, as wide as
+                    // its words, at an edge too — never a well of the
+                    // page's width, nor a sliver of an edge's. No text in
+                    // it to select: a press selects it as it would the
+                    // picture, to be moved or deleted.
+                    let (glyph, why) = match &entry {
+                        Some(images::Entry::Failed(e)) if e == "not found" => (Glyph::Warning, "Picture not found"),
+                        Some(images::Entry::Failed(e)) if e == images::HEIC_ELSEWHERE => {
+                            (Glyph::Warning, "HEIC pictures show on macOS; this one can't show here")
+                        }
+                        Some(images::Entry::Failed(e)) if e.contains("not supported") || e.contains("Unsupported") => {
+                            (Glyph::Warning, "Carnet can't show this kind of picture")
+                        }
+                        Some(images::Entry::Failed(_)) => (Glyph::Warning, "This picture couldn't be opened"),
+                        Some(_) => (Glyph::Picture, "Opening the picture\u{2026}"),
+                        None => (Glyph::Picture, "A picture on the web, not loaded"),
+                    };
+                    let path = store::decode_src(src);
+                    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                    ui.with(
+                        NodeSpec::row()
+                            .width(Sizing::Fit)
+                            .max_width(max_w)
+                            .pad_xy(12.0, 10.0)
+                            .gap(10.0)
+                            .radius(radius::CARD)
+                            .bg(t.sunken)
+                            .border(2.0, ring)
+                            .cross_align(Align::Center),
+                        |ui| {
+                            icons::icon(ui, glyph, t.muted, 18.0, false);
+                            ui.with(NodeSpec::column().gap(2.0), |ui| {
+                                ui.text(why, TextStyle::new(Type::UI.size).color(t.fg).nowrap());
+                                ui.text_in(
+                                    NodeSpec::row().max_width((max_w - 64.0).max(40.0)),
+                                    &name,
+                                    TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis(),
+                                );
+                            });
+                        },
+                    );
+                    return;
+                };
+                let fit = if floated { nw.min((self.text_w * 0.45).round()) } else { nw };
+                let dw = match resizing {
+                    Some(r) => r.w,
+                    None => width.map_or(fit, |w| w as f32),
+                }
+                .clamp(48.0_f32.min(nw), max_w);
+                let dh = dw * nh / nw;
+                self.pic_w.insert(id, (dw, fit.min(max_w), max_w));
+                // The picture on the text's own edge; its ring an overlay
+                // 5px out, so selecting it moves nothing.
+                ui.with(NodeSpec::row().size(dw, dh), |ui| {
+                    match &entry {
+                        Some(images::Entry::Ready { id: img, .. }) => {
+                            ui.image(*img, NodeSpec::row().size(dw, dh).radius(7.0));
+                        }
+                        // Decoding: the well it will fill, a faint picture
+                        // in its middle.
+                        _ => {
+                            ui.with(
+                                NodeSpec::row().size(dw, dh).radius(7.0).bg(t.sunken).center(),
+                                |ui| icons::icon(ui, Glyph::Picture, t.faint, 28.0_f32.min(dh * 0.5), false),
+                            );
+                        }
+                    }
+                    ui.leaf(
+                        NodeSpec::row()
+                            .size(dw + 10.0, dh + 10.0)
+                            .radius(radius::CARD)
+                            .border(2.0, ring)
+                            .role(Role::None)
+                            // Clipped by the page's scroller like the picture,
+                            // not painted over the toolbar when scrolled under it.
+                            .float(FloatConfig::parent().offset(-5.0, -5.0).clipped()),
+                    );
+                    if selected {
+                        // The handles: a bar on each side and a dot on the
+                        // outer corner, dragged to resize; the shape holds.
+                        // A picture at the right edge grows to the left, so
+                        // its corner is the bottom-left one.
+                        let right = float == Float::Right;
+                        let handle = |w: f32, h: f32| {
+                            NodeSpec::row()
+                                .size(w, h)
+                                .radius(w.min(h) / 2.0)
+                                .bg(l.card)
+                                .border(2.0, t.accent)
+                                .label("Resize picture")
+                                .tooltip("Drag to resize  \u{b7}  right-click for sizes")
+                        };
+                        for (key, left) in [("resize-l", true), ("resize-r", false)] {
+                            let at = if left { Align::Start } else { Align::End };
+                            ui.leaf_keyed(
+                                key,
+                                handle(8.0, 30.0_f32.min(dh * 0.5))
+                                    .float(FloatConfig::parent().inside(at, Align::Center).offset(if left { -9.0 } else { 9.0 }, 0.0).clipped())
+                                    .on_drag(Msg::ResizePicture { id, side: left as u64 })
+                                    .cursor(kui_native::CursorShape::EwResize),
+                            );
+                        }
+                        let (at, dx, cursor) = if right {
+                            (Align::Start, -10.0, kui_native::CursorShape::NeswResize)
+                        } else {
+                            (Align::End, 10.0, kui_native::CursorShape::NwseResize)
+                        };
+                        ui.leaf_keyed(
+                            "resize",
+                            handle(14.0, 14.0)
+                                .float(FloatConfig::parent().inside(at, Align::End).offset(dx, 10.0).clipped())
+                                .on_drag(Msg::ResizePicture { id, side: right as u64 })
+                                .cursor(cursor),
+                        );
+                    }
+                    if resizing.is_some() {
+                        ui.text_in(
+                            NodeSpec::row()
+                                .pad_xy(8.0, 3.0)
+                                .radius(radius::CONTROL)
+                                .bg(l.card)
+                                .float(FloatConfig::parent().inside(Align::Start, Align::End).offset(8.0, -8.0).clipped()),
+                            &format!("{} \u{00d7} {}", dw.round(), dh.round()),
+                            TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
+                        );
+                    }
+                });
+            },
+        );
+    }
+
+    /// The gap between blocks nearest `y` (last frame's layout): the index
+    /// of the block a drop there goes before, in the note's order.
+    pub(super) fn gap_at(&self, y: f32) -> usize {
+        let doc = self.doc();
+        doc.blocks()
+            .iter()
+            .position(|b| self.row_rects.iter().find(|(id, _)| *id == b.id).is_some_and(|(_, r)| y < r.y + r.h / 2.0))
+            .unwrap_or(doc.len())
+    }
+
+    /// Where a carried picture would land under `at`: beside another
+    /// picture when over one's outer third, else between the blocks.
+    fn picture_target(&self, id: u64, at: Vec2) -> Option<page::PicDrop> {
+        let page = self.page_rect?;
+        let inside = |r: &Rect| at.x >= r.x && at.x <= r.x + r.w && at.y >= r.y && at.y <= r.y + r.h;
+        if !inside(&page) {
+            return None;
+        }
+        for (b, r) in &self.row_rects {
+            if *b == id || !inside(r) || !matches!(self.doc().get(*b).map(|b| &b.kind), Some(Kind::Image { .. })) {
+                continue;
+            }
+            let fx = (at.x - r.x) / r.w.max(1.0);
+            if !(0.3..=0.7).contains(&fx) {
+                return Some(page::PicDrop::Beside { id: *b, after: fx > 0.7 });
+            }
+        }
+        Some(page::PicDrop::Before(self.gap_at(at.y)))
+    }
+
+    /// A picture pressed: selected; dragged, carried — the drop line shows
+    /// where it goes between blocks, a bar beside a picture where the two
+    /// will sit side by side.
+    pub(super) fn picture_drag(&mut self, id: u64, ev: &UiEvent) {
+        let p = &ev.payload;
+        let num = |k: &str| p.get_float(k).or_else(|| p.get_int(k).map(|v| v as f64)).unwrap_or(0.0) as f32;
+        let at = Vec2::new(num("x"), num("y"));
+        match p.get_str("phase") {
+            Some("start") => {
+                self.pic_drag = Some(PicDrag { id, from: at, at, moved: false, target: None });
+                self.on_plain(Msg::Select { id });
+            }
+            Some("move") => {
+                let target = self.picture_target(id, at);
+                let Some(d) = self.pic_drag.as_mut() else { return };
+                d.at = at;
+                d.moved = d.moved || (at.x - d.from.x).abs() + (at.y - d.from.y).abs() > 6.0;
+                d.target = if d.moved { target } else { None };
+                self.drop_index = match d.target {
+                    Some(page::PicDrop::Before(i)) => Some(i),
+                    _ => None,
+                };
+            }
+            _ => {
+                self.drop_index = None;
+                let Some(d) = self.pic_drag.take() else { return };
+                if let (true, Some(to)) = (d.moved, d.target) {
+                    self.edit(Step::Other, |doc, c| page::move_picture(doc, c, id, to));
+                    self.reveal = false;
+                }
+            }
+        }
+    }
+
+    /// While a picture is carried: it, small, under the pointer, and the
+    /// bar where it would sit beside another.
+    fn picture_ghost(&mut self, ui: &mut Ui<'_>, l: &Look) {
+        let Some(d) = self.pic_drag.clone().filter(|d| d.moved) else { return };
+        let t = l.t;
+        if let Some(page::PicDrop::Beside { id, after }) = d.target
+            && let Some((_, r)) = self.row_rects.iter().find(|(b, _)| *b == id)
+        {
+            let x = if after { r.x + r.w - 2.0 } else { r.x - 2.0 };
+            ui.leaf(
+                NodeSpec::row()
+                    .size(4.0, (r.h - 16.0).max(8.0))
+                    .radius(2.0)
+                    .bg(t.accent)
+                    .role(Role::None)
+                    .float(FloatConfig::viewport().offset(x, r.y + 8.0)),
+            );
+        }
+        let folder = self.page_folder();
+        let (src, wiki) = match self.doc().get(d.id).map(|b| &b.kind) {
+            Some(Kind::Image { src, wiki, .. }) => (src.clone(), *wiki),
+            _ => return,
+        };
+        if let Some(images::Entry::Ready { id: img, w, h }) = self.store.picture_file(&folder, &src, wiki).map(|p| self.images.get(&p)) {
+            let gw = 120.0_f32;
+            let gh = gw * h as f32 / (w as f32).max(1.0);
+            ui.image(
+                img,
+                NodeSpec::row()
+                    .size(gw, gh)
+                    .radius(6.0)
+                    .opacity(0.75)
+                    .role(Role::None)
+                    .float(FloatConfig::viewport().offset(d.at.x + 12.0, d.at.y + 12.0)),
+            );
+        }
+        ui.request_frame();
+    }
+
+    /// A drag on a picture's handle: the width follows the pointer, and
+    /// lands as one step of the history when it is let go. Back at its own
+    /// width (or the page's, for one wider), the width is forgotten.
+    pub(super) fn resize_drag(&mut self, id: u64, left: bool, ev: &UiEvent) {
+        let p = &ev.payload;
+        let x = p.get_float("x").or_else(|| p.get_int("x").map(|v| v as f64)).unwrap_or(0.0) as f32;
+        let full = (self.text_w - 10.0).max(48.0);
+        let (now, fit, max_w) = self.pic_w.get(&id).copied().unwrap_or((full, full, full));
+        match p.get_str("phase") {
+            Some("start") => {
+                self.resizing = Some(Resize { id, w0: now, x0: x, w: now, left });
+                if let Some(i) = self.doc().index_of(id) {
+                    let c = page::select_blocks(self.doc(), i, i);
+                    self.move_to(c);
+                }
+                self.focus_page = true;
+                self.editing = true;
+            }
+            Some("move") => {
+                if let Some(r) = self.resizing.as_mut() {
+                    let dx = if r.left { r.x0 - x } else { x - r.x0 };
+                    r.w = (r.w0 + dx).clamp(48.0, max_w);
+                }
+            }
+            _ => {
+                let Some(r) = self.resizing.take() else { return };
+                let w = r.w.round();
+                // Back at the width it has with none given: none given.
+                let width = if (w - fit).abs() < 2.0 { None } else { Some(w as u32) };
+                self.edit(Step::Other, |d, _| page::set_image_width(d, id, width));
+                self.reveal = false;
+            }
+        }
+    }
+    /// A kui table: rows whose cells line up in columns, the grid drawn as
+    /// hairline rules. Every cell grows by the same weight from no floor,
+    /// so a column's width is a share of the table, not of its text —
+    /// typing can wrap a cell but never move the grid.
+    fn table(&mut self, ui: &mut Ui<'_>, l: &Look, id: u64, table: &Table, body: TextStyle, cov: &Coverage) {
+        let t = l.t;
+        // The header is small and quiet: a label for its column.
+        let head = l.page_type(Type::LABEL).family(l.body).color(t.muted);
+        let names: Vec<String> = table.rows[0].cells.iter().map(|c| c.trim().to_string()).collect();
+        ui.with(NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0)), |ui| {
+            ui.with(
+                // One warm hairline for the frame and the rules, and the
+                // rows inset by it, so the header's wash never paints over
+                // the frame.
+                NodeSpec::table()
+                    .grow_width()
+                    .pad(1.0)
+                    .rules(t.border)
+                    .border(1.0, t.border)
+                    .radius(radius::CONTROL)
+                    .clip()
+                    .role(Role::Group)
+                    .label(format!("Table, {} rows, {} columns", table.rows.len(), table.width())),
+                |ui| {
+                    for (r, row) in table.rows.iter().enumerate() {
+                        let mut spec = NodeSpec::row().grow_width();
+                        if r == 0 {
+                            spec = spec.bg(t.sunken);
+                        }
+                        ui.with_indexed(row.id, spec, |ui| {
+                            for (c, &col) in table.cols.iter().enumerate() {
+                                let slot = Slot {
+                                    block: id,
+                                    cell: Some((row.id, col)),
+                                };
+                                // A cell is named for its column, so a reader
+                                // hears "Price, row 3", not coordinates.
+                                let name = match names.get(c) {
+                                    Some(h) if r > 0 && !h.is_empty() => format!("{h}, row {r}"),
+                                    _ if r == 0 => format!("Column {} header", c + 1),
+                                    _ => format!("Column {}, row {r}", c + 1),
+                                };
+                                // Where the cell was laid out: what a click
+                                // is matched against, by x as well as y.
+                                let ck = ui.child_key_indexed(col);
+                                if let Some(rect) = ui.layout_of(ck) {
+                                    self.cell_rects.insert(slot, rect);
+                                }
+                                ui.with_indexed(
+                                    col,
+                                    NodeSpec::column()
+                                        .width(Sizing::Grow(1.0))
+                                        .min_width(48.0)
+                                        .pad_xy(l.px(14.0), l.px(if r == 0 { 9.0 } else { 8.0 }))
+                                        .on_layout(Value::Null)
+                                        .label(name),
+                                    |ui| {
+                                        let style = if r == 0 { head } else { body };
+                                        self.slot_line(ui, l, slot, &row.cells[c], style, None, false, cov);
+                                    },
+                                );
+                            }
+                        });
+                    }
+                },
+            );
+        });
+    }
+
+    /// One slot's text: a `line` row holding the wrapped text — its inline
+    /// styles drawn, their markers faint, the part the selection covers on
+    /// the selection's wash, an IME composition underlined at the caret —
+    /// and the caret.
+    #[allow(clippy::too_many_arguments)]
+    fn slot_line(
+        &mut self,
+        ui: &mut Ui<'_>,
+        l: &Look,
+        slot: Slot,
+        text: &str,
+        style: TextStyle,
+        hint: Option<&str>,
+        strike: bool,
+        cov: &Coverage,
+    ) {
+        let t = &l.t;
+        let here = self.editing && self.caret.head.slot == slot;
+        let byte = self.caret.head.byte.min(text.len());
+        // Code blocks are code: no inline styles in them.
+        let code_block = matches!(self.doc().get(slot.block).map(|b| &b.kind), Some(Kind::Raw(_)));
+        let runs = if code_block {
+            vec![(0, text.len(), inline::Style::default())]
+        } else {
+            inline::runs(text)
+        };
+        // Markdown's marks are never drawn: the words are, styled. Code
+        // keeps every byte.
+        let hidden: Vec<(usize, usize)> = if code_block {
+            Vec::new()
+        } else {
+            runs.iter().filter(|r| r.2.marker).map(|r| (r.0, r.1)).collect()
+        };
+        if !hidden.is_empty() && !text.is_empty() {
+            // What is drawn: what a press's byte is read back through.
+            self.shown.insert(slot, inline::Visible::of(text));
+        }
+        let mut row = NodeSpec::row().grow_width().role(Role::Line);
+        if here {
+            row = row.caret(self.drawn_byte(slot, byte) as u32);
+            if self.caret.anchor.slot == slot && !self.caret.is_empty() {
+                row = row.selection_anchor(self.drawn_byte(slot, self.caret.anchor.byte) as u32);
+            }
+        }
+        let drawn = hash(&format!("{hidden:?}{text}"));
+        let fresh = self.drawn.get(&slot) == Some(&drawn);
+        self.drawn.insert(slot, drawn);
+        let (drawn_byte, drawn_0) = (self.drawn_byte(slot, byte), self.drawn_byte(slot, 0));
+        let preedit = if here { self.preedit.clone() } else { None };
+        // A selection shows only while the page has the keyboard: one
+        // selection in the window at a time. A block covered whole wears
+        // the wash on its row instead.
+        let part = cov
+            .parts
+            .get(&slot)
+            .copied()
+            .filter(|_| self.editing && !cov.whole.contains(&slot.block))
+            .filter(|(f, to)| f < to);
+        if here {
+            self.caret_fresh = fresh;
+        }
+        let blink = ui.caret_visible();
+        // The large first letter: where it is in the source, with any
+        // opening quote before it.
+        let cap = (self.initial == Some(slot) && !code_block).then(|| initial_letter(text)).flatten();
+        let (dark, page_bg) = (l.c.dark, t.bg);
+        ui.with(row, |ui| {
+            let key = ui.child_key_indexed(0);
+            let mut spans: Vec<Span<'_>> = Vec::new();
+            if text.is_empty() && preedit.is_none() {
+                // An empty line still has a line's height, and a place for
+                // the caret; its placeholder floats over it, easing in.
+                spans.push(Span::new("\u{200B}"));
+            } else {
+                // Cut points: the styles' runs, the selection's ends and
+                // the composition.
+                let mut cuts = vec![0, text.len()];
+                cuts.extend(runs.iter().map(|r| r.0));
+                cuts.extend(hidden.iter().flat_map(|&(f, to)| [f, to]));
+                if let Some((f, to)) = part {
+                    cuts.extend([f.min(text.len()), to.min(text.len())]);
+                }
+                if preedit.is_some() {
+                    cuts.push(byte);
+                }
+                if let Some((f, to)) = cap {
+                    cuts.extend([f, to]);
+                }
+                cuts.sort_unstable();
+                cuts.dedup();
+                for w in cuts.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    if preedit.is_some() && a == byte {
+                        spans.push(Span::new(preedit.as_deref().unwrap_or("")).underline());
+                    }
+                    let s = runs
+                        .iter()
+                        .find(|r| r.0 <= a && a < r.1)
+                        .map(|r| r.2)
+                        .unwrap_or_default();
+                    if hidden.iter().any(|&(f, to)| f <= a && b <= to) {
+                        continue;
+                    }
+                    let mut sp = Span::new(&text[a..b]);
+                    if s.marker {
+                        // The marks show on the line being written; on the
+                        // others they step back further.
+                        sp = sp.color(if here { t.faint } else { t.faint.with_alpha(0.4) });
+                    } else {
+                        // Colour: the words' own, unless it would vanish
+                        // into the page (black words in the dark); a
+                        // highlighter's wash, the words on it in whichever
+                        // of black and white reads.
+                        // Colour: the words' own and a highlighter's wash,
+                        // both; see `words_ink`.
+                        let plain = style.color.unwrap_or(t.fg);
+                        let own = (s.ink != 0).then(|| crate::design::tint::ink(s.ink, dark));
+                        let wash = (s.mark != 0).then(|| {
+                            if s.mark == inline::HIGHLIGHT {
+                                crate::design::tint::highlight(dark)
+                            } else {
+                                crate::design::tint::wash(s.mark, dark, page_bg)
+                            }
+                        });
+                        if let Some(w) = wash {
+                            sp = sp.bg(w).bg_radius(3.0);
+                        }
+                        let ink = words_ink(own, plain, wash, page_bg);
+                        if ink != plain {
+                            sp = sp.color(ink);
+                        }
+                        if s.bold {
+                            sp = sp.bold();
+                        }
+                        if s.italic {
+                            sp = sp.italic();
+                        }
+                        if s.strike || strike {
+                            sp = sp.strikethrough();
+                        }
+                        if s.code {
+                            // Code reads as code: its own ink on a wash of
+                            // the text's colour, clear in either theme.
+                            sp = sp.color(l.c.accent_ink).bg(t.fg.with_alpha(0.09)).bg_radius(4.0);
+                        }
+                        if s.link {
+                            sp = sp.color(t.focus_ring).underline();
+                        }
+                    }
+                    if cap.is_some_and(|(f, to)| a >= f && b <= to) {
+                        // In the heading face, two lines
+                        // tall, in the accent deepened for text.
+                        sp = sp.size((style.size * 2.0).round()).family(l.serif).color(l.c.accent_ink);
+                    }
+                    if part.is_some_and(|(f, to)| a >= f && b <= to) {
+                        sp = sp.bg(t.selection).bg_radius(4.0);
+                    }
+                    spans.push(sp);
+                }
+                if preedit.is_some() && byte == text.len() {
+                    spans.push(Span::new(preedit.as_deref().unwrap_or("")).underline());
+                }
+                if spans.is_empty() {
+                    // Nothing but marks: still a line's height.
+                    spans.push(Span::new("\u{200B}"));
+                }
+            }
+            ui.rich_text(&spans, style);
+            self.slot_keys.insert(slot, key);
+            if let Some(h) = hint.filter(|_| text.is_empty() && preedit.is_none()) {
+                ui.text_in_keyed(
+                    "hint",
+                    NodeSpec::row()
+                        .float(FloatConfig::parent())
+                        .enter(kui_native::Enter::default().opacity(0.0))
+                        .transition(320.0)
+                        .role(Role::None),
+                    h,
+                    style.color(t.faint).nowrap(),
+                );
+            }
+            if !(here && self.caret.is_empty() && preedit.is_none()) {
+                return;
+            }
+            // The bar is declared on every frame and blinks by its opacity:
+            // a float that came and went with the blink would come back
+            // each time over whatever opened since (the `/` menu).
+            let bar = |h: f32, (dx, dy): (f32, f32), on: bool| {
+                NodeSpec::row()
+                    .size(2.0, h.max(8.0))
+                    .radius(1.0)
+                    .bg(t.accent)
+                    .opacity(if on { 1.0 } else { 0.0 })
+                    .float(FloatConfig::parent().offset(dx, dy))
+                    .role(Role::None)
+            };
+            // On an empty line the caret is the line's start: nothing to
+            // measure, so nothing to wait for.
+            if text.is_empty() {
+                ui.leaf_keyed("caret", bar(style.line_height, (0.0, 0.0), blink));
+                return;
+            }
+            // Elsewhere, where the last layout put this byte, measured from
+            // where it put the first, so the bar rides along however the
+            // page scrolled since. Text not measured yet: out of sight for
+            // the frame it takes.
+            match (fresh, ui.caret_rect(key, drawn_byte), ui.caret_rect(key, drawn_0)) {
+                (true, Some(r), Some(o)) => {
+                    ui.leaf_keyed("caret", bar(r.h, (r.x - o.x, r.y - o.y), blink));
+                }
+                _ => {
+                    ui.leaf_keyed("caret", bar(style.line_height, (0.0, 0.0), false));
+                    ui.request_frame();
+                }
+            }
+        });
+    }
+
+    /// Where the drawn text has source byte `b` of `slot`: past the marks
+    /// hidden before it.
+    fn drawn_byte(&self, slot: Slot, b: usize) -> usize {
+        self.shown.get(&slot).map_or(b, |v| v.drawn(b))
+    }
+
+    /// The source byte of `slot` at byte `r` of the drawn text: after the
+    /// letter before it, inside that letter's marks (`Visible::at`).
+    fn source_byte(&self, slot: Slot, r: usize) -> usize {
+        self.shown.get(&slot).map_or(r, |v| v.at(r))
+    }
+
+    /// Where the last layout put source byte `b` of `slot`.
+    pub(super) fn rect_at(&self, core: &Core, slot: Slot, b: usize) -> Option<Rect> {
+        let k = *self.slot_keys.get(&slot)?;
+        core.caret_rect(k, self.drawn_byte(slot, b))
+    }
+
+    /// The source byte of `slot` under a point, by the last layout.
+    fn byte_under(&self, core: &Core, slot: Slot, at: Vec2) -> Option<usize> {
+        let k = *self.slot_keys.get(&slot)?;
+        core.text_hit(k, at).map(|h| self.source_byte(slot, h.byte))
+    }
+
+    // ------------------------------------------------------------ input
+
+    /// The page sink's events: a key, typed or pasted text, an IME
+    /// composition.
+    pub(super) fn page_event(&mut self, ev: &UiEvent, core: &mut Core) {
+        match ev.kind() {
+            Some("key") => {
+                if let Some((KeyPhase::Down, k)) = ev.key_press() {
+                    // Enter, Tab and the deletes are writing too, with a
+                    // modifier or without (⌘⌫ takes the line back); Esc
+                    // steps out of it. Everything else — the arrows, the
+                    // chords that move or style — leaves it as it was:
+                    // what takes the keyboard elsewhere (the search, a new
+                    // note, the link editor) ends it by leaving the page.
+                    match k.code {
+                        KeyCode::Escape => self.typing = false,
+                        KeyCode::Enter | KeyCode::Tab | KeyCode::Backspace | KeyCode::Delete => {
+                            self.typing = true;
+                            self.typed_at = core.now();
+                        }
+                        _ => {}
+                    }
+                    self.page_key_press(k, core);
+                }
+            }
+            Some("text") => {
+                let s = ev.payload.get_str("text").unwrap_or("").to_string();
+                let pasted = std::mem::take(&mut self.paste_pending) || ev.payload.get("pasted").is_some();
+                self.preedit = None;
+                if pasted {
+                    self.edit(Step::Other, |d, c| page::paste(d, c, &s));
+                } else {
+                    // Writing on: the colour picker has been left behind.
+                    self.tint_open = None;
+                    self.typing = true;
+                    self.typed_at = core.now();
+                    self.type_text(&s);
+                }
+            }
+            Some("preedit") => {
+                // A letter being composed (an accent held, an input
+                // method) is typing too.
+                self.typing = true;
+                self.typed_at = core.now();
+                let s = ev.payload.get_str("text").unwrap_or("");
+                self.preedit = (!s.is_empty()).then(|| s.to_string());
+            }
+            // A right-click: the caret goes where it was unless that is
+            // inside the selection, which the menu then acts on.
+            Some("contextmenu") => {
+                let p = &ev.payload;
+                let num = |k: &str| {
+                    p.get_float(k)
+                        .or_else(|| p.get_int(k).map(|v| v as f64))
+                        .unwrap_or(0.0) as f32
+                };
+                let (x, y) = (num("x"), num("y"));
+                if let Some(pos) = self.hit(core, x, y)
+                    && !page::contains(self.doc(), self.caret, pos)
+                {
+                    self.caret = Caret::at(pos);
+                }
+                self.editing = true;
+                self.focus_page = true;
+                self.writing.moved();
+                self.history().seal();
+                self.pending_menu = Some((ev.key, Vec2::new(x, y), MenuFor::Page));
+                self.menu_at = Vec2::new(x, y);
+            }
+            _ => {}
+        }
+    }
+
+    /// The page's right-click menu: the clipboard, the styles, what the
+    /// block can turn into, and the table's tools inside a table.
+    pub(super) fn page_menu(&self) -> Vec<MenuItem> {
+        let doc = self.doc();
+        let selected = !self.caret.is_empty();
+        let in_table = self.caret.head.slot.cell.is_some();
+        let item = |label: &str, action: &str| {
+            MenuItem::new(label).id(Value::map([("page", Value::str(action))]))
+        };
+        let picture = self.picture_at_caret().is_some();
+        let mut items = Vec::new();
+        if page::link_at(doc, self.caret).is_some() {
+            items.extend([
+                item("Open link", "open-link"),
+                item("Copy link address", "copy-link"),
+                item("Remove link", "unlink"),
+                MenuItem::separator(),
+            ]);
+        }
+        items.extend([
+            item("Cut", "cut").accel("mod+x").enabled(selected || picture),
+            item("Copy", "copy").accel("mod+c").enabled(selected || picture),
+            item("Paste", "paste").accel("mod+v"),
+            item("Select all", "all").accel("mod+a"),
+            item("Copy note as Markdown", "copy-note"),
+            item("Note history", "history"),
+            MenuItem::separator(),
+        ]);
+        if let Some((_, float, now)) = self.picture_here() {
+            items.extend([item("Copy picture", "copy-picture"), item("Copy picture as Markdown", "copy-picture-md"), MenuItem::separator()]);
+            // Sizes: shares of the text's width, the one it has now ticked.
+            let full = (self.text_w - 10.0).max(48.0);
+            for (label, pct) in [("Small", 25), ("Medium", 50), ("Large", 75), ("Full width", 100)] {
+                let w = (full * pct as f32 / 100.0).round();
+                items.push(item(label, &format!("size:{pct}")).checked((w - now).abs() < 2.0));
+            }
+            items.push(item("Original size", "picture-size").enabled(self.picture_width_set()));
+            items.push(MenuItem::separator());
+            for (label, to, spec) in [
+                ("On its own line", Float::None, None),
+                ("Left of the text", Float::Left, Some(keys::FLOAT_LEFT)),
+                ("Right of the text", Float::Right, Some(keys::FLOAT_RIGHT)),
+            ] {
+                let mut it = item(label, &format!("float:{}", to as u8)).checked(float == to);
+                if let Some(spec) = spec {
+                    it = it.accel(spec);
+                }
+                items.push(it);
+            }
+            items.extend([
+                MenuItem::separator(),
+                item(super::reveal_label(), "reveal-picture"),
+                item("Remove picture", "remove"),
+            ]);
+            return items;
+        }
+        items.extend([
+            item("Bold", "style:0").accel("mod+b"),
+            item("Italic", "style:1").accel("mod+i"),
+            item("Strikethrough", "style:2").accel("mod+shift+x"),
+            item("Code", "style:3").accel("mod+e"),
+            item(if page::link_at(doc, self.caret).is_some() { "Edit link\u{2026}" } else { "Link\u{2026}" }, "link")
+                .accel("mod+k"),
+            item("Highlight", "highlight").accel(keys::HIGHLIGHT),
+            item("Text colour\u{2026}", "tint-menu:1"),
+            item("Highlight colour\u{2026}", "tint-menu:0"),
+            MenuItem::separator(),
+        ]);
+        if in_table {
+            items.extend([
+                item("Add row below", "addrow"),
+                item("Add column right", "addcol"),
+                item("Remove row", "delrow"),
+                item("Remove column", "delcol"),
+                MenuItem::separator(),
+                item("Remove table", "remove"),
+            ]);
+        } else {
+            let convertible = page::touched(doc, self.caret)
+                .any(|i| page::turned(&doc.blocks()[i].kind, TURN_TEXT).is_some());
+            for (label, to, spec) in [
+                ("Text", TURN_TEXT, keys::TEXT),
+                ("Heading", TURN_H2, keys::H2),
+                ("Bulleted list", TURN_BULLET, keys::BULLETS),
+                ("Numbered list", TURN_NUMBER, keys::NUMBERS),
+                ("Checklist", TURN_TODO, keys::TODO),
+                ("Quote", TURN_QUOTE, keys::QUOTE),
+            ] {
+                items.push(item(label, &format!("turn:{to}")).accel(spec).enabled(convertible));
+            }
+            let here = self.caret.head.slot.block;
+            if matches!(doc.get(here).map(|b| &b.kind), Some(Kind::Heading { .. })) && (self.folded.contains(&here) || self.would_fold(here)) {
+                items.push(MenuItem::separator());
+                items.push(item(if self.folded.contains(&here) { "Expand section" } else { "Collapse section" }, "fold"));
+            }
+            items.extend([
+                MenuItem::separator(),
+                item("Insert table", "table").accel(keys::TABLE),
+                item("Insert divider", "rule").accel(keys::DIVIDER),
+                MenuItem::separator(),
+                item(if selected { "Duplicate blocks" } else { "Duplicate block" }, "duplicate").accel(keys::DUPLICATE),
+                item(if selected { "Remove blocks" } else { "Remove block" }, "remove").accel(keys::REMOVE),
+            ]);
+        }
+        items
+    }
+
+    /// What the page's menu (or its shortcuts) asked for.
+    pub(super) fn page_action(&mut self, action: &str) {
+        if action == "history" {
+            self.show_history();
+            return;
+        }
+        self.focus_page = true;
+        self.editing = true;
+        match action {
+            "cut" => {
+                if self.copy_selection() {
+                    if self.picture_at_caret().is_some() && self.caret.is_empty() {
+                        self.on_plain(Msg::DeleteBlock);
+                    } else {
+                        self.edit(Step::Other, page::delete_selection);
+                    }
+                }
+            }
+            "copy" => {
+                self.copy_selection();
+            }
+            "paste" => self.paste(),
+            "copy-note" => self.on_plain(Msg::CopyText { what: 1 }),
+            "duplicate" => {
+                self.edit(Step::Other, page::duplicate);
+            }
+            "copy-picture" => {
+                if let Some((src, wiki)) = self.picture_at_caret() {
+                    self.copy_picture(&src, wiki);
+                }
+            }
+            "copy-picture-md" => {
+                if let Some((src, wiki)) = self.picture_at_caret() {
+                    // As the note writes it: an Obsidian embed stays one.
+                    let none = carnet_core::doc::Float::None;
+                    let md = wiki
+                        .then(|| carnet_core::doc::image_wiki("", &src, None, none))
+                        .flatten()
+                        .unwrap_or_else(|| carnet_core::doc::image_markdown("", &src, None, none));
+                    let folder = self.store.notes[self.current].folder.clone();
+                    self.copy_markdown(md, &folder);
+                }
+            }
+            "picture-size" => {
+                if let Some(i) = page::touched(self.doc(), self.caret).next() {
+                    let id = self.doc().blocks()[i].id;
+                    self.edit(Step::Other, |d, _| page::set_image_width(d, id, None));
+                }
+            }
+            "reveal-picture" => {
+                let folder = self.store.notes[self.current].folder.clone();
+                if let Some(p) = self.picture_at_caret().and_then(|(s, wiki)| self.store.picture_file(&folder, &s, wiki))
+                    && let Err(e) = store::reveal(&p)
+                {
+                    self.error = Some(format!("Couldn't open the folder: {e}"));
+                }
+            }
+            "all" => {
+                let all = page::select_all(self.doc());
+                self.move_to(all);
+            }
+            "link" => self.open_link_editor(),
+            "open-link" => {
+                if let Some((_, _, url)) = page::link_at(self.doc(), self.caret) {
+                    self.open_url(&url);
+                }
+            }
+            "copy-link" => {
+                if let Some((_, _, url)) = page::link_at(self.doc(), self.caret) {
+                    self.clip_out = Some((url, None));
+                }
+            }
+            "unlink" => {
+                if let Some((slot, at, _)) = page::link_at(self.doc(), self.caret) {
+                    self.edit(Step::Other, |d, _| page::set_link(d, slot, at, None));
+                }
+            }
+            "highlight" => self.on_plain(Msg::Tint { ink: 0, color: inline::HIGHLIGHT as u64 }),
+            "addrow" => self.on_plain(Msg::AddRow),
+            "addcol" => self.on_plain(Msg::AddCol),
+            "delrow" => self.on_plain(Msg::DelRow),
+            "delcol" => self.on_plain(Msg::DelCol),
+            "remove" => self.on_plain(Msg::DeleteBlock),
+            "table" => self.on_plain(Msg::InsertTable),
+            "rule" => self.on_plain(Msg::InsertDivider),
+            "fold" => {
+                let id = self.caret.head.slot.block;
+                self.fold(id);
+            }
+            a => {
+                if let Some(n) = a.strip_prefix("style:").and_then(|n| n.parse().ok()) {
+                    self.on_plain(Msg::Style { which: n });
+                } else if let Some(pct) = a.strip_prefix("size:").and_then(|n| n.parse::<f32>().ok()) {
+                    if let Some((id, _, _)) = self.picture_here() {
+                        let w = ((self.text_w - 10.0).max(48.0) * pct / 100.0).round() as u32;
+                        self.edit(Step::Other, |d, _| page::set_image_width(d, id, Some(w)));
+                    }
+                } else if let Some(to) = a.strip_prefix("float:").and_then(|n| n.parse::<u8>().ok()) {
+                    // A shortcut on a picture already there puts it back on
+                    // its own line.
+                    let to = match to {
+                        1 => Float::Left,
+                        2 => Float::Right,
+                        _ => Float::None,
+                    };
+                    if let Some((id, now, _)) = self.picture_here() {
+                        let to = if now == to { Float::None } else { to };
+                        self.edit(Step::Other, |d, _| page::set_image_float(d, id, to));
+                    }
+                } else if let Some(ink) = a.strip_prefix("tint-menu:").and_then(|n| n.parse::<u64>().ok()) {
+                    // From the page's menu: the picker where the menu was.
+                    self.tint_open = Some((ink == 1, self.menu_at));
+                    self.tint_from = None;
+                } else if let Some(to) = a.strip_prefix("turn:").and_then(|n| n.parse().ok()) {
+                    self.on_plain(Msg::Turn { to });
+                }
+            }
+        }
+    }
+
+    /// The page's key handling, for tests that need a press the driver
+    /// cannot spell (a key on another layout).
+    #[cfg(test)]
+    pub(super) fn page_key_press_for_test(&mut self, k: KeyPress, core: &Core) {
+        self.page_key_press(k, core);
+    }
+
+    pub(super) fn page_key_press(&mut self, k: KeyPress, core: &Core) {
+        let m = k.mods;
+        let chord = m.ctrl || m.super_key;
+        // Reading a version or a deleted note: Esc goes back to the note.
+        if k.code == KeyCode::Escape && self.reading() {
+            self.close_history();
+            return;
+        }
+        // The colour picker leaves the keyboard here: Esc puts it away.
+        if k.code == KeyCode::Escape && self.tint_open.is_some() {
+            self.tint_open = None;
+            return;
+        }
+        // The `/` menu has the arrows, Enter, Tab and Esc while it shows.
+        if let Some((block, shown)) = self.slash_now()
+            && !chord
+            && !m.alt
+        {
+            let n = shown.len();
+            let sel = self.slash_sel.min(n - 1);
+            match k.code {
+                KeyCode::Up => {
+                    self.slash_sel = (sel + n - 1) % n;
+                    return;
+                }
+                KeyCode::Down => {
+                    self.slash_sel = (sel + 1) % n;
+                    return;
+                }
+                KeyCode::Enter | KeyCode::Tab if !m.shift => {
+                    self.run_slash(shown[sel]);
+                    return;
+                }
+                KeyCode::Escape => {
+                    self.slash_off = Some(block);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        // Word motion: Ctrl on Windows and Linux, Option on a Mac. Cmd on a
+        // Mac goes to the edge: of the line (←→), of the note (↑↓).
+        let word = m.ctrl || m.alt;
+        let shift = m.shift;
+        let code = if chord || m.alt { keys::chord_code(&k) } else { k.code };
+        let doc = self.doc();
+        match code {
+            // The note above or below in the library.
+            KeyCode::Up | KeyCode::Down if chord && m.alt => self.step_note(code == KeyCode::Up),
+            KeyCode::Up | KeyCode::Down if m.alt => {
+                let by = if code == KeyCode::Up { -1 } else { 1 };
+                self.edit(Step::Other, |d, c| page::move_blocks(d, *c, by));
+            }
+            // The note's top or bottom; with Shift, selected to there.
+            KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End if chord => {
+                let all = page::slots(doc);
+                let p = if matches!(code, KeyCode::Up | KeyCode::Home) {
+                    page::start(all[0])
+                } else {
+                    page::end(doc, *all.last().unwrap_or(&all[0]))
+                };
+                let anchor = if shift { self.caret.anchor } else { p };
+                self.goal_x = None;
+                self.move_to(Caret { head: p, anchor });
+            }
+            KeyCode::Left | KeyCode::Right if m.super_key => {
+                self.line_edge(core, code == KeyCode::Left, shift);
+            }
+            // Cmd+Backspace: to the start of the line.
+            KeyCode::Backspace if m.super_key && !shift => {
+                self.line_edge(core, true, true);
+                self.edit(Step::Deleting, page::delete_selection);
+            }
+            // Up from the first line, back from the very start: the title,
+            // as it would be in one text.
+            KeyCode::Up | KeyCode::Left if !shift && self.caret.is_empty() && self.at_top(core, code == KeyCode::Left) => {
+                // ↑ keeps the column it is in; ← comes up to the end.
+                let column = (code == KeyCode::Up)
+                    .then(|| self.goal_x.or_else(|| self.rect_at(core, self.caret.head.slot, self.caret.head.byte).map(|r| r.x)))
+                    .flatten();
+                self.up_to_title(column);
+            }
+            KeyCode::Left => {
+                let c = page::left(doc, self.caret, word, shift);
+                self.goal_x = None;
+                self.move_to(c);
+            }
+            KeyCode::Right => {
+                let c = page::right(doc, self.caret, word, shift);
+                self.goal_x = None;
+                self.move_to(c);
+            }
+            KeyCode::Up => self.vertical(core, true, shift, 1),
+            KeyCode::Down => self.vertical(core, false, shift, 1),
+            KeyCode::PageUp => self.vertical(core, true, shift, 15),
+            KeyCode::PageDown => self.vertical(core, false, shift, 15),
+            KeyCode::Home => self.line_edge(core, true, shift),
+            KeyCode::End => self.line_edge(core, false, shift),
+            KeyCode::Backspace => {
+                self.edit(Step::Deleting, |d, c| page::backspace(d, c, word));
+            }
+            KeyCode::Delete => {
+                self.edit(Step::Deleting, |d, c| page::delete(d, c, word));
+            }
+            KeyCode::Enter if chord => {
+                let id = self.caret.head.slot.block;
+                self.edit(Step::Other, |d, _| page::toggle(d, id));
+            }
+            KeyCode::Enter => {
+                self.edit(Step::Other, |d, c| page::enter(d, c, shift));
+            }
+            // Alt+Tab is the OS's: the page must not take it for Tab and
+            // hand the keyboard to the next control on its way out.
+            // In text, a tab character, typed as letters are.
+            KeyCode::Tab if !chord && !m.alt && page::tab_types(doc, self.caret, shift) => self.type_text("\t"),
+            KeyCode::Tab if !chord && !m.alt => {
+                let mut handled = false;
+                self.edit(Step::Other, |d, c| {
+                    let (h, changed) = page::tab(d, c, shift);
+                    handled = h;
+                    changed
+                });
+                if !handled {
+                    // Not the page's: Tab leaves it, as it does a field.
+                    self.step = Some(!shift);
+                }
+            }
+            KeyCode::Tab => {}
+            KeyCode::Escape => {
+                let c = self.caret;
+                let i = doc.index_of(c.head.slot.block).unwrap_or(0);
+                let block = page::select_blocks(doc, i, i);
+                if !c.is_empty() && c != block {
+                    self.move_to(Caret::at(c.head));
+                } else if c != block {
+                    // Esc with nothing selected selects the block — the
+                    // one Backspace, Ctrl+C or the toolbar then act on.
+                    self.move_to(block);
+                } else {
+                    // And again: the page lets the keyboard go.
+                    self.move_to(Caret::at(c.head));
+                    self.editing = false;
+                    self.blur = true;
+                }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') if chord => {
+                // Once: the slot; twice: the whole note.
+                let slot = page::select_slot(doc, self.caret.head.slot);
+                let all = page::select_all(doc);
+                let next = if self.caret == slot || page::len(doc, slot.head.slot) == 0 {
+                    all
+                } else {
+                    slot
+                };
+                self.move_to(next);
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') if chord => {
+                self.copy_selection();
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') if chord && shift => self.page_action("style:2"),
+            KeyCode::Char('x') | KeyCode::Char('X') if chord => self.page_action("cut"),
+            KeyCode::Char('v') | KeyCode::Char('V') if chord => self.paste(),
+            KeyCode::Char('h') if chord && shift => self.page_action("highlight"),
+            KeyCode::Char('l') if chord && m.alt => self.page_action("float:1"),
+            KeyCode::Char('r') if chord && m.alt => self.page_action("float:2"),
+            // The block becomes: Ctrl/Cmd+Alt+0 text, 1–3 headings,
+            // 4 checklist, 5 bullets, 6 numbers, 7 a quote.
+            KeyCode::Char(d @ '0'..='7') if chord && m.alt => {
+                let to = match d {
+                    '0' => TURN_TEXT,
+                    '1' => TURN_H1,
+                    '2' => TURN_H2,
+                    '3' => TURN_H3,
+                    '4' => TURN_TODO,
+                    '5' => TURN_BULLET,
+                    '7' => TURN_QUOTE,
+                    _ => TURN_NUMBER,
+                };
+                self.on_plain(Msg::Turn { to });
+            }
+            KeyCode::Char('t') if chord && m.alt => self.on_plain(Msg::InsertTable),
+            KeyCode::Char('-') if chord && m.alt => self.on_plain(Msg::InsertDivider),
+            KeyCode::Char('d') if chord => {
+                self.edit(Step::Other, page::duplicate);
+            }
+            KeyCode::Char('k') if chord && shift => self.on_plain(Msg::DeleteBlock),
+            KeyCode::Char('b') | KeyCode::Char('B') if chord => self.page_action("style:0"),
+            KeyCode::Char('i') | KeyCode::Char('I') if chord => self.page_action("style:1"),
+            // With Shift too: ⌘⇧E is code as well, as hands that know it
+            // from elsewhere press it.
+            KeyCode::Char('e') | KeyCode::Char('E') if chord => self.page_action("style:3"),
+            KeyCode::Char('k') | KeyCode::Char('K') if chord => self.page_action("link"),
+            _ if chord => {
+                self.chord(&k);
+            }
+            _ => {
+                if let Some(s) = k.text.as_deref().filter(|s| !s.is_empty()) {
+                    let s = s.to_string();
+                    self.type_text(&s);
+                }
+            }
+        }
+    }
+
+    /// The `/` menu, when the caret ends a `/word` line it has not been
+    /// sent away from: the line, and the commands it offers.
+    pub(super) fn slash_now(&self) -> Option<(u64, Vec<usize>)> {
+        if !self.editing {
+            return None;
+        }
+        let (block, word) = slash::query(self.doc(), self.caret)?;
+        if self.slash_off == Some(block) {
+            return None;
+        }
+        let shown = slash::matches(&word);
+        (!shown.is_empty()).then_some((block, shown))
+    }
+
+    /// Runs a `/` command on the line it was typed on.
+    pub(super) fn run_slash(&mut self, i: usize) {
+        let picture = slash::COMMANDS
+            .get(i)
+            .is_some_and(|c| c.action == slash::Action::Picture);
+        self.focus_page = true;
+        self.edit(Step::Other, |d, c| slash::apply(d, c, i));
+        self.slash_sel = 0;
+        if picture {
+            self.pick_pictures = true;
+        }
+    }
+
+    /// The `/` menu under its line: each command's icon, name and what
+    /// to type for it next time; the highlighted one on the accent's wash.
+    fn slash_menu(&mut self, ui: &mut Ui<'_>, l: &Look, id: u64, shown: &[usize]) {
+        let t = l.t;
+        let sel = self.slash_sel.min(shown.len() - 1);
+        // Under the line, or over it when the page has no room below: never
+        // over the line being typed.
+        let tall = 12.0 + shown.len() as f32 * 35.0;
+        let above = match (self.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r), self.page_rect) {
+            (Some(r), Some(p)) => r.y + r.h + tall + 8.0 > p.y + p.h && r.y - tall - 8.0 >= p.y,
+            _ => false,
+        };
+        let (at, me, dy) = if above { (Align::Start, Align::End, -2.0) } else { (Align::End, Align::Start, 2.0) };
+        ui.with_keyed(
+            "slash",
+            NodeSpec::column()
+                .float(FloatConfig::parent().at(Align::Start, at).self_at(Align::Start, me).offset(-16.0, dy).fit())
+                .width(280.0)
+                .pad(6.0)
+                .gap(1.0)
+                .radius(radius::CARD)
+                .bg(l.card)
+                .border(1.0, t.border)
+                .shadow_color(l.shadow)
+                .shadow_blur(18.0)
+                .shadow_y(4.0)
+                // Out of the line it hangs from, quickly.
+                .enter(kui_native::Enter::from(0.0, if above { 4.0 } else { -4.0 }).opacity(0.0))
+                .transition(140.0)
+                .role(Role::List)
+                .label("Blocks"),
+            |ui| {
+                for (row, &i) in shown.iter().enumerate() {
+                    let cmd = &slash::COMMANDS[i];
+                    let on = row == sel;
+                    ui.with_indexed(
+                        i as u64,
+                        NodeSpec::row()
+                            .grow_width()
+                            .height(34.0)
+                            .pad_xy(10.0, 0.0)
+                            .gap(10.0)
+                            .radius(radius::CONTROL)
+                            .cross_align(Align::Center)
+                            .bg(if on { t.accent_soft } else { Color::TRANSPARENT })
+                            .hover_bg(if on { t.accent_soft } else { t.hover })
+                            .on_click(Msg::Slash { index: i as u64 })
+                            .selected(on)
+                            .label(cmd.name),
+                        |ui| {
+                            icons::icon(ui, cmd.glyph, if on { t.fg } else { t.muted }, 18.0, false);
+                            ui.text_in(
+                                NodeSpec::row().grow_width().min_width(0.0),
+                                cmd.name,
+                                TextStyle::new(Type::STRONG.size).color(t.fg).nowrap(),
+                            );
+                            // A picture comes by pasting: its shortcut as this
+                            // platform writes it.
+                            let hint = if cmd.action == slash::Action::Picture { keys::label(keys::PASTE) } else { cmd.hint.to_string() };
+                            ui.text(&hint, TextStyle::new(Type::SMALL.size).mono().color(t.muted).nowrap());
+                        },
+                    );
+                }
+            },
+        );
+    }
+
+    /// Whether the picture at the caret was given a width.
+    fn picture_width_set(&self) -> bool {
+        page::touched(self.doc(), self.caret)
+            .next()
+            .is_some_and(|i| matches!(self.doc().blocks()[i].kind, Kind::Image { width: Some(_), .. }))
+    }
+
+    /// Ctrl+K: the link editor, on the link the caret is in or for the
+    /// selection (a word, with none) to become one.
+    fn open_link_editor(&mut self) {
+        if self.caret.is_empty() && page::link_at(self.doc(), self.caret).is_none() {
+            let w = page::word_at(self.doc(), self.caret.head);
+            if !w.is_empty() {
+                self.caret = w;
+            }
+        }
+        let existing = page::link_at(self.doc(), self.caret);
+        self.link_edit = Some(LinkEdit {
+            caret: self.caret,
+            url: existing.as_ref().map(|l| l.2.clone()).unwrap_or_default(),
+            existing: existing.is_some(),
+            at: None,
+        });
+    }
+
+    /// The link editor's buttons, and Enter in it.
+    pub(super) fn link_act(&mut self, what: u64) {
+        let Some(le) = self.link_edit.clone() else { return };
+        let url = le.url.trim().to_string();
+        self.caret = page::fix(self.doc(), le.caret);
+        match what {
+            1 => {
+                if !url.is_empty() {
+                    self.open_url(&url);
+                }
+                return;
+            }
+            2 => {
+                if let Some((slot, at, _)) = page::link_at(self.doc(), self.caret) {
+                    self.edit(Step::Other, |d, _| page::set_link(d, slot, at, None));
+                }
+            }
+            _ if url.is_empty() => {}
+            _ if le.existing => {
+                if let Some((slot, at, _)) = page::link_at(self.doc(), self.caret) {
+                    self.edit(Step::Other, |d, _| page::set_link(d, slot, at, Some(&url)));
+                }
+            }
+            _ => {
+                self.edit(Step::Other, |d, c| page::make_link(d, c, &url));
+            }
+        }
+        self.link_edit = None;
+        self.focus_page = true;
+        self.editing = true;
+    }
+
+    /// A link's address opened by the system: a web page or a mail. One
+    /// written without a scheme is given one (`example.com` the web's);
+    /// anything else stays shut.
+    pub(super) fn open_url(&mut self, url: &str) {
+        // A file in the notes folder (a PDF or a recording an export
+        // brought): opened in its own app, or, one that could run, shown
+        // in its folder instead.
+        let folder = self.store.notes[self.current].folder.clone();
+        if let Some(path) = self.store.linked_file(&folder, url) {
+            let opened = if store::opens_safely(&path) {
+                store::open_url(&path.to_string_lossy())
+            } else {
+                store::reveal(&path)
+            };
+            if let Err(e) = opened {
+                self.error = Some(format!("Couldn't open the file: {}", store::plain_error(&e)));
+            }
+            return;
+        }
+        let url = inline::with_scheme(url);
+        let ok = ["http://", "https://", "mailto:"].iter().any(|s| url.to_ascii_lowercase().starts_with(s));
+        if !ok {
+            self.error = Some(format!("Only web and mail links open from a note: {url}"));
+            return;
+        }
+        if let Err(e) = store::open_url(&url) {
+            self.error = Some(format!("Couldn't open the link: {e}"));
+        }
+    }
+
+    /// The link editor: the address, Enter to keep it, a way to open the
+    /// link and to take it off its words. Hangs under the caret.
+    pub(super) fn link_editor(&mut self, ui: &mut Ui<'_>, l: &Look) {
+        let Some(le) = self.link_edit.clone() else { return };
+        let t = l.t;
+        let at = match le.at {
+            Some(at) => at,
+            None => {
+                let p = self.caret.head;
+                let at = self
+                    .rect_at(ui.core(), p.slot, p.byte)
+                    .map_or(self.menu_at, |r| Vec2::new(r.x - 12.0, r.y + r.h + 8.0));
+                if let Some(le) = self.link_edit.as_mut() {
+                    le.at = Some(at);
+                }
+                at
+            }
+        };
+        let mut field = None;
+        ui.with(
+            NodeSpec::column()
+                .float(FloatConfig::viewport().offset(at.x, at.y).fit())
+                .width(360.0)
+                .pad(12.0)
+                .gap(10.0)
+                .radius(radius::CARD)
+                .bg(l.card)
+                .border(1.0, t.border)
+                .shadow_color(l.shadow)
+                .shadow_blur(18.0)
+                .shadow_y(4.0)
+                .modal(Msg::CloseLink)
+                .role(Role::Dialog)
+                .label("Link"),
+            |ui| {
+                ui.text(if le.existing { "Link" } else { "Make a link" }, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
+                ui.with(NodeSpec::row().grow_width().pad_xy(10.0, 7.0).radius(radius::CONTROL).bg(t.sunken), |ui| {
+                    field = Some(ui.text_edit(
+                        "link-url",
+                        &le.url,
+                        &EditOptions { style: TextStyle::new(Type::UI.size).color(t.fg), ..Default::default() },
+                        NodeSpec::row().grow_width().label("Link address"),
+                    ));
+                });
+                ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
+                    let button = |ui: &mut Ui<'_>, key: &str, name: &str, what: u64, primary: bool| {
+                        ui.text_in(
+                            NodeSpec::row()
+                                .pad_xy(12.0, 6.0)
+                                .radius(radius::CONTROL)
+                                .bg(if primary { l.c.primary } else { Color::TRANSPARENT })
+                                .border(1.0, if primary { l.c.primary } else { t.border })
+                                .hover_bg(if primary { l.c.primary } else { t.hover })
+                                .on_click(Msg::LinkAct { what })
+                                .role(Role::Button)
+                                .label(key),
+                            name,
+                            TextStyle::new(Type::SMALL.size).color(if primary { l.c.on_accent } else { t.fg }).nowrap(),
+                        );
+                    };
+                    if le.existing {
+                        button(ui, "link-remove", "Remove link", 2, false);
+                    }
+                    button(ui, "link-open", "Open", 1, false);
+                    ui.leaf(NodeSpec::row().grow_width());
+                    button(ui, "link-done", "Done", 0, true);
+                });
+            },
+        );
+        if let Some(k) = field {
+            self.fields.insert(k, Field::Link);
+            self.apply_focus(ui, k, Field::Link);
+        }
+    }
+
+    /// The picture the caret is on, or the one the selection is: its id,
+    /// where it sits and its width as last drawn.
+    pub(super) fn picture_here(&self) -> Option<(u64, Float, f32)> {
+        let doc = self.doc();
+        let mut touched = page::touched(doc, self.caret);
+        let i = touched.next()?;
+        if touched.next().is_some() {
+            return None;
+        }
+        let b = &doc.blocks()[i];
+        match &b.kind {
+            Kind::Image { float, .. } => Some((b.id, *float, self.pic_w.get(&b.id).map_or(0.0, |w| w.0))),
+            _ => None,
+        }
+    }
+
+    /// The picture the caret is on, or the one the selection is: its `src`,
+    /// and whether an Obsidian embed names it.
+    pub(super) fn picture_at_caret(&self) -> Option<(String, bool)> {
+        let doc = self.doc();
+        let mut touched = page::touched(doc, self.caret);
+        let i = touched.next()?;
+        if touched.next().is_some() {
+            return None;
+        }
+        match &doc.blocks()[i].kind {
+            Kind::Image { src, wiki, .. } => Some((src.clone(), *wiki)),
+            _ => None,
+        }
+    }
+
+    /// Copies what is selected: a picture alone as the picture, anything
+    /// else as Markdown with its HTML. True when something was copied.
+    fn copy_selection(&mut self) -> bool {
+        if let Some((src, wiki)) = self.picture_at_caret() {
+            self.copy_picture(&src, wiki);
+            return true;
+        }
+        match page::copy(self.doc(), self.caret) {
+            Some(md) => {
+                let folder = self.store.notes[self.current].folder.clone();
+                self.copy_markdown(md, &folder);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A picture's pixels on the clipboard.
+    fn copy_picture(&mut self, src: &str, wiki: bool) {
+        let folder = self.store.notes[self.current].folder.clone();
+        let result = match self.store.picture_file(&folder, src, wiki) {
+            Some(p) => images::decode(&p).and_then(|d| clip::write_image(d.w, d.h, d.rgba)),
+            None => Err("it is on the web".into()),
+        };
+        match result {
+            Ok(()) => self.say = Some("Picture copied".into()),
+            Err(e) => self.error = Some(format!("Couldn't copy the picture: {e}")),
+        }
+    }
+
+    /// Ctrl+V: a picture or picture files from the clipboard go in as
+    /// pictures; anything else is text, which kui hands over.
+    pub(super) fn paste(&mut self) {
+        match clip::read_media() {
+            Some(clip::Media::Image { w, h, rgba }) => self.paste_picture(w, h, &rgba),
+            Some(clip::Media::Files(files)) => self.insert_files(&files),
+            None => self.paste_pending = true,
+        }
+    }
+
+    /// A picture's pixels kept as a PNG beside the notes, and put in at the
+    /// caret.
+    pub fn paste_picture(&mut self, w: u32, h: u32, rgba: &[u8]) {
+        if self.reading() {
+            return;
+        }
+        let folder = self.store.notes[self.current].folder.clone();
+        let saved = images::encode_png(w, h, rgba)
+            .and_then(|png| self.store.save_attachment(&folder, "png", &png).map_err(|e| e.to_string()));
+        match saved {
+            Ok(src) => {
+                // The pixels are in hand: shown at once, not read back.
+                if let Some(p) = self.store.resolve(&folder, &src) {
+                    self.images.preload(&p, images::Decoded { w, h, rgba: rgba.to_vec() });
+                }
+                self.insert_pictures(vec![src], None);
+            }
+            Err(e) => self.error = Some(format!("Couldn't keep the picture: {e}")),
+        }
+    }
+
+    /// Files pasted or picked: the pictures among them go in at the caret.
+    pub(super) fn insert_files(&mut self, paths: &[std::path::PathBuf]) {
+        self.insert_files_at(paths, None);
+    }
+
+    /// Files dropped or pasted: the pictures among them are copied in
+    /// beside the notes and put in before block `at` (the drop line), or
+    /// at the caret.
+    pub(super) fn insert_files_at(&mut self, paths: &[std::path::PathBuf], at: Option<usize>) {
+        if self.reading() {
+            return;
+        }
+        let folder = self.store.notes[self.current].folder.clone();
+        let mut srcs = Vec::new();
+        let mut skipped = 0;
+        for p in paths {
+            if !images::is_image(p) {
+                skipped += 1;
+                continue;
+            }
+            // An iPhone's photo goes in as a JPEG, which shows everywhere.
+            #[cfg(target_os = "macos")]
+            if images::is_heic(p) {
+                let saved = images::heic_to_jpeg(p)
+                    .and_then(|jpeg| self.store.save_attachment_as(&folder, &store::stem_of(p), "jpg", &jpeg).map_err(|e| e.to_string()));
+                match saved {
+                    Ok(src) => srcs.push(src),
+                    Err(e) => self.error = Some(format!("Couldn't keep {}: {e}", p.display())),
+                }
+                continue;
+            }
+            match self.store.import_attachment(&folder, p) {
+                Ok(src) => srcs.push(src),
+                Err(e) => self.error = Some(format!("Couldn't copy {}: {e}", p.display())),
+            }
+        }
+        if skipped > 0 {
+            self.notify(
+                if skipped == 1 { "That file isn't a picture — only pictures go into a note".to_string() }
+                else { format!("{skipped} files aren't pictures — only pictures go into a note") },
+                None,
+            );
+        }
+        if !srcs.is_empty() {
+            self.insert_pictures(srcs, at);
+        }
+    }
+
+    fn insert_pictures(&mut self, srcs: Vec<String>, at: Option<usize>) {
+        self.editing = true;
+        self.focus_page = true;
+        let kinds: Vec<Kind> = srcs
+            .into_iter()
+            .map(|src| Kind::Image { src, alt: String::new(), width: None, float: carnet_core::doc::Float::None, wiki: false })
+            .collect();
+        self.edit(Step::Other, |d, c| match at {
+            Some(i) => page::insert_blocks_at(d, c, i, kinds),
+            None => {
+                let mut changed = false;
+                for kind in kinds {
+                    changed |= page::insert_block(d, c, kind);
+                }
+                changed
+            }
+        });
+    }
+
+    /// Up and Down `times` visual lines: within a wrapped paragraph by its
+    /// laid-out rows, then on to the next block — in a table, the same
+    /// column of the next row — keeping to the x the caret started from.
+    /// Whether the caret is at the top of the note: on its first line (or,
+    /// `start`, at its very start), with nothing above it but the title.
+    fn at_top(&self, core: &Core, start: bool) -> bool {
+        let doc = self.doc();
+        let p = self.caret.head;
+        let first = page::first(doc);
+        if start {
+            return p == first;
+        }
+        if !page::vertical(doc, p.slot, true).is_empty() || p.slot != first.slot {
+            return false;
+        }
+        // On the slot's first row.
+        match (self.rect_at(core, p.slot, p.byte), self.rect_at(core, p.slot, 0)) {
+            (Some(r), Some(f)) => r.y <= f.y + 1.0,
+            _ => true,
+        }
+    }
+
+    /// The keyboard to the title: its caret at the end, or under `column`.
+    fn up_to_title(&mut self, column: Option<f32>) {
+        self.typing = false;
+        self.title_to = Some(column);
+        self.focus(Field::Title);
+    }
+
+    /// Where the note's first line is under `x`: the first block's top row,
+    /// at the letter nearest that column.
+    pub(super) fn first_line_at(&self, core: &Core, x: f32) -> Option<Pos> {
+        let first = page::first(self.doc());
+        let top = self.rect_at(core, first.slot, 0)?;
+        let byte = self.byte_under(core, first.slot, Vec2::new(x, top.y + top.h * 0.5))?;
+        Some(page::fix(self.doc(), Caret::at(Pos { slot: first.slot, byte })).head)
+    }
+
+    fn vertical(&mut self, core: &Core, up: bool, extend: bool, times: usize) {
+        let mut c = self.caret;
+        if !extend && !c.is_empty() {
+            let (a, b) = page::ordered(self.doc(), c);
+            c = Caret::at(if up { a } else { b });
+        }
+        for _ in 0..times {
+            c.head = self.vertical_once(core, c.head, up);
+        }
+        if !extend {
+            c.anchor = c.head;
+        }
+        self.caret = c;
+        self.writing.moved();
+        self.history().seal();
+        self.reveal = true;
+    }
+
+    fn vertical_once(&mut self, core: &Core, p: Pos, up: bool) -> Pos {
+        let key = self.slot_keys.get(&p.slot).copied();
+        let r = self.rect_at(core, p.slot, p.byte);
+        let x = match (self.goal_x, r) {
+            (Some(x), _) => x,
+            (None, Some(r)) => r.x,
+            (None, None) => 0.0,
+        };
+        self.goal_x = Some(x);
+        let doc = self.doc();
+        let clamp = |p: Pos| page::fix(doc, Caret::at(p)).head;
+        // Another row of this paragraph above or below?
+        if let (Some(_), Some(r)) = (key, r) {
+            let len = page::text(doc, p.slot).len();
+            let more = if up {
+                self.rect_at(core, p.slot, 0).is_some_and(|f| r.y > f.y + 1.0)
+            } else {
+                self.rect_at(core, p.slot, len).is_some_and(|e| r.y + 1.0 < e.y)
+            };
+            if more {
+                let y = if up { r.y - r.h * 0.5 } else { r.y + r.h * 1.5 };
+                if let Some(byte) = self.byte_under(core, p.slot, Vec2::new(x, y)) {
+                    return clamp(Pos { slot: p.slot, byte });
+                }
+            }
+        }
+        let cands = page::vertical(doc, p.slot, up);
+        if cands.is_empty() {
+            // The first line up, the last down: to its start, or its end.
+            return if up { page::start(p.slot) } else { page::end(doc, p.slot) };
+        }
+        // Of a table row, the cell under the caret's x.
+        let left_of = |s: &Slot| self.rect_at(core, *s, 0).is_some_and(|o| o.x <= x + 1.0);
+        let mut pick = if cands.len() == 1 {
+            cands[0]
+        } else {
+            cands.iter().rev().find(|s| left_of(s)).copied().unwrap_or(cands[0])
+        };
+        // Past what a collapsed heading hides.
+        while self.hidden.contains(&pick.block) {
+            match page::vertical(doc, pick, up).first() {
+                Some(&next) => pick = next,
+                None => return p,
+            }
+        }
+        if !self.slot_keys.contains_key(&pick) {
+            return page::start(pick);
+        }
+        let len = page::text(doc, pick).len();
+        // Its last row coming up, its first going down.
+        let edge = self.rect_at(core, pick, if up { len } else { 0 });
+        let byte = edge
+            .and_then(|e| self.byte_under(core, pick, Vec2::new(x, e.y + e.h * 0.5)))
+            .unwrap_or(if up { len } else { 0 });
+        clamp(Pos { slot: pick, byte })
+    }
+
+    /// Home and End: the start or end of the visual line the caret is on.
+    fn line_edge(&mut self, core: &Core, home: bool, extend: bool) {
+        let p = self.caret.head;
+        let doc = self.doc();
+        let len = page::len(doc, p.slot);
+        let byte = (|| {
+            let r = self.rect_at(core, p.slot, p.byte)?;
+            let o = self.rect_at(core, p.slot, 0)?;
+            let x = if home { o.x - 1.0 } else { o.x + 100_000.0 };
+            self.byte_under(core, p.slot, Vec2::new(x, r.y + r.h * 0.5))
+        })()
+        .unwrap_or(if home { 0 } else { len });
+        let head = page::fix(doc, Caret::at(Pos { slot: p.slot, byte })).head;
+        let anchor = if extend { self.caret.anchor } else { head };
+        self.goal_x = None;
+        self.move_to(Caret { head, anchor });
+    }
+
+    /// The page's pointer: in text, a press places the caret (two take a
+    /// word, three the line) and a drag selects — across blocks and cells,
+    /// since every block is part of this one editor; in the margin, a drag
+    /// selects whole blocks and a click puts the caret in the block beside
+    /// it. Where a press lands is the page's own question (`hit`): kui's
+    /// `line` is the row a press is level with, the same for every cell of
+    /// a table row and for the margin beside it.
+    pub(super) fn page_drag(&mut self, ev: &UiEvent, core: &Core) {
+        let p = &ev.payload;
+        let num = |k: &str| {
+            p.get_float(k)
+                .or_else(|| p.get_int(k).map(|v| v as f64))
+                .unwrap_or(0.0) as f32
+        };
+        let (x, y) = (num("x"), num("y"));
+        let clicks = p.get_int("clicks").unwrap_or(1);
+        match p.get_str("phase") {
+            Some("start") => {
+                self.focus_page = true;
+                self.editing = true;
+                self.goal_x = None;
+                self.preedit = None;
+                self.writing.moved();
+                self.history().seal();
+                // Ctrl+click (⌘ on a Mac) on a link opens it.
+                let m = core.modifiers();
+                if clicks == 1
+                    && (m.ctrl || m.super_key)
+                    && let Some(pos) = self.hit(core, x, y).filter(|_| !self.in_margin(x, y))
+                    && let Some((_, _, url)) = page::link_at(self.doc(), Caret::at(pos))
+                {
+                    self.drag = None;
+                    self.open_url(&url);
+                    return;
+                }
+                match self.hit(core, x, y).filter(|_| !self.in_margin(x, y)) {
+                    Some(pos) => {
+                        self.caret = match clicks {
+                            2 => page::word_at(self.doc(), pos),
+                            n if n >= 3 => page::select_slot(self.doc(), pos.slot),
+                            _ if core.modifiers().shift => Caret {
+                                head: pos,
+                                anchor: self.caret.anchor,
+                            },
+                            _ => Caret::at(pos),
+                        };
+                        let unit = (clicks >= 2).then_some((self.caret, clicks == 2));
+                        self.drag = Some(Drag::Text { unit });
+                    }
+                    None => self.drag = Some(Drag::Margin { y0: y, moved: false, from: self.block_at(y) }),
+                }
+                self.drag_at = Some((Vec2::new(x, y), Vec2::new(x, y), core.now()));
+            }
+            Some("move") => {
+                if let Some((at, _, _)) = self.drag_at.as_mut() {
+                    *at = Vec2::new(x, y);
+                }
+                self.drag_to(core, x, y);
+            }
+            _ => {
+                self.drag_at = None;
+                if let Some(Drag::Margin { y0, moved: false, .. }) = self.drag {
+                    // A click in the margin: the caret into the block
+                    // beside it, at its end; below them all, the last.
+                    if let Some(i) = self.block_at(y0) {
+                        let doc = self.doc();
+                        let slots = page::block_slots(&doc.blocks()[i]);
+                        let pos = page::end(doc, *slots.last().unwrap_or(&slots[0]));
+                        self.caret = Caret::at(pos);
+                    }
+                }
+                self.drag = None;
+            }
+        }
+        self.reveal = false;
+    }
+
+    /// The selection's moving end, for a drag now at `x`, `y`: in text, to
+    /// the letter there (by words or lines for a drag begun with two or
+    /// three clicks); in the margin, whole blocks.
+    fn drag_to(&mut self, core: &Core, x: f32, y: f32) {
+        match self.drag {
+            Some(Drag::Text { unit }) => {
+                if let Some(pos) = self.hit(core, x, y) {
+                    self.caret = match unit {
+                        Some((clicked, words)) => page::extend_by(self.doc(), clicked, pos, words),
+                        None => Caret { head: pos, ..self.caret },
+                    };
+                }
+            }
+            // Past a few pixels, a press in the margin is a drag.
+            Some(Drag::Margin { y0, moved, from }) if moved || (y - y0).abs() >= 4.0 => {
+                self.drag = Some(Drag::Margin { y0, moved: true, from });
+                if let (Some(i), Some(j)) = (from, self.block_at(y)) {
+                    self.caret = page::select_blocks(self.doc(), i, j);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A selection dragged to the page's top or bottom edge, or past it:
+    /// the page scrolls, faster the further the pointer goes — from a
+    /// band inside the edge, up to a cap — and goes on while the pointer
+    /// is held still, the moving end following the words under it. kui's
+    /// own rate: 10 px a second for each px, 1000 at most.
+    pub(super) fn drag_scroll(&mut self, ui: &mut Ui<'_>, key: Key) {
+        const BAND: f32 = 24.0;
+        const REACH: f32 = 100.0;
+        const RATE: f32 = 10.0;
+        let (Some((at, from, then)), Some(r), Some(_)) = (self.drag_at, self.page_rect, self.drag) else { return };
+        // A press near the edge that has not moved is a click, not a drag.
+        if (at.x - from.x).hypot(at.y - from.y) < 4.0 || matches!(self.drag, Some(Drag::Margin { moved: false, .. })) {
+            return;
+        }
+        let past = if at.y < r.y + BAND {
+            -(r.y + BAND - at.y)
+        } else if at.y > r.y + r.h - BAND {
+            at.y - (r.y + r.h - BAND)
+        } else {
+            0.0
+        };
+        let now = ui.now();
+        self.drag_at = Some((at, from, now));
+        let Some(g) = ui.scroll_geometry(key).filter(|_| past != 0.0) else { return };
+        let dt = (now - then).clamp(0.0, 0.1) as f32;
+        let dt = if dt > 0.0 { dt } else { 1.0 / 60.0 };
+        let step = past.clamp(-REACH, REACH) * RATE * dt;
+        let to = (g.offset.y + step).clamp(0.0, g.max_offset.y.max(0.0));
+        if (to - g.offset.y).abs() < 0.01 {
+            return;
+        }
+        // At once, not eased: the page moves at the drag's rate.
+        let d = Vec2::new(0.0, to - g.offset.y);
+        ui.shift_scroll(key, d, d);
+        // The end under the pointer, against the layout as drawn now; the
+        // next frame, against the one scrolled.
+        let core = ui.core();
+        self.drag_to(core, at.x, at.y);
+        ui.request_frame();
+    }
+
+    /// Whether a point is in the page's margin: beside the blocks' rows,
+    /// or well below the last.
+    fn in_margin(&self, x: f32, y: f32) -> bool {
+        self.block_under(x, y)
+            .and_then(|i| {
+                let id = self.doc().blocks()[i].id;
+                self.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r)
+            })
+            .is_none_or(|r| x < r.x || x > r.x + r.w || y > r.y + r.h + 40.0)
+    }
+
+    /// The caret position under a point (viewport px, last frame's
+    /// layout): the block whose row spans `y`; in a table, the cell nearest
+    /// the point; the byte `text_hit` finds there, with the point held
+    /// inside the text's own rows so padding and gaps land on the nearest
+    /// line.
+    pub(super) fn hit(&self, core: &Core, x: f32, y: f32) -> Option<Pos> {
+        let i = self.block_under(x, y)?;
+        let doc = self.doc();
+        let b = &doc.blocks()[i];
+        let slots = page::block_slots(b);
+        let slot = if slots.len() > 1 {
+            let dist = |s: &Slot| {
+                self.cell_rects.get(s).map_or(f32::MAX, |r| {
+                    let dx = (r.x - x).max(0.0).max(x - (r.x + r.w));
+                    let dy = (r.y - y).max(0.0).max(y - (r.y + r.h));
+                    dx * dx + dy * dy
+                })
+            };
+            slots.iter().copied().min_by(|a, b| dist(a).total_cmp(&dist(b)))?
+        } else {
+            slots[0]
+        };
+        if page::is_atomic(doc, slot) {
+            return Some(page::start(slot));
+        }
+        let len = page::len(doc, slot);
+        let byte = (|| {
+            let o = self.rect_at(core, slot, 0)?;
+            let e = self.rect_at(core, slot, len).unwrap_or(o);
+            let py = y.clamp(o.y + 1.0, (e.y + e.h - 1.0).max(o.y + 1.0));
+            self.byte_under(core, slot, Vec2::new(x.max(o.x), py))
+        })()
+        .unwrap_or(0);
+        Some(page::fix(doc, Caret::at(Pos { slot, byte })).head)
+    }
+
+    /// The block under a point: the one whose row holds it — beside a
+    /// picture at an edge, rows share a height, so `x` tells them apart —
+    /// else the one whose row spans `y`. Nearest in `x`, among those
+    /// level with the point.
+    fn block_under(&self, x: f32, y: f32) -> Option<usize> {
+        let level: Vec<&(u64, Rect)> = self.row_rects.iter().filter(|(_, r)| y >= r.y && y < r.y + r.h).collect();
+        if level.len() > 1 {
+            let dx = |r: &Rect| (r.x - x).max(0.0).max(x - (r.x + r.w));
+            let id = level.iter().min_by(|a, b| dx(&a.1).total_cmp(&dx(&b.1)))?.0;
+            return self.doc().index_of(id);
+        }
+        self.block_at(y)
+    }
+
+    /// The block whose row spans `y` (viewport px, last frame's layout);
+    /// above the first is the first, below the last is the last.
+    fn block_at(&self, y: f32) -> Option<usize> {
+        let (first, last) = (self.row_rects.first()?, self.row_rects.last()?);
+        let id = if y < first.1.y {
+            first.0
+        } else {
+            self.row_rects
+                .iter()
+                .find(|(_, r)| y < r.y + r.h)
+                .unwrap_or(last)
+                .0
+        };
+        self.doc().index_of(id)
+    }
+}
+
+/// The bullet, number or check in front of a list item, one line tall so
+/// it sits on the item's first line. A checkbox takes clicks over the whole
+/// marker, not just its 18px ring, and is a checkbox to a screen reader,
+/// named by its item.
+#[allow(clippy::too_many_arguments)]
+fn marker(ui: &mut Ui<'_>, l: &Look, id: u64, style: ListStyle, done: bool, n: u32, depth: usize, text: &str) {
+    let t = &l.t;
+    let cell = NodeSpec::row().width(l.px(22.0)).height(l.px(BODY_LH)).center();
+    match style {
+        ListStyle::Bullet => {
+            let size = l.px([6.0, 5.0, 4.0][depth % 3]).max(3.0);
+            ui.with(cell.role(Role::None), |ui| {
+                let dot = NodeSpec::row().size(size, size).radius(size / 2.0);
+                ui.leaf(if depth % 3 == 1 {
+                    dot.border(1.2, t.accent)
+                } else {
+                    dot.bg(t.accent)
+                });
+            });
+        }
+        ListStyle::Number => {
+            ui.text_in(
+                cell.main_align(Align::End).role(Role::None),
+                &format!("{n}."),
+                // The text's own face, size and line, so the number sits
+                // on the text's baseline.
+                l.page_type(Type::BODY).family(l.body).color(t.muted).nowrap(),
+            );
+        }
+        ListStyle::Todo => {
+            let hovered = ui.is_hovered(ui.child_key("check"));
+            ui.with_keyed(
+                "check",
+                cell.on_click(Msg::Toggle { id })
+                    .role(Role::Checkbox)
+                    .checked(done)
+                    .label(if text.trim().is_empty() { "Checklist item" } else { text }),
+                |ui| {
+                    // The ring fills (and empties) rather than switching.
+                    let d = l.px(18.0);
+                    let ring = NodeSpec::row().size(d, d).radius(d / 2.0).transition(160.0);
+                    let ring = match (done, hovered) {
+                        (true, false) => ring.bg(t.accent).border(1.5, t.accent),
+                        (true, true) => ring.bg(t.accent_hover).border(1.5, t.accent_hover),
+                        // Empty is the accent with no alpha, so filling it
+                        // eases through the accent, not through black.
+                        (false, false) => ring.bg(t.accent.with_alpha(0.0)).border(1.5, l.ring),
+                        (false, true) => ring.bg(t.accent_soft).border(1.5, t.accent),
+                    };
+                    ui.with(ring, |ui| {
+                        // The tick is drawn in the ring's own box, so it sits
+                        // where the ring is and not where a glyph's metrics
+                        // would put it.
+                        if done {
+                            ui.polyline(
+                                &[Vec2::new(5.2, 9.4), Vec2::new(8.0, 12.2), Vec2::new(12.9, 6.6)].map(|p| Vec2::new(p.x * d / 18.0, p.y * d / 18.0)),
+                                Stroke::new((1.7 * d / 18.0).max(1.2), t.on_accent),
+                                // The tick comes in with a small give.
+                                NodeSpec::row()
+                                    .enter(kui_native::Enter::default().scale(0.4).opacity(0.0))
+                                    .transition(220.0)
+                                    .bounce(0.3),
+                            );
+                        }
+                    });
+                },
+            );
+        }
+    }
+}
+
+/// The first letter of a paragraph's words, with any opening quote or
+/// bracket before it: its range in the source, marks left out.
+fn initial_letter(text: &str) -> Option<(usize, usize)> {
+    let v = inline::Visible::of(text);
+    let words = v.text(text);
+    let mut chars = words.char_indices().skip_while(|(_, c)| c.is_whitespace()).peekable();
+    let (start, _) = *chars.peek()?;
+    let (at, ch) = chars.find(|(_, c)| !matches!(c, '"' | '\'' | '\u{201c}' | '\u{2018}' | '\u{ab}' | '\u{201e}' | '(' | '['))?;
+    if !ch.is_alphanumeric() {
+        return None;
+    }
+    let end = v.source(at) + ch.len_utf8();
+    Some((v.source(start), end))
+}
+
+/// What colour words are drawn in. The colour the reader gave them, on
+/// a highlighter's wash or not — unless it would all but vanish into what
+/// is behind it (black words in the dark, white on paper). Words of no
+/// colour of their own on a wash: in whichever of black and white reads
+/// on it, when the text's colour would not.
+pub(super) fn words_ink(own: Option<Color>, plain: Color, wash: Option<Color>, page: Color) -> Color {
+    use crate::design::contrast;
+    let behind = wash.unwrap_or(page);
+    if let Some(c) = own.filter(|&c| contrast(c, behind) >= 1.6) {
+        return c;
+    }
+    match wash {
+        Some(w) if contrast(plain, w) < 3.0 => {
+            let (black, white) = (Color::hex(0x1a1a1aff), Color::hex(0xffffffff));
+            if contrast(black, w) >= contrast(white, w) { black } else { white }
+        }
+        _ => plain,
+    }
+}
+
+/// Focus: a part of the page steps back while another block is written,
+/// eased — down slowly enough not to be seen as a change, up at once.
+/// Nothing at all when focus is off.
+fn step_back(spec: NodeSpec, focus: bool, dim: bool) -> NodeSpec {
+    if !focus {
+        return spec;
+    }
+    spec.opacity(if dim { 0.32 } else { 1.0 }).transition(if dim { 600.0 } else { 160.0 })
+}
+
+/// Where dropped files will go: a line in the accent across the page, a
+/// ring at its start. It takes no room, so nothing moves under it.
+fn drop_line(ui: &mut Ui<'_>, l: &Look) {
+    let t = l.t;
+    ui.with_keyed("drop-line", NodeSpec::row().grow_width().height(0.0).role(Role::None), |ui| {
+        ui.leaf(
+            NodeSpec::row()
+                .grow_width()
+                .height(3.0)
+                .radius(1.5)
+                .bg(t.accent)
+                .float(FloatConfig::parent().offset(0.0, -1.5).clipped()),
+        );
+        ui.leaf(
+            NodeSpec::row()
+                .size(10.0, 10.0)
+                .radius(5.0)
+                .bg(l.card)
+                .border(2.5, t.accent)
+                .float(FloatConfig::parent().offset(-6.0, -5.0).clipped()),
+        );
+    });
+}

@@ -1,0 +1,5 @@
+# Windows: the C runtime linked in, so carnet.exe runs on a machine that
+# has never installed the Visual C++ Redistributable. (4099: the static
+# CRT's .lib files name PDBs that ship with nobody's SDK.)
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/ignore:4099"]

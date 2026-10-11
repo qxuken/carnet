@@ -1,0 +1,16 @@
+[package]
+name = "carnet-core"
+version = "0.1.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Carnet's notes as Markdown: the block model, inline styles and HTML, with no UI in them"
+
+# No dependencies, on purpose: this crate builds for the desktop and for
+# wasm32-unknown-unknown alike (the PWA, docs/SYNC.md §8).
+[dependencies]
+
+# Property tests: random notes and edits, shrunk to the smallest that fails
+# (tests/properties.rs). Failures found are kept in proptest-regressions/.
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }

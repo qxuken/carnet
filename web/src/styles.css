@@ -1,0 +1,89 @@
+/* Carnet's look, from the desktop's tokens (docs/tokens.json, Linen). */
+
+@font-face { font-family: 'Inter'; src: url('/fonts/Inter-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('/fonts/Inter-Bold.woff2') format('woff2'); font-weight: 600 700; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('/fonts/Inter-Italic.woff2') format('woff2'); font-style: italic; font-display: swap; }
+@font-face { font-family: 'Source Serif 4'; src: url('/fonts/SourceSerif4-Regular.woff2') format('woff2'); font-weight: 400; font-display: swap; }
+@font-face { font-family: 'Source Serif 4'; src: url('/fonts/SourceSerif4-Semibold.woff2') format('woff2'); font-weight: 600; font-display: swap; }
+@font-face { font-family: 'Source Serif 4'; src: url('/fonts/SourceSerif4-It.woff2') format('woff2'); font-style: italic; font-display: swap; }
+
+:root {
+  --page: #fcfaf7; --side: #f5f1ec; --card: #ffffff; --sunken: #f1ece5;
+  --ink: #2f2a27; --muted: #71635d; --faint: #8d817c;
+  --border: #eeebe7; --border-strong: #ded9d6;
+  --accent: #c27c68; --accent-ink: #955f50; --primary: #9f6655; --on-accent: #ffffff;
+  --accent-soft: #c27c681f; --selection: #c27c6838; --focus: #955f50;
+  --hover: #2f2a270b; --pressed: #2f2a2714;
+  --danger: #a8483f; --success: #5d7b58; --warning: #8a6a35;
+  --highlight: #fcefa1;
+  --serif: 'Source Serif 4', Georgia, serif;
+  --sans: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --radius: 8px; --radius-card: 12px;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #1f1b18; --side: #171412; --card: #2c2622; --sunken: #25201d;
+    --ink: #efe6dc; --muted: #a1948b; --faint: #776c65;
+    --border: #35302c; --border-strong: #4c4540;
+    --accent: #d9a08c; --accent-ink: #d9a08c; --primary: #d9a08c; --on-accent: #1f1b18;
+    --accent-soft: #d9a08c29; --selection: #d9a08c4d; --focus: #d9a08c;
+    --hover: #efe6dc0d; --pressed: #efe6dc17;
+    --danger: #e08a80; --success: #9fb89a; --warning: #d8b27a;
+    --highlight: #5a4d17;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; height: 100%; }
+body {
+  background: var(--page);
+  color: var(--ink);
+  font: 400 15px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+::selection { background: var(--selection); }
+button { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+
+/* The note as the viewer draws it (carnet_core::export::viewer). */
+.note { font: 400 17px/1.65 var(--sans); overflow-wrap: anywhere; }
+.note h1, .note h2, .note h3 { font-family: var(--serif); font-weight: 600; line-height: 1.25; }
+.note h1 { font-size: 32px; margin: 0 0 18px; }
+.note h2 { font-size: 24px; margin: 28px 0 10px; }
+.note h3, .note h4, .note h5, .note h6 { font-size: 19px; margin: 22px 0 8px; }
+.note p { margin: 0 0 12px; }
+.note ul, .note ol { margin: 0 0 12px; padding-left: 24px; }
+.note li { margin: 3px 0; }
+.note li.task { list-style: none; margin-left: -24px; display: flex; gap: 10px; align-items: flex-start; }
+.note li.task.done { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--faint); }
+.note li.task input {
+  appearance: none; flex: none; width: 20px; height: 20px; margin: 3px 0 0;
+  border: 1.6px solid var(--border-strong); border-radius: 50%; background: var(--card); cursor: pointer;
+}
+.note li.task input:checked { background: var(--accent); border-color: var(--accent); }
+.note li.task input:checked::after {
+  content: ''; display: block; width: 6px; height: 10px; margin: 2px 0 0 6px;
+  border: solid var(--on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.note blockquote { margin: 0 0 12px; padding-left: 14px; border-left: 3px solid var(--border-strong); color: var(--muted); }
+.note code { font: 14px/1.5 ui-monospace, Menlo, monospace; background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
+.note pre { background: var(--sunken); padding: 12px 14px; border-radius: var(--radius); overflow-x: auto; }
+.note pre code { background: none; padding: 0; }
+.note table { border-collapse: collapse; margin: 0 0 14px; width: 100%; display: block; overflow-x: auto; border: 0 !important; }
+.note th, .note td { border: 1px solid var(--border-strong); padding: 7px 10px; text-align: left; vertical-align: top; }
+.note th { background: var(--sunken); font-weight: 600; color: var(--muted); font-size: 14px; }
+.note hr { border: 0; border-top: 1px solid var(--border-strong); margin: 20px 0; }
+.note a { color: var(--accent-ink); }
+.note img { max-width: 100%; height: auto; border-radius: var(--radius); background: var(--sunken); }
+.note img[align='left'] { float: left; margin: 4px 16px 8px 0; max-width: 50%; }
+.note img[align='right'] { float: right; margin: 4px 0 8px 16px; max-width: 50%; }
+.note img.waiting { min-height: 120px; min-width: 160px; }
+/* A picture this browser can't draw (HEIC, outside Safari): a small card. */
+.picture-card { display: inline-flex; align-items: center; gap: 10px; max-width: 100%; margin: 4px 0; padding: 10px 12px; border-radius: var(--radius); background: var(--sunken); color: var(--muted); font: 400 15px/1.4 var(--sans); }
+.picture-card-icon { display: inline-flex; flex: none; width: 18px; height: 18px; }
+.picture-card-icon svg { width: 100%; height: 100%; }
+.note mark { background: var(--mark, var(--highlight)); color: inherit; border-radius: 3px; padding: 0 2px; }
+.note .ink { color: var(--ink); }

@@ -1,0 +1,6 @@
+node_modules/
+dist/
+src/wasm/
+public/fonts/
+public/icon-256.png
+public/icon.svg

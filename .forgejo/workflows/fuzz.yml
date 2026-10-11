@@ -1,0 +1,96 @@
+# Every night, and by hand: each libFuzzer target in fuzz/ for a few
+# minutes, on what the nights before found.
+#
+#   markdown   any text as a note file: read, written, read again, HTML
+#   inline     any line, any edit the page makes to it at any caret
+#   compare    any two notes compared as the history compares versions
+#   note_doc   a note's CRDT under any saves, merges, restores, reloads,
+#              and any bytes as a saved doc or another copy's changes
+#   replica    the replica opened on any index and doc file, then used
+#   wire       any bytes off a socket: frames, records, version vectors
+#   hub        the server's hub fed any frames from any sockets
+#
+# Not on every push: libFuzzer needs nightly Rust, and it finds things by
+# running long. The property tests (ci.yml) are the quick net; this is the
+# slow, wide one. Its corpus — the inputs that reached new code — is
+# cached from night to night, so each run starts where the last stopped.
+# A crash fails the job and leaves its input as an artifact:
+#
+#   cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-…
+#
+# reproduces it locally, and the input goes into fuzz/seeds/<target>/ with
+# the fix, so it is tried first from then on.
+name: fuzz
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: '300'
+
+jobs:
+  fuzz:
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    env:
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      CARGO_TERM_COLOR: always
+      SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build environment
+        run: |
+          set -eux
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+              --default-toolchain nightly
+          echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+
+      - name: Restore cargo-fuzz and the registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/bin/cargo-fuzz
+            /usr/local/cargo/registry/index
+            /usr/local/cargo/registry/cache
+          key: fuzz-tools-${{ hashFiles('fuzz/Cargo.toml') }}
+
+      - name: cargo-fuzz
+        run: command -v cargo-fuzz || cargo install cargo-fuzz --locked
+
+      # Keyed by the run, restored from the newest: the corpus only grows.
+      - name: Restore the corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Fuzz
+        working-directory: fuzz
+        run: |
+          set -eu
+          cargo fuzz build
+          status=0
+          for t in $(cargo fuzz list); do
+            mkdir -p "corpus/$t"
+            seeds=""
+            [ -d "seeds/$t" ] && seeds="seeds/$t"
+            echo "::group::$t"
+            cargo fuzz run "$t" "corpus/$t" $seeds -- \
+                -max_total_time="$SECONDS_PER_TARGET" -max_len=4096 || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts

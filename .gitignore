@@ -1,0 +1,8 @@
+/target
+/dist
+
+# Browser-automation logs from checking the web app.
+.playwright-mcp/
+
+# Local tool state.
+.claude/

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 59c51c26dc0a4ff075f4388a2bf110cc085baebc705404f446e398810db2dc54 # shrinks to ops = [Elsewhere(Index(6148914691236517206)), RenameElsewhere(Index(6148914691236517206))]
+cc d3a667f5053db75aba401c68dfab602d7663c3558aa667332a6ecbdfa477fc01 # shrinks to ops = [RenameElsewhere(Index(0)), RenameElsewhere(Index(0))]

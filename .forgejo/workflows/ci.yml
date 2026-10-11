@@ -1,0 +1,178 @@
+# Every push and pull request: the tests, and carnet-core built for the
+# browser.
+#
+#   cargo test     the app's headless UI tests and carnet-core's round
+#                  trips (the workspace's default members are both)
+#   clippy         the workspace, warnings as errors
+#   server         carnet-server with Postgres and S3 built in, its
+#                  migration tests run against a real Postgres and a real
+#                  bucket (RustFS, S3's API) as service containers
+#   wasm32         carnet-core and carnet-sync for wasm32-unknown-unknown:
+#                  what keeps kui, files and threads out of the crates the
+#                  PWA is built on (docs/SYNC.md §8)
+#   web            the viewer (web/): crates/carnet-web as wasm, its types
+#                  checked, and the page built as carnet-server serves it
+#
+# The container is release.yml's node:24-bookworm (actions/checkout runs on
+# its node), with only what a test build needs rather than the whole of
+# packaging/build-env.sh: Rust, the wasm target, and ALSA's headers (kui's
+# sound links libasound). The cargo registry is cached by Cargo.lock; the
+# target dir is not, as in release.yml. Debug info is off: with it, the
+# test build of kui's tree (wgpu, naga, winit, all at opt-level 2) fills
+# more disk than the tests need, and a failure's backtrace still names
+# the test.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    env:
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build environment
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends pkg-config libasound2-dev
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+              --default-toolchain stable -t wasm32-unknown-unknown
+          echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+
+      - name: Restore the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry/index
+            /usr/local/cargo/registry/cache
+            /usr/local/cargo/git/db
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Clippy
+        run: |
+          rustup component add clippy
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: carnet-core and carnet-sync for the browser
+        run: cargo build --locked -p carnet-core -p carnet-sync --target wasm32-unknown-unknown
+
+  # The storage the hosted service runs on: Postgres and a bucket, both
+  # real, so `migrate` and the S3 store are tested as they run. Without
+  # these the tests skip themselves (tests/common's `postgres`/`bucket`).
+  server:
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: carnet
+      rustfs:
+        image: rustfs/rustfs
+        env:
+          RUSTFS_ACCESS_KEY: carnet
+          RUSTFS_SECRET_KEY: carnetsecret
+    env:
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARNET_TEST_POSTGRES: postgres://postgres:carnet@postgres/postgres?sslmode=disable
+      CARNET_TEST_S3: http://rustfs:9000/carnet-test
+      CARNET_S3_ACCESS_KEY: carnet
+      CARNET_S3_SECRET_KEY: carnetsecret
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build environment
+        run: |
+          set -eux
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+              --default-toolchain stable -c clippy
+          echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+
+      - name: Restore the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry/index
+            /usr/local/cargo/registry/cache
+            /usr/local/cargo/git/db
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      # The services take a few seconds to take connections.
+      - name: Wait for Postgres and the bucket
+        run: |
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/postgres/5432) 2>/dev/null && curl -s -o /dev/null http://rustfs:9000/; then exit 0; fi
+            sleep 1
+          done
+          echo "the services did not come up"; exit 1
+        shell: bash
+
+      - name: The server, with Postgres and S3
+        run: cargo test --locked -p carnet-server --all-features
+
+      - name: Clippy, with them
+        run: cargo clippy --locked -p carnet-server --all-features --all-targets -- -D warnings
+
+  web:
+    runs-on: docker
+    container:
+      image: node:24-bookworm
+    env:
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build environment
+        run: |
+          set -eux
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
+              --default-toolchain stable -t wasm32-unknown-unknown
+          echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+
+      - name: Restore the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/cargo/registry/index
+            /usr/local/cargo/registry/cache
+            /usr/local/cargo/git/db
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-registry-
+
+      # The CLI's version is the one carnet-web pins (wasm-bindgen =0.2.129).
+      - name: wasm-bindgen
+        run: cargo install --locked wasm-bindgen-cli --version 0.2.129
+
+      - name: The viewer
+        working-directory: web
+        run: |
+          set -eux
+          npm ci
+          npm run wasm
+          npm run check
+          npx vite build

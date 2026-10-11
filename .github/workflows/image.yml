@@ -1,0 +1,135 @@
+# GitHub Actions: carnet-server's released image, from a `v*` tag, for
+# amd64 and arm64, each built natively on its own runner from
+# packaging/server/Dockerfile and then joined into one image:
+#
+#   ghcr.io/<owner>/carnet-server:<v>, :<major>.<minor>, :latest
+#   docker.io/<DOCKERHUB_REPOSITORY>:the same     (when Docker Hub's secrets exist)
+#
+# A prerelease (`v0.2.0-rc.1`) gets its own tag only, never `latest`.
+# main's image, between releases, is the forge's (.forgejo/workflows/
+# edge.yml).
+#
+# Secrets and variables:
+#   * DOCKERHUB_USERNAME, and DOCKERHUB_TOKEN (an access token that can
+#     write the repository; better) or DOCKERHUB_PASSWORD; without them
+#     only ghcr.io gets the image
+#   * vars.DOCKERHUB_REPOSITORY: where on Docker Hub, `qxuken/carnet-server`
+#     unless set
+name: image
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/carnet-server
+  DOCKERHUB_IMAGE: docker.io/${{ vars.DOCKERHUB_REPOSITORY || 'qxuken/carnet-server' }}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Where it goes
+        id: where
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_PASSWORD }}
+        run: |
+          names="$GHCR_IMAGE"
+          if [ -n "$DOCKERHUB_TOKEN" ]; then names="$names,$DOCKERHUB_IMAGE"; fi
+          echo "names=$names" >> "$GITHUB_OUTPUT"
+          p="${{ matrix.platform }}"
+          echo "pair=${p//\//-}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/login-action@v3
+        if: ${{ contains(steps.where.outputs.names, 'docker.io') }}
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_PASSWORD }}
+      - name: Build, and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packaging/server/Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+          outputs: type=image,"name=${{ steps.where.outputs.names }}",push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+      - name: Keep the digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          d="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${d#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ steps.where.outputs.pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Docker Hub, if it's set up
+        id: hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN || secrets.DOCKERHUB_PASSWORD }}
+        run: |
+          if [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+            echo "images=$GHCR_IMAGE,$DOCKERHUB_IMAGE" >> "$GITHUB_OUTPUT"
+          else
+            echo "images=$GHCR_IMAGE" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ steps.hub.outputs.images }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=auto
+      - name: One image, both platforms, every tag
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -eu
+          for image in $(echo "${{ steps.hub.outputs.images }}" | tr , ' '); do
+            tags=$(jq -cr --arg i "$image" '.tags | map(select(startswith($i + ":"))) | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+            docker buildx imagetools create $tags $(printf "$image@sha256:%s " *)
+            docker buildx imagetools inspect "$image:${DOCKER_METADATA_OUTPUT_VERSION}"
+          done

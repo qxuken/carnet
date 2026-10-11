@@ -1,0 +1,62 @@
+[package]
+name = "carnet"
+version = "0.1.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# The app, and beside it what other builds share with it: `carnet-core`,
+# the Markdown model with no kui in it; `carnet-sync`, the notes as CRDTs
+# and a device's side of sync; and `carnet-server` (docs/SYNC.md §10).
+# Plain `cargo build` and `cargo test` cover them all.
+[workspace]
+members = [".", "crates/carnet-core", "crates/carnet-sync", "crates/carnet-server", "crates/carnet-web"]
+default-members = [".", "crates/carnet-core", "crates/carnet-sync", "crates/carnet-server", "crates/carnet-web"]
+# The fuzz targets, with their own workspace.
+exclude = ["fuzz"]
+
+[dependencies]
+carnet-core = { path = "crates/carnet-core" }
+carnet-sync = { path = "crates/carnet-sync", features = ["net"] }
+# Sync's keys in the system's keychain: macOS's, Windows' Credential
+# Manager, the Secret Service on Linux (over zbus, as kui already is).
+keyring = "4"
+# kui as released on crates.io, pinned: a release of Carnet names the kui
+# it was built with. To try kui's main, point this at a checkout with
+# `path = "../kui/crates/kui-native"`.
+kui-native = "=0.1.0-alpha.52"
+# Pictures in notes: the clipboard's (kui carries text only) and the files'.
+# Both are already in kui-native's tree; these name them for Carnet's use.
+arboard = "3.6"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# The pairing code as a QR code, for a phone's camera (Settings → Sync).
+qrcode = { version = "0.14", default-features = false }
+
+# The picture decoders and the font shaper are slow unoptimised: a debug
+# build optimises its dependencies, so a dropped photo shows as quickly
+# as in a release build.
+[profile.dev.package."*"]
+opt-level = 2
+
+# The store's property test: random edits, saves, other apps' edits,
+# renames and restarts (src/store.rs).
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
+# src/sync_tests.rs: two notes folders syncing through the hub, in memory;
+# app_tests: two whole apps through the server binary's own code.
+carnet-server = { path = "crates/carnet-server" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
+
+# The Windows executable's icon and version (packaging/windows/carnet.rc).
+[build-dependencies]
+embed-resource = "3.0"
+
+# The PWA's wasm (crates/carnet-web, web/): small over fast
+# (docs/SYNC.md §8). `cargo build -p carnet-web --profile web
+# --target wasm32-unknown-unknown`.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

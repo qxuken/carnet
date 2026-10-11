@@ -1,0 +1,13 @@
+target
+**/target
+dist
+fuzz/corpus
+fuzz/artifacts
+assets
+!assets/icon
+docs/*.png
+web/node_modules
+web/dist
+web/src/wasm
+web/public/fonts
+web/public/icon*

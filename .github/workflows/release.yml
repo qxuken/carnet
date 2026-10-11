@@ -1,0 +1,171 @@
+# GitHub Actions: the public release. Pushing a `v*` tag runs
+#
+#   check ──┬── linux-windows (Linux x64 + arm64 tarballs, the Windows setup.exe and .zip)
+#           ├── mac (Carnet-<v>-macos.dmg, Apple silicon)                                 ──┬── publish
+#           └───────────────────────────────────────────────────────────────────────────────┘
+#
+# and `publish` puts every file, with SHA256SUMS, on a draft GitHub
+# Release for the tag, to read over and publish by hand. Running it again
+# over the same tag replaces the files rather than adding copies. The
+# server's image is image.yml's, from the same tag.
+#
+# Everything is scripts/package.nu, as on a Mac by hand. Linux and Windows
+# are built in packaging/build-env.sh's environment (node:24-bookworm, as
+# the local build image), Windows through cargo-xwin and NSIS; the .dmg on
+# GitHub's macOS runner, which carries Xcode.
+#
+# Tags reach GitHub through Forgejo's push mirror, but do not count on the
+# mirror to start this: push the tag here by name too (CONTRIBUTING.md's
+# Releasing).
+#
+# Signing: the .app is signed ad hoc, which Apple silicon needs to run it,
+# unless the secrets below exist. With them it is signed with a Developer
+# ID and the .dmg notarized:
+#   * MACOS_CERTIFICATE_P12 (base64) and MACOS_CERTIFICATE_PASSWORD: the
+#     Developer ID Application certificate and its key, exported as .p12
+#   * MACOS_SIGN_IDENTITY: "Developer ID Application: … (TEAMID)"
+#   * APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD: for notarytool
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  NU_VERSION: "0.116.0"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag names Cargo.toml's version
+        run: |
+          set -eu
+          v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$v" ]; then
+            echo "the tag is $GITHUB_REF_NAME but Cargo.toml's version is $v"
+            exit 1
+          fi
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: cargo test --locked
+
+  linux-windows:
+    needs: check
+    runs-on: ubuntu-24.04
+    container:
+      image: node:24-bookworm
+    env:
+      CARGO_HOME: /usr/local/cargo
+      RUSTUP_HOME: /usr/local/rustup
+      # scripts/package.nu builds Linux and runs NSIS here rather than in
+      # Docker.
+      CARNET_BUILD_ENV: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build environment
+        run: |
+          sh packaging/build-env.sh
+          echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+      # cargo-xwin's copy of Microsoft's CRT and SDK: minutes to fetch.
+      - uses: actions/cache@v4
+        with:
+          path: /github/home/.cache/cargo-xwin
+          key: cargo-xwin-0.23.1
+      - name: Windows
+        run: nu scripts/package.nu windows
+      - name: Linux
+        run: nu scripts/package.nu linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-windows
+          path: dist/Carnet-*
+          if-no-files-found: error
+
+  mac:
+    needs: check
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nushell
+        run: |
+          set -eu
+          d="nu-${NU_VERSION}-aarch64-apple-darwin"
+          curl -fL --retry 3 "https://github.com/nushell/nushell/releases/download/${NU_VERSION}/${d}.tar.gz" | tar -xz -C /tmp
+          echo "/tmp/${d}" >> "$GITHUB_PATH"
+      - run: rustup target add aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: A signing identity, if there is one
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -eu
+          if [ -z "$P12" ] || [ -z "$IDENTITY" ]; then
+            echo "no certificate: the .app is signed ad hoc"
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/sign.keychain-db"
+          kcpass=$(uuidgen)
+          security create-keychain -p "$kcpass" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpass" "$kc"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpass" "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "CARNET_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_PASSWORD" ]; then
+            xcrun notarytool store-credentials carnet --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_APP_PASSWORD" --keychain "$kc"
+            echo "CARNET_NOTARY_PROFILE=carnet" >> "$GITHUB_ENV"
+          fi
+      - name: The .dmg
+        run: nu scripts/package.nu mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: dist/Carnet-*.dmg
+          if-no-files-found: error
+
+  publish:
+    needs: [linux-windows, mac]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: A draft release, with every file
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          cd dist
+          sha256sum Carnet-* > SHA256SUMS
+          cat SHA256SUMS
+          v=${GITHUB_REF_NAME#v}
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            pre=""
+            case "$v" in *-*) pre="--prerelease" ;; esac
+            gh release create "$GITHUB_REF_NAME" --draft $pre --verify-tag --title "Carnet $v" \
+                --notes "Carnet $v. README.md's Installing says what to do with each file."
+          fi
+          gh release upload "$GITHUB_REF_NAME" Carnet-* SHA256SUMS --clobber

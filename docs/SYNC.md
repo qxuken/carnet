@@ -1,0 +1,659 @@
+# Carnet Sync: architecture
+
+> Your notes on every device, merged and never lost. The files stay plain Markdown on your disk. The server is one binary anyone can run, and it only ever sees ciphertext.
+
+This document describes how Carnet's optional sync works: what is synced, how devices merge, what the server stores and sees, how keys are made and moved, and how the pieces are tested. It's written for contributors, for people running their own server, and for anyone checking the security claims. Source comments cite it by section ("docs/SYNC.md §6", or just "§6" inside the sync crates), so the section numbers are stable.
+
+**Terms used throughout:**
+
+| Term | Meaning |
+|---|---|
+| **notes folder** | The folder of `.md` files a desktop app shows. The files are the truth; sync is extra. |
+| **device** | One install that syncs: a desktop app, or a browser running the web app. Each has its own signing key. |
+| **account** | One person's notes on a server, and the devices allowed to read them. An account holds one **vault**: the notes, their folders and their pictures. |
+| **doc** | A CRDT document (§3). Each note is one doc; the vault's layout (folders, file names, pins, trash) is one more, the **vault doc**. |
+| **room** | A doc as the server knows it: a random id, and the encrypted records written to it. |
+| **record** | One encrypted piece of a doc: a **delta** (some of one device's operations) or a **snapshot** (the whole doc as of a version). |
+| **vault key** | The symmetric key every record and picture is encrypted under, by way of keys derived from it. It changes when a device is removed; each version of it is an **epoch**. |
+| **hub** | The part of the server that handles sockets' frames: logins, rooms, relaying. It runs on one thread and does no I/O itself. |
+| **replica** | A device's local sync state: every note's doc, and an index of where each note's file is. |
+
+## 1. What it has to be
+
+The typical user is one person with a laptop, a desktop and a phone, often offline on at least one of them. Two people typing into one paragraph at the same moment is not the main case, and isn't optimised for. What is:
+
+- **Merge, never fork.** When a note is changed on two devices offline, both edits survive. No `… (conflict).md` copies of the kind a Dropbox folder produces.
+- **The file is still the truth.** Every note stays the same GFM file, readable by any tool. An edit made in another editor is picked up and synced like an edit made in Carnet. If the sync state is deleted, it's rebuilt from the folder (without history).
+- **No network on the hot path.** Typing never waits on sync. Sync runs behind the save.
+- **Self-hostable in one command.** One static binary or one container, with SQLite and a data folder. Postgres and S3-compatible storage are optional, for larger installs.
+- **End-to-end encrypted.** The server stores and relays opaque blobs. A breach of a server leaks sizes and timings, never notes (§7 lists exactly what it sees).
+- **A phone can read and write.** The web app (§8) reads every note offline, ticks checklists and edits notes, installable as a PWA (a web app that can be added to the home screen and work offline).
+- **Opt-in and silent.** Sync is off until it's turned on in Settings → Sync. The app never shows a dialog, banner or nudge about it.
+
+## 2. The shape
+
+```
+ Desktop app                                      Browser (web app, a PWA)
+ ┌──────────────────────────────┐                 ┌───────────────────────────────┐
+ │ editor ── save ──► store     │                 │ Svelte UI, CodeMirror editor  │
+ │           .md files ◄────────┼── other apps    │  ├ service worker (offline)   │
+ │ replica (app data folder)    │                 │  ├ IndexedDB (sealed state)   │
+ │  ├ a Loro doc per note       │                 │  └ carnet-web (wasm):         │
+ │  ├ the vault doc             │                 │     carnet-core + carnet-sync │
+ │  └ pictures index            │                 └───────────────┬───────────────┘
+ │ carnet-sync session (sealing)│                                 │
+ │ socket thread ───────────────┼────────┐   ┌────────────────────┘
+ └──────────────────────────────┘        ▼   ▼   one WebSocket each, plus HTTPS for pictures
+                                ┌──────────────────────────────┐
+                                │ carnet-server (axum)         │
+                                │  ├ hub: logins, rooms, feed  │   SQLite: a file per account
+                                │  ├ picture links and storage │   (or Postgres)
+                                │  └ the web app's files at /  │   pictures: files (or S3)
+                                └──────────────────────────────┘
+```
+
+The server never decrypts and never merges. It authenticates devices, orders, stores and forwards. Every merge happens on a device, in the same Rust code on the desktop and in the browser.
+
+## 3. The CRDT
+
+A CRDT (conflict-free replicated data type) is a data structure that any number of copies can edit independently and that always converges to the same state once every copy has seen every change, in any order. Carnet uses [Loro](https://loro.dev).
+
+### Why Loro
+
+| | Loro | Automerge 3 | Yrs (Yjs) |
+|---|---|---|---|
+| Core language | Rust | Rust | Rust port of a JS original |
+| Web | wasm | wasm | Yjs (JS); Yrs wasm exists |
+| Text algorithm | Fugue (minimal interleaving) | RGA-style | YATA |
+| "Make the text equal this string" | `LoroText::update` (a character diff) | `update_text` | none built in |
+| Fork at a past version | yes (`fork_at`) | yes | limited |
+| Ecosystem | youngest | mature | largest |
+
+Loro fits best because:
+
+1. **The editor doesn't change.** Carnet's editor works on block snapshots, not an operation log. `LoroText::update(markdown)` diffs the new text against the doc's and records the difference as operations, so sync hooks in after the save and the editor never learns it exists.
+2. **`fork_at` gives a real three-way merge** for a note edited here and in another app at the same time (§5), and lets history previews run on a fork without touching the live note (§9).
+3. **It's Rust,** so the same crate compiles into the desktop binary and into the web app's wasm.
+
+Automerge 3 would work almost as well. Everything sits behind `carnet-sync`'s own types, so a switch would stay inside that crate.
+
+**Measured before committing to it** (loro 1.16, Apple-silicon Mac):
+
+- **Every byte survives.** 400 random saves on each of six fixtures (long Markdown documents, an 80 KB note, CRLF line endings with Cyrillic, CJK, emoji and combining accents) gave 0 mismatches, both in the writing copy and in a second copy fed only exported updates.
+- **Saves are cheap.** A one-character save on the 80 KB note takes 0.09 ms; a 500-line paste, 0.23 ms.
+- **History is small.** A simulated year of writing (3,000 saves) weighs 62 KB of history, less than the 81 KB file. Kept as 3,000 encrypted delta records it's about 500 KB, which is why the server compacts (§6).
+- **Merges that come out wrong are rare and lose nothing,** within a text CRDT's known limits (below). Two devices typing at the same spot keep both phrases whole rather than interleaving letters.
+
+### Granularity: the Markdown text, not blocks
+
+Each note is one `LoroText` holding the file's Markdown, exactly as Carnet writes it.
+
+- **Why not a tree of blocks** (a table as rows of cells)? It would merge tables more cleverly, but it would be a second document model beside `carnet-core`'s, its serialiser would have to round-trip byte for byte, and edits from other apps would still arrive as text. Text is what's on disk, so text is what's merged.
+- **A character diff, not a line diff.** Loro also offers `update_by_line`, which replaces each changed line whole. When two devices edit one line, both versions then survive: a table row appears twice, or a checklist item twice with its tick on one copy. In testing the character diff merged 7 of 10 concurrent-edit cases as a person would want, against 5 for the line diff, and its history was less than half the size (62 KB against 142 KB for the year above).
+- **What text merging costs:** concurrent edits to *different* lines, cells, items or words merge cleanly. Two devices changing one table's column count at once can leave a ragged row (GFM still renders it). Two devices styling overlapping words can leave a stray `**`. The same typo fixed on two offline devices comes out `thee`. An item deleted on one device while edited on another leaves the new words behind. All of these are rare for one person on several devices, visible, and fixed in a keystroke. Nothing is lost.
+
+## 4. What is synced
+
+| Thing | Where it lives in sync | How it merges |
+|---|---|---|
+| A note's text (title included, as its `# ` line) | a Loro doc per note (`LoroText`) | character by character |
+| A note's folder, file name, pinned, trashed | the vault doc: one map entry per note and field (`<key>/folder`, `/name`, `/pinned`, `/trashed`) | last writer wins, per field, so a pin on one device and a move on another both hold |
+| Folders, empty ones too | the vault doc: a map of path → present or not | last writer wins, per folder |
+| Pictures in `attachments/` | sealed blobs by content id (§7); the vault maps path → blob id | a blob never changes; a path is last writer wins |
+| A trashed note | its doc stays; the vault marks it trashed, and its folder and name say where it came from | restoring clears the mark |
+| A note deleted forever | the vault marks it gone (`<key>/gone`), never unmarked; the server deletes its room | gone wins over any other field |
+| A picture no note shows any more | the vault's path keeps `-<id>` instead of the id; the server may drop the blob after 30 days (§6) | a path put back revives it |
+| Settings | not synced | — |
+
+**Note identity.** A note gets a random 128-bit key the first time sync sees it. The mapping key ↔ path lives in the replica, not in the file: no front matter is added. A rename in Carnet updates the mapping directly. A rename made outside Carnet is spotted on rescan: a known path that disappeared is matched to a new file sharing at least half its lines.
+
+**File names.** The vault stores the name a note *wants* (the slug of its title). When several notes want one name in one folder, every device numbers them the same way, by key: `Plan.md`, `Plan 2.md`, … Numbering skips names other notes want outright, so devices don't renumber each other's notes back and forth.
+
+**Where the sync state lives.** In the app's data folder, never inside the notes folder:
+
+| OS | Replica folder |
+|---|---|
+| macOS | `~/Library/Application Support/Carnet/replica/<id>/` |
+| Windows | `%APPDATA%\Carnet\replica\<id>\` |
+| Linux | `$XDG_DATA_HOME/carnet/replica/<id>/` (default `~/.local/share/…`) |
+
+`<id>` is a hash of the notes folder's path, so each notes folder has its own. A `.carnet/` inside the notes folder would itself be synced by Dropbox or iCloud and conflict. Running Carnet Sync on a folder that's also in Dropbox still works: a file Dropbox rewrites is just an edit from another app (§5).
+
+```
+index.log        a line per change: note key, text hash, version, path
+notes/<key>.loro each note's doc, history and all; loaded only when needed
+vault.loro       the vault doc
+vault.applied    the vault's version last applied to the files here
+pictures.txt     path, size, modified time and blob id of each picture
+forgotten.txt    rooms and pictures the server still has to be told are gone
+version          the layout of this folder (§14)
+```
+
+- **The index is an append-only log.** A save appends one short line. When the log opens with more stale lines than live ones, it's rewritten whole.
+- **Docs are written by a thread of their own.** A save hands over the bytes and goes on; a doc still waiting to be written is read from memory.
+- **Writes are atomic, but not flushed to disk** the way notes are. A replica that's lost or behind is rebuilt from the files, without their history. A doc that doesn't decode is renamed `.loro.bad`, not deleted.
+- **Memory:** only the index and up to 32 recently used docs stay loaded. On a folder of 5,000 notes the first open, which makes every doc, costs a few hundred milliseconds more than plain files, once; later opens cost about the same as plain files.
+
+The replica exists even with sync off: it's what gives every note its history (§9) and lets a save merge with an outside edit (§5).
+
+## 5. The engine on the desktop
+
+**Threads.** The session (the device's side of the protocol, `carnet_sync::session`), the replica and the notes stay on the app's thread. The socket has a thread of its own (`carnet_sync::net`, tokio-tungstenite on a current-thread runtime) that only moves bytes, and wakes the app when some arrive. The session is a state machine with no I/O: bytes in, bytes out, events. The same session runs in the browser and in the test simulation.
+
+**A save here.** The store writes the file as before, then records the new text in the note's doc (`LoroText::update`, one commit). The session sends what's new since the last send. Saves are already debounced, so this is about one commit every couple of seconds of typing, never one per key.
+
+**An edit from another app.** Rescans already notice a changed file. Its new text is recorded in the doc the same way, marked as from another app, and syncs like a local edit.
+
+**Both at once: a merge instead of a conflict copy.** If a note has unsaved edits here and its file changed on disk meanwhile:
+
+1. `base` = the doc's version when the file was last written or read.
+2. `theirs` = `fork_at(base)`, then `update(disk text)`.
+3. `ours` = `update(editor text)` on the main doc.
+4. Importing `theirs` gives one merged text, which is written to the file, and the page reloads from it.
+
+This needs no server. Only when there's no version to merge from (no replica, or a file it never saw) does Carnet keep both, as `… (conflict).md`.
+
+**An update from another device.** It's decrypted and imported, and the store writes the merged text atomically. The outcome is one of: *same* (the file has it already), *updated* (no edits here), *merged* (edits here, both kept, and a notice says so), or *created* (a note new to this device). An open note is redrawn with the caret kept where it can be. The note list doesn't re-sort under the pointer: order is recalculated on navigation.
+
+**The vault doc.** Each tick (at once when the vault changed, otherwise every second) the store compares three layouts: the files here, the vault, and the vault as last applied here (`vault.applied`, so a restart knows what changed meanwhile). Field by field, what changed here is written to the vault, and the rest is taken from it and done to the files: moved, renamed, pinned, trashed, restored, folders made, empty ones removed. A note with unsaved edits waits. Nothing of this device's is written before the account's vault has arrived, or a new device's layout would overwrite the others'.
+
+**Peers.** Each run of the app is a fresh Loro peer, so two runs never write as one. The device that wrote a change is recorded in its commit message instead (§9).
+
+**Offline.** There is no outbox. On joining a room the server says what it holds of it, by peer (a version vector), and the device sends whatever its own doc has past that. A dropped socket loses nothing: the next join works it out again. The only sync state kept beyond the notes is the feed cursor (§6). The socket reconnects after 1 s, 2 s, 4 s … up to a minute, and pings every 30 s so a proxy keeps a quiet socket open.
+
+**What the desktop keeps:**
+
+- `sync.txt`, beside `settings.txt`: the server, the account id, this device's id and name, and the feed cursor. Nothing secret.
+- The signing key and the vault key ring: one item in the OS keychain (§7), read on a background thread so the window never waits on a keychain prompt. The item is named for the settings folder, so a second Carnet with its own settings (`CARNET_CONFIG`) is a second device.
+
+On macOS the keychain ties an item to the program that made it. A locally rebuilt Carnet, or an update not signed with the same Developer ID, is a different program to the keychain, which asks for the login password before handing over the sync keys. If access is denied, sync stays off and Settings says why; the next start asks again.
+
+**Joining an account that already has notes.** The new device's untouched welcome note, if it's alone in the folder, goes to its trash before anything is sent, so the account doesn't end up with two welcome notes.
+
+## 6. The server
+
+### The wire: Loro Protocol rooms, plus a feed of Carnet's own
+
+**Each doc is a room in the Loro Protocol** (MIT), encoded and decoded by the `loro-protocol` crate. It multiplexes rooms on one WebSocket and fragments large updates. Every room, the vault's and each note's, is a `%ELO` room: end-to-end encrypted Loro.
+
+**What the server sees of a `%ELO` record.** Each record has a plaintext header, authenticated as the AES-GCM associated data, and ciphertext after it:
+
+| Record | Plaintext header | Holds |
+|---|---|---|
+| delta | `peer, start, end, key id, IV` | one peer's operations `start..end` on this doc |
+| snapshot | `version vector, key id, IV` | the whole doc as of that version |
+
+The key id is `e<epoch>`; a peer is written as its decimal digits, as other Loro Protocol clients write it. That's enough for the server to sync each room without decrypting anything:
+
+- **Backfill by version vector.** A device joins a room with its version vector. The server answers with the room's base snapshot, if the device isn't past it, plus every delta the device's vector doesn't cover. It keeps a peer's spans unless a longer span from the same peer covers them.
+- **Live:** a delta from one device is stored, acknowledged, and relayed to every other device in the room. A batch is kept whole or refused; a record not kept is never acknowledged.
+- **Big changes go in pieces.** A span past 192 KiB of plaintext is cut in halves until each piece fits a record, and records travel in updates under 240 KiB. The server refuses a record over 256 KiB and a frame over 1 MiB.
+
+The Loro Protocol's own Rust server and client crates aren't used. At the time Carnet's sync was built they spoke an older protocol version; in `%ELO` rooms a device that joined later received nothing (the client sent every update as a snapshot record with an empty version vector, and the server indexed only deltas); the server kept `%ELO` rooms in memory only; and the client's AES-GCM IV defaulted to all zeros unless the caller set one. So the room logic is Carnet's: records in a database, snapshots as bases, and the feed below. Carnet's `%ELO` writer always uses random IVs.
+
+**The vault feed.** The protocol syncs one room at a time, and has no way to tell a device that a room it has never heard of exists: a note made on another device. So the server numbers every record it accepts with a **per-account sequence number**, and Carnet frames (magic `%CRN`, on the same socket; either side tells the two apart by their first four bytes) carry the feed:
+
+```
+← Challenge { nonce, greeting }                 see §7 (login) and §14 (greeting)
+→ Hello     { account, device, signature, since: <seq> }
+← Welcome   { seq }
+← Changed   { [(room, seq), …] }   rooms with records after `since`
+  … the device joins those rooms with the Loro Protocol and backfills …
+← Changed   { [(room, seq)] }      live: a room it hasn't joined got a record
+```
+
+On login a device joins every room it has a doc for, the vault's first, and with each join sends what the server lacks (§5). Any room the feed names that it doesn't have yet gets a doc and is joined too, and from then on is joined on every login. Rooms stay joined for the life of the socket, so live deltas reach the device directly. Its cursor is the highest `seq` the feed has named.
+
+**Every Carnet frame, by family** (`carnet_sync::wire`):
+
+| Family | Frames | Section |
+|---|---|---|
+| Login | `Challenge`, `Hello`, `Welcome`, `Denied`, `Changed` | §6, §7 |
+| New account by invite | `Enroll`, `Enrolled` | §6 |
+| Pairing | `PairOpen`, `PairOpened`, `PairJoin`, `PairJoined`, `PairStep`, `PairApprove`, `PairClose` | §7 |
+| Recovery | `SetRecovery`, `RecoverySet`, `Recover`, `Recovered` | §7 |
+| Devices | `SetCard`, `ListDevices`, `Devices`, `Revoke`, `Rekey`, `Refused` | §7 |
+| Password | `PasswordSetStart`/`Reply`/`Finish`, `PasswordSet`, `PasswordDrop`, `PasswordLogin`, `PasswordLoginReply` | §7 |
+| Passkeys | `PasskeyAdd`, `PasskeyDrop`, `PasskeySet` | §7 |
+| Compaction and repair | `Compact`, `Checked`, `Inspect`, `Inspected`, `RollBack`, `Repair` | §6, §9 |
+| Pictures | `BlobOffer`, `BlobFetch`, `BlobLink`, `BlobStored`, `BlobNone`, `BlobDrop`, `BlobDropped` | §6, §7 |
+| Deletion | `RoomRemove`, `RoomRemoved`, `AccountDelete` | §6 |
+| Invites (owner) | `Invites`, `InviteList`, `InviteAdd`, `InviteDrop`, `AccountRemove` | §6 |
+| Usage | `Usage`, `UsageIs` | §11 |
+
+### Compaction
+
+**Why.** For each room the server holds encrypted deltas, one per save, and at most one encrypted snapshot as the room's **base**. It can't merge them, because it can't decrypt them. A device can, and one snapshot with full history is far smaller than the deltas it replaces (62 KB against about 500 KB for a heavy year of one note).
+
+**When: the server asks, when it's needed and safe.** It can judge both without reading a word:
+
+- **Needed:** the room holds more than 200 deltas since its base (`--compact-after N`), or more than 256 KiB of them.
+- **Safe:** all of these hold.
+  1. **The device is caught up.** The device is asked right after the server has sent it everything it holds for the room (on one socket, in order), so the snapshot it writes covers everything.
+  2. **Nobody else is writing.** The device is the account's only one connected, or the room has had no new record for 5 minutes.
+  3. **One lease.** The server sends `Compact { room }` to that one device, which holds the lease for 10 minutes. No other device is asked meanwhile, so two snapshots never race.
+
+  A device is asked when it joins or writes to a room. An edit that lands during compaction is harmless: the snapshot's version vector doesn't cover it, so that delta stays.
+
+**Accepting the snapshot.** The server takes it only from the lease holder, alone in its update, and only if its version vector covers the current base's. The deltas it covers and the old base are then *set aside*, not deleted: new devices no longer download them, but the server keeps them for 30 days so the snapshot can be rolled back (§9). Snapshots are sealed under the newest epoch, so compaction also retires records under keys a removed device knew.
+
+- **The check.** The next device to load the snapshot opens it on its own, before it touches the note, checks that its real version vector matches the header and that it reads as a note, and sends `Checked`.
+- **A failed check.** The server rolls back on its own: it drops the snapshot, reinstates the old base and the deltas, and logs which device wrote it. The checking device asks for the room again and gets the records back.
+- **After 30 days,** what was set aside is purged (hourly). That applies with or without a second device, so an account with one device still gains from compaction.
+
+A buggy or hostile client therefore can't wipe history by claiming a version it doesn't hold. Snapshots carry full history; nothing on the server trims it.
+
+### The binary
+
+`carnet-server` is Rust: axum for HTTP and WebSockets, the hub on a thread of its own fed by every socket through one queue (so it handles one thing at a time, exactly as in the simulation, and a slow disk never stalls a socket), and a picture worker on another. It's a library with a thin `main`, so a hosted service can be built on it (§11). How to run it, behind which proxy, and how to back it up and move it: [`crates/carnet-server/README.md`](../crates/carnet-server/README.md).
+
+```
+GET  /              the web app (§8), or a page saying what this is
+GET  /v1/info       what the server is: name, version, origin, protocol, features (§14)
+GET  /v1/health     200 while the hub answers, 503 if not
+GET  /v1/sync       the WebSocket: Carnet frames and Loro Protocol rooms
+GET  /v1/blobs/…    a sealed picture, by a link the socket gave
+PUT  /v1/blobs/…    one picture put, the same way
+GET  /metrics       Prometheus text format, on a separate listener (--metrics ADDR)
+```
+
+**Storage.** Behind the `Storage` trait:
+
+| | Records, devices, keys | Pictures |
+|---|---|---|
+| Default | SQLite (WAL), one file per account: `data/carnet.db` is the directory (accounts, invites, and the indexes a sign-in must find), `data/accounts/<id>.db` an account's devices, records, bases and slots | files: `data/blobs/<account>/<id>`, written into `data/spool` first and moved in whole |
+| With the `postgres` / `s3` features | Postgres, one schema, every row naming its account | an S3-compatible bucket, links pre-signed there so the bytes never pass through the server |
+
+A file per account means a query in one account's database can't reach another's, whatever it forgets to say; one account's writes don't wait on another's; an account deleted is a file deleted. Reads never create files: a login naming an unknown account leaves nothing behind. Up to 256 account databases stay open, least recently used closed first. Each file carries its schema version and upgrades itself; one from a newer server is refused (§14). `carnet-server migrate` moves a data folder to Postgres and a bucket, checked and resumable.
+
+Other files in `data/`: `links.key` (signs picture links) and, with passwords on, `opaque.key` (§7). Both are made on first start, mode `0600`, and must be kept with a backup.
+
+**Accounts by invite.** There are two kinds of code, and they shouldn't be confused:
+
+- An **invite code** makes a new *account*: a person with their own vault.
+- A **pairing code** (§7) adds a *device* to an account that already exists.
+
+On a start with no accounts, the server prints an invite code to its log, a fresh one each start until an account exists. The device that redeems it (`Enroll`, over the socket) becomes the **owner**. From then on the owner's devices make invites in Settings, on the desktop or in the browser: the device generates the code and sends only its hash, so the server never holds a usable code. Each is single-use and lasts 7 days; at most 100 wait at once. The owner sees the waiting invites and every other account (its device count, when it was last seen, a short id: the server knows nothing more), can take an invite back, and can remove an account. `carnet-server invite` prints one from the shell, for an owner who has lost every device.
+
+Invite codes are 80 random bits as 16 Crockford base32 characters in groups of four (`K7QF-2M9D-XW4H-P3TA`; no I, L, O or U, so it survives being read aloud). The server stores only the hash.
+
+**TLS** is the reverse proxy's job; the server speaks plain HTTP behind it (nginx, Caddy, or Cloudflare, including a Tunnel for a home server with no open port). Cloudflare terminating TLS is harmless here: all it sees is ciphertext.
+
+**Limits** (`limits.rs`), counted per client address. The address is taken from `CF-Connecting-IP` or `X-Forwarded-For` (read from the right, past the trusted hops) only when `--trusted-proxy` names the proxy:
+
+- sockets: 30 at once, then one every 2 s, and at most 64 open; past that, `429` before the upgrade;
+- tries that guess at something or cost work (a failed login, an invite, joining a pairing, a recovery or password sign-in): 10 at once, then one every 6 s; past that, `Denied`. A login that succeeds is never counted, so a reconnecting device never shuts itself out.
+
+**Backup:** `carnet-server backup DIR` copies every database (`VACUUM INTO`) and the pictures into a folder laid out like `data/`, consistent while serving. Everything in it is ciphertext or public keys, so it can go anywhere.
+
+**Health and metrics.** `/v1/health` is what the container's `HEALTHCHECK` asks, through `carnet-server health`. `/metrics` reports counts only: logins and refusals, records and pictures kept, compactions, storage failures, traffic, how long the hub takes per frame, its queue lag, and sockets by protocol and app version (§14). Never what anything holds.
+
+### Pictures over HTTP
+
+Pictures are too big for the socket, so their bytes go over HTTP, by short-lived links the socket gives (`links.rs`):
+
+1. `BlobOffer { ids }`: does the server have these? Each comes back `BlobStored`, or `BlobLink` with a URL to `PUT` it to.
+2. The device puts the sealed bytes. The server answers `204` only once the file is whole on disk (synced, moved in, its folder synced). Only then does the device write path → id into the vault, so the vault never names a picture the server lacks.
+3. `BlobFetch { ids }`: links to fetch, each a `BlobLink` or `BlobNone`. The server serves ranges.
+
+A link is one account's one picture, one direction (`GET` or `PUT`), at most 32 MiB, for five minutes: an HMAC-SHA256 under `data/links.key` over a fixed layout. It's not a JWT: only the server reads it, and one layout with one algorithm leaves nothing to negotiate. A leaked link opens one sealed picture for minutes. With S3 storage the links are pre-signed bucket URLs instead; devices can't tell the difference. The hub only decides who may; the picture worker makes links and checks what was put, so neither a picture nor a bucket's answer holds up the hub.
+
+### Deletion
+
+- **A note deleted forever** (from Deleted, after confirming): the vault marks it gone, and `RoomRemove` has the server delete the room's records and base at once and remember the room's id in a `removed` table. A device that still has the note (offline, or writing without knowing) is told `RoomRemoved` when it joins or writes, and nothing it sends is kept. The vault's own room can't be removed. Any device of the account may remove any of its rooms; the server can't read the notes to judge.
+- **A picture no note shows any more**, in any version of any remaining note (a note in Deleted counts): `BlobDrop` marks it, and the server deletes it 30 days later in an hourly sweep, unless a device offers, fetches or puts it meanwhile. Unlike a note, a picture is dropped by inference, so it gets the grace period.
+- **Until the server confirms,** the rooms and pictures to remove are kept on the device (`forgotten.txt` on the desktop, the saved state in the browser) and sent again on each login, so a deletion made offline isn't lost.
+- **Deleting the account** (`AccountDelete`, from any of its devices, after confirming): everything the server keeps of it goes at once (records, devices, pictures, slots), and every device is let go (`Denied`), each keeping its local notes. The owner's account can't be deleted this way, since it's what lets everyone else in. A host is told (§11).
+
+## 7. Auth and encryption
+
+Two questions, answered by two different keys:
+
+| | Question | Answered by | Leaves the device? |
+|---|---|---|---|
+| **Auth** | "Is this an enrolled device of account A?" | the device's **signing key** (Ed25519), one per device | the public half, once, at enrolment |
+| **Encryption** | "Can this device read and write the notes?" | the **vault key** (256-bit, symmetric), one per epoch | never in the clear |
+
+The server checks the first and never holds the second. A stolen server database has device public keys and wrapped vault keys: nothing to log in with, and nothing to read with.
+
+**On the socket, authentication is the login,** once per socket: the device's signature over a fresh nonce and the server's origin. Before it, a socket may only log in, use an invite, join a pairing, recover, or sign in by password or passkey; every other frame is refused. After it, the socket belongs to that account and device, and every frame acts on that account, whatever account it names. Within an account, a frame must also fit its context: a write only to a room the device joined, a snapshot only from the lease holder, a device approved only from the pairing this device opened, invites only from the owner's devices. `crates/carnet-server/tests/auth.rs` sends what an attacker would, frame by frame, and checks each is refused.
+
+**What the server sees,** plainly: which accounts and devices exist, when each device was last online, and, per room, a random id, how many records it has, how big, and when they were written. From `%ELO` headers it also sees which peer wrote how many operations into which room: roughly how much was typed into each note, and when. It never sees text, titles, folder or file names, device names, history, or pictures; those are all sealed. That's what end-to-end encryption leaves visible to any server that syncs, and worth stating rather than hiding.
+
+### Where the keys live
+
+| | Signing key and vault key ring |
+|---|---|
+| macOS | Keychain |
+| Windows | Credential Manager |
+| Linux | Secret Service (GNOME Keyring, KWallet); a `0600` file beside `sync.txt` when there's none |
+| Browser | IndexedDB, sealed with AES-GCM under a WebCrypto key the browser made non-extractable |
+
+The desktop uses the `keyring` crate. In the browser, everything kept (the identity, the replica state, fetched pictures) is sealed under that non-extractable key, so a copy of the database alone opens nothing; only that browser, on that site, can. Nothing about sync is written to `settings.txt`.
+
+### Logging in: a signature, not a password or a token
+
+Every connection opens with a challenge-response.
+
+**The nonce** ("number used once") is 32 bytes from the server's CSPRNG, fresh for each connection. It is unpredictable, so a signature can't be made in advance; single-use, forgotten the moment a `Hello` arrives, valid or not, so a captured signature can't be replayed; and short-lived, held only in memory beside the socket for 30 seconds.
+
+**What's signed:**
+
+```
+"carnet-auth-v1" ‖ server origin ‖ account id ‖ device id ‖ nonce      (each part length-prefixed)
+```
+
+The fixed prefix keeps this signature from being valid for anything else the key signs. The origin (`https://notes.example.com`, set with `--origin`) stops a malicious server from relaying a challenge from a real one. The account and device ids pin who is logging in.
+
+The server checks the signature against the device's public key and that the device isn't removed, then the socket is logged in. Everything after goes over that socket, except pictures' bytes (§6). No long-lived token exists to be copied from a disk or a log. Removing a device closes its open sockets at once, and every later challenge fails.
+
+(Encryption has its own random value per message, the AES-GCM **IV**. This document says "nonce" only for the login challenge, so the two don't get mixed up.)
+
+### Getting the vault key onto a new device
+
+1. **The first device** makes the vault key. Settings → Sync offers to make a **recovery code**:
+   - **One secret, not shares.** 128 random bits, written as 12 words from the BIP-39 English list (2,048 words, no two sharing their first four letters). 12 words carry 132 bits: 128 bits of key and a 4-bit checksum that catches most typos. Only the wordlist and checksum come from BIP-39; its seed derivation isn't used.
+   - **No slow hash.** 128 random bits can't be guessed, so unlike a password they need no Argon2. HKDF derives three keys from the code: a **wrapping key**, which wraps a copy of the key ring kept on the server; a **signing key** (Ed25519), whose public half is registered, so recovery logs in through the same kind of challenge as a device; and a **box key** (X25519), which later epochs are sealed to.
+2. **Pairing** (the normal way): Settings → Add a device shows a code and its QR code on a device already in. The code is `47-381095`: a **nameplate** (the smallest number free on the server) and six random digits. The new device scans it, types it, or opens the link the QR code carries (`https://server/#pair=47-381095`). The two run SPAKE2 (a PAKE: password-authenticated key exchange, the `spake2` crate) through the server, keyed by the code, so the server relaying the messages learns nothing and can't tamper unnoticed. Each side derives the same key only if the codes match. Then:
+   - the new device sends its id and public key sealed under that key, so the server can't substitute its own;
+   - the device in approves it into the account, and sends the key ring and account id sealed under the same key;
+   - the new device logs in on the same socket.
+
+   A nameplate is spent on the first join, right code or not, so a guesser gets one try and a second joiner racing the first finds nothing. That's why six digits are enough.
+3. **Recovery,** when every device is lost: the new device derives the code's keys from the 12 words, signs the challenge with the recovery signing key (naming the new device, so the signature admits that device and no other), and is let in. The server returns the wrapped key ring and every epoch's key sealed to the code since. Setting a new code replaces the old one, which then finds nothing.
+
+There's no email in self-hosting, and passwords are optional (below). Losing every device and the recovery code means the notes on the server can't be read. The local `.md` files are untouched, because they never depended on sync.
+
+### Devices, removal and key epochs
+
+- **Cards.** Each device sends a **card** on every login: its id, its signing key, its box key (X25519, derived from its signing key, so nothing more to keep) and its name, sealed under the vault key. The server keeps it and can't read the name. A card is believed only if it names the row it's on, so a server can't pass one device's card off as another's. The recovery code, the password and each passkey have cards too.
+- **Renaming** happens on the device itself; its card is re-sent sealed, and the other devices' lists show the new name.
+- **Removing another device** (`Revoke`): the removing device makes the next epoch's vault key, seals it to each remaining device and to every slot (recovery code, password, passkeys) with a one-off X25519 key agreement then AES-GCM, and re-seals their cards under it. The server accepts only if it covers every device and slot kept, no more and no fewer; otherwise it refuses (`Refused`) and nothing changes. If it accepts, in one transaction: the device is marked removed, its sockets get `Denied` and close, and each remaining device gets its key (`Rekey`) now if online, else at its next login. The removing device takes the new key only from the server's `Rekey`, so a refused removal never leaves it sealing under a key nobody else has.
+- **Leaving** (turning sync off) takes the device out without a new key, since a device leaving isn't lost or stolen.
+- **Rings.** A device keeps every epoch's key, so what was written before still reads; new records are sealed under the newest. Pairing hands over the whole ring.
+
+**What removal doesn't cover:**
+
+- A device offline when another is removed keeps sealing under the old key until it comes back for the new one. The removed device could read those records if it ever obtained them; it can't from this server.
+- A server colluding with the device being removed could slip in a device of its own making before the removal, with a card sealed under the old key the removed device knows. The new key would then be sealed to it too. Closing this needs devices to vouch for each other with their signing keys, or safety numbers compared by eye; neither exists yet.
+- Records already written stay under their old epoch until compaction re-seals the room's snapshot under the newest.
+
+### A password
+
+Some people expect to sign in on a new device with an email and a password. That's one more way to unwrap the key ring, not a replacement for the above, and it's off unless the server runs with `--passwords` (it needs a server key to keep, and emails to hold).
+
+It uses **OPAQUE** (the `opaque-ke` crate, which builds for wasm): the password never reaches the server, not even hashed. A stolen database allows no precomputed attack; guessing has to start after the theft, one account at a time, through Argon2id, and needs the server's `data/opaque.key` as well.
+
+- **Setting one** (a device already in): OPAQUE registration, relayed. Its `export_key`, which never leaves the device, becomes a secret that works like the recovery words: it wraps a copy of the key ring, its signing key's public half names the password's slot, and its box key is in the slot's card. The server keeps OPAQUE's record and the slot, with the email in the directory to find it by. One email signs in to one account. Changing the password replaces the slot.
+- **Signing in** (a new device): OPAQUE login, relayed; an unknown email gets a made-up answer and fails on the device exactly as a wrong password does. Then a recovery signed with the secret. It counts as a try for the rate limit.
+- **A device removed** seals the new epoch to the password's slot too, so a password set before still works after.
+
+### Passkeys
+
+On the web, a passkey is one more way in, in the same pattern as the words and the password: a slot on the server that a secret opens. WebAuthn's **PRF extension** supplies the secret: 32 bytes, the same each time the passkey is used with the same salt, computed inside the authenticator from a key that never leaves it.
+
+- **Making one** (a browser already in): `navigator.credentials.create` with a discoverable credential, user verification required, `user.id` the account id, and the PRF salt fixed for good (SHA-256 of `carnet passkey v1`). The PRF output becomes a secret, with its own HKDF label so it never collides with a password's, that wraps a copy of the ring and names a slot by its signing key. The slot's card holds the passkey's name and credential id, sealed. Where a passkey manager gives PRF output only on use, not on creation, the passkey is used once straight away.
+- **Signing in** (a new browser): `navigator.credentials.get` with the same salt and no `allowCredentials`, so the browser asks which passkey. Then a recovery signed with the secret. **The server never verifies a WebAuthn assertion:** the signature made with the PRF-derived key is the proof, and the authenticator's user verification (face, fingerprint, PIN) guards the PRF output.
+- **Slots.** Each passkey has its own, at most 20 per account; the same passkey added again replaces its slot. A slot id never collides with a device id or the password's. A removal seals the new epoch to every passkey, as to devices.
+- **Taking one away** removes its slot and what was sealed to it; it signs nothing in from then on. No new epoch is needed, since the passkey can't reach the server without its slot. The browser tells the passkey manager it's gone (`signalUnknownCredential`, where supported).
+- **Where it works.** Browsers with PRF support (current Chrome and Edge, Safari 18+, Firefox 135+). A passkey is bound to the site's domain: the web app at a bare IP address can't make one; at `localhost` or its own domain over HTTPS it can. The desktop app has no WebAuthn: it lists the account's passkeys and removes them, and its removals seal to them.
+
+### Records and pictures
+
+- **Records.** AES-256-GCM with a random 12-byte IV and the plaintext header as associated data, so the server can't alter a header undetected. Each room has its own key per epoch, HKDF-SHA256(vault key, `"carnet doc v1"`, epoch, room id), so a record the server moves into another room fails to decrypt there. Random 96-bit IVs are safe far beyond any note's update count. They must be random, never a counter.
+- **Pictures.** Each is sealed on its own. Its id is HKDF of the first epoch's vault key over the picture's SHA-256, so the same picture is one blob in a vault, the id tells the server nothing, and rotating keys doesn't change it. (A removed device could therefore tell whether a picture it has is in the vault; nothing more.) The blob is AES-256-GCM under a key for its epoch, with the epoch and id bound in, so it opens only if it's the picture its id names: a server swapping blobs is caught. Pictures are capped at 32 MiB.
+- **Randomness** comes in through a `Random` trait: the OS's on a device and on the server, `crypto.getRandomValues` in the browser, a seeded one in the simulation.
+
+**What end-to-end encryption gives up:** server-side search, server-rendered previews, and "reset my password by email". Search runs on the device, in the browser as on the desktop.
+
+## 8. The web app
+
+### Why it's its own app
+
+The web app is a separate app, not the desktop app compiled for the browser. The desktop UI draws everything itself on a canvas, and the hard parts of a web editor (text input, IMEs, selection, accessibility, scrolling on a phone) are exactly what a canvas UI is worst at in a phone browser.
+
+It's also a device like any other: paired by a code, the recovery words, a password or a passkey. It lists notes by folder, searches them, renders them with their pictures, ticks checklists, edits and creates notes, adds pictures, moves notes to Deleted and back or deletes them forever, shows a note's history and restores a version, manages devices, invites and recovery words, all online or offline.
+
+### What it reuses
+
+Only what must behave identically on every device is shared, compiled to wasm:
+
+- **`carnet-core`:** the Markdown dialect. Colour spans, `==highlights==`, `![alt|right|300](…)` floats and the escaping rules are Carnet's own, and a JS Markdown library would render them differently. A note in the browser is `export::viewer` (real checkboxes with `data-task="n"`, `<mark>` and ink colours as CSS variables). The editor's model, `page.rs` and `history.rs` (caret, selection, every edit, undo), lives here too.
+- **`carnet-sync`:** the session, the docs, sealing, pairing. Merge logic exists once.
+
+`crates/carnet-web` (wasm-bindgen) exposes them as sans-I/O objects: `Join` (pair, recover, enroll, password, passkey) and `Vault` (frames in and out, notes, folders, HTML, search, ticking, editing, pictures, devices, invites, history, saved state). The WebSocket, IndexedDB, WebCrypto and the service worker stay in TypeScript, where the browser APIs are.
+
+### The stack: TypeScript, Svelte 5, Vite
+
+| Option | Verdict |
+|---|---|
+| Server-rendered HTML (htmx and the like) | Out: the server can't render what it can't decrypt, and even pairing needs crypto in the browser. |
+| A Rust UI in wasm (Leptos, Dioxus) | One language, but the work here is platform work (service worker, install prompt, IndexedDB, iOS Safari's quirks, accessibility, a virtual list), where Rust's web tooling lags, and it adds hundreds of KB. The Rust that matters is already in the wasm. |
+| **Svelte 5 + TypeScript** | Chosen: small, plain DOM code with a tiny runtime, readable by someone who doesn't live in JS. `vite-plugin-pwa` handles the service worker and manifest. |
+
+It's a static single-page app, served by `carnet-server` at `/` (`--web DIR`, with the `.br` and `.gz` copies the build writes), so self-hosters get it from the same binary. Any other path gets `index.html`, except under `/v1/`.
+
+### Writing in the browser
+
+A note opens in CodeMirror 6, but CodeMirror shows only the words: no Markdown mark is ever in its text, so none can be seen, half-typed or half-deleted. Every edit is applied by the desktop's own page model (`carnet_core::page`, in wasm) on the note's document, with the desktop's rules (typing carries the style of the letter before it, Enter continues a list, `- ` and `[] ` make lists, undo takes back a run of typing), and the note is written back by the desktop's own serialiser. So Carnet's dialect is never read or written by a second implementation. How each line looks (heading size, checkbox, bullet, quote, code, colour) also comes from the page model.
+
+A rich-text editor (ProseMirror and the like) was ruled out: it would need its own reader and writer for Carnet's dialect, and any difference would rewrite someone's notes on their first save. Editing raw Markdown with the marks dimmed was tried and dropped: the marks read as leftovers, where the desktop shows none.
+
+- **Sending:** half a second after a pause, and at once when the page is hidden or the editor closes. Each send is the editor's Markdown from the version it started from, merged (`NoteDoc::apply_from`) with whatever arrived meanwhile. A change from another device while editing is merged the same way, with the caret kept.
+- **Tables** are edited cell by cell, each cell its own editor over the page model's cell.
+- **Pictures** added from the browser are named as the desktop names a pasted one, kept sealed locally until the server has them, then put in the vault. Photos (JPEG, HEIC) are re-encoded as JPEG, at most 2560 px on the long side, with metadata such as location stripped.
+- **On phones** the toolbar rides above the keyboard (`visualViewport`).
+
+### Storage, offline and size
+
+- **IndexedDB** holds the identity, the state (cursor and every doc) and fetched pictures, each sealed (§7). A state that won't open is discarded and the server sends everything again. Once paired, the app asks the browser to keep its storage (`navigator.storage.persist`), since Safari can evict a site that isn't installed. On an iPhone it says to add Carnet to the Home Screen before pairing, because Safari and the Home Screen keep separate storage.
+- **Offline:** the service worker precaches the app (wasm, fonts, icons). Notes and pictures come from IndexedDB; edits wait in the docs and go when the socket is back.
+- **Removed elsewhere,** it forgets the account and its copy, and says so.
+- **Size:** the wasm is about 2.3 MB, about 590 KB with Brotli, which the server serves precompressed. The editor's code loads with the first edit.
+- **Ten thousand notes** open in about a second; a tick redraws in under 100 ms and a search keystroke in about 30 ms. Only the rows in sight are in the page.
+
+## 9. History and repair
+
+Two needs, one tool:
+
+- **A person wants an older version of a note back:** a paste gone wrong, a list cleared by mistake, a merge that came out odd (§3).
+- **Sync itself needs putting right:** a bad snapshot that got past the check, or a buggy device that wrote nonsense.
+
+Both come from the same data. Every device holds each note's full history in its doc. Everything below runs on the device; the server only ever sees ciphertext and the request to roll back. History works with sync off too, since the replica always exists (§4).
+
+### What history records
+
+- **When:** every change carries its time.
+- **How:** each commit carries a message: `import`, `save`, `other app`, `restore`.
+- **Who:** with sync on, the message also names the device that wrote it (`save by 0a1b…`), since a run's Loro peer is fresh each time. The list shows "Edited here", "Edited on Laptop" (by the device's name), or "Edited" for changes from before sync was on.
+- **Versions, not keystrokes.** A writer's commits from the same origin within 10 minutes of the first are one change: a sitting of writing is one entry.
+
+### A note's history
+
+On the desktop it opens from the note's menu (History). The library column becomes the version list; the page shows the selected version read-only, with **Restore**, **Restore as a copy** and **Done**. The web app has the same list, marked previews and Restore.
+
+- **The list:** newest first, each version with its time, where it was made, and words added and removed (counted as bags of words, so a moved paragraph counts as neither).
+- **What changed is marked** (`carnet_core::compare`): words added since the version before are washed with the green highlighter; removed words are put back where they were, struck through in red; a block whose words stayed but which changed otherwise (a box ticked, a heading level) gets the plain highlighter. These are the note's own styles, drawn in each theme's colours. **Compare with now** marks what a restore would bring back and take away.
+- **Previews never touch the live note.** They're built on `fork_at(version)`, so typing and syncing carry on underneath.
+- **Restore** is `revert_to(version)`: Loro writes *new* operations that make the note equal that version. It's an edit like any other: it syncs, merges with whatever happens meanwhile, and is itself in the history, so a restore can be undone. Nothing is ever removed from history.
+- **Restore as a copy** makes a new note beside it with that version's text.
+- **Known limit:** text copied from a marked preview carries the marks. Restore gives the version's own text.
+
+### Sync repair: Settings → Sync → Notes on the server
+
+It lists each note the server holds that's worth a look, by title, in plain words with an icon per line:
+
+| Shown | Comes from |
+|---|---|
+| up to date, or how many edits each side has that the other hasn't | version vectors |
+| packed into one copy (the base snapshot): when and by which device, and saves since; or kept as N saves | the server's bases |
+| whether another device has checked the packed copy | the base's check state |
+| lately: packing undone, a copy replaced, a packed copy found wrong | the server's log |
+
+Each note's ways to fix it, each confirmed before it runs:
+
+- **Undo packing** (`RollBack`): reinstate the previous base and the deltas the snapshot set aside, and drop the snapshot, while they're within their 30 days. Any of the account's devices can do it; it's logged for every device to see.
+- **Replace with this device's copy** (`Repair`): when the server's state is wrong and its old records are past 30 days, a device whose own copy is good uploads a snapshot of it. The server takes it as the room's new base, whatever the old base held, and sets the old one aside for 30 days as usual.
+
+**Two guards make repair rarely needed:**
+
+- **Fork first.** A device never imports a downloaded snapshot straight into its note. It opens it on its own, checks that its version vector matches the header and that it reads as a note, and only then merges it. A bad snapshot is caught before it touches the local copy, and the local copy stays good enough to repair from.
+- **Large removals are kept.** A change from another device that empties a note, or removes more than half of it, is applied, because it's a real edit and every copy must converge. But the text from just before goes to `.trash/` as `… (before sync).md` and shows in Deleted. The last resort stays where it has always been: plain files.
+
+## 10. Code layout
+
+```
+Cargo.toml              the workspace
+src/                    the desktop app (kui); src/sync.rs, src/pictures.rs and the store's sync parts
+crates/carnet-core/     the Markdown model, the editor's page and history, export, compare: no UI, builds for wasm
+crates/carnet-sync/     a device's side: note and vault docs, the replica, crypto, %ELO records, the wire,
+                        the session, pairing, passwords, passkeys, compatibility; with the `net` feature,
+                        the desktop's socket and HTTP clients
+crates/carnet-server/   the hub, storage (memory, SQLite, Postgres), pictures (files, S3), limits, the binary
+crates/carnet-web/      wasm-bindgen bindings over core and sync for the web app: Join, Vault, the editor
+web/                    the web app (Svelte 5, TypeScript, Vite), served by carnet-server at /
+fuzz/                   cargo-fuzz targets (§12)
+```
+
+`carnet-sync`'s core does no I/O: the session, docs, sealing, pairing and the protocol state machine are bytes in, bytes out. Drivers move the bytes: the desktop's socket thread (`net`), the web app's TypeScript, and the test simulation. The same holds for the server's hub, which `server.rs` drives over real sockets and `tests/sim.rs` drives directly.
+
+## 11. Hosting it for others
+
+`carnet-server` as shipped is everything a self-hoster needs: accounts by invite, sync, pictures, backup, metrics. It's also a library, so a hosted service (public signup, plans, billing, a landing page) can be built as a separate program on top of it without forking. Nothing in this repository says `if hosted`: the server exposes seams, each with the self-hosted behaviour as its default.
+
+**The entry point** is `carnet_server::serve_hosted(config, listener, metrics, host, stop)`. `serve` and `serve_with` call it with `Host::default()`. A `Host` provides:
+
+| Field | Self-hosted default | What a host can do |
+|---|---|---|
+| `routes` | none | merge its own axum routes beside the API. A `/` among them replaces the web app's page there (a landing page); the web app is still served everywhere else, and unknown `/v1/` paths stay 404. |
+| `quota: Arc<dyn Quota>` | `Unlimited` | per account, a byte limit (notes and pictures, as sealed), whether it may write, a plan name and an end date (`quota::Limit`) |
+| `admission: Arc<dyn Admission>` | `ByInvite` | be told which invite made which account (`admitted`), and when an account is deleted or removed (`removed`) |
+| `signup: Option<String>` | none | a URL where newcomers make an account: `/v1/info` returns it, and the web app's first screen links to it |
+| `passwords` | off | accept email and password sign-in (§7) |
+| `first_invite` | on | print the owner's invite on a start with no accounts |
+| `store` | SQLite files in `data/` | any `Storage`, e.g. `postgres::Postgres` (feature `postgres`) |
+| `blobs` | files in `data/blobs` | any `Blobs`, e.g. `s3::S3Blobs` (feature `s3`), with pre-signed links |
+| `ready` | none | receive a `HubHandle` once the hub runs |
+
+**Running work on the hub.** `HubHandle::run(|hub, outs| …)` runs a closure on the hub's thread, one thing at a time like everything else there: for example, minting an invite for a new signup with `server::invite(store, false)` (never an owner's invite), or reading an account's usage. A signup flow can then hand the person the invite as a link to the web app, `https://server/#invite=ABCD-…`, which the web app redeems on open.
+
+**Quotas and read-only accounts.** The picture worker gives no upload link for a new picture once the account is at its limit (so one picture may take it over, never two), and the device is told once, in plain words (`quota::FULL`). A note's text is never refused for size. An account that may not write (`writable: false`, e.g. a lapsed plan) is read-only: rooms are joined with the Loro Protocol's read permission, the session sends nothing to them and raises `Event::ReadOnly` once, and edits wait on the device until a login finds the account writable again. `Usage` / `UsageIs` let a device show what's kept and the limit; on a self-hosted server, just what's kept.
+
+**What stays the same.** A hosted server runs the same hub, the same protocol and the same end-to-end encryption; the seams pass account ids and invite hashes, never content. A host keeps its own data (emails, plans) in its own storage, which can be the same Postgres database in tables of its own.
+
+## 12. How it's tested, and what it doesn't cover
+
+`cargo test` runs everything below except the fuzzers; CI also builds the wasm and type-checks and builds the web app.
+
+**Property tests** (proptest; failures shrink to the smallest input and are kept in `proptest-regressions/` to be replayed first):
+
+- `carnet-core`: nothing panics on any text (styling, cutting, typing, comparing); the read–write round trip settles; styling a stretch of words always styles it.
+- `carnet-sync`: a note keeps every byte; copies converge in any order of arrival, duplicates included; a merge with one side unchanged is the other side; edits to separate lines both survive; every version reads and restores; the replica remembers across reopens.
+- The store, as a model: random edits, saves, edits from another app, renames behind its back, restarts, a lost replica and the trash. No typed word is lost, a saved note's file equals its doc's text, and a note keeps its key across an outside rename and a restart.
+
+**Fuzzing** (`fuzz/`, cargo-fuzz on nightly; CI runs each target nightly on a growing corpus):
+
+| Target | Fed | Holds |
+|---|---|---|
+| `markdown` | any text as a note file | read, written, read again and rendered without a panic |
+| `inline` | any line, and any edit at any caret | styling, colour, links, cut, type, split and join never panic |
+| `compare` | any two notes | no panic; a note compared with itself is marked nowhere |
+| `note_doc` | any saves, merges, restores and reloads; any bytes as a doc or as another copy's changes | saves and restores leave exactly their text; garbage is an error, not a panic |
+| `replica` | any index and doc files | opens and is used without a panic |
+| `wire` | any bytes off a socket: a frame, a record, a container, a version vector | no panic, no allocation beyond what the bytes could hold; a frame that decodes re-encodes identically |
+| `hub` | any frames from several sockets, opened and closed at any time | the hub never panics |
+
+The `wire` target found that the Loro Protocol crate's decoders reserve memory for whatever count they read before reading the items: four bytes could ask for 4 GB, so any client could take a server down. Every count from a socket is now checked against the bytes that follow before the crate sees it.
+
+**The simulation** (`crates/carnet-server/tests/sim.rs`). Four devices of one account, three notes, the hub, and a network that delivers one message at a time, in random order across sockets (in order within one, as TCP does). Every step is one of: type, deliver a message, drop a socket with whatever was in flight, reconnect, restart a device (notes kept, session lost), or restart the server (sockets dropped, storage kept). Now and then one device removes another; rooms compact at a low threshold so snapshots are written, checked and built on throughout. Everything random comes from one seed, so a failure names its seed and replays exactly. When every device is back and every message delivered:
+
+- every device has every note, with the same text;
+- every word anyone typed is there;
+- no typed word appears anywhere in what the server stored;
+- a removed device holds no word typed after its removal, and opens no record sealed under a later epoch.
+
+200 seeds run on every `cargo test` (more with `SIM_SEEDS=N`), alternating in-memory and SQLite storage (and Postgres when `CARNET_TEST_POSTGRES` is set). Each safety check (coverage on compaction, shutting out a removed device) has been confirmed by removing it and watching the simulation fail.
+
+**Integration tests** (`crates/carnet-server/tests/`, on memory and SQLite): logins and authorization frame by frame (`auth.rs`), accounts never seeing each other's records (`accounts_never_meet`), pairing and removal, recovery, passwords, passkeys, invites, compaction and repair, pictures, deletion, quotas, compatibility across protocol versions, and the binary end to end over real sockets (`server.rs`), including that neither the database nor its WAL holds a word of the notes.
+
+**Whole apps** (`src/app_tests.rs`, `src/sync_tests.rs`): desktop apps against the server's own code on a real socket: enrolling by invite, pairing, live edits into an open note, moves, pins, trash and folders following across devices, pictures, deletion, removal, passwords. A randomized vault test (`VAULT_SEEDS=N`) has two devices make, move, pin, rename, trash and restore notes and folders, apart and together, then checks both end with the same vault, files and notes. `crates/carnet-web/tests/viewer.rs` does the same for the web app's Rust against a desktop-like session, including a 10,000-note state.
+
+### Known limitations
+
+- **Text merges** can leave visible oddities in rare concurrent edits (§3). Nothing is lost.
+- **Removal** doesn't protect against a server colluding with the removed device, and offline devices keep sealing under the old key until they reconnect (§7).
+- **Pictures:** a picture changed in place keeps its path, and the vault takes the new one, but a device that already has the old file keeps it. Pictures over 32 MiB don't sync. A picture typed into a note one letter at a time may be missed when deciding what's still in use; its id is kept in the vault (`-<id>`) so it can be fetched again within 30 days.
+- **Folders:** a folder trashed whole on one device arrives as its notes, one by one, in the other's trash. A title literally equal to another note's clash name ("Plan 2" beside two "Plan"s) can number differently on two devices.
+- **Web editing:** a picture's width and float can't be set from the browser; Android input methods are untested. On an iPhone, Edit doesn't raise the keyboard by itself (iOS raises it only on a tap).
+- **Markdown:** punctuation is ASCII's, so other scripts' punctuation and emoji count as letters where CommonMark counts them as punctuation.
+
+### Not built
+
+- Sharing with other people: a read-only link to one note (its key in the URL fragment, never sent to the server) or a vault shared by several accounts (the vault key wrapped for each member). The design leaves room for both; neither exists.
+- Devices vouching for each other, or safety numbers, to close the colluding-server gap above.
+- Splitting the recovery code across people (SLIP-39).
+- Syncing settings.
+
+## 13. Design decisions
+
+- **End-to-end encryption from the start.** Retrofitting it changes the server's storage, the protocol and every client; built in, it costs little, and it means a server, ours or anyone's, is trusted with availability only (§7).
+- **Loro, through `LoroText::update` on the Markdown text.** The editor stays snapshot-based, other apps' edits arrive as text anyway, and the character diff merges better and keeps less history than the line diff (§3).
+- **The Loro Protocol's wire format, Carnet's own room logic and feed.** The format is good and lets the server index encrypted records by header; the existing server and client implementations weren't fit for encrypted rooms. The feed tells a device about rooms it doesn't have yet (§6).
+- **No outbox.** On join, the server says what it holds and the device sends the rest. Nothing besides the notes and a cursor needs to survive a crash (§5).
+- **One database file per account** on the default SQLite store: isolation by construction rather than by every query remembering its `WHERE account =` (§6).
+- **Opt-in, never prompts.** Sync is for those who ask for it (§1).
+- **Accounts by invite on a self-hosted server.** No email, no signup form to abuse; the first code is printed at first start and the owner makes more from the app (§6).
+- **Auth by device keys and pairing; passwords and passkeys optional.** Signatures over a fresh nonce leave nothing to steal from the server or a log. Passwords use OPAQUE so the server never sees one; passkeys use PRF so the server never verifies anything but a signature (§7).
+- **Recovery is 128 random bits as 12 words**, not a password: no slow hash needed, nothing to guess (§7).
+- **Compaction is asked for by the server** when one caught-up device has the room to itself, under a lease; what a snapshot replaces is kept 30 days, and any device can roll it back (§6, §9).
+- **Pictures over HTTP, by short-lived signed links, for every server.** One path for self-hosted and object storage alike; links rather than tokens, because a link is one picture, one direction, five minutes (§6).
+- **Delete forever is final, history included; pictures get 30 days.** A note is deleted because someone asked and confirmed; a picture is dropped by inference (no note shows it), so the server waits and a device that still wants it keeps it (§6).
+- **The web app is its own app** (Svelte 5 + TypeScript), sharing only `carnet-core` and `carnet-sync` through wasm, and editing through the desktop's own page model so the Markdown dialect has one implementation (§8).
+- **TLS belongs to the proxy.** Reverse proxies already do certificates well; the server stays plain HTTP (§6).
+- **The server is a library with seams for hosting** rather than a fork or feature flags (§11).
+
+## 14. Compatibility
+
+Apps update when their owners let them, and a self-hosted server when its owner gets round to it, so an app and a server of different builds meet every day. What decides whether they can talk is the **protocol**: one number per build (`carnet_sync::compat::PROTOCOL`), raised whenever what goes over the socket changes in a way an older peer would read wrongly or not at all.
+
+**The window.** A build talks to peers as old as `compat::OLDEST`. Peers older than `compat::DEPRECATED` are still served, and told to update. The three numbers hold `OLDEST ≤ DEPRECATED ≤ PROTOCOL`.
+
+**Who says what.**
+
+- The app puts its protocol in the socket's address: `/v1/sync?protocol=1`. None means 0: builds from before protocol numbers.
+- The server's challenge carries its **greeting**: its protocol, its `OLDEST` and `DEPRECATED`, and its **features** by name (`compat::feature`: `passwords`, `passkeys`, `account-delete`, `remove`, `usage`). It's on every challenge, so a device joining by an invite, a code, the words, a password or a passkey reads it too, before it says anything.
+- `/v1/info` says the same, for a page to read before any socket opens.
+- **App too old:** the server sends the greeting, then `Denied` with the reason `Outdated`, and closes. The app says "Update Carnet to keep syncing" and retries now and then.
+- **Server too old:** a greeting older than the app's `OLDEST`, or none at all. The app sends nothing and says the server needs updating.
+- **Deprecated:** the app syncs as ever, and Settings asks for an update.
+- **Features:** an app leaves out what its server doesn't list (passkeys, deleting the account), rather than asking and being refused.
+- `Denied` carries a reason code the app acts on (`wire::Deny`: device removed, account removed, outdated, other), so its wording can change without breaking an app that reads it.
+
+**Changes that need no new protocol.** Each side skips a frame whose tag it doesn't know (`Carnet::Unknown`), and ignores whatever follows the fields it knows. So:
+
+- A new frame is safe: an old peer skips it. A new app that needs it from a server should check the server's features first.
+- A new field is safe **at the end** of a frame: an old reader ignores it, and a new reader takes the default when it's missing (see how `Challenge` reads a greeting and `Denied` its reason).
+- A tag is never reused: a retired frame's tag goes in `RETIRED` (`wire.rs` tests).
+
+**Changes that do need one.** A field changed, moved or removed, or a frame or behaviour an old peer would misread: raise `PROTOCOL`, and keep the old peer working (a server can speak down to an app by the protocol in its address) until `OLDEST` passes it.
+
+**Held by tests.**
+
+- `protocol/N.txt` in `carnet-sync` holds one of every frame as protocol N's builds write them.
+- Every fixture of every protocol must still decode as a frame this build knows.
+- This protocol's frames must encode byte for byte as its fixture says. A change fails with instructions: raise `PROTOCOL`, keep the old fixture, and bless the new one (`CARNET_BLESS=1 cargo test -p carnet-sync wire`).
+- Every tag the decoder knows needs a sample, so a new frame can't skip the fixture.
+- `tests/compat.rs` in both crates covers both sides: an app reading greetings, removals and later frames, and a running server greeting an app from before protocols and skipping a later one's frames.
+
+**Policy.**
+
+- A protocol is supported for **12 months after the release that replaced it**, or two protocols back, whichever is longer.
+- Dropping one takes two releases. First raise `DEPRECATED` past it, so its apps ask for an update while still syncing. A release or more later, raise `OLDEST`.
+- Before raising `OLDEST`, check the server's metrics. `carnet_sockets_by_protocol` shows how many logged-in sockets still speak each protocol. `carnet_sockets_by_app` and `carnet_logins_by_app_total` show which app and version they're on: the app adds `&app=desktop-macos&version=0.1.1` (or `web`, `web-installed`) to its address. At most 64 app–version pairs are counted apart; the rest are counted as `other`.
+
+**What's stored is versioned separately from the wire.** The server's SQLite and Postgres layouts carry their own schema version and upgrade themselves when a newer server opens them. Notes are Loro documents, which keep their own compatibility. The apps' own stores follow one rule: **no stamp means layout 1; an older one is brought up a step at a time; a newer one is refused and left as it is.**
+
+- **The desktop's replica** (`carnet_sync::replica`) keeps its layout in `replica/<id>/version` (`replica::LAYOUT`, now 1). It covers everything in that folder (§4). A replica without the file is from before stamps and is stamped 1; a new one is stamped as it's made. An older one runs the steps in `replica::UPGRADES` in order, one per layout. Each step must be safe to run again after a crash, and the stamp moves on only after its step is done (written beside, flushed, renamed). A newer one doesn't open (`replica::Newer`) and nothing in it is touched. The notes still open from their files, without history or sync, and the app says "These notes' history was written by a newer Carnet. Update Carnet to open it."
+- **The web app's IndexedDB** has the browser's own version (`VERSION` in `web/src/lib/db.ts`): `onupgradeneeded` runs the steps in `UPGRADES` from the version found, in the one transaction the browser gives it. A database a newer Carnet opened gives a `VersionError`, and the page stops and says "The notes kept in this browser were saved by a newer Carnet. Reload the page to get it." The page updates itself through its service worker, so a newer Carnet has been in this browser and the reload brings it. If another tab with a newer Carnet upgrades the database while this one is open, this one stops the same way at its next save.
+- **The vault's bytes** in IndexedDB (`Vault.save`) start with a header: `CRS` and the layout's digit (`notes::STATE`, now 1). An older layout goes through `STATE_UPGRADES` as it opens and is saved in the new layout at the next save. A newer one is refused (`state_refusal`), and the page says so rather than starting over. Bytes that don't read at all start again, and the server sends everything back.
+- **Not stamped:** `sync.txt` and `settings.txt` are `key = value` lines, and a reader skips keys it doesn't know. An older app that rewrites one drops the keys it doesn't know, so a new key must be one an older app can lose. The keychain entry (signing key, then the ring) would need a stamp before its format changes.

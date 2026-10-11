@@ -1,0 +1,33 @@
+// The Windows executable's resources: its icon (Explorer's, the taskbar
+// pin's, the Start menu's) and the version Explorer's Properties show.
+// build.rs compiles it; scripts/package.nu builds the installer around the
+// result. CARNET_VERSION_* come from Cargo.toml through build.rs.
+
+#include <winver.h>
+
+1 ICON "../../assets/icon/carnet.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION CARNET_VERSION_MAJOR, CARNET_VERSION_MINOR, CARNET_VERSION_PATCH, 0
+PRODUCTVERSION CARNET_VERSION_MAJOR, CARNET_VERSION_MINOR, CARNET_VERSION_PATCH, 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "qxuken"
+            VALUE "FileDescription", "Carnet"
+            VALUE "FileVersion", CARNET_VERSION
+            VALUE "InternalName", "carnet"
+            VALUE "OriginalFilename", "carnet.exe"
+            VALUE "ProductName", "Carnet"
+            VALUE "ProductVersion", CARNET_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

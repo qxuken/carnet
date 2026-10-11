@@ -1,0 +1,204 @@
+//! Several notes and folders chosen at once in the library, as Finder
+//! chooses them: ⇧-click takes everything from the last one clicked to
+//! the one clicked now, ⌘-click (Ctrl elsewhere) adds or takes one. What
+//! is chosen goes to the trash together, or, notes only, to a folder.
+
+use kui_native::KeyMods;
+
+use super::*;
+
+/// A row of the library that can be chosen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pick {
+    /// A note, by id.
+    Note(u64),
+    /// A folder, by its path.
+    Folder(String),
+}
+
+/// Whether a click with these keys held adds to a choice: ⌘ on a Mac,
+/// Ctrl elsewhere.
+fn adds(m: KeyMods) -> bool {
+    if cfg!(target_os = "macos") { m.super_key } else { m.ctrl }
+}
+
+impl Carnet {
+    /// The library's rows as they read, top to bottom: the folders, then
+    /// the notes shown. What a ⇧-click's range runs over.
+    fn pick_rows(&self) -> Vec<Pick> {
+        let folders = self.store.folders.iter().cloned().map(Pick::Folder);
+        let notes = self.order.iter().map(|&i| Pick::Note(self.store.notes[i].id));
+        folders.chain(notes).collect()
+    }
+
+    /// The row a range starts from: the last one clicked, else the folder
+    /// shown, else the open note.
+    fn pick_from(&self) -> Pick {
+        self.pick_anchor.clone().unwrap_or_else(|| match &self.folder {
+            Some(f) if !self.deleted => Pick::Folder(f.clone()),
+            _ => Pick::Note(self.store.notes[self.current].id),
+        })
+    }
+
+    /// A click on a library row with `m` held: true when it chose (⇧ or ⌘
+    /// held), false for a plain click, which lets go of any choice and is
+    /// the row's own.
+    pub(super) fn pick_click(&mut self, row: Pick, m: KeyMods) -> bool {
+        if m.shift {
+            let rows = self.pick_rows();
+            let from = self.pick_from();
+            let (Some(a), Some(b)) = (rows.iter().position(|r| *r == from), rows.iter().position(|r| *r == row)) else {
+                self.picked = vec![row];
+                return true;
+            };
+            let (a, b) = (a.min(b), a.max(b));
+            self.picked = rows[a..=b].to_vec();
+            self.pick_anchor = Some(from);
+            return true;
+        }
+        if adds(m) {
+            // The open note (or the folder shown) is chosen already: the
+            // first ⌘-click adds to it.
+            if self.picked.is_empty() {
+                let from = self.pick_from();
+                if from != row {
+                    self.picked.push(from);
+                }
+            }
+            match self.picked.iter().position(|r| *r == row) {
+                Some(k) => {
+                    self.picked.remove(k);
+                }
+                None => self.picked.push(row.clone()),
+            }
+            self.pick_anchor = Some(row);
+            return true;
+        }
+        self.picked.clear();
+        self.pick_anchor = Some(row);
+        false
+    }
+
+    /// Whether a row is among those chosen.
+    pub(super) fn is_picked(&self, row: &Pick) -> bool {
+        self.picked.len() > 1 && self.picked.contains(row)
+    }
+
+    /// What is chosen, as it still is: folders that are gone and notes
+    /// that are gone left out, and what is inside a chosen folder left to
+    /// go with it.
+    fn picked_now(&self) -> (Vec<String>, Vec<u64>) {
+        let mut folders: Vec<String> = self
+            .picked
+            .iter()
+            .filter_map(|p| match p {
+                Pick::Folder(f) if self.store.folders.contains(f) => Some(f.clone()),
+                _ => None,
+            })
+            .collect();
+        let inside = |f: &str, of: &str| f == of || f.starts_with(&format!("{of}/"));
+        let all = folders.clone();
+        folders.retain(|f| !all.iter().any(|o| o != f && inside(f, o)));
+        let notes = self
+            .picked
+            .iter()
+            .filter_map(|p| match p {
+                Pick::Note(id) => self.store.notes.iter().find(|n| n.id == *id),
+                _ => None,
+            })
+            .filter(|n| !folders.iter().any(|f| inside(&n.folder, f)))
+            .map(|n| n.id)
+            .collect();
+        (folders, notes)
+    }
+
+    /// "3 notes", "2 folders and a note": what is chosen, in words.
+    fn picked_words(folders: usize, notes: usize) -> String {
+        let count = |n: usize, one: &str, many: &str| match n {
+            1 => format!("a {one}"),
+            n => format!("{n} {many}"),
+        };
+        match (folders, notes) {
+            (0, n) => count(n, "note", "notes"),
+            (f, 0) => count(f, "folder", "folders"),
+            (f, n) => format!("{} and {}", count(f, "folder", "folders"), count(n, "note", "notes")),
+        }
+    }
+
+    /// The menu for what is chosen: to the trash, or (notes only) to a
+    /// folder.
+    pub(super) fn picked_menu(&self) -> Vec<MenuItem> {
+        let (folders, notes) = self.picked_now();
+        let what = Self::picked_words(folders.len(), notes.len());
+        let item = |label: String, to: Option<&str>| {
+            let mut m = vec![("picked", Value::str(if to.is_some() { "move" } else { "trash" }))];
+            if let Some(f) = to {
+                m.push(("folder", Value::str(f)));
+            }
+            MenuItem::new(label).id(Value::map(m))
+        };
+        let mut items = Vec::new();
+        if folders.is_empty() && !notes.is_empty() {
+            let mut targets = vec![item("Out of their folders".into(), Some(""))];
+            targets.extend(self.store.folders.iter().map(|f| item(f.clone(), Some(f))));
+            items.push(MenuItem::submenu(format!("Move {what} to"), targets));
+            items.push(MenuItem::separator());
+        }
+        items.push(item(format!("Move {what} to the trash"), None).accel(crate::keys::TRASH));
+        items
+    }
+
+    /// The chosen notes and folders to the trash, together: one notice
+    /// says what went, and its Undo brings all of it back.
+    pub(super) fn trash_picked(&mut self) {
+        let (folders, notes) = self.picked_now();
+        self.picked.clear();
+        self.pick_anchor = None;
+        let mut undo = Vec::new();
+        let (mut gone_f, mut gone_n) = (0, 0);
+        for f in &folders {
+            let had = self.store.folders.contains(f);
+            self.notice = None;
+            self.folder_action(f, "delete");
+            if had && !self.store.folders.contains(f) {
+                gone_f += 1;
+            }
+            undo.extend(self.notice.take().and_then(|n| n.undo));
+        }
+        for id in notes {
+            let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { continue };
+            self.notice = None;
+            self.delete_note_at(i);
+            if !self.store.notes.iter().any(|n| n.id == id) {
+                gone_n += 1;
+            }
+            undo.extend(self.notice.take().and_then(|n| n.undo));
+        }
+        if gone_f + gone_n > 0 {
+            let what = Self::picked_words(gone_f, gone_n);
+            self.notify(format!("Moved {what} to the trash"), (!undo.is_empty()).then_some(Undo::Many(undo)));
+        }
+    }
+
+    /// The chosen notes into folder `to` ("" for the top level).
+    pub(super) fn move_picked(&mut self, to: &str) {
+        let (_, notes) = self.picked_now();
+        self.picked.clear();
+        self.pick_anchor = None;
+        let mut moved = 0;
+        for id in notes {
+            let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { continue };
+            if self.store.notes[i].folder == to {
+                continue;
+            }
+            self.move_note(i, to);
+            if self.store.notes.iter().any(|n| n.id == id && n.folder == to) {
+                moved += 1;
+            }
+        }
+        if moved > 0 {
+            let place = if to.is_empty() { "out of their folders".to_string() } else { format!("to \u{201c}{}\u{201d}", folder_name(to)) };
+            self.notify(format!("Moved {} {place}", Self::picked_words(0, moved)), None);
+        }
+    }
+}

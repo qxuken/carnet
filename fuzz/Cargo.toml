@@ -1,0 +1,73 @@
+[package]
+name = "carnet-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "libFuzzer targets for Carnet's Markdown, inline styling, comparing, notes as CRDTs, the wire and the server's hub"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+carnet-core = { path = "../crates/carnet-core" }
+carnet-sync = { path = "../crates/carnet-sync" }
+carnet-server = { path = "../crates/carnet-server" }
+
+# A workspace of its own: built with nightly and sanitizers by cargo fuzz,
+# never by the app's `cargo build`.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "markdown"
+path = "fuzz_targets/markdown.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inline"
+path = "fuzz_targets/inline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compare"
+path = "fuzz_targets/compare.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "note_doc"
+path = "fuzz_targets/note_doc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replica"
+path = "fuzz_targets/replica.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hub"
+path = "fuzz_targets/hub.rs"
+test = false
+doc = false
+bench = false

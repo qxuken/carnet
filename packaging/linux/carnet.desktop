@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Carnet
+GenericName=Notes
+Comment=Notes with lists and tables that work properly
+Exec=carnet
+Icon=carnet
+Terminal=false
+Categories=Office;TextEditor;Utility;
+Keywords=notes;markdown;notebook;
+StartupWMClass=carnet

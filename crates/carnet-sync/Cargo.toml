@@ -1,0 +1,64 @@
+[package]
+name = "carnet-sync"
+version = "0.1.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Carnet's notes as CRDTs: each note's file as a Loro text, its history, and this device's replica of them"
+
+# The core (`note`) builds for wasm too; the replica on disk is native only.
+[dependencies]
+loro = "=1.16.2"
+# The wire (docs/SYNC.md §6): the Loro Protocol's frames and `%ELO` records.
+loro-protocol = "=0.3.0"
+# End-to-end encryption (§7): AES-256-GCM records, keys by HKDF-SHA256,
+# devices that sign with Ed25519, a recovery code in BIP-39 words. All
+# pure Rust, all for wasm too; randomness comes in through `Random`.
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
+hkdf = "0.13"
+sha2 = "0.11"
+ed25519-dalek = "3"
+# Sealed boxes (X25519): a new vault key, sent to each device kept when
+# one is removed. The curve ed25519-dalek is already built on.
+curve25519-dalek = { version = "5", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
+bip39 = { version = "3", default-features = false, features = ["std"] }
+# Pairing a device (§7): SPAKE2 over the server, keyed by a short code.
+# The stable line; it takes its randomness from us (rand_core 0.6's
+# traits, put on `Random`), so it needs no OS's either.
+spake2 = { version = "=0.4.0", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+# Email and password, for a hosted service (§7): OPAQUE, so the password
+# never reaches the server, not even hashed; Argon2id against guessing.
+opaque-ke = { version = "3", default-features = false, features = ["ristretto255-voprf", "argon2"] }
+# Its password hash, Argon2id with its defaults (19 MiB, two passes).
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+
+# Property tests: random notes and edits, shrunk to the smallest that fails
+# (tests/properties.rs). Failures found are kept in proptest-regressions/.
+[dev-dependencies]
+proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
+# net's TLS test: a server with a certificate of its own making.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+
+# The OS's randomness, where there is an OS (the PWA brings WebCrypto's).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = "0.3"
+# `net`: the desktop's socket, on a thread of its own (src/net.rs). TLS by
+# rustls with ring and the web's roots built in: no OpenSSL, no aws-lc,
+# so the Windows and Linux cross builds need nothing more.
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros", "io-util"], optional = true }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+# Pictures over HTTP (http.rs): the socket's TLS, and its parser of
+# headers, both already under tokio-tungstenite.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
+httparse = { version = "1", optional = true }
+
+[features]
+# The desktop's network driver; the PWA and the server leave it out.
+net = ["dep:tokio", "dep:tokio-tungstenite", "dep:rustls", "dep:webpki-roots", "dep:futures-util", "dep:tokio-rustls", "dep:httparse"]
