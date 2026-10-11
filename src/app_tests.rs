@@ -4106,52 +4106,6 @@ fn the_page_follows_the_text_size_down_to_12px() {
 }
 
 #[test]
-fn a_heading_collapses_what_is_under_it_on_the_page_only() {
-    let (mut app, mut d, dir) = body("fold");
-    d.core.set_inspect(true);
-    for (i, s) in ["## First", "one", "two", "## Second", "three"].iter().enumerate() {
-        if i > 0 {
-            key(&mut app, &mut d, "enter");
-        }
-        type_in(&mut app, &mut d, s);
-    }
-    let md = app.store.notes[app.current].markdown();
-    let ids: Vec<u64> = app.doc().blocks().iter().map(|b| b.id).collect();
-    let drawn = |app: &Carnet| app.row_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-    d_frame_twice(&mut app, &mut d);
-    assert!(drawn(&app).contains(&ids[1]));
-    // From the page's menu on the heading.
-    app.caret = Caret::at(page::end(app.doc(), Slot::block(ids[0])));
-    d.frame(&mut app);
-    assert!(app.page_menu().iter().any(|m| m.label == "Collapse section"));
-    app.page_action("fold");
-    d_frame_twice(&mut app, &mut d);
-    assert_eq!(drawn(&app)[..2], [ids[0], ids[3]], "the paragraphs under it are out of sight");
-    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("2 more blocks")));
-    assert_eq!(app.store.notes[app.current].markdown(), md, "the file is as it was");
-    // ↓ from the heading steps over them, to the next heading.
-    key(&mut app, &mut d, "down");
-    assert_eq!(app.caret.head.slot.block, ids[3]);
-    assert!(app.folded.contains(&ids[0]), "still collapsed");
-    // A caret that goes in (here, ↑ then ← from the second heading's
-    // start, into the end of "two") opens it.
-    key(&mut app, &mut d, "home");
-    key(&mut app, &mut d, "left");
-    d_frame_twice(&mut app, &mut d);
-    assert_eq!(app.caret.head.slot.block, ids[2]);
-    assert!(!app.folded.contains(&ids[0]), "opened");
-    assert!(drawn(&app).contains(&ids[1]));
-    // The pill shows them again too.
-    app.fold(ids[0]);
-    d_frame_twice(&mut app, &mut d);
-    let pill = d.key_of("folded").expect("how much is hidden");
-    d.click_key(&mut app, pill);
-    d_frame_twice(&mut app, &mut d);
-    assert!(app.folded.is_empty());
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
 fn a_window_360_wide_holds_the_note_the_list_and_the_settings() {
     let (store, dir) = temp_store("w360");
     let mut app = Carnet::new(store);

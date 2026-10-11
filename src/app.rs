@@ -220,8 +220,6 @@ pub enum Msg {
     Tint { ink: u64, color: u64 },
     /// The colour picker for the words' colour (`ink` 1) or a highlighter.
     TintMenu { ink: u64 },
-    /// A heading's section collapsed, or shown again.
-    Fold { id: u64 },
     /// The link editor's buttons: 0 done, 1 open, 2 remove the link.
     LinkAct { what: u64 },
     CloseLink,
@@ -538,11 +536,6 @@ pub struct Carnet {
     text_w: f32,
     /// The paragraph whose first letter is dropped, this frame.
     initial: Option<Slot>,
-    /// Headings whose sections are collapsed, by block id: what the page
-    /// shows, never what the file says. For as long as the app runs.
-    pub folded: std::collections::HashSet<u64>,
-    /// The blocks a collapsed heading hides, as last drawn.
-    pub hidden: std::collections::HashSet<u64>,
     /// How far the leftmost strip's content keeps from the window's left
     /// edge: past the macOS traffic lights under custom chrome, else 0.
     pub lights: f32,
@@ -852,8 +845,6 @@ impl Carnet {
             images: Images::default(),
             text_w: 600.0,
             initial: None,
-            folded: Default::default(),
-            hidden: Default::default(),
             menu_open: false,
             lights: 0.0,
             refocus: false,
@@ -2800,7 +2791,6 @@ impl Carnet {
                 }
             }
             Msg::Slash { index } => self.run_slash(index as usize),
-            Msg::Fold { id } => self.fold(id),
             Msg::ResizePicture { .. } | Msg::CardDrag { .. } | Msg::PictureDrag { .. } | Msg::LibraryDrag => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {

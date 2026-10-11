@@ -49,8 +49,6 @@ pub enum Glyph {
     Search,
     ChevronDown,
     ChevronUp,
-    /// A folded heading's: what is under it is hidden.
-    ChevronRight,
     /// The toolbar's overflow: three dots, where a menu of more is meant.
     More,
     Quote,
@@ -201,7 +199,6 @@ impl Glyph {
             Search => ("M10.5 4.5a6 6 0 1 0 0 12a6 6 0 1 0 0-12z M15 15l4.5 4.5", ""),
             ChevronDown => ("M6.5 9.5L12 15l5.5-5.5", ""),
             ChevronUp => ("M6.5 14.5L12 9l5.5 5.5", ""),
-            ChevronRight => ("M9.5 6.5L15 12l-5.5 5.5", ""),
             Quote => ("M5 5.5v13 M9.5 7.5h10 M9.5 12h10 M9.5 16.5h6.5", ""),
             TextColor => ("M7 16.5l5-12 5 12 M8.9 12h6.2", "M4.5 18.5h15v2.2h-15z"),
             Highlight => (
@@ -259,13 +256,13 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 60] = [
+    pub const ALL: [Glyph; 59] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
         Glyph::Indent, Glyph::Up, Glyph::Down, Glyph::Cross, Glyph::Star, Glyph::Trash, Glyph::Back, Glyph::Plus,
         Glyph::Minus, Glyph::Folder, Glyph::FolderPlus, Glyph::Settings, Glyph::Search, Glyph::ChevronDown,
-        Glyph::ChevronUp, Glyph::ChevronRight, Glyph::More, Glyph::Quote, Glyph::TextColor, Glyph::Highlight, Glyph::FloatLeft,
+        Glyph::ChevronUp, Glyph::More, Glyph::Quote, Glyph::TextColor, Glyph::Highlight, Glyph::FloatLeft,
         Glyph::FloatRight, Glyph::Inline, Glyph::Sidebar, Glyph::Zen, Glyph::Check, Glyph::Undo, Glyph::Upload,
         Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
         Glyph::Person, Glyph::Passkey,

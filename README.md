@@ -116,7 +116,7 @@ The toolbar's highlighter and text-colour buttons offer ten calm hues. They are 
 | drag in the margin | select whole blocks |
 | right-click on the page | cut, copy, paste, styles, and what the toolbar does for the block |
 
-The toolbar acts on the blocks the caret touches: turn them into another kind, indent them, move them, remove them. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table. A chevron beside a heading collapses the section under it; only the page changes, never the file.
+The toolbar acts on the blocks the caret touches: turn them into another kind, indent them, move them, remove them. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
 
 ### Notes and folders
 

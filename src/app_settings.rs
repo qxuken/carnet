@@ -394,7 +394,7 @@ impl Carnet {
                 let body = l.page_type(Type::BODY).family(l.body).color(t.fg);
                 let words = "Lists, tables and pictures, kept as plain Markdown files you own. \
                              Nothing moves unless you move it. Write a line, a page or a book; \
-                             fold a section away under its heading, pin the notes you come back to, \
+                             colour a word, drop a paragraph's first letter, pin the notes you come back to, \
                              and find any of them again by a word in it. Every note is a file in \
                              your folder, readable by any other app, today and in twenty years, \
                              whatever happens to this one.";
