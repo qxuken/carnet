@@ -14,7 +14,8 @@
   import { theme } from '../lib/editor/theme';
   import Icon from '../lib/Icon.svelte';
   import { HUES, inkOf, inkCss, washCss } from '../lib/colors';
-  import { PageEditor } from '../wasm/carnet_web.js';
+  import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
+  import { drawnPicture, picked as pictureHere, textWidth, type Picked } from '../lib/editor/picture';
 
   let props: { key: string; folder: string; fresh: boolean } = $props();
   // Which note, as it was opened: an editor is for one note (the reader
@@ -44,8 +45,11 @@
   let turned = $state<Record<string, boolean>>({});
   let flags = $state(0);
   const BAR = 48;
-  /// A sheet open over the toolbar: a link's address, or the colours.
-  let sheet = $state<null | 'link' | 'color'>(null);
+  /// A sheet open over the toolbar: a link's address, the colours, or a
+  /// picture's sizes.
+  let sheet = $state<null | 'link' | 'color' | 'size'>(null);
+  /// The picture the caret is on, if it is on one.
+  let pic = $state<Picked | null>(null);
   /// The colours' tab: the words' own, or a highlighter.
   let inkTab = $state(true);
   let url = $state('');
@@ -144,6 +148,8 @@
     flags = pe.style_here();
     const t = pe.tint_here();
     tint = [t[0], t[1]];
+    pic = pictureHere(pe);
+    if (!pic && sheet === 'size') sheet = null;
   }
 
   function openLink() {
@@ -191,6 +197,28 @@
     },
     { icon: () => 'trash', label: 'Remove the table', f: (pe) => pe.remove_table() },
   ];
+
+  /// A picture selected: where it sits, its size, taking it out. What a
+  /// block becomes and the words' styles do nothing to it, so these stand
+  /// in their place, as on the desktop.
+  const pictureTools: Tool[] = [
+    { icon: () => 'inline', label: 'On its own line', f: (pe) => pe.set_picture_float(0, false), on: () => pic?.float === 0 },
+    { icon: () => 'float-left', label: 'Left of the text', f: (pe) => pe.set_picture_float(1, false), on: () => pic?.float === 1 },
+    { icon: () => 'float-right', label: 'Right of the text', f: (pe) => pe.set_picture_float(2, false), on: () => pic?.float === 2 },
+    { icon: () => 'resize', label: 'Size', f: () => ((sheet = sheet === 'size' ? null : 'size'), false), on: () => sheet === 'size', gap: true },
+    { icon: () => 'trash', label: 'Remove picture', f: (pe) => pe.remove_picture() },
+    { icon: () => 'undo', label: 'Undo', f: (pe) => pe.undo(), gap: true },
+  ];
+
+  /// The sizes a picture is given from the list: shares of the text's
+  /// width, the desktop's.
+  const SIZES: [string, number][] = JSON.parse(picture_sizes());
+  const sizeOf = (pct: number) => (view ? Math.round((textWidth(view) * pct) / 100) : 0);
+  /// The size it is drawn at now is `pct`'s (to within 2, as the desktop ticks it).
+  function sizeIs(p: Picked, pct: number) {
+    const el = view && drawnPicture(view, p.line);
+    return !!el && Math.abs(el.getBoundingClientRect().width - sizeOf(pct)) < 2;
+  }
 
   const tools: Tool[] = [
     { icon: () => 'todo', label: 'Checklist', f: (pe) => pe.turn(TURN.todo), on: () => turned.todo },
@@ -366,6 +394,17 @@
           {/if}
         </div>
       </div>
+    {:else if sheet === 'size' && pic}
+      {@const p = pic}
+      <div class="sheet" role="dialog" aria-label="Picture size">
+        <div class="row">
+          {#each SIZES as [name, pct] (pct)}
+            <button class="pill" class:on={sizeIs(p, pct)} aria-pressed={sizeIs(p, pct)} onclick={() => act((pe) => pe.set_picture_width(sizeOf(pct)))}>{name}</button>
+          {/each}
+          <button class="pill" disabled={!p.width} onclick={() => act((pe) => pe.set_picture_width(undefined))}>Original size</button>
+        </div>
+        <p class="recent">Or drag the handles on the picture.</p>
+      </div>
     {:else if sheet === 'link'}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div role="dialog" aria-label="Link" tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
@@ -385,7 +424,7 @@
     {/if}
     <div class="strip">
       <div class="tools">
-        {#each inTable ? [...tableTools, ...tools.slice(7)] : tools as t (t.label)}
+        {#each inTable ? [...tableTools, ...tools.slice(7)] : pic ? pictureTools : tools as t (t.label)}
           {#if t.gap}<span class="gap"></span>{/if}
           <button class:on={t.on?.()} aria-label={t.label} aria-pressed={t.on ? t.on() : undefined} title={t.label} onclick={() => act(t.f)}>
             <Icon name={t.icon()} size={20} />
@@ -455,6 +494,7 @@
     text-decoration: none; color: var(--ink);
   }
   .pill.primary { background: var(--primary); color: var(--on-accent); }
+  .pill.on { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
   .pill:disabled { opacity: 0.45; }
   .dot { width: 12px; height: 12px; border-radius: 3px; background: var(--highlight); }
   .link input {

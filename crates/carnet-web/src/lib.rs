@@ -5,7 +5,7 @@
 pub mod editor;
 pub mod notes;
 
-use carnet_core::inline;
+use carnet_core::{inline, page};
 use carnet_sync::crypto::{DeviceKey, Random, RecoveryCode};
 use carnet_sync::invite::InviteCode;
 use carnet_sync::pair::{Enroller, Joiner, Joining, NO_SLOT, PairCode, PasswordJoiner, Recoverer};
@@ -703,7 +703,8 @@ impl PageEditor {
 
     /// How each line is drawn, as JSON: `[{k: kind, f: first of its block,
     /// i: indent, d: done, n: number, r: [[from, to, flags, mark, ink]],
-    /// src, wk: the src an Obsidian embed's, alt, w, cells}]`. Flags: 1 bold, 2 italic, 4 struck, 8 code,
+    /// src, wk: the src an Obsidian embed's, alt, w, fl: a picture's place
+    /// (0 its own line, 1 left, 2 right), cells}]`. Flags: 1 bold, 2 italic, 4 struck, 8 code,
     /// 16 link; colours 0xRRGGBBAA, a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
         let n = self.e.lines().len();
@@ -739,7 +740,7 @@ impl PageEditor {
                     })
                     .collect();
                 format!(
-                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"cells":[{}]}}"#,
+                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}]}}"#,
                     l.kind,
                     l.first,
                     l.indent,
@@ -750,6 +751,7 @@ impl PageEditor {
                     l.wiki,
                     json(&l.alt),
                     l.width.map_or("null".into(), |w| w.to_string()),
+                    float_number(l.float),
                     cells.join(",")
                 )
             })
@@ -869,6 +871,32 @@ impl PageEditor {
         self.e.insert_picture(src)
     }
 
+    /// The one picture the caret is on, or selects: `[line, place (0 its
+    /// own line, 1 left, 2 right), width (0: its own)]`.
+    pub fn picture_here(&self) -> Option<Vec<u32>> {
+        self.e.picture_here().map(|(line, float, width)| vec![line as u32, float_number(float), width.unwrap_or(0)])
+    }
+
+    /// The caret's picture `width` wide (`undefined`: its own).
+    pub fn set_picture_width(&mut self, width: Option<u32>) -> bool {
+        self.e.set_picture_width(width)
+    }
+
+    /// The caret's picture on its own line (0), left (1) or right (2) of
+    /// the text; `toggle` (a shortcut), back on its own line if there.
+    pub fn set_picture_float(&mut self, to: u32, toggle: bool) -> bool {
+        let to = match to {
+            1 => carnet_core::doc::Float::Left,
+            2 => carnet_core::doc::Float::Right,
+            _ => carnet_core::doc::Float::None,
+        };
+        self.e.set_picture_float(to, toggle)
+    }
+
+    pub fn remove_picture(&mut self) -> bool {
+        self.e.remove_picture()
+    }
+
     /// The caret's link given `url`, or taken off (`undefined`); else the
     /// selection made a link.
     pub fn set_link(&mut self, url: Option<String>) -> bool {
@@ -903,6 +931,44 @@ impl PageEditor {
     pub fn redo(&mut self) -> bool {
         self.e.redo()
     }
+}
+
+fn float_number(f: carnet_core::doc::Float) -> u32 {
+    match f {
+        carnet_core::doc::Float::None => 0,
+        carnet_core::doc::Float::Left => 1,
+        carnet_core::doc::Float::Right => 2,
+    }
+}
+
+/// How wide a picture `natural` pixels wide is drawn, as the desktop draws
+/// it ([`page::picture_width`]): `[width, the width it has with none
+/// given]`; `given` 0 for none.
+#[wasm_bindgen]
+pub fn picture_width(natural: f32, given: u32, text_w: f32, max: f32, floated: bool) -> Vec<f32> {
+    let (w, fit) = page::picture_width(natural, (given > 0).then_some(given), text_w, max, floated);
+    vec![w, fit]
+}
+
+/// A picture's width while its handle is dragged `dx` outwards.
+#[wasm_bindgen]
+pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
+    page::dragged_width(from, dx, max)
+}
+
+/// The width a resize let go at `w` gives a picture (`undefined`: none,
+/// back at its own `fit`).
+#[wasm_bindgen]
+pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
+    page::resized_width(w, fit)
+}
+
+/// The widths a picture is given from a menu, as JSON: `[[name, percent
+/// of the text's width]]`.
+#[wasm_bindgen]
+pub fn picture_sizes() -> String {
+    let all: Vec<String> = page::PICTURE_SIZES.iter().map(|(name, pct)| format!("[{},{pct}]", json(name))).collect();
+    format!("[{}]", all.join(","))
 }
 
 /// What made a version, as a row in the history says it; where (here, or

@@ -818,14 +818,10 @@ impl Carnet {
                     );
                     return;
                 };
-                let fit = if floated { nw.min((self.text_w * 0.45).round()) } else { nw };
-                let dw = match resizing {
-                    Some(r) => r.w,
-                    None => width.map_or(fit, |w| w as f32),
-                }
-                .clamp(48.0_f32.min(nw), max_w);
+                let (drawn, fit) = page::picture_width(nw, width, self.text_w, max_w, floated);
+                let dw = resizing.map_or(drawn, |r| r.w.clamp(page::PICTURE_MIN.min(nw), max_w));
                 let dh = dw * nh / nw;
-                self.pic_w.insert(id, (dw, fit.min(max_w), max_w));
+                self.pic_w.insert(id, (dw, fit, max_w));
                 // The picture on the text's own edge; its ring an overlay
                 // 5px out, so selecting it moves nothing.
                 ui.with(NodeSpec::row().size(dw, dh), |ui| {
@@ -1030,14 +1026,13 @@ impl Carnet {
             Some("move") => {
                 if let Some(r) = self.resizing.as_mut() {
                     let dx = if r.left { r.x0 - x } else { x - r.x0 };
-                    r.w = (r.w0 + dx).clamp(48.0, max_w);
+                    r.w = page::dragged_width(r.w0, dx, max_w);
                 }
             }
             _ => {
                 let Some(r) = self.resizing.take() else { return };
-                let w = r.w.round();
                 // Back at the width it has with none given: none given.
-                let width = if (w - fit).abs() < 2.0 { None } else { Some(w as u32) };
+                let width = page::resized_width(r.w, fit);
                 self.edit(Step::Other, |d, _| page::set_image_width(d, id, width));
                 self.reveal = false;
             }
@@ -1490,7 +1485,7 @@ impl Carnet {
             items.extend([item("Copy picture", "copy-picture"), item("Copy picture as Markdown", "copy-picture-md"), MenuItem::separator()]);
             // Sizes: shares of the text's width, the one it has now ticked.
             let full = (self.text_w - 10.0).max(48.0);
-            for (label, pct) in [("Small", 25), ("Medium", 50), ("Large", 75), ("Full width", 100)] {
+            for (label, pct) in page::PICTURE_SIZES {
                 let w = (full * pct as f32 / 100.0).round();
                 items.push(item(label, &format!("size:{pct}")).checked((w - now).abs() < 2.0));
             }
@@ -1670,7 +1665,7 @@ impl Carnet {
                         _ => Float::None,
                     };
                     if let Some((id, now, _)) = self.picture_here() {
-                        let to = if now == to { Float::None } else { to };
+                        let to = page::float_toggled(now, to);
                         self.edit(Step::Other, |d, _| page::set_image_float(d, id, to));
                     }
                 } else if let Some(ink) = a.strip_prefix("tint-menu:").and_then(|n| n.parse::<u64>().ok()) {
@@ -2156,12 +2151,7 @@ impl Carnet {
     /// where it sits and its width as last drawn.
     pub(super) fn picture_here(&self) -> Option<(u64, Float, f32)> {
         let doc = self.doc();
-        let mut touched = page::touched(doc, self.caret);
-        let i = touched.next()?;
-        if touched.next().is_some() {
-            return None;
-        }
-        let b = &doc.blocks()[i];
+        let b = &doc.blocks()[page::picture_at(doc, self.caret)?];
         match &b.kind {
             Kind::Image { float, .. } => Some((b.id, *float, self.pic_w.get(&b.id).map_or(0.0, |w| w.0))),
             _ => None,
@@ -2172,12 +2162,7 @@ impl Carnet {
     /// and whether an Obsidian embed names it.
     pub(super) fn picture_at_caret(&self) -> Option<(String, bool)> {
         let doc = self.doc();
-        let mut touched = page::touched(doc, self.caret);
-        let i = touched.next()?;
-        if touched.next().is_some() {
-            return None;
-        }
-        match &doc.blocks()[i].kind {
+        match &doc.blocks()[page::picture_at(doc, self.caret)?].kind {
             Kind::Image { src, wiki, .. } => Some((src.clone(), *wiki)),
             _ => None,
         }
