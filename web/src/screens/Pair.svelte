@@ -407,12 +407,16 @@
   .back:not(:disabled):hover { background: var(--hover); }
   .back:disabled, .link:disabled, .choice:disabled { opacity: 0.45; cursor: default; }
   .choices { display: flex; flex-direction: column; gap: 10px; }
+  /* Each a step off the page: its edge a control's, a heavier foot; a
+     further step under the pointer, and another pressed. */
   .choice {
     display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px 12px 14px 14px;
-    border: 1px solid var(--border-strong); border-radius: var(--radius-card); background: var(--card); color: var(--ink);
-    text-align: left; cursor: pointer;
+    border: 1px solid color-mix(in srgb, var(--border-strong) 88%, var(--ink)); border-radius: var(--radius-card);
+    background: var(--card); color: var(--ink); box-shadow: 0 1px 0 var(--border-strong);
+    text-align: left; cursor: pointer; transition: background-color 0.12s, border-color 0.12s;
   }
-  .choice:not(:disabled):hover { border-color: var(--accent); }
+  .choice:not(:disabled):hover { border-color: var(--accent); background: linear-gradient(var(--hover), var(--hover)) var(--card); }
+  .choice:not(:disabled):active { background: linear-gradient(var(--pressed), var(--pressed)) var(--card); box-shadow: none; }
   .badge {
     display: inline-flex; align-items: center; justify-content: center; flex: none; width: 40px; height: 40px;
     border-radius: 50%; background: var(--accent-soft); color: var(--accent-ink);

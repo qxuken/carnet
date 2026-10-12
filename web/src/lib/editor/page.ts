@@ -345,6 +345,39 @@ function pictureBlocks(state: EditorState, pictures: Pictures): DecorationSet | 
   return Decoration.set(out, true);
 }
 
+/// A divider the selection takes in whole (Backspace on the empty line
+/// under it, a click on it): drawn chosen, as the desktop draws it — the
+/// selection's wash, the rule in the accent — so the next Backspace is
+/// seen to have a target. Native selection draws nothing on a widget.
+const ruleOn = Decoration.line({ class: 'cm-rule-on' });
+
+function chosenRules(state: EditorState): DecorationSet {
+  const all = state.field(looks);
+  const doc = state.doc;
+  const sel = state.selection.main;
+  if (sel.empty || all.length !== doc.lines) return Decoration.none;
+  const out: Range<Decoration>[] = [];
+  for (let n = doc.lineAt(sel.from).number; n <= doc.lineAt(sel.to).number; n++) {
+    if (all[n - 1]?.k !== 'divider') continue;
+    const line = doc.line(n);
+    if (sel.from <= line.from && sel.to >= line.to) out.push(ruleOn.range(line.from));
+  }
+  return Decoration.set(out);
+}
+
+const ruleChosen = ViewPlugin.fromClass(
+  class {
+    deco: DecorationSet;
+    constructor(v: EditorView) {
+      this.deco = chosenRules(v.state);
+    }
+    update(u: ViewUpdate) {
+      if (u.selectionSet || u.docChanged || u.transactions.some((t) => t.effects.some((e) => e.is(setLooks)))) this.deco = chosenRules(u.state);
+    }
+  },
+  { decorations: (v) => v.deco },
+);
+
 function build(view: EditorView, toggle: (line: number) => void, tables: TableContext): { deco: DecorationSet; atomic: DecorationSet } {
   const all = view.state.field(looks);
   const doc = view.state.doc;
@@ -494,6 +527,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     looks.init(() => JSON.parse(pe.looks())),
     pictureField,
     plugin,
+    ruleChosen,
     pictureTools(pe, run),
     pictureRoom,
     EditorState.transactionFilter.of((tr) => {

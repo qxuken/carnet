@@ -47,6 +47,10 @@ export const theme = EditorView.theme({
   '.cm-l': { color: 'var(--accent-ink)', textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, var(--accent-ink) 40%, transparent)' },
   '.cm-marked': { borderRadius: '3px' },
   '.cm-rule': { display: 'inline-block', width: '100%', borderTop: '1px solid var(--border-strong)', verticalAlign: 'middle' },
+  // A divider selected whole (page.ts `ruleChosen`): the selection's
+  // wash over its line, the rule in the accent.
+  '.cm-rule-on': { backgroundColor: 'var(--selection)', borderRadius: 'var(--radius)' },
+  '.cm-rule-on .cm-rule': { borderTopColor: 'var(--accent)' },
   // Pictures (page.ts `PictureRow`), laid out as the reading view lays
   // them out (styles.css `.pictures`). Every space is inside what
   // CodeMirror measures: padding, never a margin, and a line that goes

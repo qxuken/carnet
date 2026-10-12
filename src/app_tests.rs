@@ -6794,3 +6794,94 @@ fn a_notice_stays_while_pointed_at_or_unseen() {
     let _ = std::fs::remove_dir_all(dir.join(".trash"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A divider put in at the note's end leaves a line to write on; a
+/// Backspace there selects the divider, drawn in the selection's wash and
+/// the accent, and only the next one takes it.
+#[test]
+fn a_divider_is_selected_before_backspace_takes_it() {
+    let (mut app, mut d, dir) = body("rule-select");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "Words");
+    app.on_plain(Msg::InsertDivider);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app), ["Words", "---", ""]);
+    // The divider's block as drawn: the most washed of what fills its row.
+    let wash = |app: &Carnet, d: &Drive| {
+        let id = blocks(app)[1].id;
+        let r = app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).expect("the divider's row");
+        d.core.nodes().iter().filter(|n| n.rect == r).map(|n| n.bg.a).fold(0.0, f32::max)
+    };
+    assert_eq!(wash(&app, &d), 0.0, "not selected: no wash");
+    key(&mut app, &mut d, "backspace");
+    d.frame(&mut app);
+    assert_eq!(texts(&app), ["Words", "---", ""], "the last line stays");
+    assert!(page::coverage(app.doc(), app.caret).whole.contains(&blocks(&app)[1].id), "the divider selected");
+    assert!(wash(&app, &d) > 0.0, "and drawn so");
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app), ["Words", ""]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The library's edge is one solid line the window's height, in either
+/// kind of window, light or dark: nothing of what is behind the window
+/// shows through it. A step darker under the pointer.
+#[test]
+fn the_library_edge_is_solid_its_whole_height() {
+    let (mut app, mut d, dir) = fresh("library-edge-solid");
+    d.core.set_inspect(true);
+    let edge = |d: &mut Drive| {
+        let k = d.key_of("library-edge").expect("the library's edge");
+        d.core.nodes().into_iter().find(|n| n.key == k).unwrap()
+    };
+    for (translucent, backdrop) in [(false, kui_native::Backdrop::Opaque), (true, kui_native::Backdrop::Blur), (true, kui_native::Backdrop::Transparent)] {
+        for theme in [ThemePref::Light, ThemePref::Dark] {
+            app.settings.translucent = translucent;
+            app.settings.theme = theme;
+            d.core.env.window.backdrop = backdrop;
+            d.move_to(&mut app, 700.0, 300.0);
+            d_frame_twice(&mut app, &mut d);
+            let n = edge(&mut d);
+            let what = format!("{backdrop:?} {theme:?}");
+            assert_eq!(n.bg.a, 1.0, "solid: {what}");
+            assert_eq!((n.rect.y, n.rect.h), (0.0, d.viewport.h), "the window's height: {what}");
+            let rest = n.bg;
+            d.move_to(&mut app, n.rect.x + 3.0, 300.0);
+            d_frame_twice(&mut app, &mut d);
+            let hovered = edge(&mut d).bg;
+            assert!(hovered.a == 1.0 && hovered != rest, "a step darker under the pointer: {what}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Settings → Sync's waiting line, by the frame clock: a wait a fast
+/// server ends within a frame or two says nothing; one that lasts says
+/// "Waiting…" after a moment, then "All sent" for a moment more, and
+/// asks for the frames that change it.
+#[test]
+fn the_waiting_line_waits_a_moment_and_says_all_sent() {
+    use super::settings_view::{WaitLine, Waited, SENT_SHOWN_FOR, WAIT_SHOWN_AFTER};
+    // A frame's wait: nothing at all, and nothing more to draw after.
+    let mut w = WaitLine::default();
+    assert_eq!(w.said(10.0, true), (None, Some(10.0 + WAIT_SHOWN_AFTER)));
+    assert_eq!(w.said(10.016, false), (None, None));
+    assert_eq!(w.said(10.0 + WAIT_SHOWN_AFTER, false), (None, None));
+    // A real wait: "Waiting…" once it has lasted, while it lasts.
+    let mut w = WaitLine::default();
+    assert_eq!(w.said(20.0, true).0, None);
+    assert_eq!(w.said(20.0 + WAIT_SHOWN_AFTER, true), (Some(Waited::Waiting), None));
+    assert_eq!(w.said(25.0, true).0, Some(Waited::Waiting));
+    // Sent: "All sent", and a frame asked for when it is to go.
+    assert_eq!(w.said(26.0, false), (Some(Waited::Sent), Some(26.0 + SENT_SHOWN_FOR)));
+    assert_eq!(w.said(27.0, false).0, Some(Waited::Sent));
+    assert_eq!(w.said(26.0 + SENT_SHOWN_FOR, false), (None, None));
+    // A new short wait while "All sent" shows: it stays, unbroken.
+    let mut w = WaitLine::default();
+    w.said(0.0, true);
+    w.said(1.0, true);
+    assert_eq!(w.said(2.0, false).0, Some(Waited::Sent));
+    assert_eq!(w.said(2.5, true).0, Some(Waited::Sent));
+    assert_eq!(w.said(2.6, false).0, Some(Waited::Sent));
+    assert_eq!(w.said(2.0 + SENT_SHOWN_FOR, false).0, None);
+}

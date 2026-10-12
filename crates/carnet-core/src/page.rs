@@ -739,7 +739,7 @@ fn shortcuts(doc: &mut Doc, c: &mut Caret, old: &str) {
             *c = Caret::at(entry(doc, &target, caret_in));
             if target.kind.is_atomic() {
                 // Nothing to type on: carry on in the block below.
-                carry_on_unless_picture(doc, doc.index_of(target.id).unwrap_or(0) + 1, c);
+                past_divider(doc, doc.index_of(target.id).unwrap_or(0) + 1, c, true);
             }
             doc.ensure_tail();
         }
@@ -780,7 +780,8 @@ fn entry(doc: &Doc, b: &Block, byte: usize) -> Pos {
 /// caret. At the start of a block it undoes the block's structure first —
 /// an item outdents, then becomes text; a heading becomes text — and then
 /// joins the text to the block above. A divider above goes; a table above
-/// is selected, so the next Backspace removes it.
+/// is selected, so the next Backspace removes it. An empty line under a
+/// divider, a table or a picture goes, and that is selected.
 pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     if delete_selection(doc, c) {
         return true;
@@ -870,11 +871,13 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
         Kind::Text(t) | Kind::Heading { text: t, .. } => {
             let Some(prev) = i.checked_sub(1) else { return false };
             match doc.blocks()[prev].kind.clone() {
-                Kind::Divider => {
+                // Words under a divider take its place; an empty line
+                // goes instead, the divider selected, as by a picture.
+                Kind::Divider if !t.is_empty() => {
                     doc.remove(prev);
                     true
                 }
-                Kind::Table(_) | Kind::Image { .. } => {
+                Kind::Divider | Kind::Table(_) | Kind::Image { .. } => {
                     // An empty line under a table goes, and the table is
                     // selected; a line with words only selects it.
                     if t.is_empty() && i + 1 < doc.len() {
@@ -934,7 +937,7 @@ fn after_removal_up(doc: &mut Doc, i: usize) -> Pos {
 /// Delete: the selection, else the character (or word) after the caret.
 /// At the end of a block the next one's text joins it; a divider below
 /// goes, a table or a picture below is selected (an empty line above
-/// one goes first).
+/// any of them goes first, and it is selected).
 pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     if delete_selection(doc, c) {
         return true;
@@ -973,14 +976,16 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     }
     let Some(next) = doc.blocks().get(i + 1).cloned() else { return false };
     match &next.kind {
-        Kind::Divider => {
+        // A divider below goes; from an empty line, the line goes instead
+        // and the divider is selected, as a picture is.
+        Kind::Divider if !matches!(&doc.blocks()[i].kind, Kind::Text(t) if t.is_empty()) => {
             doc.remove(i + 1);
             true
         }
         // An empty line above a table or a picture goes, and it is
         // selected (Backspace's, the other way); a line with words only
         // selects it.
-        Kind::Table(_) | Kind::Image { .. } => {
+        Kind::Divider | Kind::Table(_) | Kind::Image { .. } => {
             let empty = matches!(&doc.blocks()[i].kind, Kind::Text(t) if t.is_empty());
             if empty {
                 doc.remove(i);
@@ -1695,17 +1700,25 @@ fn carry_on(doc: &mut Doc, j: usize) -> Pos {
     start(Slot::block(next))
 }
 
-/// Where the caret carries on past a divider put in just before block
-/// `j`: as `carry_on`, but where a picture (or another divider) follows,
-/// just past the divider, where typing starts a paragraph — no empty
-/// line is made between the divider and the picture, to show as a gap.
-fn carry_on_unless_picture(doc: &mut Doc, j: usize, c: &mut Caret) {
-    if doc.blocks().get(j).is_some_and(|b| b.kind.is_atomic()) {
-        let divider = Slot::block(doc.blocks()[j - 1].id);
-        *c = Caret::at(end(doc, divider));
+/// Where the caret goes past a divider put in just before block `j`: into
+/// the block that follows — a text's start, a table's first cell, inside
+/// code — and onto a picture or another divider there, selected as a
+/// picture is. No empty line is made between them, to show as a gap; one
+/// is made only where the divider ends the note. Typed (`---`), it does
+/// not select what follows, where the next letter would replace it: the
+/// caret stands just past the divider, where typing starts a paragraph.
+fn past_divider(doc: &mut Doc, j: usize, c: &mut Caret, typed: bool) {
+    let Some(b) = doc.blocks().get(j) else {
+        *c = Caret::at(carry_on(doc, j));
         return;
-    }
-    *c = Caret::at(carry_on(doc, j));
+    };
+    *c = if !b.kind.is_atomic() {
+        Caret::at(entry(doc, b, 0))
+    } else if typed {
+        Caret::at(end(doc, Slot::block(doc.blocks()[j - 1].id)))
+    } else {
+        select_blocks(doc, j, j)
+    };
 }
 
 /// A divider where the caret is. In the middle of a block's words the
@@ -1728,7 +1741,7 @@ pub fn insert_divider(doc: &mut Doc, c: &mut Caret) -> bool {
     let words = p.slot.cell.is_none() && matches!(kind, Kind::Text(_) | Kind::Heading { .. } | Kind::Item { .. } | Kind::Quote(_));
     if !words {
         doc.insert(i + 1, Block::new(Kind::Divider));
-        carry_on_unless_picture(doc, i + 2, c);
+        past_divider(doc, i + 2, c, false);
         doc.ensure_tail();
         return true;
     }
@@ -1738,12 +1751,12 @@ pub fn insert_divider(doc: &mut Doc, c: &mut Caret) -> bool {
     let (at_start, at_end) = (v.drawn(byte) == 0, v.drawn(byte) == v.drawn_len());
     if t.is_empty() && matches!(kind, Kind::Text(_)) {
         doc.set(i, Block::new(Kind::Divider));
-        carry_on_unless_picture(doc, i + 1, c);
+        past_divider(doc, i + 1, c, false);
     } else if at_start {
         doc.insert(i, Block::new(Kind::Divider));
     } else if at_end {
         doc.insert(i + 1, Block::new(Kind::Divider));
-        carry_on_unless_picture(doc, i + 2, c);
+        past_divider(doc, i + 2, c, false);
     } else {
         // Cut as Enter cuts (a bold run cut is bold on both sides); the
         // spaces or the line break at the cut go.
@@ -2910,6 +2923,104 @@ mod tests {
         assert_eq!(texts(&d)[..2], ["---", "Head:Next"]);
     }
 
+    /// A divider put in before a block makes no empty line: the caret
+    /// goes on into the block — a text's start, a table's first cell — or
+    /// selects a picture or a divider there. At the note's end, a line.
+    #[test]
+    fn a_divider_carries_on_into_the_next_block() {
+        let pic = || Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false });
+        let table = || Block::new(Kind::Table(Table::new(2, 2)));
+        // On an empty line before a table: into its first cell.
+        let mut d = doc(vec![Block::text("a"), Block::text(""), table(), Block::text("")]);
+        let mut c = at(&d, 1, 0);
+        assert!(insert_block(&mut d, &mut c, Kind::Divider));
+        assert_eq!(texts(&d), ["Text:a", "---", "<table>", "Text:"]);
+        assert_eq!(c, at(&d, 2, 0), "the table's first cell");
+        // At the end of words before a table, the same.
+        let mut d = doc(vec![Block::text("a"), table(), Block::text("")]);
+        let mut c = at(&d, 0, 1);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(texts(&d), ["Text:a", "---", "<table>", "Text:"]);
+        assert_eq!(c, at(&d, 2, 0));
+        // Before a picture, or another divider: it is selected.
+        let mut d = doc(vec![Block::text("a"), pic(), Block::text("")]);
+        let mut c = at(&d, 0, 1);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(texts(&d), ["Text:a", "---", "Imag:", "Text:"]);
+        assert_eq!(picture_at(&d, c), Some(2));
+        let mut d = doc(vec![Block::text("a"), Block::new(Kind::Divider), Block::text("")]);
+        let mut c = at(&d, 0, 1);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(texts(&d), ["Text:a", "---", "---", "Text:"]);
+        assert_eq!(c, select_blocks(&d, 2, 2));
+        assert!(coverage(&d, c).whole.contains(&d.blocks()[2].id));
+        // Before words: their start, from the slash menu's empty line too.
+        let mut d = doc(vec![Block::text(""), Block::text("next")]);
+        let mut c = at(&d, 0, 0);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(texts(&d), ["---", "Text:next"]);
+        assert_eq!(c, at(&d, 1, 0));
+        // On the note's last line: a new one to write on.
+        let mut d = doc(vec![Block::text("a"), Block::text("")]);
+        let mut c = at(&d, 1, 0);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(texts(&d), ["Text:a", "---", "Text:"]);
+        assert_eq!(c, at(&d, 2, 0));
+    }
+
+    /// An empty line by a divider goes first, as by a picture, and the
+    /// divider is selected: it goes itself only at the next press.
+    /// Backspace from below, Delete from above; words take it at once.
+    #[test]
+    fn an_empty_line_by_a_divider_goes_before_the_divider() {
+        let rule = || Block::new(Kind::Divider);
+        let mut d = doc(vec![Block::text("a"), rule(), Block::text(""), Block::text("b")]);
+        let mut c = at(&d, 2, 0);
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "---", "Text:b"]);
+        assert_eq!(c, select_blocks(&d, 1, 1), "the divider selected");
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "Text:b"]);
+        // Delete in an empty line above one: mirrored.
+        let mut d = doc(vec![Block::text("a"), Block::text(""), rule(), Block::text("b")]);
+        let mut c = at(&d, 1, 0);
+        assert!(delete(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "---", "Text:b"]);
+        assert_eq!(c, select_blocks(&d, 1, 1));
+        assert!(delete(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "Text:b"]);
+        // The note's last line stays, to write on; the divider is selected.
+        let mut d = doc(vec![Block::text("a"), rule(), Block::text("")]);
+        let mut c = at(&d, 2, 0);
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "---", "Text:"]);
+        assert_eq!(c, select_blocks(&d, 1, 1));
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "Text:"]);
+        // Words by a divider: it goes at once, as before.
+        let mut d = doc(vec![Block::text("a"), rule(), Block::text("b")]);
+        let mut c = at(&d, 2, 0);
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "Text:b"]);
+        let mut d = doc(vec![Block::text("a"), rule(), Block::text("b")]);
+        let mut c = at(&d, 0, 1);
+        assert!(delete(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:a", "Text:b"]);
+        // An empty line between a divider and a table: Backspace selects
+        // the divider, Delete the table; the line goes either way.
+        let note = || doc(vec![rule(), Block::text(""), Block::new(Kind::Table(Table::new(2, 2))), Block::text("")]);
+        let mut d = note();
+        let mut c = at(&d, 1, 0);
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["---", "<table>", "Text:"]);
+        assert_eq!(c, select_blocks(&d, 0, 0));
+        let mut d = note();
+        let mut c = at(&d, 1, 0);
+        assert!(delete(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["---", "<table>", "Text:"]);
+        assert_eq!(c, select_blocks(&d, 1, 1));
+    }
+
     /// Drop the first letter, on the paragraphs the caret touches and off
     /// again; written to the file as the letter's tag, read back as the
     /// flag; Enter at its start keeps the letter with its paragraph.
@@ -2972,23 +3083,26 @@ mod tests {
         let mut c = Caret { anchor: start(b), head: end(&d, b) };
         assert!(insert_block(&mut d, &mut c, Kind::Divider));
         assert_eq!(kinds(&d), ["a.png", "b.png", "---", "c.png", "Text(\"Words\")"]);
-        let rule = Slot::block(d.blocks()[2].id);
-        assert_eq!(c, Caret::at(end(&d, rule)), "the caret just past the divider");
-        // Typing there starts a paragraph after it, before the picture.
-        insert(&mut d, &mut c, "x");
-        assert_eq!(kinds(&d)[2..5], ["---", "Text(\"x\")", "c.png"]);
+        assert_eq!(picture_at(&d, c), Some(3), "the picture after it selected");
         // An empty line between them: the divider in its place.
         let mut d = note();
         d.insert(2, Block::text(""));
         let mut c = at(&d, 2, 0);
         insert_block(&mut d, &mut c, Kind::Divider);
         assert_eq!(kinds(&d), ["a.png", "b.png", "---", "c.png", "Text(\"Words\")"]);
-        // `---` typed there, the same.
+        assert_eq!(picture_at(&d, c), Some(3));
+        // `---` typed there, the same; but nothing selected, where the
+        // next letter would replace it: the caret just past the divider.
         let mut d = note();
         d.insert(2, Block::text(""));
         let mut c = at(&d, 2, 0);
         Typing::default().type_text(&mut d, &mut c, "---");
         assert_eq!(kinds(&d), ["a.png", "b.png", "---", "c.png", "Text(\"Words\")"]);
+        let rule = Slot::block(d.blocks()[2].id);
+        assert_eq!(c, Caret::at(end(&d, rule)), "the caret just past the divider");
+        // Typing there starts a paragraph after it, before the picture.
+        insert(&mut d, &mut c, "x");
+        assert_eq!(kinds(&d)[2..5], ["---", "Text(\"x\")", "c.png"]);
         // At the end of words before a picture.
         let mut d = doc(vec![Block::text("Hello"), pic("c.png", Float::None)]);
         let mut c = at(&d, 0, 5);
