@@ -997,7 +997,7 @@ impl Carnet {
                 let usage = self.sync.usage.clone();
                 let read_only = self.sync.read_only;
                 let update_soon = self.sync.update_soon;
-                let waiting = self.sync.waiting();
+                let waiting = (self.sync.waiting(), self.sync.pictures_waiting());
                 // A line said of the account: an icon, then words.
                 let said = |ui: &mut Ui<'_>, g: Icon, ink: Color, words: &str| {
                     ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
@@ -1010,8 +1010,8 @@ impl Carnet {
                     ui.text(&whom, TextStyle::new(Type::SMALL.size).color(t.muted));
                     // Changes the server isn't known to keep yet: not "up
                     // to date" while any wait.
-                    if waiting > 0 {
-                        said(ui, Icon::Clock, t.muted, &waiting_words(waiting));
+                    if waiting != (0, 0) {
+                        said(ui, Icon::Clock, t.muted, &waiting_words(waiting.0, waiting.1));
                     }
                     // What the server keeps for the account, and, on a
                     // hosted plan, how much it may.
@@ -1897,9 +1897,23 @@ pub(super) fn over_limit(kept: u64, limit: u64) -> Option<String> {
     Some(format!("{what}: new pictures stay on this device until there's room. Notes still sync."))
 }
 
-/// Changes waiting to be sent, in words.
-pub(super) fn waiting_words(n: usize) -> String {
-    if n == 1 { "Waiting to send 1 change".into() } else { format!("Waiting to send {n} changes") }
+/// Changes and pictures waiting to be sent, in words.
+pub(super) fn waiting_words(changes: usize, pictures: usize) -> String {
+    format!("Waiting to send {}", waiting_count(changes, pictures))
+}
+
+/// "2 changes", "1 picture", "2 changes and 1 picture" (none of both is
+/// never asked).
+pub(super) fn waiting_count(changes: usize, pictures: usize) -> String {
+    let count = |n: usize, one: &str| match n {
+        0 => None,
+        1 => Some(format!("1 {one}")),
+        n => Some(format!("{n} {one}s")),
+    };
+    match (count(changes, "change"), count(pictures, "picture")) {
+        (Some(c), Some(p)) => format!("{c} and {p}"),
+        (c, p) => c.or(p).unwrap_or_default(),
+    }
 }
 
 pub(super) fn size_words(n: u64) -> String {

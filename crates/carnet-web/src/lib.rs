@@ -261,6 +261,12 @@ impl Vault {
         self.notes.session.waiting() as u32
     }
 
+    /// How many pictures put in here the server hasn't got yet: on their
+    /// way, or held back (the account full, or read only).
+    pub fn pictures_waiting(&self) -> u32 {
+        self.notes.pictures_waiting() as u32
+    }
+
     pub fn receive(&mut self, frame: &[u8]) {
         self.notes.receive(frame, &mut WebRandom);
     }

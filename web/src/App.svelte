@@ -130,14 +130,16 @@
   const back = () => (history.length > 1 ? history.back() : go(''));
 
   /// The footer's line: up to date only when nothing waits to be sent;
-  /// else how many changes wait, and, offline or read only, why.
+  /// else how many changes and pictures wait, and, offline or read only,
+  /// why. (The desktop's Settings says it in the same words.)
   const status = $derived.by(() => {
-    const n = sync.waiting;
+    const count = (n: number, one: string) => (n === 0 ? null : n === 1 ? `1 ${one}` : `${n} ${one}s`);
+    const parts = [count(sync.waiting, 'change'), count(sync.picturesWaiting, 'picture')].filter((p) => p !== null);
     const ok = sync.status === 'Up to date';
     // Read only: said here (and in Settings), not again as an error.
     const readOnly = sync.readOnly || (sync.usage !== null && !sync.usage.writable);
-    if (!n) return ok && readOnly ? { ok: false, text: 'Read only for now' } : { ok, text: sync.status };
-    const changes = n === 1 ? '1 change' : `${n} changes`;
+    if (!parts.length) return ok && readOnly ? { ok: false, text: 'Read only for now' } : { ok, text: sync.status };
+    const changes = parts.join(' and ');
     if (ok && readOnly) return { ok: false, text: `Read only for now: ${changes} waiting` };
     if (ok) return { ok: false, text: `Waiting to send ${changes}` };
     return { ok: false, text: `${sync.status} · ${changes} waiting` };

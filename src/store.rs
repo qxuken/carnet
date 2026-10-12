@@ -163,6 +163,17 @@ impl Note {
         Ok((fresh, text))
     }
 
+    /// Its file moved to `to` by a rename here: one with no heading is
+    /// called by its file's name, so by the new one now, as it would be
+    /// read from there.
+    fn renamed_to(&mut self, to: PathBuf) {
+        self.disk = stamp(&to);
+        if !self.h1 {
+            self.title = stem_of(&to);
+        }
+        self.path = Some(to);
+    }
+
     /// Where its file is, relative to the notes folder: how the replica
     /// names it.
     fn rel_path(&self) -> Option<String> {
@@ -673,8 +684,7 @@ impl Store {
         if let Some(from) = self.notes[i].path.clone() {
             let to = self.free_path(&stem_of(&from), None, folder);
             rename_retrying(&from, &to)?;
-            self.notes[i].disk = stamp(&to);
-            self.notes[i].path = Some(to);
+            self.notes[i].renamed_to(to);
         }
         let old = std::mem::replace(&mut self.notes[i].folder, folder.to_string());
         if let (Some(key), Some(rel), Some(replica)) =
@@ -1658,8 +1668,7 @@ impl Store {
                     }
                 }
                 rename_retrying(&path, &to)?;
-                self.notes[i].disk = stamp(&to);
-                self.notes[i].path = Some(to);
+                self.notes[i].renamed_to(to);
                 if let (Some(rel), Some(r)) = (self.notes[i].rel_path(), self.replica.as_mut()) {
                     let _ = r.moved(*key, &rel);
                 }
@@ -1719,8 +1728,7 @@ impl Store {
                 let to = self.free_path(&place.name, Some(&path), &place.folder);
                 if !same_path(&to, &path) {
                     rename_retrying(&path, &to)?;
-                    self.notes[i].disk = stamp(&to);
-                    self.notes[i].path = Some(to);
+                    self.notes[i].renamed_to(to);
                     if let (Some(rel), Some(r)) = (self.notes[i].rel_path(), self.replica.as_mut()) {
                         let _ = r.moved(key, &rel);
                     }

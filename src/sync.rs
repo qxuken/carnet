@@ -823,6 +823,11 @@ impl Sync {
         }
     }
 
+    /// How many pictures put in here the server hasn't got yet.
+    pub fn pictures_waiting(&self) -> usize {
+        self.pictures.as_ref().map_or(0, Pictures::waiting)
+    }
+
     /// Logged in, every room joined, everything sent acknowledged.
     #[cfg(test)]
     pub fn is_idle(&self) -> bool {

@@ -4035,6 +4035,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(!named(&a), "not sent while full");
+    assert_eq!(a.sync.pictures_waiting(), 1, "counted as waiting, not up to date");
 
     let hub = handle.lock().unwrap().clone().unwrap();
     let account = rt.block_on(async move { hub.run(|hub, _| hub.store().account_list()[0].0.clone()).await.unwrap() });
@@ -4046,6 +4047,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     until("sent, once there's room", &mut a, &mut da, &named);
     assert!(t0.elapsed() < Duration::from_secs(10));
     assert_eq!(a.sync.error, None, "full, taken back");
+    until("nothing waiting", &mut a, &mut da, &|x| x.sync.pictures_waiting() == 0);
 
     let _ = stop.send(());
     rt.block_on(served).unwrap().unwrap();
@@ -4931,15 +4933,17 @@ fn deleting_a_folder_with_only_other_files_moves_it_to_the_trash() {
 
 /// Settings → Sync's lines of the account: at or over a plan's limit, what
 /// that means (the server takes no new picture, and every note's text);
-/// changes waiting, counted.
+/// changes and pictures waiting, counted.
 #[test]
 fn over_a_plans_limit_and_changes_waiting_are_said_plainly() {
     use super::settings_view::{over_limit, waiting_words};
     assert_eq!(over_limit(41, 42), None);
     assert_eq!(over_limit(741, 42).as_deref(), Some("Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
     assert_eq!(over_limit(2_000_000, 2_000_000).as_deref(), Some("Reached this plan's 2.0 MB: new pictures stay on this device until there's room. Notes still sync."));
-    assert_eq!(waiting_words(1), "Waiting to send 1 change");
-    assert_eq!(waiting_words(3), "Waiting to send 3 changes");
+    assert_eq!(waiting_words(1, 0), "Waiting to send 1 change");
+    assert_eq!(waiting_words(3, 0), "Waiting to send 3 changes");
+    assert_eq!(waiting_words(0, 1), "Waiting to send 1 picture");
+    assert_eq!(waiting_words(2, 1), "Waiting to send 2 changes and 1 picture");
 }
 
 /// A notice is one line. One too long for the room beside the note's meta

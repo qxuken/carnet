@@ -172,6 +172,15 @@ impl Pictures {
         !self.sending.is_empty() || self.offered.values().any(recent) || !self.reviving.is_empty() || self.asked.values().any(recent)
     }
 
+    /// How many pictures put in here the server hasn't got yet: offered,
+    /// being sent, or held back (the account full, or read only).
+    pub fn waiting(&self) -> usize {
+        let mut ids: HashSet<&BlobId> = self.offered.keys().collect();
+        ids.extend(&self.sending);
+        ids.extend(self.held.keys());
+        ids.len()
+    }
+
     /// The pictures being sent, held back, or wanted back: paths from the
     /// notes folder.
     pub fn busy_paths(&self) -> BTreeSet<String> {

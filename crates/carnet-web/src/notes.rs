@@ -816,6 +816,11 @@ impl Notes {
         Some(hexed)
     }
 
+    /// How many pictures put in here the server hasn't got yet.
+    pub fn pictures_waiting(&self) -> usize {
+        self.uploads.len()
+    }
+
     /// Every picture put in here and not on the server, but those being
     /// sent, offered (again): logged in, or the server has room again
     /// for the ones it held back (the account full, or read only).

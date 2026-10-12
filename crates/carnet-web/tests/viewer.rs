@@ -863,6 +863,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert_eq!(web.errors, [carnet_sync::session::FULL.to_string()], "said full");
     assert!(desk.docs.get(vault::ROOM).is_none_or(|v| !v.pictures().contains_key(&pic)), "held back");
+    assert_eq!(web.pictures_waiting(), 1, "waiting, not up to date");
     web.said.clear();
 
     *plan.0.lock().unwrap() = Limit { bytes: Some(5_000_000), writable: true, plan: "Personal".into(), until: 0 };
@@ -878,6 +879,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
     assert_eq!(desk.docs[vault::ROOM].pictures().get(&pic), Some(&id));
+    assert_eq!(web.pictures_waiting(), 0, "none waiting once it's there");
 }
 
 /// A browser opened on an account that already has many notes (more

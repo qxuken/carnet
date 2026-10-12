@@ -1108,6 +1108,31 @@ fn a_note_written_in_a_folder_keeps_its_picture_links_on_both() {
     }
 }
 
+/// A note with no heading is called by its file's name. Come to the
+/// other device before its place, it is put at the top as "Untitled"
+/// until the vault names it; then it is called by that name there too,
+/// not "Untitled" still.
+#[test]
+fn a_note_without_a_heading_is_called_the_same_on_both() {
+    let mut two = Two::new("no-heading");
+    let a = &mut two.sides[0];
+    std::fs::write(a.dir.join("Missing.md"), "Just words, no heading.\n").unwrap();
+    a.store.rescan();
+    a.layout_held = true;
+    two.pump();
+    assert!(two.sides[1].dir.join("Untitled.md").exists(), "at the top until its place comes: {:?}", two.shape(1));
+    two.sides[0].layout_held = false;
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert_eq!(two.shape(0), two.shape(1));
+    for side in 0..2 {
+        let titles: Vec<&str> = two.sides[side].store.notes.iter().map(|n| n.display_title()).collect();
+        assert!(titles.contains(&"Missing"), "on {side}: {titles:?}");
+        assert!(!titles.contains(&"Untitled"), "on {side}: {titles:?}");
+    }
+}
+
 /// A note moved into another folder on one device: its links rewritten
 /// there, once; the other device follows the move and takes that edit,
 /// without rewriting them again.

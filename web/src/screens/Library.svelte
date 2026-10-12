@@ -15,7 +15,9 @@
       (n: Note) =>
         n.trashed === trash &&
         (hits ? hits.has(n.key) : true) &&
-        (hits || folder === null || n.folder === folder || n.folder.startsWith(folder + '/')),
+        // A folder's own notes, as the desktop lists them; its subfolders'
+        // are theirs.
+        (hits || folder === null || n.folder === folder),
     );
     return list.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.modified - a.modified);
   });
@@ -33,7 +35,7 @@
     if (list) list.scrollTop = top = 0;
   });
 
-  const count = (f: string) => sync.notes.filter((n) => !n.trashed && (n.folder === f || n.folder.startsWith(f + '/'))).length;
+  const count = (f: string) => sync.notes.filter((n) => !n.trashed && n.folder === f).length;
   const deleted = $derived(sync.notes.filter((n) => n.trashed).length);
 </script>
 

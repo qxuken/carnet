@@ -115,6 +115,9 @@ class Sync {
   /// Changes (a note's, or the library's) the server isn't known to keep
   /// yet: offline, read only, or on their way.
   waiting = $state(0);
+  /// Pictures put in here the server hasn't got yet: on their way, or
+  /// held back (the account full, or read only).
+  picturesWaiting = $state(0);
   error = $state<string | null>(null);
   joining = $state(false);
   // Replaced whole, never changed in place: raw, so ten thousand notes
@@ -309,6 +312,7 @@ class Sync {
     // After every edit and every frame: what the server isn't known to
     // keep yet.
     this.waiting = this.vault?.waiting() ?? 0;
+    this.picturesWaiting = this.vault?.pictures_waiting() ?? 0;
   }
 
   private frame(bytes: Uint8Array) {
