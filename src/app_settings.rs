@@ -92,7 +92,7 @@ impl Carnet {
                 self.reset_armed = false;
                 s.reset_look();
                 self.font_pick = None;
-                self.notify("Appearance and writing are back as they were at first", None);
+                self.notify("Appearance and writing reset", None);
             }
             Msg::ResetLookCancel => {
                 self.reset_armed = false;
@@ -476,7 +476,7 @@ impl Carnet {
                 ui,
                 l,
                 "Reset appearance and writing",
-                Some("Colors, fonts, sizes and the writing options, back as they were at first. Notes, the library and sync stay as they are."),
+                Some("Colors, fonts, sizes and the writing options, back as they were at first. Notes, the library, the window and sync stay as they are."),
                 |ui| {
                     if armed {
                         pill_button(ui, l, "reset-cancel", "Cancel", false, true, Msg::ResetLookCancel);
@@ -902,10 +902,14 @@ impl Carnet {
                         },
                     );
                 };
-                if let Some(to) = &sent {
-                    said(ui, "signup-sent", Icon::Check, t.fg, &format!("We sent an invite to {to}. Paste its code here"));
-                    if let Some(more) = self.signup.said.clone() {
-                        said(ui, "signup-said", Icon::Clock, t.muted, &more);
+                if let Some(to) = &sent
+                    && let Some(answer) = self.signup.sent.clone()
+                {
+                    // Asked again too soon: nothing new went, so not "sent".
+                    let g = if answer.lately() { Icon::Clock } else { Icon::Check };
+                    said(ui, "signup-sent", g, t.fg, &answer.line(to));
+                    if let Some(more) = answer.more() {
+                        said(ui, "signup-said", Icon::Clock, t.muted, more);
                     }
                 }
                 let (hint, button) = match how {
@@ -992,9 +996,22 @@ impl Carnet {
                 );
                 let usage = self.sync.usage.clone();
                 let update_soon = self.sync.update_soon;
+                let waiting = self.sync.waiting();
+                // A line said of the account: an icon, then words.
+                let said = |ui: &mut Ui<'_>, g: Icon, ink: Color, words: &str| {
+                    ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
+                        crate::icons::icon(ui, g, ink, 14.0, false);
+                        ui.text_in(NodeSpec::row().grow_width().min_width(0.0), words, TextStyle::new(Type::SMALL.size).color(ink));
+                    });
+                };
                 ui.with(NodeSpec::column().grow_width().pad_xy(18.0, 14.0).gap(4.0).selectable(), |ui| {
                     ui.text(&word, TextStyle::new(Type::STRONG.size).color(ink));
                     ui.text(&whom, TextStyle::new(Type::SMALL.size).color(t.muted));
+                    // Changes the server isn't known to keep yet: not "up
+                    // to date" while any wait.
+                    if waiting > 0 {
+                        said(ui, Icon::Clock, t.muted, &waiting_words(waiting));
+                    }
                     // What the server keeps for the account, and, on a
                     // hosted plan, how much it may.
                     if let Some(u) = &usage {
@@ -1009,15 +1026,18 @@ impl Carnet {
                                 line.push_str(&format!(", until {}", super::chrome::date_words(SystemTime::UNIX_EPOCH + Duration::from_secs(until))));
                             }
                         }
-                        ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
-                            crate::icons::icon(ui, Icon::Cloud, t.muted, 14.0, false);
-                            ui.text_in(NodeSpec::row().grow_width().min_width(0.0), &line, TextStyle::new(Type::SMALL.size).color(t.muted));
-                        });
+                        said(ui, Icon::Cloud, t.muted, &line);
                         if !u.writable {
-                            ui.text(
+                            said(
+                                ui,
+                                Icon::Warning,
+                                t.danger,
                                 "Read only for now: what's written here stays here, and syncs once the account can write again.",
-                                TextStyle::new(Type::SMALL.size).color(t.danger),
                             );
+                        } else if let Some(limit) = u.limit
+                            && let Some(over) = over_limit(u.notes + u.pictures, limit)
+                        {
+                            said(ui, Icon::Warning, t.warning, &over);
                         }
                     }
                     if update_soon {
@@ -1050,6 +1070,11 @@ impl Carnet {
                             let name = d.name.clone().unwrap_or_else(|| "A device not yet named".into());
                             let what = if d.you {
                                 "This device".to_string()
+                            } else if d.online && status == Status::Online {
+                                // Logged in now: not when its session began.
+                                // (Offline here, the list is an old one: it
+                                // can't say who's online now.)
+                                "Online now".to_string()
                             } else if d.seen == 0 {
                                 "Not seen since it came in".to_string()
                             } else {
@@ -1857,6 +1882,25 @@ fn icon_pill(ui: &mut Ui<'_>, l: &Look, key: &str, g: Icon, word: &str, main: bo
 const KEEP_DAYS: u64 = 30;
 
 /// Bytes as people say them: "340 KB", "1.2 GB".
+/// What's said of an account at or over its plan's limit, if it is: the
+/// server takes no new picture then (notes' text it always takes:
+/// docs/SYNC.md §11), so new pictures wait here.
+pub(super) fn over_limit(kept: u64, limit: u64) -> Option<String> {
+    let what = if kept > limit {
+        format!("Over this plan's {}", size_words(limit))
+    } else if kept == limit {
+        format!("Reached this plan's {}", size_words(limit))
+    } else {
+        return None;
+    };
+    Some(format!("{what}: new pictures stay on this device until there's room. Notes still sync."))
+}
+
+/// Changes waiting to be sent, in words.
+pub(super) fn waiting_words(n: usize) -> String {
+    if n == 1 { "Waiting to send 1 change".into() } else { format!("Waiting to send {n} changes") }
+}
+
 pub(super) fn size_words(n: u64) -> String {
     const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
     if n < 1000 {

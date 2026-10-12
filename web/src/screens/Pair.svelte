@@ -16,6 +16,7 @@
   let code = $state('');
   let email = $state('');
   let password = $state('');
+  let showPassword = $state(false);
   let scanning = $state(false);
   const camera = !!navigator.mediaDevices?.getUserMedia;
   const installed = matchMedia('(display-mode: standalone)').matches || (navigator as { standalone?: boolean }).standalone === true;
@@ -32,6 +33,9 @@
   let sending = $state(false);
   let sentTo = $state<string | null>(null);
   let sentSaid = $state('');
+  /// Asked again within the server's mail limit: nothing went. When the
+  /// last one did, and when another may be asked for, in seconds.
+  let lately = $state<{ ago: number; again: number } | null>(null);
   let signupError = $state('');
   let codeField = $state<HTMLInputElement | null>(null);
   /// Whether this server takes passwords and passkeys; offered unless it
@@ -122,6 +126,28 @@
     }
   }
 
+  /// A yes that mailed nothing: asked again within the server's mail
+  /// limit, `{"sent": false, "mailed_ago", "again_in"}` (as its own signup
+  /// page reads it). Null for an invite sent now.
+  function mailedLately(body: string): { ago: number; again: number } | null {
+    try {
+      const j = JSON.parse(body) as { sent?: unknown; mailed_ago?: unknown; again_in?: unknown };
+      if (j?.sent !== false) return null;
+      const n = (v: unknown) => (typeof v === 'number' && v > 0 ? v : 0);
+      return { ago: n(j.mailed_ago), again: n(j.again_in) };
+    } catch {
+      return null;
+    }
+  }
+
+  /// Said of an invite asked for too soon, as the desktop says it: when the
+  /// last one went, and when another may be asked for.
+  function latelyLine(to: string, l: { ago: number; again: number }) {
+    const minutes = (n: number) => (n === 1 ? '1 minute' : `${n} minutes`);
+    const ago = l.ago < 60 ? 'a moment ago' : `${minutes(Math.round(l.ago / 60))} ago`;
+    return `We emailed ${to} ${ago}. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in ${minutes(Math.max(1, Math.ceil(l.again / 60)))}.`;
+  }
+
   /// An invite asked for, here: the server mails it, and its code goes in
   /// the code field, focused.
   async function sendInvite(e: SubmitEvent) {
@@ -136,10 +162,13 @@
     signupError = '';
     try {
       const r = await fetch('/v1/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: to }) });
-      const words = said(await r.text().catch(() => ''));
+      const body = await r.text().catch(() => '');
+      const words = said(body);
       if (r.ok) {
         sentTo = to;
         sentSaid = r.status === 204 ? '' : words;
+        lately = mailedLately(body);
+        if (lately) sentSaid = '';
         newHere = false;
         way = 'code';
         code = '';
@@ -190,6 +219,9 @@
       <p>{signupEmail ? 'The email you signed up with, and the password set on another of your devices.' : 'The email and password set on another of your devices.'}</p>
     {:else if way === 'passkey'}
       <p>A passkey added for Carnet on another of your devices, or in this browser before. The browser asks which, and for your face, fingerprint or PIN.</p>
+    {:else if sentTo && !newHere && lately}
+      <!-- Asked again too soon: nothing new went. -->
+      <p class="sent" role="status"><Icon name="clock" size={16} /> {latelyLine(sentTo, lately)}</p>
     {:else if sentTo && !newHere}
       <p class="sent" role="status"><Icon name="check" size={16} /> We sent an invite to <b>{sentTo}</b>. Paste its code here.</p>
       {#if sentSaid}<p class="said">{sentSaid}</p>{/if}
@@ -204,7 +236,13 @@
         <textarea bind:value={code} rows="3" placeholder="twelve words, spaces between" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
       {:else if way === 'password'}
         <input bind:value={email} type="email" placeholder="you@example.com" autocomplete="username" aria-label="Email" />
-        <input bind:value={password} type="password" placeholder="Password" autocomplete="current-password" aria-label="Password" />
+        <!-- An eye inside its right end shows the letters, or hides them. -->
+        <span class="pw">
+          <input bind:value={password} type={showPassword ? 'text' : 'password'} placeholder="Password" autocomplete="current-password" aria-label="Password" />
+          <button type="button" class="eye" onclick={() => (showPassword = !showPassword)} aria-label={showPassword ? 'Hide password' : 'Show password'} title={showPassword ? 'Hide password' : 'Show password'}>
+            <Icon name={showPassword ? 'eye-off' : 'eye'} size={20} />
+          </button>
+        </span>
       {:else if way === 'passkey'}
         <!-- Nothing to type: the browser asks. -->
       {:else}
@@ -253,6 +291,15 @@
     border: 1px solid var(--border-strong); background: var(--card); color: var(--ink); width: 100%;
   }
   textarea { font-size: 16px; text-align: left; resize: none; }
+  .pw { position: relative; display: flex; }
+  /* Room both sides, so the letters stay centred clear of the eye. */
+  .pw input { padding-left: 48px; padding-right: 48px; }
+  .eye {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: inline-flex; padding: 8px; border: 0;
+    border-radius: var(--radius); background: none; color: var(--muted); cursor: pointer;
+  }
+  .eye:hover { color: var(--ink); }
+  .eye:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 0; }
   button.main {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
     padding: 12px; border: 0; border-radius: var(--radius); background: var(--primary); color: var(--on-accent);

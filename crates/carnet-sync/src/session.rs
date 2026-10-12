@@ -58,6 +58,9 @@ pub struct DeviceInfo {
     pub seen: u64,
     /// This device.
     pub you: bool,
+    /// Logged in now, as the server said when it listed them (one from
+    /// before it said so: false).
+    pub online: bool,
 }
 
 /// A passkey of the account, as the list shows it.
@@ -213,6 +216,13 @@ pub struct Session {
     held: HashMap<String, HashMap<u64, u64>>,
     /// Batches sent and not yet acknowledged, with their rooms.
     unacked: HashMap<BatchId, String>,
+    /// Rooms with changes made here the server isn't known to keep yet:
+    /// offline, read only, or on their way ([`Session::waiting`]).
+    waiting: BTreeSet<String>,
+    /// What the server was last known to keep of each room, when it had
+    /// all this device had: a save that changes nothing waits for nothing.
+    /// Kept across logins.
+    kept: HashMap<String, HashMap<u64, u64>>,
     /// How many times the account's notes changed as this device saw:
     /// [`Session::moves`].
     moves: u64,
@@ -272,6 +282,8 @@ impl Session {
             joined: HashMap::new(),
             held: HashMap::new(),
             unacked: HashMap::new(),
+            waiting: BTreeSet::new(),
+            kept: HashMap::new(),
             moves: 0,
             next_batch: 0,
             out: Vec::new(),
@@ -384,6 +396,8 @@ impl Session {
     pub fn remove_room(&mut self, room: &str) {
         self.joined.remove(room);
         self.held.remove(room);
+        self.waiting.remove(room);
+        self.kept.remove(room);
         if self.removing.insert(room.to_string()) && self.state == State::Ready {
             self.send(Frame::Carnet(Carnet::RoomRemove { room: room.to_string() }));
         }
@@ -732,6 +746,13 @@ impl Session {
         self.state == State::Ready && self.unacked.is_empty() && self.joined.values().all(|j| *j == Join::Joined)
     }
 
+    /// How many rooms (notes, and the library's own) have changes made
+    /// here the server isn't known to keep yet: offline, read only, or on
+    /// their way. What "Waiting to send" counts; 0 when it all is kept.
+    pub fn waiting(&self) -> usize {
+        self.waiting.len()
+    }
+
     pub fn take_out(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.out)
     }
@@ -775,7 +796,15 @@ impl Session {
     /// `room`'s doc changed here: what it has that the server does not
     /// goes out now, if the room is joined (else on joining).
     pub fn saved(&mut self, room: &str, docs: &mut impl Docs, rng: &mut impl Random) {
-        if self.removing.contains(room) || self.read_only.contains(room) {
+        if self.removing.contains(room) {
+            return;
+        }
+        // Something the server isn't known to keep: waiting, until it is.
+        let vv = docs.doc(room).version_vector();
+        if !self.kept.get(room).is_some_and(|k| covers(k, &vv)) {
+            self.waiting.insert(room.to_string());
+        }
+        if self.read_only.contains(room) {
             return;
         }
         match self.joined.get(room) {
@@ -913,7 +942,7 @@ impl Session {
                 let infos = listed
                     .rows
                     .iter()
-                    .map(|(r, c)| DeviceInfo { id: r.id.clone(), name: c.as_ref().map(|c| c.name.clone()), seen: r.seen, you: r.you })
+                    .map(|(r, c)| DeviceInfo { id: r.id.clone(), name: c.as_ref().map(|c| c.name.clone()), seen: r.seen, you: r.you, online: r.online })
                     .collect();
                 self.listed = Some(listed);
                 self.events.push(Event::Devices(infos));
@@ -990,6 +1019,8 @@ impl Session {
                 self.removing.remove(&room);
                 self.joined.remove(&room);
                 self.held.remove(&room);
+                self.waiting.remove(&room);
+                self.kept.remove(&room);
                 self.events.push(Event::RoomRemoved(room));
             }
             Frame::Carnet(Carnet::BlobDropped { ids }) => {
@@ -1035,6 +1066,13 @@ impl Session {
                 self.joined.insert(room_id.clone(), Join::Joined);
                 // Read only (a plan lapsed): what's here waits here.
                 if permission == loro_protocol::Permission::Read {
+                    // What's here and not there waits; what's there is kept.
+                    let vv = docs.doc(&room_id).version_vector();
+                    if self.held.get(&room_id).is_some_and(|h| covers(h, &vv)) {
+                        self.settle(&room_id, docs);
+                    } else {
+                        self.waiting.insert(room_id.clone());
+                    }
                     if self.read_only.is_empty() {
                         self.limited = true;
                         self.events.push(Event::ReadOnly);
@@ -1100,13 +1138,18 @@ impl Session {
                 }
                 if took {
                     self.moves += 1;
+                    self.settle(&room_id, docs);
                     self.events.push(Event::Changed(room_id));
                 }
             }
             ProtocolMessage::Ack { ref_id, status, .. } => {
                 let room = self.unacked.remove(&ref_id);
-                if room.is_some() && status == UpdateStatusCode::Ok {
+                if let Some(room) = &room
+                    && status == UpdateStatusCode::Ok
+                {
                     self.moves += 1;
+                    // Kept: no longer waiting, once all of it is.
+                    self.settle(room, docs);
                 }
                 if status != UpdateStatusCode::Ok
                     && let Some(room) = room
@@ -1155,6 +1198,12 @@ impl Session {
                 held.insert(peer, end);
             }
         }
+        // Sent: waiting until it's said kept. Nothing to send: kept.
+        if records.is_empty() {
+            self.settle(room, docs);
+        } else {
+            self.waiting.insert(room.to_string());
+        }
         for batch in elo::batches(records) {
             self.next_batch += 1;
             let id = BatchId(self.next_batch.to_be_bytes());
@@ -1168,9 +1217,29 @@ impl Session {
         }
     }
 
+    /// If the server keeps all `room` has here (nothing of it on its way,
+    /// and what it holds covers the doc), it's no longer waiting, and
+    /// that's remembered.
+    fn settle(&mut self, room: &str, docs: &mut impl Docs) {
+        if self.unacked.values().any(|r| r == room) {
+            return;
+        }
+        let Some(held) = self.held.get(room) else { return };
+        let vv = docs.doc(room).version_vector();
+        if covers(held, &vv) {
+            self.kept.insert(room.to_string(), vv.into_iter().collect());
+            self.waiting.remove(room);
+        }
+    }
+
     fn send(&mut self, f: Frame) {
         self.out.push(wire::encode(&f));
     }
+}
+
+/// Whether `have` holds every peer's operations `vv` says there are.
+fn covers(have: &HashMap<u64, u64>, vv: &[(u64, u64)]) -> bool {
+    vv.iter().all(|(peer, end)| have.get(peer).copied().unwrap_or(0) >= *end)
 }
 
 /// `peer`'s operations `start..end` in spans whose changes each fit a

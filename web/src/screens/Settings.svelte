@@ -79,11 +79,18 @@
       line += ` · ${u.plan}`;
       if (u.until) line += `, until ${new Date(u.until * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })}`;
     }
-    return { line, writable: u.writable };
+    const used = u.notes + u.pictures;
+    const over = u.limit === null ? '' : used > u.limit ? `Over this plan’s ${size(u.limit)}` : used === u.limit ? `Reached this plan’s ${size(u.limit)}` : '';
+    return { line, writable: u.writable, over };
   });
 
   /// The password being set: its fields; asked to take it away.
   let pw = $state<{ email: string; password: string } | null>(null);
+  /// Its letters shown, by the eye in the field; hidden again for the next.
+  let showPw = $state(false);
+  $effect(() => {
+    if (pw === null) showPw = false;
+  });
   let saving = $state(false);
   let dropping = $state(false);
   let deletingAccount = $state(false);
@@ -101,8 +108,11 @@
     if (sync.error) saving = false;
   });
 
-  function seen(d: { you: boolean; seen: number }) {
+  function seen(d: { you: boolean; seen: number; online?: boolean }) {
     if (d.you) return 'This browser';
+    // Logged in now: not the time its session began. (Offline here, the
+    // list is an old one: it can't say who's online now.)
+    if (d.online && online) return 'Online now';
     if (!d.seen) return 'Not seen since it came in';
     return `Last seen ${ago(d.seen)}`;
   }
@@ -123,7 +133,11 @@
     {#if space}
       <p class="row quiet"><Icon name="cloud" size={16} /> {space.line}</p>
       {#if !space.writable}
-        <p class="row danger">Read only for now: what’s written here stays here, and syncs once the account can write again.</p>
+        <p class="row danger"><Icon name="warning" size={16} /> Read only for now: what’s written here stays here, and syncs once the account can write again.</p>
+      {:else if space.over}
+        <!-- The server takes no new picture at or over the limit; notes'
+             text it always takes. -->
+        <p class="row warn"><Icon name="warning" size={16} /> {space.over}: new pictures stay on this device until there’s room. Notes still sync.</p>
       {/if}
     {/if}
     <h2>Devices</h2>
@@ -299,13 +313,18 @@
               <!-- The service holds passwords to the email signed up with:
                    shown, not asked (and named for the browser's keychain). -->
               <input value={sync.password.only} type="email" autocomplete="username" aria-label="Email" readonly />
-              <!-- svelte-ignore a11y_autofocus -->
-              <input bind:value={pw.password} type="password" autocomplete="new-password" placeholder="8 letters or more" aria-label="New password" autofocus />
             {:else}
               <!-- svelte-ignore a11y_autofocus -->
               <input bind:value={pw.email} type="email" autocomplete="username" placeholder="you@example.com" aria-label="Email" autofocus />
-              <input bind:value={pw.password} type="password" autocomplete="new-password" placeholder="8 letters or more" aria-label="New password" />
             {/if}
+            <!-- An eye inside its right end shows the letters, or hides them. -->
+            <span class="pw">
+              <!-- svelte-ignore a11y_autofocus -->
+              <input bind:value={pw.password} type={showPw ? 'text' : 'password'} autocomplete="new-password" placeholder="8 letters or more" aria-label="New password" autofocus={!!sync.password.only} />
+              <button type="button" class="eye" onclick={() => (showPw = !showPw)} aria-label={showPw ? 'Hide password' : 'Show password'} title={showPw ? 'Hide password' : 'Show password'}>
+                <Icon name={showPw ? 'eye-off' : 'eye'} size={18} />
+              </button>
+            </span>
             <button type="button" class="pill" onclick={() => (pw = null)}>Cancel</button>
             <button class="pill primary" disabled={!online || saving || !(sync.password?.only ?? pw.email).includes('@') || pw.password.length < 8}>{saving ? 'Saving…' : 'Save'}</button>
           </form>
@@ -451,6 +470,7 @@
   .row.rule { border-top: 1px solid var(--border); }
   .row.quiet, .row.ok { font-size: 14px; gap: 8px; }
   .row.danger { font-size: 14px; color: var(--danger); }
+  .row.warn { font-size: 14px; gap: 8px; color: var(--warning); }
   .row.ok { color: var(--success); }
   .text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
   .text b { color: var(--ink); font-weight: 600; }
@@ -474,6 +494,14 @@
   .naming.password { flex-wrap: wrap; }
   .naming.password input { flex: 1 1 180px; }
   .naming.password input[readonly] { color: var(--muted); }
+  .naming.password .pw { flex: 1 1 180px; min-width: 0; display: flex; position: relative; }
+  .naming.password .pw input { padding-right: 40px; }
+  .eye {
+    position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: inline-flex; padding: 5px; border: 0;
+    border-radius: 6px; background: none; color: var(--muted); cursor: pointer;
+  }
+  .eye:hover { color: var(--ink); }
+  .eye:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 0; }
   .invite p { margin: 0; font-size: 13px; color: var(--muted); }
   .invite .digits { margin-bottom: 8px; font-size: 26px; }
   .code-text { font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }

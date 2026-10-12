@@ -798,6 +798,15 @@ impl Sync {
         self.layout_due = true;
     }
 
+    /// How many changes (a note's, or the library's) the server isn't
+    /// known to keep yet: offline, read only, or on their way.
+    pub fn waiting(&self) -> usize {
+        match &self.phase {
+            Phase::On { session, .. } => session.waiting(),
+            _ => 0,
+        }
+    }
+
     /// Logged in, every room joined, everything sent acknowledged.
     #[cfg(test)]
     pub fn is_idle(&self) -> bool {

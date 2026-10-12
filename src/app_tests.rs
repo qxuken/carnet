@@ -3049,11 +3049,12 @@ fn up_and_down_after_a_click_on_a_folder_walk_from_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Whether a drawn node reads `s`.
+/// Whether a drawn node reads `s`. (The inspector gives a long text's
+/// first 60 characters only: the access tree has it whole.)
 fn drawn(d: &mut Drive, app: &mut Carnet, s: &str) -> bool {
     d.core.set_inspect(true);
     d.frame(app);
-    d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s))
+    d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s)) || d.core.access_tree().nodes.iter().any(|n| n.name.as_deref() == Some(s))
 }
 
 /// A note saved twice: "First words", then "First words and more".
@@ -3713,10 +3714,11 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
             let mut log = log.lock().unwrap();
             log.push((h(header::CONTENT_TYPE), h(header::ORIGIN), body));
             let json = [(header::CONTENT_TYPE, "application/json")];
-            if log.len() == 1 {
-                (StatusCode::TOO_MANY_REQUESTS, json, r#"{"error":"Mailed lately: look for it, or wait ten minutes."}"#)
-            } else {
-                (StatusCode::ACCEPTED, json, r#"{"sent":true}"#)
+            match log.len() {
+                1 => (StatusCode::TOO_MANY_REQUESTS, json, r#"{"error":"Mailed lately: look for it, or wait ten minutes."}"#),
+                2 => (StatusCode::ACCEPTED, json, r#"{"sent":true}"#),
+                // Asked again within the mail limit: nothing mailed.
+                _ => (StatusCode::ACCEPTED, json, r#"{"sent":false,"mailed_ago":40,"again_in":560}"#),
             }
         }
     };
@@ -3779,6 +3781,24 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
             assert_eq!((kind.as_deref(), from.as_deref(), body.as_str()), (Some("application/json"), None, r#"{"email":"ann@example.com"}"#));
         }
     }
+    // Asked again within the server's mail limit: nothing went, and it
+    // says when the last did, and when another can be asked for.
+    let again = d.key_of("signup-open").expect("Ask again");
+    let r = d.rect_of(again).unwrap();
+    d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d_frame_twice(&mut a, &mut d);
+    let send = d.key_of("signup-send").expect("Send me an invite");
+    let r = d.rect_of(send).unwrap();
+    d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    until("answered again", &mut a, &mut d, &|x| x.signup.sent.as_ref().is_some_and(carnet_sync::signup::Sent::lately));
+    d_frame_twice(&mut a, &mut d);
+    assert!(drawn(
+        &mut d,
+        &mut a,
+        "We emailed ann@example.com a moment ago. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in 10 minutes"
+    ));
+    assert!(!drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here"), "nothing sent, so not said sent");
+    assert_eq!(focused(&a, &d), Some(Field::SyncCode));
     // The code pasted: in.
     type_in(&mut a, &mut d, &invite.text());
     assert_eq!(a.sync_code, invite.text());
@@ -4223,6 +4243,14 @@ fn two_apps_sync_through_a_server() {
     let short = |id: &[u8]| id.iter().take(3).map(|b| format!("{b:02x}")).collect::<String>();
     let me = list.iter().find(|d| d.you).unwrap();
     assert!(drawn(&mut da, &mut a, "Laptop") && drawn(&mut da, &mut a, &format!("This device \u{b7} {}", short(&me.id))));
+    // The others are logged in now: said so, not when their session began.
+    let laptop = list.iter().find(|d| d.name.as_deref() == Some("Laptop")).unwrap();
+    assert!(laptop.online && list.iter().all(|d| d.online));
+    assert!(drawn(&mut da, &mut a, &format!("Online now \u{b7} {}", short(&laptop.id))));
+    // Over a (tiny) plan's limit: said plainly, and what it means.
+    a.sync.usage = Some(carnet_sync::session::Usage { notes: 700, pictures: 41, limit: Some(42), writable: true, plan: "Tiny".into(), until: None });
+    assert!(drawn(&mut da, &mut a, "741 bytes of 42 bytes used \u{b7} Tiny"));
+    assert!(drawn(&mut da, &mut a, "Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
     let at = list.iter().position(|d| d.name.as_deref() == Some("Laptop")).unwrap() as u64;
     a.on_plain(Msg::SyncRemove { at });
     assert!(b.sync.is_on() && a.sync_remove_armed.is_some(), "asked once: not yet");
@@ -4637,7 +4665,7 @@ fn an_apple_notes_export_comes_in_with_its_pictures() {
     d.frame(&mut app);
     assert_eq!(app.store.folders, ["Archive"]);
     let said = app.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default();
-    assert!(said == "Moved 1 picture and 1 other file to the attachments folder, links and all", "{said}");
+    assert!(said == "Moved 1 picture and 1 other file to the attachments folder", "{said}");
     assert!(!at.exists(), "emptied, gone");
     assert!(dir.join("attachments").join("IMG-0412.png").exists());
     let i = app.store.notes.iter().position(|n| n.title == "Lisbon").unwrap();
@@ -4752,6 +4780,56 @@ fn deleting_a_folder_with_only_other_files_moves_it_to_the_trash() {
     assert!(app.folder_is_bare(&g), "the menu says Delete folder");
     app.folder_action(&g, "delete");
     assert!(app.error.is_none() && !dir.join("Bare").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Settings → Sync's lines of the account: at or over a plan's limit, what
+/// that means (the server takes no new picture, and every note's text);
+/// changes waiting, counted.
+#[test]
+fn over_a_plans_limit_and_changes_waiting_are_said_plainly() {
+    use super::settings_view::{over_limit, waiting_words};
+    assert_eq!(over_limit(41, 42), None);
+    assert_eq!(over_limit(741, 42).as_deref(), Some("Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
+    assert_eq!(over_limit(2_000_000, 2_000_000).as_deref(), Some("Reached this plan's 2.0 MB: new pictures stay on this device until there's room. Notes still sync."));
+    assert_eq!(waiting_words(1), "Waiting to send 1 change");
+    assert_eq!(waiting_words(3), "Waiting to send 3 changes");
+}
+
+/// A notice is one line. One too long for the room beside the note's meta
+/// line is cut after a whole word, with "…", never mid-word; its whole
+/// words are its name and tooltip. One that fits is drawn whole.
+#[test]
+fn a_notice_too_long_for_its_line_is_cut_at_a_word() {
+    let (mut app, _, dir) = fresh("notice-cut");
+    let mut d = Drive::new(Core::new(), 820.0, 700.0).framing();
+    d.core.set_inspect(true);
+    let long = "Changed in another app too: yours is kept as \u{201c}Ferry times, the summer timetable with every crossing\u{201d}";
+    app.notify(long, Some(Undo::Edit));
+    d_frame_twice(&mut app, &mut d);
+    let key = d.core.access_tree().nodes.iter().find(|n| n.name.as_deref() == Some(long)).map(|n| n.key).expect("named by its whole words");
+    let notice = d.core.nodes().into_iter().find(|n| n.key == key).unwrap();
+    let tip = d.core.access_tree().nodes.iter().find(|n| n.key == key).and_then(|n| n.description.clone());
+    assert_eq!(tip.as_deref(), Some(long), "its tooltip");
+    // What it shows: its text, whole in the access tree.
+    let shown = d.core.access_tree().nodes.iter().find(|n| n.parent == Some(key)).and_then(|n| n.name.clone()).expect("its words, cut");
+    assert!(shown.ends_with('\u{2026}') && shown.len() < long.len(), "{shown}");
+    let kept = shown.trim_end_matches('\u{2026}');
+    assert!(long.starts_with(kept) && long[kept.len()..].starts_with(' '), "cut after a whole word: {shown}");
+    // It and its Undo fit the line.
+    let line = d.core.nodes().into_iter().find(|n| Some(n.key) == notice.parent).unwrap();
+    let undo = d.key_of("undo").and_then(|k| d.rect_of(k)).unwrap();
+    assert!(undo.x + undo.w <= line.rect.x + line.rect.w + 0.5, "Undo shows: {undo:?} in {:?}", line.rect);
+    // Short: whole, nothing more to name it.
+    app.notify("Moved \u{201c}hill.png\u{201d} into Carnet", None);
+    d_frame_twice(&mut app, &mut d);
+    assert!(drawn(&mut d, &mut app, "Moved \u{201c}hill.png\u{201d} into Carnet"));
+    // The rule itself: whole words, the stop before the cut left out.
+    let w = |s: &str| s.chars().count() as f32;
+    assert_eq!(super::page_view::fit_words("Copied it into Carnet: this note shows it", 99.0, w), None);
+    assert_eq!(super::page_view::fit_words("Copied it into Carnet: this note shows it", 24.0, w).as_deref(), Some("Copied it into Carnet\u{2026}"));
+    assert_eq!(super::page_view::fit_words("Copied it into Carnet: this note shows it", 3.0, w).as_deref(), Some("Copied\u{2026}"), "the first word stays");
+    assert_eq!(super::page_view::fit_words("Supercalifragilistic", 3.0, w), None, "one word: nothing to cut at");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -5691,6 +5769,7 @@ fn a_reset_puts_the_look_back_when_asked_twice() {
     app.on_plain(Msg::SetPalette { to: 2 });
     app.on_plain(Msg::SetFocus { to: 1 });
     app.on_plain(Msg::SetSort { to: 1 });
+    app.on_plain(Msg::SetWindow { to: 0 });
     d_frame_twice(&mut app, &mut d);
     let reset = d.key_of("reset").expect("the button");
     d.click_key(&mut app, reset);
@@ -5711,8 +5790,10 @@ fn a_reset_puts_the_look_back_when_asked_twice() {
     let s = &app.settings;
     assert_eq!((s.size, s.palette, s.focus, s.theme), (16, crate::design::Palette::Linen, false, ThemePref::System));
     assert_eq!(s.sort, Sort::Title, "the library's order stays");
+    assert!(!s.translucent, "the window stays as chosen: the system's look, set for the next start");
+    assert!(drawn(&mut d, &mut app, "Colors, fonts, sizes and the writing options, back as they were at first. Notes, the library, the window and sync stay as they are."));
     assert!(!app.reset_armed && !enabled(&mut d, "Reset"));
-    assert!(app.notice.as_ref().is_some_and(|n| n.text.starts_with("Appearance and writing are back")));
+    assert!(app.notice.as_ref().is_some_and(|n| n.text == "Appearance and writing reset"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
