@@ -294,6 +294,8 @@ A file per account means a query in one account's database can't reach another's
 
 Other files in `data/`: `links.key` (signs picture links) and, with passwords on, `opaque.key` (§7). Both are made on first start, mode `0600`, and must be kept with a backup.
 
+All of `data/` is the server's own user's alone (`private.rs`): the folder and the folders in it `0700`, the databases (and so their WALs) and pictures `0600`. Sealed or public as it all is, who has an account, how much it keeps and when it last wrote are nobody else's on the machine. A data folder from before that's open to others is closed on start (`0700`), and the log says so once.
+
 **Accounts by invite.** There are two kinds of code, and they shouldn't be confused:
 
 - An **invite code** makes a new *account*: a person with their own vault.
@@ -310,6 +312,10 @@ Invite codes are 80 random bits as 16 Crockford base32 characters in groups of f
 - sockets: 30 at once, then one every 2 s, and at most 64 open; past that, `429` before the upgrade;
 - tries that guess at something or cost work (a failed login, an invite, joining a pairing, a recovery or password sign-in): 10 at once, then one every 6 s; past that, `Denied`. A login that succeeds is never counted, so a reconnecting device never shuts itself out.
 
+**Each request** (`server.rs`) has its head read within 30 s, and a connection idle between requests is closed after as long, so one that sends slowly holds nothing (`HEAD_TIMEOUT`). A request is answered within 30 s, its body read too, or gets `408` (`REQUEST_TIMEOUT`): the API, the web app's files and a host's routes. A picture's `PUT` or `GET` by its link has 10 minutes (`BLOB_TIMEOUT`): its largest, 32 MiB, at 56 kB/s. The socket's own upgrade is a request like the others; once upgraded it's held to its own limits, below.
+
+**Whose page.** A browser says which page opens a socket (`Origin`). The web app is at the server's own origin (`--origin`), so a socket whose `Origin` is another site's is refused with `403` before it upgrades: a page elsewhere can't use a visitor's browser, or its address, to talk to the server. The apps send no `Origin`, and aren't asked. A server whose origin is on this machine (`localhost`, a loopback address) also takes a page on this machine, as in development behind Vite's proxy; no other site's page can be one.
+
 **Each socket** (`server.rs`, `SocketLimits`):
 
 - **Logging in:** a socket not logged in 30 s after it opened is closed ("took too long to sign in"), whatever it sends meanwhile: the challenge lives no longer (§7). Enrolling, pairing, a recovery or a password sign-in all end in that login.
@@ -317,9 +323,11 @@ Invite codes are 80 random bits as 16 Crockford base32 characters in groups of f
 - **At its own pace:** a socket's next frame goes to the hub only once the hub has done the last and what came of it is mostly written (under 1 MiB waiting); one more is held meanwhile, and nothing more read. A device that asks without reading (a room's backfill again and again) is answered as fast as it reads, and the hub's queue holds at most a frame per socket, so the queue needs no bound of its own and the hub never waits on a socket.
 - **What waits for it:** at most 16 MiB (16 frames' worth, a message counted with 64 bytes of keeping beside its own), pongs to its pings among it. Past that it isn't reading: it's closed at once, and what waited dropped.
 
+`/metrics` counts the sockets closed for each: `carnet_sockets_closed_total{reason="budget"}`, `{reason="login_timeout"}`, `{reason="idle"}`.
+
 **Backup:** `carnet-server backup DIR` copies every database (`VACUUM INTO`) and the pictures into a folder laid out like `data/`, consistent while serving. Everything in it is ciphertext or public keys, so it can go anywhere.
 
-**Health and metrics.** `/v1/health` is what the container's `HEALTHCHECK` asks, through `carnet-server health`. `/metrics` reports counts only: logins and refusals, records and pictures kept, compactions, storage failures, traffic, how long the hub takes per frame, its queue lag, and sockets by protocol and app version (§14). Never what anything holds.
+**Health and metrics.** `/v1/health` is what the container's `HEALTHCHECK` asks, through `carnet-server health`. `/metrics` reports counts only: logins and refusals, records and pictures kept, compactions, storage failures, traffic, how long the hub takes per frame, its queue lag, sockets by protocol and app version (§14), and sockets closed for their limits. Never what anything holds.
 
 ### Pictures over HTTP
 
@@ -338,7 +346,7 @@ A link is one account's one picture, one direction (`GET` or `PUT`), for five mi
 - **A note deleted forever** (from Deleted, after confirming): the vault marks it gone, and `RoomRemove` has the server delete the room's records and base at once and remember the room's id in a `removed` table. A device that still has the note (offline, or writing without knowing) is told `RoomRemoved` when it joins or writes, and nothing it sends is kept. The vault's own room can't be removed. Any device of the account may remove any of its rooms; the server can't read the notes to judge.
 - **A picture no note shows any more**, in any version of any remaining note (a note in Deleted counts), once the last note showing it is deleted forever, or a device's sweep has found it unshown for a week (§4); only Carnet's, in `attachments/`: `BlobDrop` marks it, and the server deletes it 30 days later in an hourly sweep, unless a device offers, fetches or puts it meanwhile. Unlike a note, a picture is dropped by inference, so it gets the grace period.
 - **Until the server confirms,** the rooms and pictures to remove are kept on the device (`forgotten.txt` on the desktop, the saved state in the browser) and sent again on each login, so a deletion made offline isn't lost.
-- **Deleting the account** (`AccountDelete`, from any of its devices, after confirming): everything the server keeps of it goes at once (records, devices, pictures, slots), and every device is let go (`Denied`), each keeping its local notes. The owner's account can't be deleted this way, since it's what lets everyone else in. A host is told (§11).
+- **Deleting the account** (`AccountDelete`, from any of its devices, after confirming): everything the server keeps of it goes at once (records, devices, pictures, slots), and every device is let go (`Denied`), each keeping its local notes. The owner's account can't be deleted this way, since it's what lets everyone else in. A host is told (§11). A link to put a picture given before (good for five minutes) puts nothing after: this server refuses it (`403`), the account being gone. A bucket's link the server can't take back, so the hourly sweep also takes the pictures of any account that's no more (the account folders are listed first, then the store asked which are still accounts, so one made meanwhile isn't among them); a picture put to this server while its account was being deleted goes the same way.
 
 ## 7. Auth and encryption
 
@@ -380,7 +388,7 @@ Every connection opens with a challenge-response.
 
 The fixed prefix keeps this signature from being valid for anything else the key signs. The origin (`https://notes.example.com`, set with `--origin`) stops a malicious server from relaying a challenge from a real one. The account and device ids pin who is logging in.
 
-The server checks the signature against the device's public key and that the device isn't removed, then the socket is logged in. Everything after goes over that socket, except pictures' bytes (§6). No long-lived token exists to be copied from a disk or a log. Removing a device closes its open sockets at once, and every later challenge fails.
+The server checks the signature against the device's public key and that the device isn't removed, then the socket is logged in. Turned away, a login is told why only as far as its app must act on it: a device removed, that it was (`Deny::DeviceRemoved`); an account not here and a device not in the account it names, the same words and code either way (`Deny::AccountRemoved`: an account deleted while its device was away is the first), so a login tells nobody which accounts there are; a device of the account signed wrongly (another key, another server's origin), only turned away. Everything after goes over that socket, except pictures' bytes (§6). No long-lived token exists to be copied from a disk or a log. Removing a device closes its open sockets at once, and every later challenge fails.
 
 (Encryption has its own random value per message, the AES-GCM **IV**. This document says "nonce" only for the login challenge, so the two don't get mixed up.)
 
@@ -598,7 +606,7 @@ fuzz/                   cargo-fuzz targets (§12)
 |---|---|---|
 | `routes` | none | merge its own axum routes beside the API. A `/` among them replaces the web app's page there (a landing page); the web app is still served everywhere else, and unknown `/v1/` paths stay 404. The web app's service worker answers only `/` from its cache, so a host's pages (a signup at `/start`) reach the server even once the app is installed. |
 | `quota: Arc<dyn Quota>` | `Unlimited` | per account, a byte limit (notes and pictures, as sealed), whether it may write, a plan name and an end date (`quota::Limit`); and the ceiling for its notes (`notes_ceiling`, 4 GiB unless said) |
-| `admission: Arc<dyn Admission>` | `ByInvite` | be told which invite made which account (`admitted`), and when an account is deleted or removed (`removed`); say the email an account came in by (`email_of`) |
+| `admission: Arc<dyn Admission>` | `ByInvite` | refuse an invite before it's taken (`admit`, by its hash: refused, the device is told as of an invite never made, and the invite stays); be told which invite made which account (`admitted`), and when an account is deleted or removed (`removed`); say the email an account came in by (`email_of`) |
 | `signup: Option<String>` | none | a URL where newcomers make an account. Set, the server lists the `signup` feature (in `/v1/info` and every greeting) and `/v1/info` returns the URL; the apps then offer "Make an account" in their connect steps, which asks `POST /v1/signup` (a route the host adds) to mail an invite |
 | `passwords` | off | accept email and password sign-in (§7) |
 | `password_emails` | `Any` | which email a password may sign in as (§7): any, or `Account`, only the one `admission.email_of` says |
@@ -606,6 +614,8 @@ fuzz/                   cargo-fuzz targets (§12)
 | `store` | SQLite files in `data/` | any `Storage`, e.g. `postgres::Postgres` (feature `postgres`) |
 | `blobs` | files in `data/blobs` | any `Blobs`, e.g. `s3::S3Blobs` (feature `s3`), with pre-signed links |
 | `ready` | none | receive a `HubHandle` once the hub runs |
+
+**Its other listeners.** `server::serve_app(listener, router, stop)` serves a router as the server serves its own, each request's head in 30 s; a host's admin address can use it. Its routes merged into `routes` have the API's 30 s for a request.
 
 **Running work on the hub.** `HubHandle::run(|hub, outs| …)` runs a closure on the hub's thread, one thing at a time like everything else there: for example, minting an invite for a new signup with `server::invite(store, false)` (never an owner's invite), or reading an account's usage. A signup flow can then hand the person the invite as a link to the web app, `https://server/#invite=ABCD-…`, which the web app redeems on open.
 
@@ -648,7 +658,7 @@ The `wire` target found that the Loro Protocol crate's decoders reserve memory f
 
 200 seeds run on every `cargo test` (more with `SIM_SEEDS=N`), alternating in-memory and SQLite storage (and Postgres when `CARNET_TEST_POSTGRES` is set). Each safety check (coverage on compaction, shutting out a removed device) has been confirmed by removing it and watching the simulation fail.
 
-**Integration tests** (`crates/carnet-server/tests/`, on memory and SQLite): logins and authorization frame by frame (`auth.rs`), accounts never seeing each other's records (`accounts_never_meet`), pairing and removal, new epochs' keys signed and a removed device's refused, held until the key before them comes, and no epoch overflowing (`rekey.rs`), recovery, passwords, passkeys, invites, compaction and repair, pictures, deletion, quotas, what an account may hold and ask at once (`caps.rs`), compatibility across protocol versions, and the binary end to end over real sockets (`server.rs`), including that neither the database nor its WAL holds a word of the notes.
+**Integration tests** (`crates/carnet-server/tests/`, on memory and SQLite): logins and authorization frame by frame (`auth.rs`), accounts never seeing each other's records (`accounts_never_meet`), pairing and removal, new epochs' keys signed and a removed device's refused, held until the key before them comes, and no epoch overflowing (`rekey.rs`), recovery, passwords, passkeys, invites, compaction and repair, pictures, deletion, quotas, what an account may hold and ask at once (`caps.rs`), compatibility across protocol versions, and the binary end to end over real sockets (`server.rs`), including that neither the database nor its WAL holds a word of the notes, that the data folder and what's in it are the server's user's alone, that a deleted account's put link puts nothing and pictures no account owns are swept, and that another site's page opens no socket.
 
 **Whole apps** (`src/app_tests.rs`, `src/sync_tests.rs`): desktop apps against the server's own code on a real socket: enrolling by invite, pairing, live edits into an open note, moves, pins, trash and folders following across devices, pictures, deletion, removal, passwords. A randomized vault test (`VAULT_SEEDS=N`) has two devices make, move, pin, rename, trash and restore notes and folders, apart and together, then checks both end with the same vault, files and notes. `crates/carnet-web/tests/viewer.rs` does the same for the web app's Rust against a desktop-like session, including a 10,000-note state.
 

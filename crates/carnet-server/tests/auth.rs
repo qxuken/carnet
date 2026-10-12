@@ -581,3 +581,39 @@ fn a_device_id_the_account_has_had_is_never_given_again() {
         assert!(raw.hub.store().device(A, b"a2").unwrap().revoked);
     }
 }
+
+/// A login naming an account that isn't here, and one naming a device
+/// that isn't in an account that is, are answered alike, frame for frame:
+/// a login tells nobody which accounts there are. (Either way the app
+/// forgets the account: an account deleted while its device was away is
+/// the first.) A device removed is told so; a device of the account
+/// signed with the wrong key is only turned away.
+#[test]
+fn a_login_tells_nobody_which_accounts_there_are() {
+    use carnet_sync::wire::Deny;
+    for store in stores() {
+        let mut raw = Raw::new(store);
+        let b1 = raw.b1.clone();
+        let mut n = 0;
+        let mut denial = |raw: &mut Raw, account: &[u8], device: &[u8]| {
+            // Each from an address of its own: no limit on tries meets it.
+            n += 1;
+            let (conn, nonce) = raw.open(&format!("198.51.100.{n}"));
+            let outs = raw.send(conn, &Raw::hello(account, device, &b1, ORIGIN, &nonce));
+            assert!(denied(&outs, conn).is_some(), "turned away");
+            frames(&outs, conn).into_iter().find(|f| matches!(f, Frame::Carnet(Carnet::Denied { .. }))).unwrap()
+        };
+        let unknown = denial(&mut raw, b"no-such-account", b"b1");
+        assert_eq!(denial(&mut raw, A, b"b1"), unknown, "B's device, named as A's");
+        assert_eq!(denial(&mut raw, A, b"a9"), unknown, "a device A never had");
+        let Frame::Carnet(Carnet::Denied { why, .. }) = &unknown else { unreachable!() };
+        assert_eq!(*why, Deny::AccountRemoved);
+        // A device of A's, signed with another's key: only turned away.
+        let wrong = denial(&mut raw, A, b"a1");
+        assert!(matches!(wrong, Frame::Carnet(Carnet::Denied { why: Deny::Other, .. })), "{wrong:?}");
+        // A device removed is told so, to forget the account.
+        raw.hub.store_mut().revoke_device(A, b"a2").unwrap();
+        let removed = denial(&mut raw, A, b"a2");
+        assert!(matches!(removed, Frame::Carnet(Carnet::Denied { why: Deny::DeviceRemoved, .. })), "{removed:?}");
+    }
+}

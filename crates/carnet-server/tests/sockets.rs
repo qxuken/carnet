@@ -236,3 +236,37 @@ async fn a_quiet_socket_is_pinged_and_closed_if_it_never_answers() {
     srv.stop().await;
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// The sockets the server closes for its limits are counted, by why:
+/// `carnet_sockets_closed_total{reason}` on `/metrics`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sockets_closed_for_their_limits_are_counted() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let data = temp("closes");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let maddr = metrics.local_addr().unwrap();
+    let (stop, rx) = oneshot::channel::<()>();
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+    let host = server::Host { first_invite: false, ..server::Host::default() };
+    let limits = SocketLimits { login: Duration::from_millis(500), ..SocketLimits::default() };
+    let done = tokio::spawn(server::serve_limited(config, listener, Some(metrics), host, limits, async {
+        let _ = rx.await;
+    }));
+    let url = format!("ws://{addr}/v1/sync?protocol={}", carnet_sync::compat::PROTOCOL);
+    let mut late = tokio_tungstenite::connect_async(url).await.unwrap().0;
+    assert_eq!(closed(&mut late).await.as_deref(), Some("took too long to sign in"));
+    let mut s = TcpStream::connect(maddr).await.unwrap();
+    s.write_all(b"GET /metrics HTTP/1.1\r\nHost: m\r\nConnection: close\r\n\r\n").await.unwrap();
+    let mut page = String::new();
+    s.read_to_string(&mut page).await.unwrap();
+    for (reason, n) in [("login_timeout", 1), ("idle", 0), ("budget", 0)] {
+        let line = format!("carnet_sockets_closed_total{{reason=\"{reason}\"}} {n}\n");
+        assert!(page.contains(&line), "{line}: {page}");
+    }
+    assert!(page.contains("# TYPE carnet_sockets_closed_total counter"));
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&data);
+}

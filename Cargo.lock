@@ -900,6 +900,8 @@ dependencies = [
  "carnet-sync",
  "futures-util",
  "hmac 0.13.0",
+ "hyper",
+ "hyper-util",
  "jiff",
  "loro-protocol",
  "md-5",

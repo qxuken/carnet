@@ -250,8 +250,13 @@ pub struct Sharded {
 impl Sharded {
     /// The databases in `data`: the directory made if it is not there.
     pub fn open(data: &Path) -> Result<Self, Failed> {
-        std::fs::create_dir_all(data.join("accounts")).map_err(|e| Failed(e.to_string()))?;
-        let directory = Connection::open(Self::directory_path(data)).map_err(failed)?;
+        // Its own user's alone (`private.rs`): the folders, and each
+        // database before its WAL is made.
+        crate::private::data_dir(data).map_err(|e| Failed(e.to_string()))?;
+        crate::private::dir(&data.join("accounts")).map_err(|e| Failed(e.to_string()))?;
+        let path = Self::directory_path(data);
+        let directory = Connection::open(&path).map_err(failed)?;
+        crate::private::file(&path).map_err(|e| Failed(e.to_string()))?;
         prepare(&directory, DIRECTORY)?;
         Ok(Sharded { place: Place::Disk(data.to_path_buf()), directory, open: RefCell::default(), clock: Cell::new(0) })
     }
@@ -317,7 +322,9 @@ impl Sharded {
         let db = match &self.place {
             Place::Disk(data) => {
                 let path = Self::account_path(data, account).ok_or_else(|| Failed("an account id past 64 bytes".into()))?;
-                Connection::open(path).map_err(failed)?
+                let db = Connection::open(&path).map_err(failed)?;
+                crate::private::file(&path).map_err(|e| Failed(e.to_string()))?;
+                db
             }
             Place::Memory => Connection::open_in_memory().map_err(failed)?,
         };
@@ -1031,6 +1038,10 @@ impl Storage for Sharded {
 
     fn is_owner(&self, account: &[u8]) -> bool {
         self.directory.query_row("SELECT owner FROM accounts WHERE id = ?1", params![account], |r| r.get(0)).unwrap_or(false)
+    }
+
+    fn has_account(&self, account: &[u8]) -> bool {
+        self.directory.query_row("SELECT EXISTS (SELECT 1 FROM accounts WHERE id = ?1)", params![account], |r| r.get(0)).unwrap_or(true)
     }
 
     fn account_list(&self) -> Vec<(Vec<u8>, bool, u64)> {

@@ -538,10 +538,22 @@ impl Postgres {
         for l in &rows.log {
             tx.execute(&st, &[a, &int(l.at), &l.device, &l.room, &l.what]).map_err(failed)?;
         }
+        // A recovery key or passkey another account here has (its own rows
+        // went above) is refused, as `set_recovery` refuses it, never taken
+        // from that account: the whole account fails, nothing changed.
+        let elsewhere = |tx: &mut Transaction<'_>, table: &str, public: &[u8]| -> Result<(), Failed> {
+            let other = tx.query_opt(&format!("SELECT account FROM {table} WHERE public = $1"), &[&public]).map_err(failed)?;
+            match other {
+                Some(r) => Err(Failed(format!(
+                    "account {}: its {table} key is account {}'s here already: not copied over it",
+                    hex(a),
+                    hex(&r.get::<_, Vec<u8>>(0))
+                ))),
+                None => Ok(()),
+            }
+        };
         if let Some(r) = &rows.recovery {
-            // A key another account had (only ever a copy's leftover): this
-            // one's now, as in the files' directory.
-            tx.execute("DELETE FROM recovery WHERE public = $1", &[&r.public]).map_err(failed)?;
+            elsewhere(&mut tx, "recovery", &r.public)?;
             tx.execute("INSERT INTO recovery (account, public, wrapped, created, card) VALUES ($1, $2, $3, $4, $5)", &[a, &r.public, &r.wrapped, &int(r.created), &r.card])
                 .map_err(failed)?;
         }
@@ -550,7 +562,7 @@ impl Postgres {
                 .map_err(failed)?;
         }
         for k in &rows.passkeys {
-            tx.execute("DELETE FROM passkeys WHERE public = $1", &[&k.public]).map_err(failed)?;
+            elsewhere(&mut tx, "passkeys", &k.public)?;
             tx.execute("INSERT INTO passkeys (account, public, wrapped, card, made) VALUES ($1, $2, $3, $4, $5)", &[a, &k.public, &k.wrapped, &k.card, &int(k.made)])
                 .map_err(failed)?;
         }
@@ -579,6 +591,10 @@ impl Postgres {
             None => Err(Failed("no such account".into())),
         }
     }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 impl Drop for Postgres {
@@ -1007,6 +1023,13 @@ impl Storage for Postgres {
         self.read(false, |c| {
             let st = c.st("SELECT owner FROM accounts WHERE id = $1")?;
             Ok(c.client.query_opt(&st, &[&account]).map_err(failed)?.is_some_and(|r| r.get(0)))
+        })
+    }
+
+    fn has_account(&self, account: &[u8]) -> bool {
+        self.read(true, |c| {
+            let st = c.st("SELECT 1 FROM accounts WHERE id = $1")?;
+            Ok(c.client.query_opt(&st, &[&account]).map_err(failed)?.is_some())
         })
     }
 

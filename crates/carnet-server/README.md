@@ -100,6 +100,8 @@ data/opaque.key               with --passwords: the server's OPAQUE key (never l
 
 Accounts never meet, so neither do their files. A query in one account's database can't reach another's. One account's writes never wait on another's. Deleting an account deletes its file, and moving one copies its file.
 
+All of it is readable by the server's own user alone: the folders `700`, the files `600`. A data folder from an older server that others could read is closed when it starts, and the log says so once.
+
 ## Invites, pairing, recovery
 
 An invite makes a new account, a person with their own notes. Adding a device to an account is pairing, done from a device that's already in: it shows a code like `47-381095`, and the new device types it. The server relays the two sides' messages, and can't read or change what passes between them. When no device is left, the account's 12-word recovery code lets a new one in.
@@ -158,6 +160,10 @@ carnet-server --trusted-proxy 172.16.0.0/12      # a proxy in another container
 
 A socket past the limit is refused with `429`; a try past it, with "too many tries from this address". `carnet_limited_total` in `/metrics` counts both.
 
+**Time limits.** A request's headers must come within 30 seconds, and a connection idle between requests is closed after as long. A request is answered within 30 seconds or gets `408`; a picture's upload or download by its link has 10 minutes. A socket, once open, keeps its own limits (30 seconds to sign in, 5 minutes with nothing heard). So a proxy's own timeouts can be generous (`proxy_read_timeout` above).
+
+**Only its own pages open a socket.** A browser says which page opens a socket (`Origin`), and the server refuses one from another site's page (`403`): the web app is at `--origin`, and the apps send none. So set `--origin` to the address the browser shows. On your own machine (`--origin http://127.0.0.1:…`), a page at `localhost` on any port is taken too, as for the web app's development server.
+
 ## Is it well?
 
 `GET /v1/health` answers `200 {"ok":true}` while the server's hub does, and `503` if it doesn't within five seconds: for an uptime monitor, or a load balancer. The container checks it itself (`HEALTHCHECK`, so `docker ps` says `healthy`), through `carnet-server health`, which asks the server on this machine and exits 0 or 1.
@@ -178,6 +184,7 @@ They're counts, never what anything held: the server has nothing else to give.
 |---|---|
 | `carnet_storage_failures_total` | writes to the databases that failed: the one to alert on (a full disk, a broken file) |
 | `carnet_limited_total{what}` | sockets refused (`sockets`) and sockets turned away (`tries`) for asking too much from one address |
+| `carnet_sockets_closed_total{reason}` | sockets the server closed for its limits: too much waiting for one that isn't reading (`budget`), too long to sign in (`login_timeout`), nothing heard for 5 minutes (`idle`) |
 | `carnet_hub_queue_seconds` | how long the scrape waited for the hub, which takes every socket's frames in turn: its lag |
 | `carnet_hub_handle_seconds` | a histogram of how long the hub took over each frame |
 | `carnet_sockets`, `carnet_sockets_logged_in` | sockets open, and of them devices logged in |
@@ -314,5 +321,5 @@ cargo test -p carnet-server --features postgres,s3
 
 - `tests/sim.rs` simulates devices, the server and a faulty network from a seed, on memory and on SQLite alike (and Postgres, given one).
 - `tests/migrate.rs` moves a folder to Postgres and a bucket and compares every answer; refuses a folder in use and a database served; copies the pictures first beside a running server, a picture half put meanwhile, then the rest after the stop; and end to end, fills a server on SQLite through its sockets, moves it, starts it on Postgres and the bucket, and its devices carry on (notes, a picture by the bucket's link, a password, a note deleted for good). `tests/s3.rs` puts and fetches by the bucket's links, marks and sweeps.
-- `tests/server.rs` runs the binary's own path end to end: HTTP, WebSockets, SQLite, a restart, what health and metrics say, and the limits behind a trusted proxy.
+- `tests/server.rs` runs the binary's own path end to end: HTTP, WebSockets, SQLite, a restart, what health and metrics say, and the limits behind a trusted proxy; the data folder's permissions, a deleted account's links and pictures, and sockets from other sites' pages.
 - `tests/auth.rs` sends what an attacker would, frame by frame: everything but a login before one, logins signed with the wrong key, for another nonce or server or account, false invites and recoveries, another account's rooms, devices and pictures, writes and snapshots out of turn, the owner's frames from someone else, and too many tries from one address.

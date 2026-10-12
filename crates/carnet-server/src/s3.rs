@@ -30,6 +30,10 @@
 //! device (`open_blob`), as with any picture the account's device puts.
 //! Nor is a sweep needed for pictures put and never named in a note: each
 //! is counted against its account, and goes when a device drops it (§4).
+//! A link can't be taken back, though: one given before its account was
+//! deleted may still put, within its five minutes. So the hourly sweep
+//! lists the account folders ([`Blobs::owners`], by S3's delimiter, a
+//! thousand to a call) and takes those of accounts that are no more.
 //!
 //! The bucket needs CORS for the web app: `PUT` and `GET` from the
 //! server's origin (the README says how).
@@ -245,6 +249,33 @@ impl S3Blobs {
         }
     }
 
+    /// The folders right under `prefix` (each `<prefix><name>/`), by
+    /// name: a list by S3's delimiter, a thousand names to a call.
+    pub fn folders(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut action = self.bucket.list_objects_v2(Some(&self.creds));
+            action.with_prefix(prefix);
+            action.with_delimiter("/");
+            if let Some(t) = &token {
+                action.with_continuation_token(t.clone());
+            }
+            let url = action.sign(CALL);
+            let mut r = self.agent.get(url.as_str()).call().map_err(|e| format!("listing {prefix}: {e}"))?;
+            let body = r.body_mut().with_config().limit(16 << 20).read_to_string().map_err(|e| format!("listing {prefix}: {e}"))?;
+            if !r.status().is_success() {
+                return Err(format!("listing {prefix}: {}", r.status()));
+            }
+            let page = ListObjectsV2::parse_response(&body).map_err(|e| format!("listing {prefix}: {e}"))?;
+            out.extend(page.common_prefixes.into_iter().filter_map(|p| Some(p.prefix.strip_prefix(prefix)?.strip_suffix('/')?.to_string())));
+            match page.next_continuation_token {
+                Some(t) if !t.is_empty() => token = Some(t),
+                _ => return Ok(out),
+            }
+        }
+    }
+
     /// Every one of `keys` gone, a thousand to a call.
     pub fn delete_all(&self, keys: &[String]) -> Result<(), String> {
         for chunk in keys.chunks(1000) {
@@ -394,6 +425,11 @@ impl Blobs for S3Blobs {
             }
         }
         gone
+    }
+
+    /// Each account's folder (`drop/` isn't one: not hex).
+    fn owners(&mut self) -> Vec<Vec<u8>> {
+        Self::said(self.folders(&self.prefix)).unwrap_or_default().iter().filter_map(|f| unhex(f)).filter(|a| !a.is_empty()).collect()
     }
 
     fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {

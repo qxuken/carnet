@@ -113,6 +113,17 @@ pub const PING_AFTER: Duration = Duration::from_secs(60);
 /// gets nowhere; past this, something sent unasked piled up.
 pub const MAX_QUEUED: usize = 16 * MAX_FRAME;
 
+/// How long a request's head may take to come, and a connection may sit
+/// idle between requests: past it, the connection closes, so one sent
+/// slowly holds nothing for long ([`serve_app`]).
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a request may take, its body read and its answer begun: the
+/// API's, the web app's files, a host's routes. Past it, 408.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// A picture's put or fetch by its link: its largest, 32 MiB, on a line
+/// as slow as 56 kB/s. (A socket, once upgraded, has its own limits.)
+pub const BLOB_TIMEOUT: Duration = Duration::from_secs(600);
+
 impl Default for SocketLimits {
     fn default() -> Self {
         SocketLimits { login: LOGIN_TIMEOUT, idle: IDLE_TIMEOUT, ping: PING_AFTER, queue: MAX_QUEUED }
@@ -306,6 +317,11 @@ pub struct Snapshot {
     pub blob_gets: u64,
     pub blob_puts: u64,
     pub blob_failures: u64,
+    /// Sockets closed for their limits ([`SocketLimits`]): too much
+    /// waiting for them, too long to log in, nothing heard.
+    pub closed_budget: u64,
+    pub closed_login: u64,
+    pub closed_idle: u64,
 }
 
 /// A histogram of durations, by Prometheus' rules: each bucket counts
@@ -347,6 +363,18 @@ struct App {
     gate: Arc<std::sync::Mutex<Gate>>,
     refused: Arc<AtomicU64>,
     sockets: SocketLimits,
+    closes: Arc<Closes>,
+}
+
+/// Sockets the server closed for its limits, by why, for `/metrics`.
+#[derive(Default)]
+struct Closes {
+    /// More waited to be sent than [`SocketLimits::queue`].
+    budget: AtomicU64,
+    /// Not logged in within [`SocketLimits::login`].
+    login: AtomicU64,
+    /// Nothing heard for [`SocketLimits::idle`].
+    idle: AtomicU64,
 }
 
 /// Sockets by client: how many each has open, and how fast it opens them.
@@ -500,6 +528,8 @@ pub async fn serve_limited(
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let started = now();
+    // Its own user's alone, before anything is made in it.
+    crate::private::data_dir(&config.data)?;
     let Host { routes, quota, admission, signup, passwords, password_emails, first_invite, store: hosted_store, blobs: hosted_blobs, ready } = host;
     let passwords = if passwords { Some(opaque_key(&config.data)?) } else { None };
     let takes_passwords = passwords.is_some();
@@ -557,13 +587,29 @@ pub async fn serve_limited(
     let counts = worker.counts.clone();
     let (jobs, queued) = std::sync::mpsc::channel::<Job>();
     let deliver = tx.clone();
-    // Once an hour, pictures dropped more than 30 days ago go.
+    // Once an hour, pictures dropped more than 30 days ago go, and those
+    // of accounts that are no more (a put by a link given before its
+    // account was deleted): the hub says which, from the store.
     let pictures = std::thread::Builder::new().name("carnet-pictures".into()).spawn(move || {
         let mut swept = Instant::now() - Duration::from_secs(3600);
         loop {
             if swept.elapsed() >= Duration::from_secs(3600) {
                 swept = Instant::now();
                 worker.sweep(now());
+                let unowned = worker.sweep_unowned(|owners| {
+                    let (reply, answer) = oneshot::channel();
+                    let ask: HubJob = Box::new(move |hub: &mut Hub<Store>| {
+                        let _ = reply.send(owners.into_iter().filter(|a| !hub.store().has_account(a)).collect::<Vec<_>>());
+                        Vec::new()
+                    });
+                    if deliver.send(ToHub::Run(ask)).is_err() {
+                        return Vec::new();
+                    }
+                    answer.blocking_recv().unwrap_or_default()
+                });
+                if unowned > 0 {
+                    println!("carnet-server: pictures of {unowned} accounts that are no more, gone");
+                }
             }
             match queued.recv_timeout(Duration::from_secs(3600).saturating_sub(swept.elapsed())) {
                 Ok(job) => worker.run(job, &mut |o| {
@@ -581,6 +627,7 @@ pub async fn serve_limited(
         ready(HubHandle { tx: tx.clone() });
     }
     let refused = Arc::new(AtomicU64::new(0));
+    let closes = Arc::new(Closes::default());
     let gate = Gate { open: Default::default(), opens: Limiter::new(limits::SOCKETS), started: Instant::now() };
     let app = App {
         hub: tx.clone(),
@@ -593,6 +640,7 @@ pub async fn serve_limited(
         gate: Arc::new(std::sync::Mutex::new(gate)),
         refused: refused.clone(),
         sockets,
+        closes: closes.clone(),
     };
     // One stop, for both listeners.
     let (stopping, stopped) = tokio::sync::watch::channel(false);
@@ -605,26 +653,30 @@ pub async fn serve_limited(
     };
     let metrics_task = match metrics {
         Some(listener) => {
-            let watch = Watch { hub: tx.clone(), data: config.data.clone(), started, refused: refused.clone(), counts: counts.clone(), http: http.clone() };
-            let router = Router::new().route("/metrics", get(metrics_route)).with_state(watch);
+            let watch = Watch { hub: tx.clone(), data: config.data.clone(), started, refused: refused.clone(), counts: counts.clone(), http: http.clone(), closes };
+            let router = Router::new().route("/metrics", get(metrics_route)).with_state(watch).layer(timeout(REQUEST_TIMEOUT));
             println!("carnet-server: metrics on http://{}/metrics", listener.local_addr()?);
-            Some(tokio::spawn(axum::serve(listener, router).with_graceful_shutdown(until_stopped(stopped.clone())).into_future()))
+            Some(tokio::spawn(serve_app(listener, router, until_stopped(stopped.clone()))))
         }
         None => None,
     };
-    let blobs: Router<App> = Router::new()
+    // Each request in its time: a picture's in minutes, any other in
+    // seconds (a socket's only until it's upgraded).
+    let blobs: Router = Router::new()
         .route("/v1/blobs/{token}", get(blob_get).put(blob_put))
         .layer(axum::extract::DefaultBodyLimit::max(pictures::MAX as usize))
-        .with_state(Links { signer, files, http });
-    let router = Router::new()
-        .merge(blobs)
+        .layer(timeout(BLOB_TIMEOUT))
+        .with_state(Links { signer, files, http, hub: tx.clone() });
+    let api = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/health", get(health))
         .route("/v1/sync", get(sync_route))
         // Not the viewer's page: an API address that isn't one is a 404.
         .route("/v1/{*rest}", any(|| async { StatusCode::NOT_FOUND }))
         .with_state(app)
-        .merge(routes);
+        .merge(routes)
+        .layer(timeout(REQUEST_TIMEOUT));
+    let router = blobs.merge(api);
     // The viewer at `/`, its files as built; an address it doesn't have is
     // its page (the app finds its way from there). Its files, and only
     // they, with its CSP (a host's own pages say their own).
@@ -633,7 +685,7 @@ pub async fn serve_limited(
             let index = tower_http::services::ServeFile::new(dir.join("index.html"));
             let files = tower_http::services::ServeDir::new(dir).precompressed_br().precompressed_gzip().fallback(index);
             let csp = HeaderValue::from_str(&csp).map_err(std::io::Error::other)?;
-            router.fallback_service(Router::new().fallback_service(files).layer(axum::middleware::from_fn_with_state(csp, web_headers)))
+            router.fallback_service(Router::new().fallback_service(files).layer(axum::middleware::from_fn_with_state(csp, web_headers)).layer(timeout(REQUEST_TIMEOUT)))
         }
         None => router.fallback(|uri: axum::http::Uri| async move {
             if uri.path() == "/" {
@@ -650,8 +702,7 @@ pub async fn serve_limited(
     }));
     let addr: SocketAddr = listener.local_addr()?;
     println!("carnet-server: listening on {addr}, origin {}", config.origin);
-    // Each request's address: who it's from, unless a trusted proxy says.
-    let served = axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(until_stopped(stopped)).await;
+    let served = serve_app(listener, router, until_stopped(stopped)).await;
     if let Some(t) = metrics_task {
         let _ = t.await;
     }
@@ -665,6 +716,64 @@ pub async fn serve_limited(
     })
     .await;
     served
+}
+
+/// Past `limit`, a request is answered 408: [`REQUEST_TIMEOUT`] for the
+/// API, a host's routes, and a host's other listeners'.
+pub fn timeout(limit: Duration) -> tower_http::timeout::TimeoutLayer {
+    tower_http::timeout::TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, limit)
+}
+
+/// `router` served on `listener` until `stop`, as `axum::serve` serves
+/// (HTTP/1.1, each request's address its `ConnectInfo`, a socket
+/// upgraded), and each request's head read within [`HEAD_TIMEOUT`]: a
+/// connection that sends one slowly, or sits idle, is let go. Once
+/// stopped, no more is taken, and what's under way finishes (a socket,
+/// upgraded, is the hub's to let go). A host's other listeners use it too.
+pub async fn serve_app(listener: TcpListener, router: Router, stop: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+    let (closing, closed) = tokio::sync::watch::channel(false);
+    // Each connection holds one: all dropped, all done.
+    let (open, mut done) = mpsc::channel::<()>(1);
+    let mut stop = std::pin::pin!(stop);
+    loop {
+        let (io, peer) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(a) => a,
+                // Out of files, or one reset before it was taken: a
+                // moment, and on.
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+            },
+            _ = &mut stop => break,
+        };
+        let router = router.clone();
+        let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let mut req = req.map(axum::body::Body::new);
+            req.extensions_mut().insert(ConnectInfo(peer));
+            tower::ServiceExt::oneshot(router.clone(), req)
+        });
+        let (open, mut closed) = (open.clone(), closed.clone());
+        tokio::spawn(async move {
+            let _open = open;
+            let mut http = hyper::server::conn::http1::Builder::new();
+            http.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEAD_TIMEOUT);
+            let mut conn = std::pin::pin!(http.serve_connection(hyper_util::rt::TokioIo::new(io), service).with_upgrades());
+            tokio::select! {
+                _ = conn.as_mut() => return,
+                _ = closed.wait_for(|&c| c) => {}
+            }
+            conn.as_mut().graceful_shutdown();
+            let _ = conn.await;
+        });
+    }
+    drop(listener);
+    let _ = closing.send(true);
+    drop(open);
+    let _ = done.recv().await;
+    drop(closed);
+    Ok(())
 }
 
 /// The web app's Content-Security-Policy (docs/SYNC.md §8): its own
@@ -764,6 +873,7 @@ struct Watch {
     refused: Arc<AtomicU64>,
     counts: Arc<Counts>,
     http: Arc<BlobHttp>,
+    closes: Arc<Closes>,
 }
 
 async fn metrics_route(State(w): State<Watch>) -> impl IntoResponse {
@@ -781,6 +891,9 @@ async fn metrics_route(State(w): State<Watch>) -> impl IntoResponse {
     snapshot.blob_gets = w.http.gets.load(Ordering::Relaxed);
     snapshot.blob_puts = w.http.puts.load(Ordering::Relaxed);
     snapshot.blob_failures = w.http.failures.load(Ordering::Relaxed);
+    snapshot.closed_budget = w.closes.budget.load(Ordering::Relaxed);
+    snapshot.closed_login = w.closes.login.load(Ordering::Relaxed);
+    snapshot.closed_idle = w.closes.idle.load(Ordering::Relaxed);
     let data = w.data.clone();
     let bytes = tokio::task::spawn_blocking(move || dir_bytes(&data)).await.unwrap_or(0);
     ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], metrics_text(&snapshot, bytes, w.started)).into_response()
@@ -829,6 +942,12 @@ pub fn metrics_text(s: &Snapshot, data_bytes: u64, started: u64) -> String {
     one("carnet_logins_by_app_total", "counter", "Logins let in, by the app and its version.", &by);
     one("carnet_pairings_open", "gauge", "Pairings open, waiting for a new device.", &[("", n(s.open.pairings))]);
     one("carnet_sockets_opened_total", "counter", "Sockets opened.", &[("", n(s.sockets_opened))]);
+    one(
+        "carnet_sockets_closed_total",
+        "counter",
+        "Sockets the server closed for its limits: too much waiting to be sent, too long to sign in, nothing heard for too long.",
+        &[("{reason=\"budget\"}", n(s.closed_budget)), ("{reason=\"login_timeout\"}", n(s.closed_login)), ("{reason=\"idle\"}", n(s.closed_idle))],
+    );
     one("carnet_frames_received_total", "counter", "Frames from devices.", &[("", n(s.frames_in))]);
     one("carnet_received_bytes_total", "counter", "Bytes of frames from devices.", &[("", n(s.bytes_in))]);
     one("carnet_frames_sent_total", "counter", "Frames to devices.", &[("", n(s.frames_out))]);
@@ -883,6 +1002,19 @@ struct Links {
     signer: Arc<Signer>,
     files: BlobFiles,
     http: Arc<BlobHttp>,
+    /// Whether a put's account is still one: the hub's store says.
+    hub: mpsc::UnboundedSender<ToHub>,
+}
+
+/// Whether `account` is still an account, as the hub's store says; no if
+/// the hub doesn't answer (the server is stopping).
+async fn account_here(hub: &mpsc::UnboundedSender<ToHub>, account: Vec<u8>) -> bool {
+    let (reply, answer) = oneshot::channel();
+    let ask: HubJob = Box::new(move |hub: &mut Hub<Store>| {
+        let _ = reply.send(hub.store().has_account(&account));
+        Vec::new()
+    });
+    hub.send(ToHub::Run(ask)).is_ok() && answer.await.unwrap_or(false)
 }
 
 /// Pictures over HTTP, for `/metrics`.
@@ -962,6 +1094,11 @@ async fn blob_put(
     if len != g.max {
         return (StatusCode::BAD_REQUEST, "not the length this link is for").into_response();
     }
+    // Its account deleted since the link was given: nothing of it is kept
+    // again. (One deleted while the put comes is swept within the hour.)
+    if !account_here(&l.hub, g.account.clone()).await {
+        return (StatusCode::FORBIDDEN, "this link's account is no more").into_response();
+    }
     let n = l.http.next.fetch_add(1, Ordering::Relaxed);
     let tmp = l.files.spool.join(format!("put-{n}"));
     let failed = |l: &Links, tmp: &std::path::Path, status: StatusCode| {
@@ -969,7 +1106,7 @@ async fn blob_put(
         let _ = std::fs::remove_file(tmp);
         status.into_response()
     };
-    let Ok(mut file) = tokio::fs::File::create(&tmp).await else {
+    let Ok(mut file) = tokio::fs::OpenOptions::from(crate::private::create()).open(&tmp).await else {
         return failed(&l, &tmp, StatusCode::INTERNAL_SERVER_ERROR);
     };
     let mut got = 0u64;
@@ -1021,10 +1158,16 @@ async fn sync_route(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    // A page of another site, in someone's browser, opens no socket here.
+    if let Some(page) = headers.get(header::ORIGIN)
+        && !origin_allowed(&app.origin, page.to_str().unwrap_or("null"))
+    {
+        return (StatusCode::FORBIDDEN, "a page of another site may not open this server's socket").into_response();
+    }
     // The app's protocol, name and version, in its address; no
     // protocol, a build from before.
     let app_said = compat::Client::from_query(query.as_deref());
-    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
     let client = limits::client_of(peer.ip(), header("cf-connecting-ip"), header("x-forwarded-for"), &app.trusted).to_string();
     if !app.gate.lock().unwrap_or_else(|e| e.into_inner()).admit(&client) {
         app.refused.fetch_add(1, Ordering::Relaxed);
@@ -1038,6 +1181,43 @@ async fn sync_route(
         socket_task(app, socket, client, app_said).await;
     });
     upgraded.into_response()
+}
+
+/// Whether a browser's page at `page` (its `Origin`) may open a socket on
+/// the server at `own` (its `--origin`): the web app this server serves
+/// is at its own origin. Behind a proxy that's the public one; a server
+/// on this machine (development, Vite's proxy) takes a page on this
+/// machine too, which another site can't be. The apps send no `Origin`,
+/// and aren't asked this.
+pub fn origin_allowed(own: &str, page: &str) -> bool {
+    match (site(own), site(page)) {
+        (Some(own), Some(page)) => own == page || (loopback(&own.1) && loopback(&page.1)),
+        _ => false,
+    }
+}
+
+/// An origin's scheme, host and port, as a browser says it: lowercase,
+/// the default port said. `None` for `null` or anything not HTTP's.
+fn site(origin: &str) -> Option<(String, String, u16)> {
+    let origin = origin.trim().to_ascii_lowercase();
+    let (scheme, rest) = origin.split_once("://")?;
+    let default = match scheme {
+        "http" => 80,
+        "https" => 443,
+        _ => return None,
+    };
+    let rest = rest.split(['/', '?', '#']).next()?;
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (h, p.parse().ok()?),
+        _ => (rest, default),
+    };
+    (!host.is_empty()).then(|| (scheme.to_string(), host.to_string(), port))
+}
+
+/// A name or address of this machine's own.
+fn loopback(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    host == "localhost" || host.ends_with(".localhost") || bare.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// A socket a client holds open, for the [`Gate`].
@@ -1232,6 +1412,15 @@ async fn socket_task(app: App, socket: WebSocket, client: String, said: compat::
         }
     };
     let _ = app.hub.send(ToHub::Closed { conn });
+    let counted = match end {
+        End::Over => Some(&app.closes.budget),
+        End::Late(LOGIN_LATE) => Some(&app.closes.login),
+        End::Late(_) => Some(&app.closes.idle),
+        End::Gone => None,
+    };
+    if let Some(c) = counted {
+        c.fetch_add(1, Ordering::Relaxed);
+    }
     match end {
         End::Over => writer.abort(),
         End::Late(why) => {

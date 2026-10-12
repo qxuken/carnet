@@ -728,3 +728,185 @@ async fn a_hosts_pages_keep_their_headers_beside_the_app() {
     tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+fn mode(p: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).unwrap_or_else(|e| panic!("{}: {e}", p.display())).permissions().mode() & 0o777
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// What the server keeps is its own user's alone: a data folder left open
+/// to others is closed on start, and the folders it makes, its databases
+/// and its pictures are made so. A link to put a picture given before its
+/// account was deleted puts nothing after: the account's folder isn't
+/// made again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_data_is_private_and_a_deleted_accounts_link_puts_nothing() {
+    use carnet_sync::session::Transfer;
+    let data = temp("private");
+    std::fs::create_dir_all(&data).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (handle_tx, handle_rx) = oneshot::channel();
+    let host = server::Host {
+        first_invite: false,
+        ready: Some(Box::new(move |h| {
+            let _ = handle_tx.send(h);
+        })),
+        ..server::Host::default()
+    };
+    let (stop, rx) = oneshot::channel::<()>();
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+    let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
+        let _ = rx.await;
+    }));
+    let hub: server::HubHandle = handle_rx.await.unwrap();
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&data), 0o700, "closed on start");
+        for dir in ["accounts", "blobs", "spool"] {
+            assert_eq!(mode(&data.join(dir)), 0o700, "{dir}");
+        }
+        for file in ["carnet.db", "links.key"] {
+            assert_eq!(mode(&data.join(file)), 0o600, "{file}");
+        }
+    }
+
+    let code = hub.run(|hub, _| server::invite(hub.store_mut(), false).unwrap()).await.unwrap();
+    let key = DeviceKey::generate(&mut OsRandom);
+    let account = enroll(addr, &code.text(), b"\x0a", key.public()).await.unwrap();
+    let identity = Identity { origin: format!("http://{addr}"), account: account.clone(), device: b"\x0a".to_vec(), key, ring: Ring::new(VaultKey::generate(&mut OsRandom)), name: String::new() };
+    let mut a = Device::new(identity, 1);
+    let mut ws = a.connect(addr).await;
+    a.settle(&mut ws).await;
+    let len = |n: usize| format!("Content-Length: {n}\r\n");
+    let offer = |a: &mut Device, pic: &[u8]| {
+        let id = a.session.blob_id(pic);
+        a.session.offer_blobs(vec![(id, pic.len())]);
+        id
+    };
+    // One put, kept: its folder and file the server's alone.
+    let first: Vec<u8> = vec![1; 5000];
+    let id = offer(&mut a, &first);
+    a.settle(&mut ws).await;
+    assert!(a.session.put_blob(&first, &mut OsRandom));
+    let [Transfer::Put { url, sealed, .. }] = &a.session.take_transfers()[..] else { panic!("a put") };
+    assert_eq!(request(addr, "PUT", &path_of(url), &len(sealed.len()), sealed).await.0, 204);
+    a.session.transferred(id, true, Ok(Vec::new()));
+    let folder = data.join("blobs").join(hex(&account));
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&folder), 0o700);
+        for f in walk(&folder) {
+            assert_eq!(mode(&f), 0o600, "{}", f.display());
+        }
+        let db = Sharded::account_path(&data, &account).unwrap();
+        assert_eq!(mode(&db), 0o600);
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        if wal.exists() {
+            assert_eq!(mode(&wal), 0o600, "the WAL as its database");
+        }
+    }
+
+    // A second picture's link, then the account deleted.
+    let second: Vec<u8> = vec![2; 7000];
+    offer(&mut a, &second);
+    a.settle(&mut ws).await;
+    assert!(a.session.put_blob(&second, &mut OsRandom));
+    let [Transfer::Put { url, sealed, .. }] = &a.session.take_transfers()[..] else { panic!("a put") };
+    let (put_path, sealed) = (path_of(url), sealed.clone());
+    let gone = account.clone();
+    hub.run(move |hub, outs| outs.extend(hub.remove_account(&gone).unwrap())).await.unwrap();
+    for _ in 0..50 {
+        if !folder.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!folder.exists(), "its pictures gone with it");
+    let (status, _, body) = request(addr, "PUT", &put_path, &len(sealed.len()), &sealed).await;
+    assert_eq!(status, 403, "{}", String::from_utf8_lossy(&body));
+    assert!(!folder.exists(), "not made again");
+    assert!(std::fs::read_dir(data.join("spool")).unwrap().next().is_none());
+    drop(ws);
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Pictures whose account is no more (put by a link given before it was
+/// deleted, or missed by its deletion) go on the hourly sweep, the first
+/// at start; an account's own stay, and a folder that names no account
+/// is left alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pictures_of_accounts_that_are_no_more_are_swept() {
+    use carnet_server::Storage;
+    let data = temp("unowned");
+    {
+        let mut db = Sharded::open(&data).unwrap();
+        db.add_account(b"here", true).unwrap();
+        db.add_device(b"here", b"d", [1; 32]).unwrap();
+    }
+    let blobs = data.join("blobs");
+    for owner in [hex(b"here"), hex(b"gone"), "not-an-account".into()] {
+        std::fs::create_dir_all(blobs.join(&owner)).unwrap();
+        std::fs::write(blobs.join(&owner).join("07".repeat(32)), b"SEALED").unwrap();
+    }
+    let srv = start(&data, None).await;
+    for _ in 0..50 {
+        if !blobs.join(hex(b"gone")).exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(!blobs.join(hex(b"gone")).exists(), "an account that's no more: its pictures gone");
+    assert!(blobs.join(hex(b"here")).join("07".repeat(32)).exists(), "an account's own stay");
+    assert!(blobs.join("not-an-account").exists(), "not a picture folder: left as it is");
+    srv.stop().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A page of another site, in someone's browser, opens no socket here: a
+/// socket whose `Origin` isn't this server's is refused before it
+/// upgrades. The apps send none, and the web app is at the server's own
+/// origin; a server on this machine (development) takes its pages too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_socket_from_another_sites_page_is_refused() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    assert!(server::origin_allowed("https://notes.example", "https://notes.example"));
+    assert!(server::origin_allowed("https://notes.example/", "https://NOTES.example:443"));
+    assert!(!server::origin_allowed("https://notes.example", "http://notes.example"));
+    assert!(!server::origin_allowed("https://notes.example", "https://notes.example.evil.test"));
+    assert!(!server::origin_allowed("https://notes.example", "https://notes.example:8443"));
+    assert!(!server::origin_allowed("https://notes.example", "null"));
+    assert!(!server::origin_allowed("https://notes.example", "http://localhost:5173"), "not a server on this machine");
+    assert!(server::origin_allowed("http://127.0.0.1:8787", "http://localhost:5173"));
+    assert!(server::origin_allowed("http://[::1]:8787", "http://127.0.0.1:5173"));
+
+    let data = temp("origin");
+    std::fs::create_dir_all(&data).unwrap();
+    let srv = start(&data, Some("https://notes.example")).await;
+    let open = |origin: Option<&'static str>| async move {
+        let mut req = format!("ws://{}/v1/sync?protocol={}", srv.addr, carnet_sync::compat::PROTOCOL).into_client_request().unwrap();
+        if let Some(o) = origin {
+            req.headers_mut().insert("origin", o.parse().unwrap());
+        }
+        tokio_tungstenite::connect_async(req).await
+    };
+    let refused = open(Some("https://evil.example")).await.expect_err("another site's page");
+    assert!(refused.to_string().contains("403"), "{refused}");
+    assert!(open(Some("null")).await.is_err(), "a page with no origin of its own");
+    assert!(open(None).await.is_ok(), "an app: no Origin");
+    assert!(open(Some("https://notes.example")).await.is_ok(), "the web app, at the server's own origin");
+    srv.stop().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
