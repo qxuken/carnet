@@ -395,7 +395,7 @@ impl Pictures {
                 // Brought back: written where it was, and named again.
                 let mut wrote = false;
                 for rel in self.reviving.remove(id).unwrap_or_default().into_iter().filter(|p| is_owned(p)) {
-                    let path = store.dir.join(&rel);
+                    let Ok(path) = store.inside(store.dir.join(&rel)) else { continue };
                     if !path.exists() {
                         if let Some(dir) = path.parent() {
                             fs::create_dir_all(dir)?;
@@ -412,7 +412,9 @@ impl Pictures {
 
                 let vault = store.replica.as_ref().map(|r| r.vault().pictures()).unwrap_or_default();
                 for rel in vault.iter().filter(|(p, v)| unhex(v) == Some(*id) && is_owned(p)).map(|(p, _)| p) {
-                    let path = store.dir.join(rel);
+                    // Its path checked twice over: plain (the vault reads
+                    // no other), and in the notes folder once joined.
+                    let Ok(path) = store.inside(store.dir.join(rel)) else { continue };
                     if path.exists() {
                         continue;
                     }

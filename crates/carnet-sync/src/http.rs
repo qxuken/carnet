@@ -18,6 +18,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc as tmpsc;
 
 use crate::crypto::{BlobId, MAX_BLOB};
+use crate::link::Url;
 use crate::session::Transfer;
 
 /// How long a transfer may take, all of it.
@@ -85,34 +86,6 @@ impl Http {
     }
 }
 
-/// Where a link points: secure or not, host, port, and the path with its
-/// query, as sent.
-struct Url {
-    tls: bool,
-    host: String,
-    port: u16,
-    path: String,
-}
-
-fn parse(url: &str) -> Result<Url, String> {
-    let (tls, rest) = if let Some(r) = url.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (false, r)
-    } else {
-        return Err(format!("{url}: not an http(s) link"));
-    };
-    let (authority, path) = rest.find('/').map_or((rest, "/"), |i| (&rest[..i], &rest[i..]));
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((h, p)) if !h.ends_with(']') || p.parse::<u16>().is_ok() => (h, p.parse().map_err(|_| format!("{url}: not a port"))?),
-        _ => (authority, if tls { 443 } else { 80 }),
-    };
-    if host.is_empty() {
-        return Err(format!("{url}: no host"));
-    }
-    Ok(Url { tls, host: host.trim_start_matches('[').trim_end_matches(']').to_string(), port, path: path.to_string() })
-}
-
 async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer) -> Result<Vec<u8>, String> {
     let answer = match t {
         Transfer::Put { url, sealed, .. } => request(config, "PUT", url, Some(("application/octet-stream", sealed))).await?,
@@ -164,7 +137,9 @@ pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static)
 
 /// One request, with a body of its type if any, and its answer.
 async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>) -> Result<Answer, String> {
-    let u = parse(url)?;
+    // Read strictly (`link`): nothing in the request line but the link's
+    // printable ASCII.
+    let u = Url::parse(url)?;
     let tcp = tokio::net::TcpStream::connect((u.host.as_str(), u.port)).await.map_err(|e| e.to_string())?;
     if u.tls {
         let name = rustls::pki_types::ServerName::try_from(u.host.clone()).map_err(|e| e.to_string())?;
@@ -176,8 +151,7 @@ async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, bod
 }
 
 async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &str, body: Option<(&str, &[u8])>) -> Result<Answer, String> {
-    let host = if (u.tls && u.port == 443) || (!u.tls && u.port == 80) { u.host.clone() } else { format!("{}:{}", u.host, u.port) };
-    let mut head = format!("{method} {} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: Carnet\r\n", u.path);
+    let mut head = format!("{method} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: Carnet\r\n", u.path, u.host_header());
     if let Some((kind, b)) = body {
         head.push_str(&format!("Content-Type: {kind}\r\nContent-Length: {}\r\n", b.len()));
     }
@@ -241,11 +215,14 @@ fn unchunk(mut b: &[u8]) -> Result<Vec<u8>, String> {
         if size == 0 {
             return Ok(out);
         }
-        if b.len() < size + 2 {
+        // A size past any there could be is a bad answer, not a sum
+        // that wraps.
+        let end = size.checked_add(2).ok_or("not a chunk")?;
+        if b.len() < end {
             return Err("a chunk cut short".into());
         }
         out.extend_from_slice(&b[..size]);
-        b = &b[size + 2..];
+        b = &b[end..];
     }
 }
 
@@ -288,16 +265,25 @@ mod tests {
     }
 
     #[test]
-    fn links_are_read_as_they_say() {
-        let u = parse("https://bucket.example/acct/id?X-Amz-Signature=ab%2Fcd&x=1").unwrap();
-        assert_eq!((u.tls, u.host.as_str(), u.port, u.path.as_str()), (true, "bucket.example", 443, "/acct/id?X-Amz-Signature=ab%2Fcd&x=1"));
-        let u = parse("http://127.0.0.1:8787/v1/blobs/ab").unwrap();
-        assert_eq!((u.tls, u.host.as_str(), u.port), (false, "127.0.0.1", 8787));
-        let u = parse("http://[::1]:9000/x").unwrap();
-        assert_eq!((u.host.as_str(), u.port), ("::1", 9000));
-        assert!(parse("ftp://x/y").is_err() && parse("https:///x").is_err());
+    fn chunks_are_read_as_they_say() {
         assert_eq!(unchunk(b"3\r\nabc\r\n2;x=1\r\nde\r\n0\r\n\r\n").unwrap(), b"abcde");
         assert!(unchunk(b"5\r\nab").is_err());
+        // A size as big as can be, or past it: a bad answer, said so.
+        assert_eq!(unchunk(b"ffffffffffffffff\r\nab\r\n0\r\n\r\n"), Err("not a chunk".into()));
+        assert_eq!(unchunk(b"fffffffffffffffd\r\nab\r\n0\r\n\r\n"), Err("a chunk cut short".into()));
+        assert!(unchunk(b"10000000000000000\r\nab\r\n").is_err());
+    }
+
+    /// A link with CR or LF in it is never sent: no second request, no
+    /// header of the server's making.
+    #[test]
+    fn a_link_that_reads_two_ways_is_not_asked() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()).await;
+            let url = format!("{base}/x HTTP/1.1\r\nHost: evil\r\n\r\nGET /y");
+            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url }).await.is_err());
+        });
     }
 
     #[test]

@@ -261,8 +261,10 @@ impl Blobs for FileBlobs {
     }
 }
 
-/// Pictures in memory, and links that are only names: the tests', whose
-/// harnesses do the transfers with [`MemoryBlobs::serve`].
+/// Pictures in memory, and links that are only names, as an object
+/// store's on a public host would read ([`MEMORY_LINKS`]; a device follows
+/// no other kind): the tests', whose harnesses do the transfers with
+/// [`MemoryBlobs::serve`].
 #[derive(Default)]
 pub struct MemoryBlobs {
     held: HashMap<(Vec<u8>, [u8; 32]), Vec<u8>>,
@@ -288,7 +290,7 @@ impl MemoryBlobs {
             Transfer::Put { url, sealed, .. } => (url, Some(sealed)),
             Transfer::Get { url, .. } => (url, None),
         };
-        let mut parts = url.strip_prefix("mem:").ok_or("not a memory link")?.split(':');
+        let mut parts = url.strip_prefix(MEMORY_LINKS).ok_or("not a memory link")?.split('/');
         let (way, account, id) = (parts.next(), parts.next().and_then(unhex), parts.next().and_then(unhex));
         let (Some(account), Some(id)) = (account, id.and_then(|i| <[u8; 32]>::try_from(i).ok())) else {
             return Err("not a memory link".into());
@@ -304,6 +306,9 @@ impl MemoryBlobs {
     }
 }
 
+/// Where [`MemoryBlobs`]' links say they are.
+pub const MEMORY_LINKS: &str = "https://blobs.test/";
+
 fn unhex(s: &str) -> Option<Vec<u8>> {
     s.len().is_multiple_of(2).then(|| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect())?
 }
@@ -313,7 +318,7 @@ impl Blobs for MemoryBlobs {
         self.get(account, id).map(|b| b.len() as u64)
     }
     fn link(&mut self, account: &[u8], id: &[u8; 32], put: bool, _expires: u64) -> String {
-        format!("mem:{}:{}:{}", if put { "put" } else { "get" }, hex(account), hex(id))
+        format!("{MEMORY_LINKS}{}/{}/{}", if put { "put" } else { "get" }, hex(account), hex(id))
     }
     fn forget(&mut self, account: &[u8]) {
         self.held.retain(|(a, _), _| a != account);

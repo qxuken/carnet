@@ -8,6 +8,9 @@ description = "Carnet's notes as CRDTs: each note's file as a Loro text, its his
 
 # The core (`note`) builds for wasm too; the replica on disk is native only.
 [dependencies]
+# What a name or path in the vault must be (`name::is_plain_path`): the
+# Markdown crate, no dependencies of its own, wasm too.
+carnet-core = { path = "../carnet-core" }
 loro = "=1.16.2"
 # The wire (docs/SYNC.md §6): the Loro Protocol's frames and `%ELO` records.
 loro-protocol = "=0.3.0"

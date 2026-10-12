@@ -25,9 +25,12 @@ pub const SWEEP_GRACE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const UNSHOWN: &str = "unshown.txt";
 
 /// Whether a path from the notes folder (`/` between parts) is in the
-/// attachments folder, case aside.
+/// attachments folder, case aside, and goes nowhere else: each of its
+/// parts a plain name ([`is_plain_path`](carnet_core::name::is_plain_path):
+/// no `..`, no `\`, no drive).
 pub fn is_owned(rel: &str) -> bool {
-    rel.split_once('/').is_some_and(|(top, rest)| top.eq_ignore_ascii_case(ATTACHMENTS) && !rest.is_empty())
+    carnet_core::name::is_plain_path(rel)
+        && rel.split_once('/').is_some_and(|(top, rest)| top.eq_ignore_ascii_case(ATTACHMENTS) && !rest.is_empty())
 }
 
 /// Whether two paths name one file, `..` worked out and case aside, as
@@ -132,8 +135,10 @@ impl Store {
         let dir = self.dir.join(ATTACHMENTS);
         fs::create_dir_all(&dir)?;
         let stem = slug(&stem_of(from)).replace(' ', "-");
-        let ext = from.extension().and_then(|e| e.to_str()).unwrap_or("png").to_lowercase();
-        let to = free_file(&dir, &stem, &ext);
+        // A picture's own kind, or none: never a name that would open as
+        // something else.
+        let ext = from.extension().and_then(|e| e.to_str()).map(str::to_lowercase).filter(|e| doc::is_picture_name(&format!("x.{e}")));
+        let to = free_file(&dir, &stem, ext.as_deref().unwrap_or("png"));
         if !(link && fs::hard_link(from, &to).is_ok()) {
             fs::copy(from, &to)?;
         }
@@ -337,7 +342,9 @@ impl Store {
             let Ok(entries) = fs::read_dir(&dir) else { continue };
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') || name.ends_with(".tmp-carnet") {
+                // Nor one another system would read as more than a name
+                // (`a:b.png`, a Mac allows it): never synced, nor swept.
+                if name.starts_with('.') || name.ends_with(".tmp-carnet") || !carnet_core::name::is_plain_name(&name) {
                     continue;
                 }
                 match e.file_type() {
@@ -358,9 +365,11 @@ impl Store {
     /// sweep took to the trash: put back where they were.
     pub(super) fn bring_back(&self, folder: &str, text: &str) {
         for rel in doc::picture_paths(folder, text, &self.files) {
-            let here = self.dir.join(&rel);
-            let swept = self.dir.join(TRASH).join(&rel);
-            if !is_owned(&rel) || here.exists() || !swept.is_file() {
+            if !is_owned(&rel) {
+                continue;
+            }
+            let (Ok(here), Ok(swept)) = (self.inside(self.dir.join(&rel)), self.inside(self.dir.join(TRASH).join(&rel))) else { continue };
+            if here.exists() || !swept.is_file() {
                 continue;
             }
             if let Some(dir) = here.parent() {
@@ -565,6 +574,57 @@ mod tests {
         s.delete_forever(&t).unwrap();
         assert!(!dir.join("attachments/pasted.png").exists(), "Carnet's goes");
         assert!(dir.join("Home/hill.jpg").exists(), "the user's stays");
+    }
+
+    /// A note's picture whose path climbs out with Windows' `\` (Windows
+    /// reads `attachments\..\..\x` as `x`, beside the notes folder), or
+    /// names a drive or another folder outright, is never Carnet's: Delete
+    /// forever leaves it, wherever it is. And no removal or rename asked
+    /// for a path outside the notes folder is done.
+    #[test]
+    fn deleting_forever_never_reaches_outside_the_notes_folder() {
+        let base = temp_dir("forever-outside");
+        let dir = base.join("notes");
+        let mut s = Store::open(dir.clone()).unwrap();
+        fs::create_dir_all(dir.join(ATTACHMENTS)).unwrap();
+        fs::write(base.join("secret.docx"), b"s").unwrap();
+        fs::write(dir.join("attachments/pasted.png"), b"p").unwrap();
+        let outside = base.join("secret.docx").to_string_lossy().replace('\\', "/");
+        let body = format!(
+            "![](attachments/..\\..\\secret.docx)\n\n![](attachments\\..\\..\\secret.docx)\n\n![](attachments/../../secret.docx)\n\n![]({outside})\n\n![](file://{outside})\n\n![](attachments/pasted.png)"
+        );
+        let i = note(&mut s, "", "Walk", &body);
+        assert_eq!(doc::picture_paths("", &s.notes[i].markdown(), &s.files).into_iter().collect::<Vec<_>>(), ["attachments/pasted.png"]);
+        s.trash(i).unwrap();
+        let t = s.trashed().into_iter().next().unwrap();
+        s.delete_forever(&t).unwrap();
+        assert!(base.join("secret.docx").exists(), "outside: never touched");
+        assert!(!dir.join("attachments/pasted.png").exists(), "Carnet's own goes");
+        // Asked outright, past every check before it: refused.
+        for p in ["attachments/../../secret.docx", "../secret.docx"] {
+            assert!(s.inside(dir.join(p)).is_err(), "{p}");
+        }
+        assert!(s.inside(base.join("secret.docx")).is_err() && s.inside(dir.join("attachments/a.png")).is_ok() && s.inside(dir.clone()).is_ok());
+        s.drop_pictures(&["attachments/../../secret.docx".to_string()].into());
+        s.bring_back("", "![](attachments/../../secret.docx)");
+        assert!(base.join("secret.docx").exists());
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Only a picture is taken in: whatever else a note names keeps its
+    /// own kind out of the attachments folder.
+    #[test]
+    fn a_copy_in_is_named_as_a_picture() {
+        let dir = temp_dir("copy-in-kind");
+        let s = Store::open(dir.clone()).unwrap();
+        for (name, kind) in [("photo.JPG", "jpg"), ("id_rsa", "png"), ("run.command", "png"), ("x.webp", "webp")] {
+            fs::write(dir.join(name), b"x").unwrap();
+            let to = s.copy_in(&dir.join(name), false).unwrap();
+            assert_eq!(to.extension().and_then(|e| e.to_str()), Some(kind), "{name}");
+        }
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A picture pasted and taken out before the note was saved: no

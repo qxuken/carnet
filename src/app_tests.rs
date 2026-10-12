@@ -6475,6 +6475,39 @@ fn list_tools_turn_every_selected_line_and_back() {
 /// brings back a path that leads nowhere. Copied, only this note shows
 /// the copy, and Ctrl+Z takes the edit back.
 #[test]
+fn a_file_that_isnt_a_picture_is_never_taken_into_carnet() {
+    let (mut app, mut d, dir) = body("theirs-not-a-picture");
+    type_in(&mut app, &mut d, "Above");
+    // A key, named as a picture would be or not at all.
+    let key = dir.join("id_rsa");
+    std::fs::write(&key, "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+    let fake = dir.join("fake.png");
+    std::fs::write(&fake, b"\x89PNG\r\n\x1a\n not a picture past its first bytes").unwrap();
+    for src in ["id_rsa", "fake.png"] {
+        let image = Block::new(Kind::Image { src: src.into(), alt: String::new(), float: Float::None, width: None, wiki: false });
+        app.edit(Step::Other, |doc, _| {
+            doc.push(image);
+            true
+        });
+    }
+    app.save_current();
+    for src in ["id_rsa", "fake.png"] {
+        let i = blocks(&app).iter().position(|b| matches!(&b.kind, Kind::Image { src: s, .. } if s == src)).unwrap();
+        app.caret = page::select_blocks(app.doc(), i, i);
+        for _ in 0..4 {
+            d.frame(&mut app);
+        }
+        assert!(d.key_of("move-in").is_none() && d.key_of("copy-in").is_none(), "{src}: no way in offered");
+        // Asked all the same (a menu from before): nothing taken.
+        app.take_in_picture(false);
+        app.take_in_picture(true);
+    }
+    assert!(key.is_file() && fake.is_file());
+    assert!(!dir.join("attachments").exists(), "nothing in Carnet's folder");
+    assert_eq!(image_blocks(&app), ["id_rsa", "fake.png"]);
+}
+
+#[test]
 fn the_users_own_picture_is_marked_and_taken_into_carnet() {
     let (mut app, mut d, dir) = body("theirs");
     type_in(&mut app, &mut d, "Above");

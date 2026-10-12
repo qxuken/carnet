@@ -449,6 +449,19 @@ impl Store {
             .fold(self.dir.clone(), |d, p| d.join(p))
     }
 
+    /// `p`, if it is in the notes folder (or is it), `..` worked out as
+    /// written. What a write, a rename, a removal or a folder made for
+    /// sync, or for a path a note's text names, is checked by first: the
+    /// vault reads a name that could reach out as not there, and this
+    /// makes sure, whatever slipped past.
+    pub(crate) fn inside(&self, p: PathBuf) -> io::Result<PathBuf> {
+        if within(&self.dir, &p) {
+            Ok(p)
+        } else {
+            Err(io::Error::new(io::ErrorKind::InvalidInput, "that place is outside the notes folder"))
+        }
+    }
+
     /// A new folder named `name` inside `parent` ("" for the top level).
     /// Returns its relative path.
     pub fn create_folder(&mut self, parent: &str, name: &str) -> io::Result<String> {
@@ -501,7 +514,7 @@ impl Store {
         if !same_stem(&to, folder) && self.folder_dir(&to).exists() {
             return Err(io::Error::other("there is a folder of that name already"));
         }
-        let (from_dir, to_dir) = (self.folder_dir(folder), self.folder_dir(&to));
+        let (from_dir, to_dir) = (self.inside(self.folder_dir(folder))?, self.inside(self.folder_dir(&to))?);
         rename_retrying(&from_dir, &to_dir)?;
         let under = format!("{folder}/");
         let moved = |f: &str| -> Option<String> {
@@ -610,7 +623,7 @@ impl Store {
 
     /// Puts a trashed folder back where it was, its notes with it.
     pub fn restore_folder(&mut self, from: &Path, folder: &str) -> io::Result<()> {
-        let to = self.folder_dir(folder);
+        let to = self.inside(self.folder_dir(folder))?;
         if to.exists() {
             return Err(io::Error::other("a folder of that name is there again"));
         }
@@ -680,9 +693,9 @@ impl Store {
         // Changed in another app since it was read (a sync, a pull): that
         // is the version that moves, not ours from before.
         self.refresh(i);
-        fs::create_dir_all(self.folder_dir(folder))?;
+        fs::create_dir_all(self.inside(self.folder_dir(folder))?)?;
         if let Some(from) = self.notes[i].path.clone() {
-            let to = self.free_path(&stem_of(&from), None, folder);
+            let to = self.inside(self.free_path(&stem_of(&from), None, folder))?;
             rename_retrying(&from, &to)?;
             self.notes[i].renamed_to(to);
         }
@@ -696,19 +709,24 @@ impl Store {
     }
 
     /// Where an image's `src` points, for a note in `folder`: a file on
-    /// disk, or `None` for a web address.
+    /// disk, or `None` for a web address, or a file on another computer
+    /// ([`on_network`]), which is never looked at.
     pub fn resolve(&self, folder: &str, src: &str) -> Option<PathBuf> {
-        if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
+        if is_web(src) {
             return None;
         }
-        if let Some(path) = src.strip_prefix("file:///").or_else(|| src.strip_prefix("file://")) {
-            return Some(PathBuf::from(decode_src(path)));
-        }
-        let p = Path::new(src);
-        if p.is_absolute() {
-            return Some(p.to_path_buf());
-        }
-        Some(self.folder_dir(folder).join(decode_src(src)))
+        // As written (a share on Windows is a name with `\` in it here;
+        // `file:////host/…` is one too), and as joined.
+        let (named, p) = if let Some(rest) = src.strip_prefix("file://") {
+            let path = decode_src(rest.strip_prefix('/').unwrap_or(rest));
+            (PathBuf::from(decode_src(rest)), PathBuf::from(path))
+        } else if Path::new(src).is_absolute() {
+            (PathBuf::from(src), PathBuf::from(src))
+        } else {
+            let path = decode_src(src);
+            (PathBuf::from(&path), self.folder_dir(folder).join(path))
+        };
+        (!on_network(&named) && !on_network(&p)).then_some(p)
     }
 
     /// Where a picture a note in `folder` shows is on disk: its `src`, and
@@ -1250,7 +1268,13 @@ impl Store {
                 out.notes.insert(key, place);
             }
         }
-        out.folders = self.folders.iter().cloned().collect();
+        // Each name as the vault may hold it: one another system would
+        // read as more than a name goes as one it reads as one.
+        for p in out.notes.values_mut() {
+            p.folder = plain_folder(&p.folder);
+            p.name = plain(&p.name);
+        }
+        out.folders = self.folders.iter().map(|f| plain_folder(f)).collect();
         out
     }
 
@@ -1425,7 +1449,9 @@ impl Store {
                 let (_, unused) = r.vault().drop_picture(p);
                 self.forgotten.pictures.extend(unused);
             }
-            let _ = fs::remove_file(self.dir.join(p));
+            if let Ok(file) = self.inside(self.dir.join(p)) {
+                let _ = fs::remove_file(file);
+            }
         }
     }
 
@@ -1449,7 +1475,7 @@ impl Store {
                     r.forget(key)?;
                 }
                 if untouched {
-                    if let Some(path) = &self.notes[i].path {
+                    if let Some(path) = self.notes[i].path.clone().and_then(|p| self.inside(p).ok()) {
                         let _ = fs::remove_file(path);
                     }
                     self.notes.remove(i);
@@ -1463,7 +1489,9 @@ impl Store {
                 changed = true;
             } else if let Some(rel) = self.replica.as_ref().and_then(|r| r.entry(key)).map(|e| e.path.clone()) {
                 let path = self.dir.join(&rel);
-                let _ = fs::remove_file(&path);
+                if within(&self.dir, &path) {
+                    let _ = fs::remove_file(&path);
+                }
                 if rel.matches('/').count() == 1 {
                     self.note_origin(&path, None);
                 }
@@ -1515,7 +1543,7 @@ impl Store {
         // Folders made elsewhere, before the notes that go in them.
         for f in vault.folders.difference(&known.folders) {
             if !local.folders.contains(f) && !self.folders.iter().any(|g| same_stem(g, f)) {
-                fs::create_dir_all(self.folder_dir(f))?;
+                fs::create_dir_all(self.inside(self.folder_dir(f))?)?;
                 self.folders.push(f.clone());
                 changed = true;
             }
@@ -1572,9 +1600,9 @@ impl Store {
                 changed = true;
             }
         }
-        // Folders made or gone here.
+        // Folders made or gone here, as the vault may hold them.
         if send {
-            let here: BTreeSet<String> = self.folders.iter().cloned().collect();
+            let here: BTreeSet<String> = self.folders.iter().map(|f| plain_folder(f)).collect();
             let r = self.replica.as_ref().expect("checked");
             for f in here.difference(&known.folders) {
                 wrote |= r.vault().set_folder(f, true);
@@ -1667,6 +1695,7 @@ impl Store {
                         continue;
                     }
                 }
+                let to = self.inside(to)?;
                 rename_retrying(&path, &to)?;
                 self.notes[i].renamed_to(to);
                 if let (Some(rel), Some(r)) = (self.notes[i].rel_path(), self.replica.as_mut()) {
@@ -1692,6 +1721,7 @@ impl Store {
             to = bin.join(format!("{} {n}.md", place.name));
             n += 1;
         }
+        let to = self.inside(to)?;
         write_atomic(&to, text)?;
         self.note_origin(&to, Some((&place.folder, &format!("{}.md", place.name), place.pinned)));
         if let Some(r) = self.replica.as_mut() {
@@ -1725,7 +1755,7 @@ impl Store {
                 && stem_of(&path) != place.name
                 && !numbered_as(&path, &place.name)
             {
-                let to = self.free_path(&place.name, Some(&path), &place.folder);
+                let to = self.inside(self.free_path(&place.name, Some(&path), &place.folder))?;
                 if !same_path(&to, &path) {
                     rename_retrying(&path, &to)?;
                     self.notes[i].renamed_to(to);
@@ -1747,7 +1777,7 @@ impl Store {
         // In the trash here.
         let trashed_at = self.replica.as_ref().and_then(|r| r.entry(key)).map(|e| e.path.clone()).filter(|p| p.starts_with(&format!("{TRASH}/")));
         if let Some(rel) = trashed_at {
-            let from = self.dir.join(&rel);
+            let from = self.inside(self.dir.join(&rel))?;
             // Put back elsewhere: put back here.
             if !place.trashed && from.exists() {
                 let i = self.restore(&from, &format!("{}.md", place.name), &place.folder)?;
@@ -1771,6 +1801,7 @@ impl Store {
                         to = bin.join(format!("{} {n}.md", place.name));
                         n += 1;
                     }
+                    let to = self.inside(to)?;
                     rename_retrying(&from, &to)?;
                     if let Some(r) = self.replica.as_mut() {
                         let _ = r.moved(key, &format!("{TRASH}/{}", file_name(&to)));
@@ -1812,7 +1843,7 @@ impl Store {
             let in_trash = replica.entry(key).map(|e| e.path.clone()).filter(|p| p.starts_with(&format!("{TRASH}/")));
             if let Some(rel) = in_trash {
                 let path = self.dir.join(&rel);
-                if path.exists() {
+                if within(&self.dir, &path) && path.exists() {
                     write_atomic(&path, &text)?;
                     if let Some(r) = self.replica.as_mut() {
                         let _ = r.record(key, &rel, &text, Origin::OtherApp);
@@ -1836,12 +1867,12 @@ impl Store {
             if place.is_none() {
                 self.from_remote.insert(key);
             }
-            fs::create_dir_all(self.folder_dir(&folder))?;
+            fs::create_dir_all(self.inside(self.folder_dir(&folder))?)?;
             if !folder.is_empty() && !self.folders.contains(&folder) {
                 self.folders.push(folder.clone());
                 self.folders.sort_by_key(|f| f.to_lowercase());
             }
-            let path = self.free_path(&stem, None, &folder);
+            let path = self.inside(self.free_path(&stem, None, &folder))?;
             write_atomic(&path, &text)?;
             let (mut note, text) = Note::load_text(&path)?;
             note.key = Some(key);
@@ -2025,8 +2056,8 @@ impl Store {
     /// first free one), in the folder it was in. Returns its index.
     pub fn restore(&mut self, from: &Path, name: &str, folder: &str) -> io::Result<usize> {
         let stem = name.strip_suffix(".md").unwrap_or(name);
-        fs::create_dir_all(self.folder_dir(folder))?;
-        let to = self.free_path(stem, None, folder);
+        fs::create_dir_all(self.inside(self.folder_dir(folder))?)?;
+        let to = self.inside(self.free_path(stem, None, folder))?;
         rename_retrying(from, &to)?;
         let pinned = self.origins().get(&file_name(from)).is_some_and(|o| o.3);
         self.note_origin(from, None);
@@ -2263,20 +2294,73 @@ pub struct Gathered {
     pub notes: Vec<u64>,
 }
 
-/// A path's parts, `..` and `.` worked out as written.
+/// A path's parts, `..` and `.` worked out as written: never past its
+/// root (`/..` is `/`), as the system works them out.
 fn path_parts(p: &Path) -> Vec<String> {
     use std::path::Component;
     let mut v: Vec<String> = Vec::new();
+    let mut root = 0;
     for c in p.components() {
         match c {
             Component::ParentDir => {
-                v.pop();
+                if v.len() > root {
+                    v.pop();
+                }
             }
             Component::CurDir => {}
+            Component::Prefix(_) | Component::RootDir => {
+                v.push(c.as_os_str().to_string_lossy().into_owned());
+                root = v.len();
+            }
             c => v.push(c.as_os_str().to_string_lossy().into_owned()),
         }
     }
     v
+}
+
+/// Whether `p` is the folder `dir` or in it, `..` worked out as written:
+/// [`key_under`]'s question, `dir` itself counted.
+fn within(dir: &Path, p: &Path) -> bool {
+    let (d, q) = (path_parts(dir), path_parts(p));
+    q.len() >= d.len() && d.iter().zip(&q).all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// A name as the vault may hold it (docs/SYNC.md §4): as it is, if it's
+/// one name on every system ([`is_plain_name`](carnet_core::name::is_plain_name));
+/// else made so as a title is ([`slug`]). A file a Mac lets be named
+/// `a:b` is `a-b` to the other devices, which would read `a:b` as a
+/// drive, and then here too, renamed so as a note renamed elsewhere is.
+fn plain(name: &str) -> String {
+    if carnet_core::name::is_plain_name(name) { name.to_string() } else { slug(name) }
+}
+
+/// A folder as the vault may hold it: each of its parts [`plain`].
+fn plain_folder(folder: &str) -> String {
+    if folder.is_empty() {
+        return String::new();
+    }
+    folder.split('/').map(plain).collect::<Vec<_>>().join("/")
+}
+
+/// Whether a picture's `src` is a web address (or the picture itself, as
+/// `data:`): not a file.
+pub fn is_web(src: &str) -> bool {
+    src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:")
+}
+
+/// Whether a path a note's text names is on another computer: a share
+/// (`\\host\share\…`, `//host/…`, and `\\?\…`, `\\.\…` with them), or a
+/// folder the system mounts from the network once looked in (`/net/…`,
+/// `/Network/…`). Never looked at: on Windows, looking alone hands that
+/// computer the user's login, and the window waits on it.
+pub fn on_network(p: &Path) -> bool {
+    let s = p.to_string_lossy();
+    let b = s.as_bytes();
+    if b.len() >= 2 && matches!(b[0], b'/' | b'\\') && matches!(b[1], b'/' | b'\\') {
+        return true;
+    }
+    let parts = path_parts(p);
+    parts.len() >= 2 && matches!(parts[0].as_str(), "/" | "\\") && ["net", "Network"].iter().any(|n| parts[1].eq_ignore_ascii_case(n))
 }
 
 /// A path under the notes folder `dir` as a key: its parts from there,
@@ -3593,6 +3677,39 @@ mod tests {
         fs::write(dir.parent().unwrap().join(&outside), "pdf").unwrap();
         assert_eq!(s.linked_file("", &format!("../{outside}")), None, "not outside the notes folder");
         let _ = fs::remove_file(dir.parent().unwrap().join(&outside));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A picture on another computer, as a note's text may name it (a
+    /// share, `file://` to one, a folder mounted from the network when
+    /// looked in), resolves to nothing: never looked at, shown as not
+    /// found. One on this computer, by its full path, still resolves.
+    #[test]
+    fn a_picture_on_another_computer_is_never_looked_at() {
+        let dir = temp_dir("network");
+        let s = Store::open(dir.clone()).unwrap();
+        for src in [
+            r"\\host\share\x.png",
+            "//host/share/x.png",
+            r"\\?\UNC\host\share\x.png",
+            r"\\?\C:\x.png",
+            r"\\.\pipe\x",
+            r"file://\\host\share\x.png",
+            "file:////host/share/x.png",
+            "file://///host/share/x.png",
+            "%5C%5Chost%5Cshare%5Cx.png",
+            "/net/host/share/x.png",
+            "/Network/Servers/host/x.png",
+            "file:///net/host/x.png",
+            "../../../../../../../../../../net/host/x.png",
+        ] {
+            assert_eq!(s.resolve("", src), None, "{src}");
+            assert_eq!(s.picture_file("", src, false), None, "{src}");
+        }
+        assert!(is_web("https://e.com/x.png") && !is_web(r"\\host\x.png"));
+        #[cfg(unix)]
+        assert_eq!(s.resolve("", "/Users/me/x.png"), Some(PathBuf::from("/Users/me/x.png")));
+        assert_eq!(s.resolve("Home", "x.png"), Some(dir.join("Home").join("x.png")));
         let _ = fs::remove_dir_all(&dir);
     }
 

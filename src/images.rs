@@ -121,6 +121,13 @@ impl Images {
             held.drawn = self.frame;
             return held.entry.clone();
         }
+        // On another computer: never looked at (`Store::resolve` gives
+        // none such; this makes sure).
+        if crate::store::on_network(path) {
+            let failed = Entry::Failed("not found".into());
+            self.hold(path, failed.clone());
+            return failed;
+        }
         // Its size as last shown, or the header alone: a few bytes, read now.
         let (w, h) = self
             .sizes
@@ -147,6 +154,12 @@ impl Images {
             }
         }
         loading
+    }
+
+    /// Whether the picture at `path` was decoded, and is shown: a
+    /// picture, whatever its file is named.
+    pub fn is_ready(&self, path: &Path) -> bool {
+        self.entries.get(path).is_some_and(|h| matches!(h.entry, Entry::Ready { .. }))
     }
 
     fn hold(&mut self, path: &Path, entry: Entry) {
