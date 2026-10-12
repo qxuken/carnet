@@ -112,7 +112,7 @@ function wordsLength(n: Node): number {
 
 /// UTF-16 offset of DOM point (`node`, `offset`) in `cell`'s words: a
 /// point in a picture's box is after it.
-function offsetIn(cell: HTMLElement, node: Node, offset: number): number {
+export function offsetIn(cell: HTMLElement, node: Node, offset: number): number {
   const r = document.createRange();
   r.setStart(cell, 0);
   try {
@@ -220,6 +220,44 @@ export class TableWidget extends WidgetType {
   destroy(dom: HTMLElement) {
     (dom as Wrap).widget = undefined;
   }
+}
+
+/// A table's cell as the page names it: CodeMirror's line, its row and
+/// its column; and the cell.
+export type CellAt = { cell: HTMLTableCellElement; line: number; r: number; c: number };
+
+/// The table's cell `el` is in, if it is in one.
+export function cellAt(el: Element | null): CellAt | null {
+  const cell = cellOf(el);
+  const w = (cell?.closest('.cm-tablewrap') as Wrap | null)?.widget;
+  if (!cell || !w) return null;
+  return { cell, line: w.line, r: Number(cell.dataset.r), c: Number(cell.dataset.c) };
+}
+
+/// Where a cell's picture is in its words: the UTF-16 offset of its letter.
+export function pictureAt(cell: HTMLElement, box: HTMLElement): number {
+  const parent = box.parentNode;
+  return parent ? offsetIn(cell, parent, [...parent.childNodes].indexOf(box)) : 0;
+}
+
+/// The UTF-16 offset in `cell`'s words nearest the point (`x`, `y`);
+/// `undefined` when the browser can't say.
+export function offsetAt(cell: HTMLElement, x: number, y: number): number | undefined {
+  const doc = document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range | null };
+  const p = doc.caretPositionFromPoint?.(x, y);
+  const [node, offset] = p ? [p.offsetNode, p.offset] : (() => {
+    const r = doc.caretRangeFromPoint?.(x, y);
+    return r ? [r.startContainer, r.startOffset] : [null, 0];
+  })();
+  if (!node || !cell.contains(node)) return undefined;
+  // In a picture's box: before it or after it, by its half.
+  const box = (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>('.cm-cellpic');
+  if (box && cell.contains(box)) {
+    const at = pictureAt(cell, box);
+    const r = box.getBoundingClientRect();
+    return x < r.left + r.width / 2 ? at : at + 1;
+  }
+  return offsetIn(cell, node, offset);
 }
 
 /// The cell `el` is, if it is one.

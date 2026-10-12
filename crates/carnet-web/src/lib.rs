@@ -13,6 +13,7 @@ use carnet_sync::pair::{Enroller, Joiner, Joining, NO_SLOT, PairCode, PasswordJo
 use carnet_sync::Origin;
 use wasm_bindgen::prelude::*;
 
+use editor::PicTo;
 use notes::{Me, Notes, Said, hex, unhex};
 
 #[wasm_bindgen]
@@ -996,6 +997,47 @@ impl PageEditor {
 
     pub fn remove_picture(&mut self) -> bool {
         self.e.remove_picture()
+    }
+
+    /// The picture on line `from` carried to before the block on line
+    /// `before` (past the last line: the end).
+    pub fn move_picture_to_line(&mut self, from: u32, before: u32) -> bool {
+        self.e.move_picture(from as usize, PicTo::Line(before as usize))
+    }
+
+    /// The picture on line `from` carried beside the one on line `to`,
+    /// `after` it or before.
+    pub fn move_picture_beside(&mut self, from: u32, to: u32, after: bool) -> bool {
+        self.e.move_picture(from as usize, PicTo::Beside(to as usize, after))
+    }
+
+    /// The picture on line `from` carried into a table's cell (its line,
+    /// row, column), at UTF-16 column `col` of its words (`undefined`:
+    /// their end): its line gone, its width kept, its side dropped.
+    pub fn move_picture_into_cell(&mut self, from: u32, line: u32, r: u32, c: u32, col: Option<u32>) -> bool {
+        self.e.move_picture(from as usize, PicTo::Cell(line as usize, r as usize, c as usize, col.map(|n| n as usize)))
+    }
+
+    /// The picture whose letter is at UTF-16 column `at` of a cell's words
+    /// (its line, row, column) carried into a cell (the same or another),
+    /// at UTF-16 column `col` of its words (`undefined`: their end).
+    #[allow(clippy::too_many_arguments)]
+    pub fn move_cell_picture_to_cell(&mut self, line: u32, r: u32, c: u32, at: u32, to_line: u32, to_r: u32, to_c: u32, col: Option<u32>) -> bool {
+        let to = PicTo::Cell(to_line as usize, to_r as usize, to_c as usize, col.map(|n| n as usize));
+        self.e.move_cell_picture(line as usize, r as usize, c as usize, at as usize, to)
+    }
+
+    /// A cell's picture (as [`Self::move_cell_picture_to_cell`] names it)
+    /// carried out of the table: on a line of its own before the block on
+    /// line `before`, its width kept.
+    pub fn move_cell_picture_out(&mut self, line: u32, r: u32, c: u32, at: u32, before: u32) -> bool {
+        self.e.move_cell_picture(line as usize, r as usize, c as usize, at as usize, PicTo::Line(before as usize))
+    }
+
+    /// A cell's picture carried out of the table beside the picture on
+    /// line `to`, `after` it or before.
+    pub fn move_cell_picture_beside(&mut self, line: u32, r: u32, c: u32, at: u32, to: u32, after: bool) -> bool {
+        self.e.move_cell_picture(line as usize, r as usize, c as usize, at as usize, PicTo::Beside(to as usize, after))
     }
 
     /// The caret's link given `url`, or taken off (`undefined`); else the

@@ -504,6 +504,12 @@ impl Carnet {
             drop_line(ui, l);
         }
         self.picture_ghost(ui, l);
+        // Files carried over a table's cell go into it: the cell ringed.
+        if self.pic_drag.is_none()
+            && let Some(slot) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y))
+        {
+            self.cell_ring(ui, l, slot);
+        }
     }
 
     /// Where a floated picture's row ends, for one at block `i`: its
@@ -1044,16 +1050,25 @@ impl Carnet {
             .unwrap_or(doc.len())
     }
 
-    /// Where a carried picture would land under `at`: beside another
-    /// picture when over one's outer third, else between the blocks.
-    fn picture_target(&self, id: u64, at: Vec2) -> Option<page::PicDrop> {
+    /// Where a carried picture would land under `at`: among a table
+    /// cell's words, where the pointer is in them; beside another picture
+    /// when over one's outer third; else between the blocks.
+    fn picture_target(&self, core: &Core, what: Carried, at: Vec2) -> Option<page::PicDrop> {
         let page = self.page_rect?;
         let inside = |r: &Rect| at.x >= r.x && at.x <= r.x + r.w && at.y >= r.y && at.y <= r.y + r.h;
         if !inside(&page) {
             return None;
         }
+        if let Some(slot) = self.cell_at(at.x, at.y) {
+            // Below the words (in a row a taller cell makes tall): after
+            // them, at their end.
+            let end = self.rect_at(core, slot, page::text(self.doc(), slot).len());
+            let below = end.is_some_and(|e| at.y > e.y + e.h);
+            let byte = if below { None } else { self.byte_under(core, slot, at) };
+            return Some(page::PicDrop::Cell { slot, at: byte.unwrap_or(usize::MAX) });
+        }
         for (b, r) in &self.row_rects {
-            if *b == id || !inside(r) || !matches!(self.doc().get(*b).map(|b| &b.kind), Some(Kind::Image { .. })) {
+            if what == Carried::Block(*b) || !inside(r) || !matches!(self.doc().get(*b).map(|b| &b.kind), Some(Kind::Image { .. })) {
                 continue;
             }
             let fx = (at.x - r.x) / r.w.max(1.0);
@@ -1066,40 +1081,50 @@ impl Carnet {
 
     /// A picture pressed: selected; dragged, carried — the drop line shows
     /// where it goes between blocks, a bar beside a picture where the two
-    /// will sit side by side.
-    pub(super) fn picture_drag(&mut self, id: u64, ev: &UiEvent) {
+    /// will sit side by side, a ring round a table's cell it goes into.
+    pub(super) fn picture_drag(&mut self, id: u64, ev: &UiEvent, core: &Core) {
         let p = &ev.payload;
         let num = |k: &str| p.get_float(k).or_else(|| p.get_int(k).map(|v| v as f64)).unwrap_or(0.0) as f32;
         let at = Vec2::new(num("x"), num("y"));
-        match p.get_str("phase") {
-            Some("start") => {
-                self.pic_drag = Some(PicDrag { id, from: at, at, moved: false, target: None });
-                self.on_plain(Msg::Select { id });
-            }
-            Some("move") => {
-                let target = self.picture_target(id, at);
-                let Some(d) = self.pic_drag.as_mut() else { return };
-                d.at = at;
-                d.moved = d.moved || (at.x - d.from.x).abs() + (at.y - d.from.y).abs() > 6.0;
-                d.target = if d.moved { target } else { None };
-                self.drop_index = match d.target {
-                    Some(page::PicDrop::Before(i)) => Some(i),
-                    _ => None,
-                };
-            }
-            _ => {
-                self.drop_index = None;
-                let Some(d) = self.pic_drag.take() else { return };
-                if let (true, Some(to)) = (d.moved, d.target) {
-                    self.edit(Step::Other, |doc, c| page::move_picture(doc, c, id, to));
-                    self.reveal = false;
-                }
-            }
+        if p.get_str("phase") == Some("start") {
+            self.pic_drag = Some(PicDrag { what: Carried::Block(id), from: at, at, moved: false, target: None });
+            self.on_plain(Msg::Select { id });
+            return;
+        }
+        self.carry(core, p.get_str("phase"), at);
+    }
+
+    /// A carried picture's pointer moved (`move`) or let go (anything
+    /// else): where it would land followed, or it put there, as one step
+    /// of the history. A press that never travelled moves nothing.
+    fn carry(&mut self, core: &Core, phase: Option<&str>, at: Vec2) {
+        let Some(what) = self.pic_drag.as_ref().map(|d| d.what) else { return };
+        if phase == Some("move") {
+            let target = self.picture_target(core, what, at);
+            let Some(d) = self.pic_drag.as_mut() else { return };
+            d.at = at;
+            d.moved = d.moved || (at.x - d.from.x).abs() + (at.y - d.from.y).abs() > 6.0;
+            d.target = if d.moved { target } else { None };
+            self.drop_index = match d.target {
+                Some(page::PicDrop::Before(i)) => Some(i),
+                _ => None,
+            };
+            return;
+        }
+        self.drop_index = None;
+        let Some(d) = self.pic_drag.take() else { return };
+        if let (true, Some(to)) = (d.moved, d.target) {
+            self.edit(Step::Other, |doc, c| match what {
+                Carried::Block(id) => page::move_picture(doc, c, id, to),
+                Carried::Cell(slot, at) => page::move_cell_picture(doc, c, slot, at, to),
+            });
+            self.reveal = false;
         }
     }
 
     /// While a picture is carried: it, small, under the pointer, and the
-    /// bar where it would sit beside another.
+    /// bar where it would sit beside another, or the ring round the cell
+    /// it would go into.
     fn picture_ghost(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let Some(d) = self.pic_drag.clone().filter(|d| d.moved) else { return };
         let t = l.t;
@@ -1107,7 +1132,8 @@ impl Carnet {
             && let Some((_, r)) = self.row_rects.iter().find(|(b, _)| *b == id)
         {
             let x = if after { r.x + r.w - 2.0 } else { r.x - 2.0 };
-            ui.leaf(
+            ui.leaf_keyed(
+                "picture-bar",
                 NodeSpec::row()
                     .size(4.0, (r.h - 16.0).max(8.0))
                     .radius(2.0)
@@ -1116,25 +1142,51 @@ impl Carnet {
                     .float(FloatConfig::viewport().offset(x, r.y + 8.0)),
             );
         }
+        if let Some(page::PicDrop::Cell { slot, .. }) = d.target {
+            self.cell_ring(ui, l, slot);
+        }
         let folder = self.page_folder();
-        let (src, wiki) = match self.doc().get(d.id).map(|b| &b.kind) {
-            Some(Kind::Image { src, wiki, .. }) => (src.clone(), *wiki),
-            _ => return,
+        let (src, wiki) = match d.what {
+            Carried::Block(id) => match self.doc().get(id).map(|b| &b.kind) {
+                Some(Kind::Image { src, wiki, .. }) => (src.clone(), *wiki),
+                _ => return,
+            },
+            Carried::Cell(slot, at) => match inline::cell_pictures(page::text(self.doc(), slot)).into_iter().find(|p| p.at.0 == at) {
+                Some(p) => (p.src, p.wiki),
+                None => return,
+            },
         };
         if let Some(images::Entry::Ready { id: img, w, h }) = self.store.picture_file(&folder, &src, wiki).map(|p| self.images.get(&p)) {
             let gw = 120.0_f32;
             let gh = gw * h as f32 / (w as f32).max(1.0);
-            ui.image(
-                img,
-                NodeSpec::row()
-                    .size(gw, gh)
-                    .radius(6.0)
-                    .opacity(0.75)
-                    .role(Role::None)
-                    .float(FloatConfig::viewport().offset(d.at.x + 12.0, d.at.y + 12.0)),
-            );
+            // Keyed, as the bar and the ring are: the blocks beside it are
+            // keyed by their ids, which a counted key could meet.
+            let at = FloatConfig::viewport().offset(d.at.x + 12.0, d.at.y + 12.0);
+            ui.with_keyed("picture-ghost", NodeSpec::row().size(gw, gh).role(Role::None).float(at), |ui| {
+                ui.image(img, NodeSpec::row().size(gw, gh).radius(6.0).opacity(0.75).role(Role::None));
+            });
         }
         ui.request_frame();
+    }
+
+    /// A table's cell something carried will go into: a ring in the
+    /// accent round it, on a wash of it, as the drop line is drawn
+    /// between blocks. It takes no room.
+    pub(super) fn cell_ring(&self, ui: &mut Ui<'_>, l: &Look, slot: Slot) {
+        let Some(r) = self.cell_rects.get(&slot) else { return };
+        let t = l.t;
+        // Keyed: the page's blocks are keyed by their ids, which a
+        // counted key could meet.
+        ui.leaf_keyed(
+            "cell-ring",
+            NodeSpec::row()
+                .size(r.w - 2.0, r.h - 2.0)
+                .radius(radius::CONTROL)
+                .bg(t.accent.with_alpha(0.08))
+                .border(2.0, t.accent)
+                .role(Role::None)
+                .float(FloatConfig::viewport().offset(r.x + 1.0, r.y + 1.0)),
+        );
     }
 
     /// A drag on a picture's handle: the width follows the pointer, and
@@ -1209,10 +1261,14 @@ impl Carnet {
                         let is_head = table.is_header(r);
                         // Counted from 1 among the plain rows.
                         let n = r + 1 - table.body();
-                        let mut spec = NodeSpec::row().grow_width();
+                        let mut spec = NodeSpec::row().grow_width().on_layout(Value::Null);
                         if is_head {
                             spec = spec.bg(t.sunken);
                         }
+                        // The row's height is its tallest cell's: each
+                        // cell is matched against all of it, so the room
+                        // under short words beside a picture is theirs.
+                        let row_rect = ui.layout_of(ui.child_key_indexed(row.id));
                         ui.with_indexed(row.id, spec, |ui| {
                             for (c, &col) in table.cols.iter().enumerate() {
                                 let slot = Slot {
@@ -1229,7 +1285,10 @@ impl Carnet {
                                 // Where the cell was laid out: what a click
                                 // is matched against, by x as well as y.
                                 let ck = ui.child_key_indexed(col);
-                                if let Some(rect) = ui.layout_of(ck) {
+                                if let Some(mut rect) = ui.layout_of(ck) {
+                                    if let Some(rr) = row_rect {
+                                        (rect.y, rect.h) = (rr.y, rr.h);
+                                    }
                                     self.cell_rects.insert(slot, rect);
                                 }
                                 ui.with_indexed(
@@ -2870,6 +2929,12 @@ impl Carnet {
         };
         let (x, y) = (num("x"), num("y"));
         let clicks = p.get_int("clicks").unwrap_or(1);
+        // A cell's picture pressed: carried, not a selection.
+        if p.get_str("phase") != Some("start") && self.pic_drag.as_ref().is_some_and(|d| matches!(d.what, Carried::Cell(..))) {
+            self.carry(core, p.get_str("phase"), Vec2::new(x, y));
+            self.reveal = false;
+            return;
+        }
         match p.get_str("phase") {
             Some("start") => {
                 self.focus_page = true;
@@ -2889,14 +2954,16 @@ impl Carnet {
                     self.open_url(&url);
                     return;
                 }
-                // A press on a picture among a cell's words chooses it, whole.
+                // A press on a picture among a cell's words chooses it,
+                // whole; a drag carries it, as one on its own line.
                 if clicks == 1
                     && !core.modifiers().shift
                     && let Some((slot, a, b)) = self.cell_picture_under(core, x, y)
                 {
                     self.caret = Caret { anchor: Pos { slot, byte: a }, head: Pos { slot, byte: b } };
-                    self.drag = Some(Drag::Text { unit: None });
-                    self.drag_at = Some((Vec2::new(x, y), Vec2::new(x, y), core.now()));
+                    self.drag = None;
+                    let at = Vec2::new(x, y);
+                    self.pic_drag = Some(PicDrag { what: Carried::Cell(slot, a), from: at, at, moved: false, target: None });
                     self.reveal = false;
                     return;
                 }

@@ -148,6 +148,8 @@ button { font: inherit; color: inherit; }
 .note .pictures .picture-card { flex: none; width: min(45cqi, var(--share)); max-width: var(--share); }
 .picture-card-icon { display: inline-flex; flex: none; width: 18px; height: 18px; }
 .picture-card-icon svg { width: 100%; height: 100%; }
+/* A picture carried in the editor (editor/picture.ts), small under the pointer. */
+.cm-carried { position: fixed; z-index: 50; width: 120px; height: auto; border-radius: 6px; opacity: 0.75; pointer-events: none; }
 .picture-card-words { display: grid; min-width: 0; }
 .picture-card-words small { font-size: 13px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .note mark { background: var(--mark, var(--highlight)); color: inherit; border-radius: 3px; padding: 0 2px; }

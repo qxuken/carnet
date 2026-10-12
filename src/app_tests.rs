@@ -7047,3 +7047,109 @@ fn a_picture_in_a_cell_is_drawn_in_it_and_taken_whole() {
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A picture on its own line carried onto a table's cell goes among its
+/// words, its line gone, its width kept and its side dropped, the cell
+/// ringed while it is over it and no drop line; one in a cell carried out
+/// between lines is a line of its own again, its width kept. Each is one
+/// step of the history.
+#[test]
+fn a_picture_is_carried_into_a_cell_and_out_again() {
+    let (mut app, mut d, dir) = body("cell-dnd");
+    let rgba: Vec<u8> = (0..200 * 100).flat_map(|_| [30u8, 90, 160, 255]).collect();
+    let png = crate::images::encode_png(200, 100, &rgba).unwrap();
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    let pic = Block::new(Kind::Image { src: "attachments/wide.png".into(), alt: String::new(), width: Some(150), float: Float::Right, wiki: false });
+    let id = pic.id;
+    let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec!["x".into(), "y".into()]]);
+    let slot = |app: &Carnet, c: usize| {
+        let b = blocks(app).into_iter().find(|b| matches!(b.kind, Kind::Table(_))).unwrap();
+        let Kind::Table(t) = &b.kind else { unreachable!() };
+        Slot { block: b.id, cell: Some((t.rows[1].id, t.cols[c])) }
+    };
+    app.store.notes[app.current].doc = Doc::new(vec![Block::text("Above"), pic, Block::new(Kind::Table(table)), Block::text("Below")]);
+    app.caret = Caret::at(page::first(app.doc()));
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let x = slot(&app, 0);
+    let rect = |app: &Carnet, id: u64| app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).unwrap();
+    let r = rect(&app, id);
+    let from = Vec2::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+    let cell = *app.cell_rects.get(&x).unwrap();
+    let to = Vec2::new(cell.x + cell.w - 8.0, cell.y + cell.h / 2.0);
+
+    // Over the cell: ringed, no drop line.
+    d.input(&mut app, InputEvent::CursorMoved(from));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(from.x + 8.0, from.y + 8.0)));
+    d.input(&mut app, InputEvent::CursorMoved(to));
+    // Frames enough for kui's checks of the tree (every 16th) to see the
+    // ring and the picture under the pointer beside the blocks.
+    for _ in 0..34 {
+        d.frame(&mut app);
+    }
+    assert!(matches!(app.pic_drag.as_ref().and_then(|p| p.target), Some(page::PicDrop::Cell { slot, .. }) if slot == x), "{:?}", app.pic_drag);
+    assert_eq!(app.drop_index, None, "no drop line");
+    let ringed = d.core.nodes().iter().any(|n| (n.rect.x - cell.x - 1.0).abs() < 0.5 && (n.rect.w - cell.w + 2.0).abs() < 0.5 && (n.rect.h - cell.h + 2.0).abs() < 0.5);
+    assert!(ringed, "the cell ringed");
+    d.input(&mut app, InputEvent::mouse_up());
+    d.frame(&mut app);
+    assert!(app.pic_drag.is_none());
+    let md = "![|150](attachments/wide.png)";
+    assert_eq!(page::text(app.doc(), x), format!("x{md}"), "at the end of its words");
+    assert!(app.doc().get(id).is_none(), "its line gone");
+    assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (1, 1 + md.len()), "selected in the cell");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert!(app.doc().get(id).is_some() && page::text(app.doc(), x) == "x", "one undo puts it back");
+    key_with(&mut app, &mut d, "z", CTRL_SHIFT);
+    assert_eq!(page::text(app.doc(), x), format!("x{md}"));
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+
+    // A press on it without moving: chosen, nothing moved.
+    let pieces = app.cell_pieces.get(&x).expect("the cell's pieces").clone();
+    let pr = d.core.layout_of(pieces.iter().find(|p| p.picture).unwrap().key).unwrap();
+    let grip = Vec2::new(pr.x + pr.w / 2.0, pr.y + pr.h / 2.0);
+    d.click(&mut app, grip.x, grip.y);
+    d.frame(&mut app);
+    assert_eq!((app.caret.anchor, app.caret.head), (Pos { slot: x, byte: 1 }, Pos { slot: x, byte: 1 + md.len() }));
+    assert_eq!(page::text(app.doc(), x), format!("x{md}"));
+
+    // To the next cell.
+    let y = slot(&app, 1);
+    let yc = *app.cell_rects.get(&y).unwrap();
+    // Its row as tall as the picture: the room under the next cell's
+    // short words is that cell's too.
+    let xc = *app.cell_rects.get(&x).unwrap();
+    assert!((yc.y, yc.h) == (xc.y, xc.h) && yc.h > pr.h, "{yc:?} {xc:?}");
+    d.drag(&mut app, grip, Vec2::new(yc.x + yc.w / 2.0, yc.y + yc.h - 6.0));
+    d.frame(&mut app);
+    assert_eq!((page::text(app.doc(), x), page::text(app.doc(), y)), ("x", format!("y{md}").as_str()), "below its words: at their end");
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+
+    // Out, above the first line: a line of its own, its width kept.
+    let pieces = app.cell_pieces.get(&y).expect("the cell's pieces").clone();
+    let pr = d.core.layout_of(pieces.iter().find(|p| p.picture).unwrap().key).unwrap();
+    let above = rect(&app, blocks(&app)[0].id);
+    d.drag(&mut app, Vec2::new(pr.x + pr.w / 2.0, pr.y + pr.h / 2.0), Vec2::new(above.x + 40.0, above.y + 2.0));
+    d.frame(&mut app);
+    assert!(
+        matches!(&blocks(&app)[0].kind, Kind::Image { src, width: Some(150), float: Float::None, .. } if src == "attachments/wide.png"),
+        "{:?}",
+        texts(&app)
+    );
+    assert_eq!(page::text(app.doc(), y), "y");
+    assert!(app.pic_drag.is_none() && app.drop_index.is_none());
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(page::text(app.doc(), y), format!("y{md}"), "one undo puts it back");
+    assert!(!blocks(&app).iter().any(|b| matches!(b.kind, Kind::Image { .. })));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}

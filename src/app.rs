@@ -832,15 +832,24 @@ pub struct LinkEdit {
     pub at: Option<Vec2>,
 }
 
-/// A picture being carried on the page: from where, where the pointer is,
-/// whether it has travelled, and where it would land.
+/// A picture being carried on the page: which, from where, where the
+/// pointer is, whether it has travelled, and where it would land.
 #[derive(Clone, Debug)]
 pub struct PicDrag {
-    pub id: u64,
+    pub what: Carried,
     pub from: Vec2,
     pub at: Vec2,
     pub moved: bool,
     pub target: Option<page::PicDrop>,
+}
+
+/// The picture a drag carries: one on a line of its own (its block's
+/// id), or one among a table cell's words (its cell, and the byte its
+/// Markdown starts at).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Carried {
+    Block(u64),
+    Cell(Slot, usize),
 }
 
 /// A note's card being dragged.
@@ -2734,7 +2743,7 @@ impl Carnet {
             Msg::PageDrag => self.page_drag(ev, core),
             Msg::SettingsTitle => self.title_click(Instant::now(), core),
             Msg::ResizePicture { id, side } => self.resize_drag(id, side == 1, ev),
-            Msg::PictureDrag { id } => self.picture_drag(id, ev),
+            Msg::PictureDrag { id } => self.picture_drag(id, ev, core),
             Msg::CardDrag { note } => self.card_drag(note, ev),
             // A click on a card or a folder with ⇧ or ⌘ held chooses it.
             Msg::OpenNote { note } => {
