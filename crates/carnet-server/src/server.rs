@@ -32,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, RawQuery, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{any, get};
@@ -487,6 +487,7 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
     // The picture worker: its own thread; what it sends goes to the
     // sockets through the hub's queue.
     let blobs: Box<dyn Blobs> = hosted_blobs.unwrap_or_else(|| Box::new(FileBlobs::new(files.clone(), &config.origin, signer.clone())));
+    let csp = web_csp(&config.origin, blobs.origin().as_deref());
     let mut worker = Worker::new(blobs);
     let counts = worker.counts.clone();
     let (jobs, queued) = std::sync::mpsc::channel::<Job>();
@@ -559,11 +560,14 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
         .with_state(app)
         .merge(routes);
     // The viewer at `/`, its files as built; an address it doesn't have is
-    // its page (the app finds its way from there).
+    // its page (the app finds its way from there). Its files, and only
+    // they, with its CSP (a host's own pages say their own).
     let router = match &config.web {
         Some(dir) => {
             let index = tower_http::services::ServeFile::new(dir.join("index.html"));
-            router.fallback_service(tower_http::services::ServeDir::new(dir).precompressed_br().precompressed_gzip().fallback(index))
+            let files = tower_http::services::ServeDir::new(dir).precompressed_br().precompressed_gzip().fallback(index);
+            let csp = HeaderValue::from_str(&csp).map_err(std::io::Error::other)?;
+            router.fallback_service(Router::new().fallback_service(files).layer(axum::middleware::from_fn_with_state(csp, web_headers)))
         }
         None => router.fallback(|uri: axum::http::Uri| async move {
             if uri.path() == "/" {
@@ -573,6 +577,11 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
             }
         }),
     };
+    // Nothing taken for another type than it's said to be, anywhere.
+    let router = router.layer(axum::middleware::map_response(|mut res: axum::response::Response| async move {
+        res.headers_mut().entry(header::X_CONTENT_TYPE_OPTIONS).or_insert(HeaderValue::from_static("nosniff"));
+        res
+    }));
     let addr: SocketAddr = listener.local_addr()?;
     println!("carnet-server: listening on {addr}, origin {}", config.origin);
     // Each request's address: who it's from, unless a trusted proxy says.
@@ -590,6 +599,42 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
     })
     .await;
     served
+}
+
+/// The web app's Content-Security-Policy (docs/SYNC.md §8): its own
+/// scripts and the wasm, inline styles (Svelte's and the notes' colours),
+/// pictures as the page draws them (`blob:`, `data:`; none from the web),
+/// and connections to this server (its socket named too, for browsers
+/// whose `'self'` leaves out `ws:`) and where pictures are, if elsewhere.
+pub fn web_csp(origin: &str, pictures: Option<&str>) -> String {
+    let mut connect = vec!["'self'".to_string()];
+    let host = |rest: &str| rest.split(['/', '?', '#']).next().unwrap_or_default().to_string();
+    if let Some(rest) = origin.strip_prefix("https://") {
+        connect.push(format!("wss://{}", host(rest)));
+    } else if let Some(rest) = origin.strip_prefix("http://") {
+        connect.push(format!("ws://{}", host(rest)));
+    }
+    connect.extend(pictures.map(str::to_string));
+    format!(
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src {}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; worker-src 'self'; manifest-src 'self'",
+        connect.join(" ")
+    )
+}
+
+/// The web app's files with its headers: the CSP, no referrer sent from
+/// it, and its page and service worker asked for afresh each time, so a
+/// new build is taken at once.
+async fn web_headers(State(csp): State<HeaderValue>, req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let worker = req.uri().path() == "/sw.js";
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(header::CONTENT_SECURITY_POLICY, csp);
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    let page = h.get(header::CONTENT_TYPE).is_some_and(|t| t.as_bytes().starts_with(b"text/html"));
+    if page || worker {
+        h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    res
 }
 
 /// What this server is. Not how many use it: that's for `/metrics`, kept
@@ -814,7 +859,13 @@ async fn blob_get(State(l): State<Links>, axum::extract::Path(token): axum::extr
             if let Ok(v) = format!("private, max-age={age}").parse() {
                 res.headers_mut().insert(axum::http::header::CACHE_CONTROL, v);
             }
-            res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/octet-stream"));
+            // Sealed bytes, from the app's own origin: never taken for a
+            // page or a script, opened, or run.
+            let h = res.headers_mut();
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+            h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+            h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+            h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
             res
         }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),

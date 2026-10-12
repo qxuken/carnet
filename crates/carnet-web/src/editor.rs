@@ -608,6 +608,13 @@ impl Editor {
         page::link_at(&self.doc, self.caret).map(|(.., url)| url)
     }
 
+    /// The address the link the caret is in opens, if it's one a page
+    /// may follow ([`carnet_core::export::safe_href`]): a `javascript:`
+    /// link is edited and taken off like any, but not opened.
+    pub fn link_to_open(&self) -> Option<String> {
+        self.link_here().as_deref().and_then(carnet_core::export::safe_href)
+    }
+
     /// The link the caret is in given address `url`, or taken off its
     /// words (`None`); else the selection made a link to `url` (with
     /// nothing selected, the address typed in as its own link).
@@ -1039,9 +1046,23 @@ mod tests {
         assert_eq!(e.link_here().as_deref(), Some("https://example.com"));
         assert!(e.set_link(Some("https://carnet.example")));
         assert!(e.markdown().contains("(https://carnet.example)"));
+        assert_eq!(e.link_to_open().as_deref(), Some("https://carnet.example"));
         assert!(e.set_link(None));
         assert!(e.markdown().contains("see the site"));
         assert_eq!(e.link_here(), None);
+        assert_eq!(e.link_to_open(), None);
+    }
+
+    /// A link that would run (`javascript:`) is there to change or take
+    /// off, but not to open; one to a note or a mail is.
+    #[test]
+    fn only_a_link_a_page_may_follow_opens() {
+        for (url, opens) in [("javascript:alert(1)", None), ("JavaScript:x", None), ("data:text/html,x", None), ("mailto:a@b", Some("mailto:a@b")), ("notes/x.md", Some("notes/x.md")), ("#top", Some("#top"))] {
+            let mut e = Editor::open(&format!("# T\n\n[go]({url})\n"));
+            e.select(1, 1, 1, 1);
+            assert!(e.link_here().is_some(), "{url}: {}", e.markdown());
+            assert_eq!(e.link_to_open().as_deref(), opens, "{url}");
+        }
     }
 
     /// The header row taken away and put back, as the desktop does; the

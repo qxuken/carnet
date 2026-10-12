@@ -852,6 +852,12 @@ impl PageEditor {
         self.e.link_here()
     }
 
+    /// Where the link the caret is in opens: none for one a page mustn't
+    /// follow (`javascript:` and the like).
+    pub fn link_to_open(&self) -> Option<String> {
+        self.e.link_to_open()
+    }
+
     /// The caret put in a table's cell: CodeMirror's line, the row, the
     /// column, and the selection in the cell's words (UTF-16).
     pub fn cell_select(&mut self, line: u32, r: u32, c: u32, a: u32, h: u32) -> bool {

@@ -69,6 +69,11 @@ pub trait Blobs: Send {
     fn sweep(&mut self, before: u64) -> u64;
     /// The bytes the account's pictures take.
     fn usage(&mut self, account: &[u8]) -> u64;
+    /// Where its links point, if not this server: the origin the web app
+    /// fetches pictures from, which its CSP allows (docs/SYNC.md §8).
+    fn origin(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Boxed, still one: the server runs files or a bucket alike.
@@ -93,6 +98,9 @@ impl<T: Blobs + ?Sized> Blobs for Box<T> {
     }
     fn usage(&mut self, account: &[u8]) -> u64 {
         (**self).usage(account)
+    }
+    fn origin(&self) -> Option<String> {
+        (**self).origin()
     }
 }
 

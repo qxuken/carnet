@@ -377,12 +377,12 @@ fn the_browser_lists_draws_and_ticks() {
     assert!(h.contains("<mark>words</mark>"), "{h}");
     assert!(h.contains("<img data-picture=\"attachments/2026/photo.png\" alt=\"\" width=\"200\">"), "found by its name: {h}");
     // A file outside the notes folder: the page says it's on the device
-    // that has it; one on the web, as it is.
+    // that has it; one on the web, that it isn't loaded.
     assert!(h.contains("data-picture=\"/Users/me/Pictures/sea.png\""), "{h}");
-    assert!(h.contains("src=\"https://example.com/a.png\""), "{h}");
-    // Only that one has a `src`: the browser asks for no other before the
-    // page has it.
-    assert_eq!(h.matches("src=").count(), 1, "{h}");
+    assert!(h.contains("data-picture=\"https://example.com/a.png\""), "{h}");
+    // None has a `src`: the browser asks for none before the page has it,
+    // and never for one on the web.
+    assert_eq!(h.matches("src=").count(), 0, "{h}");
     assert_eq!(web.picture_path("", "photo.png", true).as_deref(), Some("attachments/2026/photo.png"));
     assert_eq!(web.picture_path("Home", "../attachments/p.png", false).as_deref(), Some("attachments/p.png"));
     assert_eq!(web.picture_path("Home", "Hill.JPG", false).as_deref(), Some("Home/hill.jpg"), "as the vault spells it");

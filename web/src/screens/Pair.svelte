@@ -2,7 +2,9 @@
   // Coming in, in two steps: how (only the ways this server lists: a code
   // from a device already in or an invite, a passkey, an email and
   // password, a new account), then that way's form. A server that offers
-  // only a code opens on its form, and so does a pairing or invite link.
+  // only a code opens on its form, and so does a pairing or invite link,
+  // its code filled in, to connect with a click: a link anyone could send
+  // mustn't sign this browser into their account unasked.
   // The kind of code is read from its shape.
   import { onMount } from 'svelte';
   import { sync } from '../lib/sync.svelte';
@@ -22,6 +24,9 @@
   let moved = false;
 
   let code = $state('');
+  /// The code a pairing or invite link brought, said so while it's the one
+  /// in the field.
+  let fromLink = $state<string | null>(null);
   let email = $state('');
   let password = $state('');
   let showPassword = $state(false);
@@ -62,11 +67,11 @@
 
   type Info = { signup?: string; passwords?: boolean; password_email?: string; protocol?: number; oldest?: number; deprecated?: number; features?: string[] };
   onMount(() => {
-    // Opened by a pairing or invite link: its code, in its form.
+    // Opened by a pairing or invite link: its code, in its form, to
+    // connect with a click.
     if (sync.linked) {
-      code = sync.linked;
+      code = fromLink = sync.linked;
       step = 'code';
-      if (!safari) sync.enter(code);
     }
     const info = fetch('/v1/info', { signal: AbortSignal.timeout(8000) })
       .then((r) => (r.ok ? (r.json() as Promise<Info>) : null))
@@ -304,6 +309,8 @@
         {:else if sentTo}
           <p class="sent" role="status"><Icon name="check" size={16} /> We sent an invite to <b>{sentTo}</b>. Paste its code here.</p>
           {#if sentSaid}<p class="said">{sentSaid}</p>{/if}
+        {:else if fromLink && code === fromLink}
+          <p class="from" role="status"><Icon name="link" size={16} /> From a link. Connect only if you made it, or it’s your own invite.</p>
         {:else}
           <p>On a device already in, open <b>Settings → Sync → Add a device</b> and choose <b>Show a code</b>. Scan it, or type it here. An invite from your email goes here too.</p>
         {/if}
@@ -410,6 +417,8 @@
   .link.quiet:not(:disabled):hover { color: var(--accent-ink); }
   .error { color: var(--danger); margin: 12px 0 0; }
   .sent { color: var(--ink); }
+  .from { color: var(--ink); }
+  .from :global(.icon) { vertical-align: -3px; margin-right: 2px; color: var(--muted); }
   .sent :global(.icon) { vertical-align: -3px; margin-right: 2px; color: var(--success); }
   .said { font-size: 14px; }
   .signup p { margin: 0 0 8px; }

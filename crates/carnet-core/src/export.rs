@@ -226,14 +226,34 @@ fn spans(text: &str, viewer: bool) -> String {
                 .strip_prefix("](")
                 .and_then(|r| r.split_once(')'))
                 .map(|(u, _)| u.to_string());
-            if let Some(url) = url {
-                piece = format!("<a href=\"{}\">{piece}</a>", escape(&url));
+            // One the page mustn't follow (`javascript:` and the like):
+            // its words, with no link.
+            if let Some(href) = url.as_deref().and_then(safe_href) {
+                piece = format!("<a href=\"{}\">{piece}</a>", escape(&href));
             }
         }
         out.push_str(&piece);
         i += 1;
     }
     out
+}
+
+/// A link's address as a page may follow it: a web or mail address
+/// (`http:`, `https:`, `mailto:`), or one with no scheme (a path, `#…`).
+/// Any other scheme (`javascript:`, `data:`, `file:`, an app's) is none:
+/// a browser would run it, or hand it to whatever claims it. Read as a
+/// browser reads it: the ends' spaces and control characters, and tabs
+/// and line breaks anywhere, left out, the scheme in any case.
+pub fn safe_href(url: &str) -> Option<String> {
+    let url: String = url.trim_matches(|c: char| c <= ' ').chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
+    let scheme = url.split_once(':').map(|(s, _)| s).filter(|s| {
+        let mut cs = s.chars();
+        cs.next().is_some_and(|c| c.is_ascii_alphabetic()) && cs.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    });
+    match scheme {
+        Some(s) if !["http", "https", "mailto"].iter().any(|k| s.eq_ignore_ascii_case(k)) => None,
+        _ => Some(url),
+    }
 }
 
 fn escape(s: &str) -> String {
@@ -256,6 +276,27 @@ mod tests {
         assert!(h.contains("<ol><li>one</li></ol>"), "{h}");
         assert!(h.contains("<tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr>"), "{h}");
         assert!(h.contains("<img src=\"file:///C:/n/attachments/p.png\" alt=\"pic\">"), "{h}");
+    }
+
+    /// Only web, mail and relative links are links: any other scheme, in
+    /// any case or broken by a tab, is its words alone.
+    #[test]
+    fn only_web_mail_and_relative_links_are_links() {
+        for bad in ["javascript:alert%281%29", "JaVaScRiPt:alert%281%29", "java\tscript:alert%281%29", " data:text/html,x", "vbscript:x", "file:///etc/passwd", "\u{1}javascript:x", "java\nscript:x"] {
+            assert_eq!(safe_href(bad), None, "{bad:?}");
+            let h = html(&format!("[x]({bad}) after"), |s, _| s.to_string());
+            assert!(!h.contains("href") && (bad.contains('\n') || h.contains("<p>x after</p>")), "{bad:?}: {h}");
+            let v = viewer(&format!("# T [y]({bad})\n\n[x]({bad})"), |s, _| Picture::Url(s.into()));
+            assert!(!v.contains("href"), "{bad:?}: {v}");
+        }
+        for good in ["https://x", "HTTP://x/a?b#c", "mailto:a@b", "notes/x.md", "#top", "../a b.md", "//x.org/p", ""] {
+            assert_eq!(safe_href(good).as_deref(), Some(good), "{good:?}");
+        }
+        assert_eq!(safe_href(" https://x\t/a\n "), Some("https://x/a".into()));
+        let h = html("[a](https://x) [b](mailto:a@b) [c](notes/x.md) [d](#top)", |s, _| s.to_string());
+        for href in ["https://x", "mailto:a@b", "notes/x.md", "#top"] {
+            assert!(h.contains(&format!("href=\"{href}\"")), "{href}: {h}");
+        }
     }
 
     /// A dropped first letter is the paragraph's class, in a copy and in

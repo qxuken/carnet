@@ -7,12 +7,18 @@
 // at (the page's width, or the width the note gives it), the same box in
 // the reader and the editor, before and after a reload. One that doesn't
 // come says so in that same box, and is asked for again when the notes
-// change: a device may have sent it since.
+// change: a device may have sent it since. One on the web isn't loaded
+// (as the desktop doesn't, and the page's CSP wouldn't): its box says so.
 
 import { NOTES_CHANGED, NOT_ON_SERVER, sync } from './sync.svelte';
 import warning from '../icons/warning.svg?raw';
 import cloud from '../icons/cloud.svg?raw';
 import cloudOff from '../icons/cloud-off.svg?raw';
+import picture from '../icons/picture.svg?raw';
+
+/// Why a picture on the web isn't asked for: it isn't loaded.
+export const ON_THE_WEB = 'on the web';
+const onTheWeb = (src: string) => /^https?:/i.test(src.trim());
 
 export function pictures(box: HTMLElement) {
   for (const img of box.querySelectorAll<HTMLImageElement>('img[data-picture]')) {
@@ -20,11 +26,11 @@ export function pictures(box: HTMLElement) {
     delete img.dataset.picture;
     img.dataset.path = path;
     unshown(img, path);
-    show(img, path, () => sync.picture(path));
+    show(img, path, () => (onTheWeb(path) ? Promise.reject(new Error(ON_THE_WEB)) : sync.picture(path)));
   }
   for (const a of box.querySelectorAll('a')) {
     a.target = '_blank';
-    a.rel = 'noopener';
+    a.rel = 'noopener noreferrer';
   }
 }
 
@@ -42,7 +48,7 @@ export function show(img: HTMLImageElement, name: string, ask: () => Promise<str
     if (!place.isConnected) return;
     const [said, icon] = why(e, name);
     fill(place, said, name, true, icon);
-    waiting.set(place, () => ask().then(shown));
+    if (!(e instanceof Error && e.message === ON_THE_WEB)) waiting.set(place, () => ask().then(shown));
   });
 }
 
@@ -53,6 +59,7 @@ export function show(img: HTMLImageElement, name: string, ask: () => Promise<str
 /// into Carnet there (docs/SYNC.md §4).
 function why(e: unknown, path: string): [string, string] {
   if (e instanceof Error && e.message === NOT_ON_SERVER) return ['Picture not found', warning];
+  if (e instanceof Error && e.message === ON_THE_WEB) return ['A picture on the web, not loaded', picture];
   // A path from the notes folder (the reader's), or as the note writes it
   // (the editor's: `../attachments/…` from a folder).
   if (/^(\.\.\/)*attachments\//i.test(path)) return ['This picture hasn’t reached the server yet', cloud];
