@@ -443,6 +443,17 @@ pub struct Peek {
 }
 
 /// A press on the page, until it is let go.
+/// A piece of a table cell that has pictures among its words: a stretch
+/// of its words (`from..to` of its text), or a picture (its Markdown), and
+/// the node it was drawn in — the words' text, the picture's box.
+#[derive(Clone, Copy, Debug)]
+pub struct Piece {
+    pub from: usize,
+    pub to: usize,
+    pub key: Key,
+    pub picture: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Drag {
     /// In text: the selection follows the pointer — a letter at a time,
@@ -507,6 +518,10 @@ pub struct Carnet {
     /// Each table cell's box as the last frame laid it out: what a click is
     /// matched against.
     cell_rects: HashMap<Slot, Rect>,
+    /// A table cell with pictures among its words, as last drawn: its
+    /// stretches of words and its pictures, one under another, what the
+    /// caret is measured against there in place of one text node.
+    pub cell_pieces: HashMap<Slot, Vec<Piece>>,
     /// Each slot's text as last drawn (a hash): a caret is measured only
     /// against text the last layout had.
     drawn: HashMap<Slot, u64>,
@@ -901,6 +916,7 @@ impl Carnet {
             link_edit: None,
             menu_at: Vec2::new(0.0, 0.0),
             cell_rects: HashMap::new(),
+            cell_pieces: HashMap::new(),
             drawn: HashMap::new(),
             goal_x: None,
             drag: None,
@@ -1103,6 +1119,7 @@ impl Carnet {
                 }
             };
             let edits = self.store.relinks(self.current, &from, &to);
+            let cells = self.store.cell_relinks(self.current, &from, &to);
             let doc = self.doc();
             let srcs: Vec<(u64, String)> = edits
                 .iter()
@@ -1111,7 +1128,7 @@ impl Carnet {
                     _ => None,
                 })
                 .collect();
-            self.edit(Step::Other, |d, _| store::set_srcs(d, &edits));
+            self.edit(Step::Other, |d, _| store::set_srcs(d, &edits) | store::set_cell_srcs(d, &cells));
             self.save_current();
             self.store.index_files();
             self.sync.poke();
@@ -3247,9 +3264,10 @@ impl Carnet {
         if open_now && let Some(n) = card {
             self.open(n);
         }
-        // Over the page: the gap between blocks nearest the pointer.
+        // Over the page: the gap between blocks nearest the pointer; over
+        // a table's cell, none: they go into the cell.
         self.drop_index = match self.page_rect {
-            Some(r) if inside(&r) && !self.settings_open => {
+            Some(r) if inside(&r) && !self.settings_open && self.cell_at(at.x, at.y).is_none() => {
                 let i = self.gap_at(at.y);
                 // Near the scroller's edges, the page scrolls.
                 if let Some(k) = self.scroll_key {
@@ -4052,6 +4070,10 @@ impl App for Carnet {
                         if let Some(n) = card {
                             self.open(n);
                             self.drop_index = Some(self.doc().len());
+                        } else if let Some(cell) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y)) {
+                            // On a table's cell: into it, at its end.
+                            self.caret = Caret::at(page::end(self.doc(), cell));
+                            self.drop_index = None;
                         }
                         let at = self.drop_index.take();
                         self.file_drag = None;

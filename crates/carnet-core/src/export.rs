@@ -46,14 +46,14 @@ impl Picture {
 /// `<h1>`, and front matter is not shown.
 pub fn viewer(md: &str, image: impl Fn(&str, bool) -> Picture) -> String {
     let (title, doc) = from_markdown(md);
-    let mut out = title.map(|t| format!("<h1>{}</h1>", spans(&t, true))).unwrap_or_default();
+    let mut out = title.map(|t| format!("<h1>{}</h1>", spans(&t, true, None))).unwrap_or_default();
     let blocks: Vec<Block> = doc.blocks().iter().filter(|b| !matches!(&b.kind, Kind::Raw(r) if r.starts_with("---\n"))).map(|b| (**b).clone()).collect();
     out.push_str(&render(&blocks, image, true));
     out
 }
 
 fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool) -> String {
-    let spans = |t: &str| spans(t, viewer);
+    let spans = |t: &str| spans(t, viewer, None);
     let mut task = 0;
     let mut out = String::new();
     // The open lists, outermost first: their tag, and their indent.
@@ -137,7 +137,8 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                     out.push_str("<tr>");
                     let cell = if t.is_header(r) { "th" } else { "td" };
                     for c in &row.cells {
-                        out.push_str(&format!("<{cell}>{}</{cell}>", spans(c)));
+                        // A cell's pictures among its words, as `image` has them.
+                        out.push_str(&format!("<{cell}>{}</{cell}>", self::spans(c, viewer, Some(&image))));
                     }
                     out.push_str("</tr>");
                 }
@@ -186,16 +187,29 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
     out
 }
 
+/// Where a picture is put, by its `src` and whether an Obsidian embed's.
+type Where<'a> = dyn Fn(&str, bool) -> Picture + 'a;
+
 /// One line's inline styles as tags, its markers left out; with `viewer`,
-/// highlights and colours too.
-fn spans(text: &str, viewer: bool) -> String {
+/// highlights and colours too. With `image`, a table cell's: its pictures
+/// among the words, each an `<img>` where `image` puts it, its width the
+/// one the note gives it (a side means nothing in a cell).
+fn spans(text: &str, viewer: bool, image: Option<&Where<'_>>) -> String {
     let mut out = String::new();
+    let _cell = inline::cell_text(image.is_some());
+    let pictures = if image.is_some() { inline::cell_pictures(text) } else { Vec::new() };
     // A link's target is a marker run between its text and the next text.
     let runs = inline::runs(text);
     let mut i = 0;
     while i < runs.len() {
         let (a, b, s) = runs[i];
         if s.marker {
+            i += 1;
+            continue;
+        }
+        if let (true, Some(image), Some(p)) = (s.picture, image, pictures.iter().find(|p| p.at.0 == a)) {
+            let w = p.width.map(|w| format!(" width=\"{w}\"")).unwrap_or_default();
+            out.push_str(&format!("<img {} alt=\"{}\"{w}>", image(&p.src, p.wiki).attr(), escape(&p.alt)));
             i += 1;
             continue;
         }
@@ -334,6 +348,25 @@ mod tests {
         for href in ["https://x", "mailto:a@b", "notes/x.md", "#top"] {
             assert!(h.contains(&format!("href=\"{href}\"")), "{href}: {h}");
         }
+    }
+
+    /// A picture in a table's cell is a picture there, in the reader and
+    /// in a copy: where the page fetches it, its width, its alt text
+    /// escaped; a side means nothing in a cell. A paragraph's is the link
+    /// it looks like still.
+    #[test]
+    fn a_picture_in_a_cell_is_an_img_there() {
+        let md = "| img1 | img2 |\n|---|---|\n| ![a \"<b>\"|left|260](../attachments/aerial.jpg) and **words** | ![[photo.png]] |\n\nText ![not](x.png) here";
+        let v = viewer(md, |s, wiki| Picture::Fetch(format!("{}{s}", if wiki { "w:" } else { "" })));
+        assert!(v.contains("<td><img data-picture=\"../attachments/aerial.jpg\" alt=\"a &quot;&lt;b&gt;&quot;\" width=\"260\"> and <b>words</b></td>"), "{v}");
+        assert!(v.contains("<td><img data-picture=\"w:photo.png\" alt=\"\"></td>"), "{v}");
+        assert!(!v.contains("align") && !v.contains("left"), "{v}");
+        assert!(v.contains("<p>Text !<a href=\"x.png\">not</a> here</p>"), "{v}");
+        let h = html(md, |s, _| format!("file:///n/{s}"));
+        assert!(h.contains("<td><img src=\"file:///n/../attachments/aerial.jpg\" alt=\"a &quot;&lt;b&gt;&quot;\" width=\"260\"> and <b>words</b></td>"), "{h}");
+        // In code, or after a backslash, no picture.
+        let v = viewer("| a | b |\n|---|---|\n| `![](x.png)` | \\![](y.png) |", |s, _| Picture::Fetch(s.into()));
+        assert!(!v.contains("<img"), "{v}");
     }
 
     /// A dropped first letter is the paragraph's class, in a copy and in

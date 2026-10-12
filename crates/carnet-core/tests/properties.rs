@@ -35,6 +35,7 @@ const INLINE: &[&str] = &[
 const BLOCK: &[&str] = &[
     "\n", "\n\n", "\r\n", "- ", "* ", "1. ", "- [ ] ", "- [x] ", "    - ", "# ", "## ", "> ", "---\n",
     "```\ncode\n```\n", "| a | b |\n|---|---|\n| 1 | 2 |\n", "![](attachments/a.png)\n", "![|right|300](a.png)\n",
+    "| ![|left|260](a.png) | b |\n|---|---|\n| ![[c.png\\|9]] x | ![a](<b c.png>) |\n",
 ];
 
 fn line() -> impl Strategy<Value = String> {

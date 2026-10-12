@@ -507,7 +507,7 @@ impl Doc {
                     let cells: Vec<String> = t
                         .rows
                         .iter()
-                        .map(|r| r.cells.iter().filter(|c| !c.trim().is_empty()).map(|c| clip(c)).collect::<Vec<_>>())
+                        .map(|r| r.cells.iter().map(|c| without_pictures(c)).filter(|c| !c.trim().is_empty()).map(|c| clip(&c)).collect::<Vec<_>>())
                         .find(|cells| !cells.is_empty())
                         .unwrap_or_default();
                     if !cells.is_empty() {
@@ -530,6 +530,15 @@ impl Doc {
     pub fn snippet(&self) -> String {
         self.snippet_parts().join(", ")
     }
+}
+
+/// A cell's text with its pictures left out: its words, for a preview.
+fn without_pictures(cell: &str) -> String {
+    let mut out = cell.to_string();
+    for p in inline::cell_pictures(cell).iter().rev() {
+        out.replace_range(p.at.0..p.at.1, "");
+    }
+    out
 }
 
 // ------------------------------------------------------------ shortcuts
@@ -972,6 +981,29 @@ pub fn image_line(line: &str) -> Option<Kind> {
     if src.is_empty() || alt.contains(['[', ']']) {
         return None;
     }
+    let (alt, width, float) = alt_parts(alt);
+    Some(Kind::Image { src: src.to_string(), alt: alt.to_string(), width, float, wiki: false })
+}
+
+/// A picture among a table cell's words, as the cell's text has it: the
+/// text stays the Markdown, and this says what part of it is a picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellPicture {
+    /// Where it is in the text, `!` to its closing bracket.
+    pub at: (usize, usize),
+    /// Where its `src` is in the text: what a move rewrites.
+    pub src_at: (usize, usize),
+    pub src: String,
+    pub alt: String,
+    pub width: Option<u32>,
+    /// Written as Obsidian embeds one (`![[…]]`): `src` a name to look
+    /// for ([`find_picture`]).
+    pub wiki: bool,
+}
+
+/// The alt text's own words, the width at its end (`|400`) and the side
+/// before that (`|left`, `|right`).
+fn alt_parts(alt: &str) -> (&str, Option<u32>, Float) {
     let (alt, width) = match alt.rsplit_once('|') {
         Some((a, w)) if !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit()) => (a, w.parse().ok()),
         _ => (alt, None),
@@ -981,7 +1013,104 @@ pub fn image_line(line: &str) -> Option<Kind> {
         Some((a, "right")) => (a, Float::Right),
         _ => (alt, Float::None),
     };
-    Some(Kind::Image { src: src.to_string(), alt: alt.to_string(), width, float, wiki: false })
+    (alt, width, float)
+}
+
+/// The picture that starts at byte `at` of a line of words, if one does:
+/// `![alt](src)`, `![alt|260](<a b.png>)`, or an Obsidian embed of one,
+/// `![[photo.png|260]]`, as [`image_line`] reads one alone on its line.
+/// Its `|`s are its own, and may be written `\|`, as a table's cell has
+/// other editors write them; a side (`|left`) is kept in the text but
+/// means nothing among words.
+pub fn inline_picture(text: &str, at: usize) -> Option<CellPicture> {
+    let rest = text.get(at..)?;
+    if let Some(inner) = rest.strip_prefix("![[") {
+        let len = inner.find("]]")?;
+        let raw = &inner[..len];
+        if raw.contains(['[', ']', '\n']) {
+            return None;
+        }
+        let Some(Kind::Image { src, alt, width, wiki, .. }) = wiki_image(&format!("![[{}]]", raw.replace("\\|", "|"))) else { return None };
+        // The source as written: before the first `|` (or `\|`), its
+        // spaces left out.
+        let first = raw.split('|').next().unwrap_or(raw);
+        let first = first.strip_suffix('\\').unwrap_or(first);
+        let lead = first.len() - first.trim_start().len();
+        let s = at + 3 + lead;
+        if text.get(s..s + src.len()) != Some(src.as_str()) {
+            return None;
+        }
+        return Some(CellPicture { at: (at, at + 3 + len + 2), src_at: (s, s + src.len()), src, alt, width, wiki });
+    }
+    let inner = rest.strip_prefix("![")?;
+    let close = inner.find(']')?;
+    let alt = &inner[..close];
+    let target = inner[close + 1..].strip_prefix('(')?;
+    let t0 = at + 2 + close + 2;
+    let ((s, e), end) = if let Some(t) = target.strip_prefix('<') {
+        let n = t.find(">)")?;
+        ((t0 + 1, t0 + 1 + n), t0 + 1 + n + 2)
+    } else {
+        let n = target.find(')')?;
+        let t = &target[..n];
+        let lead = t.len() - t.trim_start().len();
+        let bare = t.trim();
+        // A title after the source (`"…"`) is dropped, as alone.
+        let src = bare.split_once(" \"").map_or(bare, |(a, _)| a);
+        if src.contains(['\t', '(']) {
+            return None;
+        }
+        ((t0 + lead, t0 + lead + src.len()), t0 + n + 1)
+    };
+    let src = &text[s..e];
+    if src.is_empty() || alt.contains(['[', '\n']) || src.contains('\n') {
+        return None;
+    }
+    let alt = alt.replace("\\|", "|");
+    let (alt, width, _) = alt_parts(&alt);
+    Some(CellPicture { at: (at, end), src_at: (s, e), src: src.to_string(), alt: alt.to_string(), width, wiki: false })
+}
+
+/// Every picture in a line of words, as [`inline_picture`] reads them,
+/// one after another: a line that only looks like one counts (in code,
+/// say), as for [`picture_paths`].
+pub fn inline_pictures(text: &str) -> Vec<CellPicture> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(k) = text[i..].find("![") {
+        match inline_picture(text, i + k) {
+            Some(p) => {
+                i = p.at.1;
+                out.push(p);
+            }
+            None => i += k + 2,
+        }
+    }
+    out
+}
+
+/// A cell's text with the `src` of each of its pictures `to` gives one
+/// (`None`: as it is): the rest of the text as it was. `None` when no
+/// picture changed.
+pub fn relink_cell(cell: &str, mut to: impl FnMut(&CellPicture) -> Option<String>) -> Option<String> {
+    let mut out = cell.to_string();
+    let mut changed = false;
+    // From the last, so the places before stay where they are.
+    for p in inline::cell_pictures(cell).iter().rev() {
+        let Some(new) = to(p).filter(|n| *n != p.src) else { continue };
+        let (s, e) = p.src_at;
+        // A bare source that now needs its `<…>`; an embed's that can't
+        // hold the new one stays.
+        let bare = !p.wiki && cell.as_bytes().get(s.wrapping_sub(1)) != Some(&b'<');
+        let new = match p.wiki {
+            true if new.contains(['[', ']', '|', '\n']) => continue,
+            false if bare && new.contains([' ', '(', ')', '<', '>']) => format!("<{new}>"),
+            _ => new,
+        };
+        out.replace_range(s..e, &new);
+        changed = true;
+    }
+    changed.then_some(out)
 }
 
 /// A picture's `src`, from a note in `folder`, as a path from the notes
@@ -1104,17 +1233,25 @@ pub fn find_picture(folder: &str, src: &str, wiki: bool, files: &Files) -> Optio
 }
 
 /// The pictures a note in `folder` shows, as paths from the notes folder:
-/// what keeps a picture wanted. A line that only looks like one (in a code
+/// what keeps a picture wanted — one on a line of its own, and one among
+/// a table cell's words. A line that only looks like one (in a code
 /// block, say) counts too: a picture kept by mistake costs little, one
 /// lost is gone. `files` is where an Obsidian embed's picture is looked
 /// for ([`find_picture`]).
 pub fn picture_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
-    md.lines()
-        .filter_map(|line| match image_line(line) {
-            Some(Kind::Image { src, wiki, .. }) => find_picture(folder, &src, wiki, files),
-            _ => None,
-        })
-        .collect()
+    let mut out = std::collections::BTreeSet::new();
+    for line in md.lines() {
+        match image_line(line) {
+            Some(Kind::Image { src, wiki, .. }) => out.extend(find_picture(folder, &src, wiki, files)),
+            // Among a table's cell's words (a row, or a line that looks
+            // like one); among a paragraph's, a picture is no picture.
+            _ if line.trim_start().starts_with('|') => {
+                out.extend(inline_pictures(line).iter().filter_map(|p| find_picture(folder, &p.src, p.wiki, files)));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// `<img src="…" alt="…" width="…">` (or `/>`), as an export writes a
@@ -1150,8 +1287,19 @@ fn html_image(line: &str) -> Option<Kind> {
     Some(Kind::Image { src, alt, width, float: Float::None, wiki: false })
 }
 
+/// A cell as its row writes it: its `|`s escaped, but for a picture's,
+/// which are written as they are (`![|left|260](a.png)`), as other
+/// editors write them and [`split_row`] reads them.
 fn escape_cell(cell: &str) -> String {
-    cell.replace('|', "\\|").replace('\n', " ")
+    let mut out = String::with_capacity(cell.len());
+    let mut last = 0;
+    for p in inline_pictures(cell) {
+        out.push_str(&cell[last..p.at.0].replace('|', "\\|"));
+        out.push_str(&cell[p.at.0..p.at.1]);
+        last = p.at.1;
+    }
+    out.push_str(&cell[last..].replace('|', "\\|"));
+    out.replace('\n', " ")
 }
 
 // ------------------------------------------------------------ markdown in
@@ -1506,13 +1654,23 @@ fn split_row(line: &str) -> Vec<String> {
     let t = t.strip_prefix('|').unwrap_or(t);
     let mut cells = Vec::new();
     let mut cur = String::new();
-    let mut chars = t.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut i = 0;
+    while let Some(c) = t[i..].chars().next() {
+        // A picture's `|`s are its own (`![|left|260](a.png)`), as other
+        // editors read them: it is taken whole, as written.
+        if c == '!'
+            && let Some(p) = inline_picture(t, i)
+        {
+            cur.push_str(&t[i..p.at.1]);
+            i = p.at.1;
+            continue;
+        }
+        i += c.len_utf8();
         match c {
             // Only an escaped pipe is the writer's; every other backslash
             // is the cell's own.
-            '\\' if chars.peek() == Some(&'|') => {
-                chars.next();
+            '\\' if t[i..].starts_with('|') => {
+                i += 1;
                 cur.push('|');
             }
             '|' => cells.push(std::mem::take(&mut cur).trim().to_string()),
@@ -2022,6 +2180,48 @@ Second line of the same paragraph.
         // Pictures this app puts in are written as Markdown links.
         let doc = Doc::new(vec![Block::new(Kind::Image { src: "attachments/p.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false })]);
         assert_eq!(to_markdown(None, &doc), "![](attachments/p.png)\n");
+    }
+
+    /// A picture in a table's cell is the cell's, its `|`s its own: the
+    /// table keeps its columns, the cell its text as written, and the
+    /// file comes back byte for byte — with a width, at a side (which a
+    /// cell keeps but means nothing there), escaped as GFM writes it, or
+    /// as Obsidian embeds one.
+    #[test]
+    fn a_picture_in_a_cell_is_the_cells_and_round_trips() {
+        let (_, doc) = from_markdown("| img1 | img2 |\n|---|---|\n| ![|left|260](../attachments/aerial.jpg) | |\n");
+        let Kind::Table(t) = &doc.blocks()[0].kind else { panic!("no table") };
+        assert_eq!(t.width(), 2);
+        assert_eq!(t.rows[1].cells, ["![|left|260](../attachments/aerial.jpg)", ""]);
+        same("| img1 | img2 |\n| --- | --- |\n| ![|left|260](../attachments/aerial.jpg) |  |\n");
+        same("| a | b |\n| --- | --- |\n| ![view|300](attachments/v.png) and words | x \\| y |\n");
+        same("| a |\n| --- |\n| ![view\\|right\\|300](<attachments/a b.png>) |\n");
+        same("| a | b |\n| --- | --- |\n| ![[aerial.jpg|260]] | ![[Other note]] |\n");
+        let (_, doc) = from_markdown("| a | b |\n| --- | --- |\n| ![[aerial.jpg|260]] | ![[Other note]] |\n");
+        let Kind::Table(t) = &doc.blocks()[0].kind else { panic!("no table") };
+        assert_eq!(t.rows[1].cells, ["![[aerial.jpg|260]]", "![[Other note]]"], "an embed of a note is no picture, and keeps its column");
+        // What a cell's picture says.
+        let p = inline_picture("x ![view|left|260](../attachments/aerial.jpg) y", 2).unwrap();
+        assert_eq!((p.src.as_str(), p.alt.as_str(), p.width, p.wiki), ("../attachments/aerial.jpg", "view", Some(260), false));
+        assert_eq!(&"x ![view|left|260](../attachments/aerial.jpg) y"[p.at.0..p.at.1], "![view|left|260](../attachments/aerial.jpg)");
+        let p = inline_picture("![a\\|300](<b c.png>)", 0).unwrap();
+        assert_eq!((p.src.as_str(), p.alt.as_str(), p.width), ("b c.png", "a", Some(300)));
+        let p = inline_picture("![[photo.png|the view|260]]", 0).unwrap();
+        assert_eq!((p.src.as_str(), p.alt.as_str(), p.width, p.wiki), ("photo.png", "the view", Some(260), true));
+        assert_eq!(inline_picture("![[Other note]]", 0), None);
+        assert_eq!(inline_picture("![a](", 0), None);
+        // The pictures a note shows: those in its cells too, not a
+        // paragraph's among its words.
+        let md = "| a | b |\n| --- | --- |\n| ![](../attachments/a.png) | ![[b.png]] ![](<../attachments/c d.png>) |\n\nText ![not](inline.png) here\n";
+        let found: Vec<String> = picture_paths("Trips", md, &Files::new(["attachments/b.png"])).into_iter().collect();
+        assert_eq!(found, ["attachments/a.png", "attachments/b.png", "attachments/c d.png"]);
+        // A cell's pictures given new sources, the rest as it was; code
+        // holds none.
+        let cell = "x ![v|260](a.png) `![](b.png)` ![[c.png|9]]";
+        let out = relink_cell(cell, |p| Some(format!("new/{}", p.src))).unwrap();
+        assert_eq!(out, "x ![v|260](new/a.png) `![](b.png)` ![[new/c.png|9]]");
+        assert_eq!(relink_cell("![](a.png)", |_| Some("my pics/a.png".into())).as_deref(), Some("![](<my pics/a.png>)"));
+        assert_eq!(relink_cell("![](a.png)", |_| None), None);
     }
 
     /// An embed's picture is looked for as Obsidian looks: beside the

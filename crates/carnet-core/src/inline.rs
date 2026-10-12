@@ -18,8 +18,51 @@
 //! plain one, `<span class="initial">T</span>he…`, but is no style of the
 //! words: [`take_initial`] reads it off as the paragraph is read, and
 //! [`put_initial`] puts it back as it is written (`doc`).
+//!
+//! In a table's cell a picture stands among the words (`![alt|260](a.png)`,
+//! `![[a.png]]`): read so only while a [`CellText`] lives, as the cell's
+//! editor and its drawing read it. Its `!` is its one word, drawn as the
+//! picture, and the rest its marks, so the caret steps over it whole and
+//! an edit takes it whole. Elsewhere a picture is a block of its own
+//! (`doc::Kind::Image`), and the same marks are the `!` and link they
+//! look like.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
+
+use crate::doc::{self, CellPicture};
+
+thread_local! {
+    /// Whether the text being read is a table cell's: see [`CellText`].
+    static IN_CELL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// While it lives, text is read as a table's cell has it, a picture among
+/// its words read as one (or, made with `false`, as any other text: a
+/// paragraph in the same edit). Dropped, reading is as it was.
+#[must_use]
+pub struct CellText {
+    was: bool,
+}
+
+/// Text read as a table's cell (`true`) or as any other text has it,
+/// until what this gives is dropped.
+pub fn cell_text(on: bool) -> CellText {
+    CellText { was: IN_CELL.replace(on) }
+}
+
+impl Drop for CellText {
+    fn drop(&mut self) {
+        IN_CELL.set(self.was);
+    }
+}
+
+/// The pictures among a cell's words, as the cell's editor reads them: not
+/// in code, nor after a backslash (`\![…](…)`).
+pub fn cell_pictures(text: &str) -> Vec<CellPicture> {
+    let _cell = cell_text(true);
+    read(text).pictures
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Style {
@@ -35,6 +78,9 @@ pub struct Style {
     pub ink: u32,
     /// A marker itself: `**`, `` ` ``, `[`, `](url)`, `<mark …>`.
     pub marker: bool,
+    /// A picture among a cell's words: its `!`, the one word it has,
+    /// drawn as the picture ([`cell_pictures`] says which).
+    pub picture: bool,
 }
 
 /// The plain highlighter, `==…==` or a `<mark>` with no colour: the
@@ -52,6 +98,9 @@ pub enum Kind {
     Code,
     Link,
     Tint,
+    /// A picture among a cell's words: nothing opens it, its `!` is its
+    /// word, and the rest its closing marks.
+    Picture,
 }
 
 impl Kind {
@@ -62,7 +111,7 @@ impl Kind {
             Kind::Italic => "*",
             Kind::Strike => "~~",
             Kind::Code => "`",
-            Kind::Link | Kind::Tint => "",
+            Kind::Link | Kind::Tint | Kind::Picture => "",
         }
     }
 
@@ -75,6 +124,7 @@ impl Kind {
             Kind::Code => s.code,
             Kind::Link => s.link,
             Kind::Tint => s.ink != 0 || s.mark != 0,
+            Kind::Picture => s.picture,
         }
     }
 }
@@ -102,12 +152,16 @@ struct Read {
     styles: Vec<Style>,
     tints: Vec<Tint>,
     pairs: Vec<Pair>,
+    pictures: Vec<CellPicture>,
 }
 
 /// The line as runs of one style each: `(start, end, style)`, in order,
 /// covering every byte.
 pub fn runs(text: &str) -> Vec<(usize, usize, Style)> {
-    let styles = styles(text);
+    runs_of(&styles(text))
+}
+
+fn runs_of(styles: &[Style]) -> Vec<(usize, usize, Style)> {
     let mut out: Vec<(usize, usize, Style)> = Vec::new();
     for (i, s) in styles.iter().enumerate() {
         match out.last_mut() {
@@ -203,6 +257,26 @@ fn read_counting(text: &str, count: Count) -> Read {
                 i = j + n;
             }
             None => i += n,
+        }
+    }
+
+    // A cell's pictures, outside code: the `!` the word, the rest marks.
+    let mut pictures = Vec::new();
+    if IN_CELL.get() {
+        let mut i = 0;
+        while let Some(k) = text[i..].find("![") {
+            let at = i + k;
+            let p = (!quiet[at] && !quiet[at + 1]).then(|| doc::inline_picture(text, at)).flatten();
+            let Some(p) = p.filter(|p| !pairs.iter().any(|c| c.open.0 < p.at.1 && p.at.0 < c.close.1)) else {
+                i = at + 2;
+                continue;
+            };
+            st[at] = Style { picture: true, ..Style::default() };
+            st[at + 1..p.at.1].fill(Style { marker: true, ..Style::default() });
+            quiet[at..p.at.1].fill(true);
+            pairs.push(Pair { kind: Kind::Picture, open: (at, at), close: (at + 1, p.at.1) });
+            i = p.at.1;
+            pictures.push(p);
         }
     }
 
@@ -453,7 +527,7 @@ fn read_counting(text: &str, count: Count) -> Read {
             };
         }
     }
-    Read { styles: st, tints: found, pairs }
+    Read { styles: st, tints: found, pairs, pictures }
 }
 
 /// Where a line's colour tags open and close: every `<mark`, `</mark>`,
@@ -776,12 +850,16 @@ pub struct Visible {
     pub len: usize,
     /// The source's ranges that are words, in order.
     pub runs: Vec<(usize, usize)>,
+    /// A cell's pictures, in the source: each one word, its `!`, and
+    /// the caret after it past all of it.
+    pub atoms: Vec<(usize, usize)>,
 }
 
 impl Visible {
     pub fn of(text: &str) -> Self {
+        let r = read(text);
         let mut runs: Vec<(usize, usize)> = Vec::new();
-        for (a, b, s) in self::runs(text) {
+        for (a, b, s) in runs_of(&r.styles) {
             if s.marker {
                 continue;
             }
@@ -790,13 +868,14 @@ impl Visible {
                 _ => runs.push((a, b)),
             }
         }
-        Self { len: text.len(), runs }
+        let atoms = r.pictures.iter().map(|p| p.at).collect();
+        Self { len: text.len(), runs, atoms }
     }
 
     /// Every byte a word: code, kept as written.
     pub fn all(text: &str) -> Self {
         let runs = if text.is_empty() { Vec::new() } else { vec![(0, text.len())] };
-        Self { len: text.len(), runs }
+        Self { len: text.len(), runs, atoms: Vec::new() }
     }
 
 
@@ -860,7 +939,9 @@ impl Visible {
         let mut left = d;
         for &(f, to) in &self.runs {
             if left <= to - f {
-                return f + left;
+                // After a picture's `!`: past the rest of it.
+                let b = f + left;
+                return self.atoms.iter().find(|a| a.0 + 1 == b).map_or(b, |a| a.1);
             }
             left -= to - f;
         }
@@ -913,8 +994,9 @@ fn cut_keeping(text: &str, a: usize, b: usize, keep: Option<Kind>) -> (String, u
             continue;
         }
         // Code is never kept whole around a change: its words are literal,
-        // so a style goes outside it, not as marks inside.
-        if keep.is_some_and(|k| k != p.kind) && p.kind != Kind::Code && o1 <= a && b <= c0 {
+        // so a style goes outside it, not as marks inside; nor a picture,
+        // whose one word is never parted from its marks.
+        if keep.is_some_and(|k| k != p.kind) && !matches!(p.kind, Kind::Code | Kind::Picture) && o1 <= a && b <= c0 {
             continue;
         }
         let mut at = vec![o1, c0];
@@ -1011,7 +1093,7 @@ pub fn merge(text: &str) -> String {
             opening.entry(q.open.0).or_default().push(q);
         }
         for p in &ps {
-            if matches!(p.kind, Kind::Link | Kind::Code) {
+            if matches!(p.kind, Kind::Link | Kind::Code | Kind::Picture) {
                 continue;
             }
             let same = |q: &&Pair| {
@@ -1046,7 +1128,7 @@ pub fn join(left: &str, right: &str) -> String {
     // opening ones of `right`, while they are the same. Those met are all
     // of `left` past `end` and all of `right` before `start`.
     let (mut end, mut start) = (left.len(), 0);
-    while let Some(p) = lp.iter().find(|p| p.close.1 == end && p.kind != Kind::Link) {
+    while let Some(p) = lp.iter().find(|p| p.close.1 == end && !matches!(p.kind, Kind::Link | Kind::Picture)) {
         // Two code spans: one, its marks made for the words of both.
         if p.kind == Kind::Code {
             let Some(q) = rp.iter().find(|q| q.open.0 == start && q.kind == Kind::Code) else { break };
@@ -1206,7 +1288,7 @@ fn unwrap_all(text: &str, kind: Kind) -> String {
 fn innermost(text: &str) -> (usize, usize) {
     let ps = pairs(text);
     let (mut s, mut e) = (0, text.len());
-    while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && p.kind != Kind::Code) {
+    while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture)) {
         s = p.open.1;
         e = p.close.0;
     }
@@ -1286,7 +1368,7 @@ pub fn tint(text: &str, a: usize, b: usize, ink: bool, color: u32) -> Option<(St
         let ps = pairs(&m);
         let (mut s, mut e) = (0, m.len());
         let mut whole = None;
-        while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && p.kind != Kind::Code) {
+        while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture)) {
             if p.kind == Kind::Tint {
                 whole = Some(p.open.0);
             }

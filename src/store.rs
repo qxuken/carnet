@@ -28,7 +28,7 @@ use carnet_sync::{Key, Newer, Origin, Replica, Revision, Version};
 
 #[path = "store_owned.rs"]
 mod owned;
-pub use owned::{Moved, is_owned, same_file, set_srcs};
+pub use owned::{Moved, is_owned, same_file, set_cell_srcs, set_srcs};
 #[cfg(test)]
 pub use owned::SWEEP_GRACE;
 
@@ -649,18 +649,38 @@ impl Store {
         let old = self.place_note(i, folder)?;
         let (from_dir, to_dir) = (self.folder_dir(&old), self.folder_dir(folder));
         let mut relinked = false;
+        let files = &self.files;
+        // Where a picture is from the new folder, when it changes.
+        let moved_src = |src: &str, wiki: bool| match wiki {
+            // An embed is looked for, not followed: one found from the
+            // note's old folder and not from its new one is named by its
+            // path from the notes folder.
+            true => {
+                let was = doc::find_picture(&old, src, true, files);
+                was.filter(|w| doc::find_picture(folder, src, true, files).as_ref() != Some(w))
+            }
+            false if is_relative(src) => Some(relative(&to_dir, &from_dir.join(decode_src(src)))),
+            false => None,
+        };
         let note = &mut self.notes[i];
         for b in 0..note.doc.len() {
             let new = match &note.doc.blocks()[b].kind {
-                // An embed is looked for, not followed: one found from the
-                // note's old folder and not from its new one is named by
-                // its path from the notes folder.
-                Kind::Image { src, wiki: true, .. } => {
-                    let was = doc::find_picture(&old, src, true, &self.files);
-                    was.filter(|w| doc::find_picture(folder, src, true, &self.files).as_ref() != Some(w))
-                }
-                Kind::Image { src, .. } if is_relative(src) => {
-                    Some(relative(&to_dir, &from_dir.join(decode_src(src))))
+                Kind::Image { src, wiki, .. } => moved_src(src, *wiki),
+                // A table's pictures among its cells' words, the same way.
+                Kind::Table(t) => {
+                    let mut cells = t.clone();
+                    let mut changed = false;
+                    for cell in cells.rows.iter_mut().flat_map(|r| r.cells.iter_mut()) {
+                        if let Some(new) = doc::relink_cell(cell, |p| moved_src(&p.src, p.wiki)) {
+                            *cell = new;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        note.doc.block_mut(b).kind = Kind::Table(cells);
+                        relinked = true;
+                    }
+                    None
                 }
                 _ => None,
             };

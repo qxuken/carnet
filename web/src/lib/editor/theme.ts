@@ -125,4 +125,12 @@ export const theme = EditorView.theme({
   '.cm-tablewrap th, .cm-tablewrap td': { border: '1px solid var(--border-strong)', padding: '6px 10px', textAlign: 'left', verticalAlign: 'top', minWidth: '3em', outline: 'none', caretColor: 'var(--accent)' },
   '.cm-tablewrap th:focus, .cm-tablewrap td:focus': { boxShadow: 'inset 0 0 0 2px var(--accent-soft)' },
   '.cm-tablewrap th': { background: 'var(--sunken)', color: 'var(--muted)', fontWeight: '600', fontSize: '14px' },
+  // A picture among a cell's words (table.ts): as wide as the note gives
+  // it, or its own, under half the text's when it has no width given, as
+  // the reader has it; its place until it comes the same. (A cell is as
+  // wide as what it holds: a share of it would be a share of nothing.)
+  '.cm-cellpic': { display: 'inline-block', verticalAlign: 'top', borderRadius: 'var(--radius)', cursor: 'default' },
+  '.cm-cellpic-img': { display: 'block', maxWidth: '45cqi', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)' },
+  '.cm-cellpic-img[width]': { maxWidth: '100cqi' },
+  '.cm-cellpic .picture-card': { width: 'min(45cqi, 280px)', minHeight: '72px', margin: '0' },
 });
