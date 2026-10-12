@@ -7,7 +7,8 @@
   import { sync } from '../lib/sync.svelte';
   import { ago, left } from '../lib/time';
   import Icon from '../lib/Icon.svelte';
-  import { pair_link, qr_svg } from '../wasm/carnet_web.js';
+  import { pair_link, password_fault, qr_svg } from '../wasm/carnet_web.js';
+  import { waysBack } from '../lib/words';
 
   let { back }: { back: (() => void) | null } = $props();
   /// The device whose removal is asked to be confirmed.
@@ -20,6 +21,17 @@
   let replacingWords = $state(false);
   /// The most passkeys an account has (`passkey::MAX`).
   const MAX_PASSKEYS = 20;
+  /// Which part of the page last asked the server for something: its
+  /// error is said there, by what was pressed, not at the foot of the page.
+  type Part = 'name' | 'devices' | 'pair' | 'recovery' | 'passkeys' | 'password' | 'invites' | 'accounts' | 'account';
+  let errorAt = $state<Part | null>(null);
+  /// `f`, its error said by part `at`.
+  const from = (at: Part, f: () => void) => () => {
+    errorAt = at;
+    f();
+  };
+  /// The password's fault, said by its field before anything is sent.
+  let pwFault = $state<string | null>(null);
   /// This browser's name, as typed while it's being changed.
   let naming = $state<string | null>(null);
 
@@ -28,6 +40,7 @@
 
   function saveName() {
     if (naming === null) return;
+    errorAt = 'name';
     void sync.rename(naming);
     naming = null;
   }
@@ -110,6 +123,22 @@
     if (sync.error) saving = false;
   });
 
+  /// The password set, once it's fit to be: else why not, by its field.
+  function savePassword() {
+    if (!pw) return;
+    const email = sync.password?.only ?? pw.email;
+    errorAt = 'password';
+    sync.error = null;
+    pwFault = password_fault(email, pw.password) ?? null;
+    if (pwFault) return;
+    if (sync.setPassword(email, pw.password)) saving = true;
+  }
+  // Typed again: the fault said goes.
+  $effect(() => {
+    void [pw?.password, pw?.email];
+    pwFault = null;
+  });
+
   function seen(d: { you: boolean; seen: number; online?: boolean }) {
     if (d.you) return 'This browser';
     // Logged in now: not the time its session began. (Offline here, the
@@ -119,6 +148,12 @@
     return `Last seen ${ago(d.seen)}`;
   }
 </script>
+
+{#snippet said(at: Part)}
+  {#if sync.error && errorAt === at}
+    <p class="row said-here" role="alert"><Icon name="warning" size={16} /> {sync.error}</p>
+  {/if}
+{/snippet}
 
 <article>
   <header>
@@ -177,12 +212,14 @@
               <p>Removed, it can’t sync, nor read anything written from now on. Its own copy of the notes stays on it.</p>
               <div class="buttons">
                 <button class="pill" onclick={() => (removing = null)}>Cancel</button>
-                <button class="pill danger" disabled={!online} onclick={() => { sync.removeDevice(d.id); removing = null; }}>Yes, remove</button>
+                <button class="pill danger" disabled={!online} onclick={from('devices', () => { sync.removeDevice(d.id); removing = null; })}>Yes, remove</button>
               </div>
             </div>
           {/if}
         {/each}
       {/if}
+      {@render said('name')}
+      {@render said('devices')}
 
       <div class="row rule">
         <Icon name="scan" size={20} />
@@ -193,7 +230,7 @@
         {#if sync.code}
           <button class="pill" onclick={() => sync.pairCancel()}>Cancel</button>
         {:else}
-          <button class="pill" disabled={!online} onclick={() => sync.pairOpen()}>Show a code</button>
+          <button class="pill" disabled={!online} onclick={from('pair', () => sync.pairOpen())}>Show a code</button>
         {/if}
       </div>
       {#if sync.code}
@@ -204,19 +241,24 @@
       {:else if sync.paired && sync.devices?.some((d) => d.id === sync.paired)}
         <p class="row ok" role="status"><Icon name="check" size={16} /> A new device is in: it’s in the list above.</p>
       {/if}
+      {@render said('pair')}
 
       <div class="row rule">
         <Icon name="key" size={20} />
         <div class="text">
           <b>Recovery code</b>
-          <span>Twelve words that let a new device in when none of yours is left.</span>
+          {#if sync.recovery}
+            <span>This account has one: twelve words that let a new device in when none of yours is left. A new one replaces it.</span>
+          {:else}
+            <span>Twelve words that let a new device in when none of yours is left.</span>
+          {/if}
         </div>
         {#if sync.words}
           <button class="pill primary" onclick={() => sync.wordsDone()}>Done</button>
         {:else if sync.wordsWaiting}
           <button class="pill" disabled>Making one…</button>
         {:else if !replacingWords}
-          <button class="pill" disabled={!online} onclick={() => (sync.hasRecovery() ? (replacingWords = true) : sync.makeRecovery())}>Make one</button>
+          <button class="pill" disabled={!online} onclick={from('recovery', () => (sync.hasRecovery() ? (replacingWords = true) : sync.makeRecovery()))}>{sync.recovery ? 'Replace' : 'Make one'}</button>
         {/if}
       </div>
       {#if replacingWords}
@@ -224,7 +266,7 @@
           <p>Replace the recovery code? The words you have now will stop working.</p>
           <div class="buttons">
             <button class="pill" onclick={() => (replacingWords = false)}>Cancel</button>
-            <button class="pill danger" disabled={!online} onclick={() => { sync.makeRecovery(); replacingWords = false; }}>Yes, replace</button>
+            <button class="pill danger" disabled={!online} onclick={from('recovery', () => { sync.makeRecovery(); replacingWords = false; })}>Yes, replace</button>
           </div>
         </div>
       {/if}
@@ -238,6 +280,7 @@
           <p>Write them down and keep them somewhere safe: they are shown this once, and kept nowhere on this browser. A new code replaces this one.</p>
         </div>
       {/if}
+      {@render said('recovery')}
     </section>
 
     {#if sync.passkeys !== null && sync.features.includes('passkeys')}
@@ -259,7 +302,7 @@
               <p>It can’t sign in to this account any more; devices it let in stay in. It stays in the passkey manager that keeps it until you delete it there.</p>
               <div class="buttons">
                 <button class="pill" onclick={() => (removingPasskey = null)}>Cancel</button>
-                <button class="pill danger" disabled={!online} onclick={() => { sync.removePasskey(p); removingPasskey = null; }}>Yes, remove</button>
+                <button class="pill danger" disabled={!online} onclick={from('passkeys', () => { sync.removePasskey(p); removingPasskey = null; })}>Yes, remove</button>
               </div>
             </div>
           {/if}
@@ -277,11 +320,12 @@
             {/if}
           </div>
           {#if sync.passkeySupport !== 'no'}
-            <button class="pill" disabled={!online || sync.addingPasskey || sync.passkeys.length >= MAX_PASSKEYS} onclick={() => sync.addPasskey()}>
+            <button class="pill" disabled={!online || sync.addingPasskey || sync.passkeys.length >= MAX_PASSKEYS} onclick={from('passkeys', () => sync.addPasskey())}>
               {sync.addingPasskey ? 'Adding…' : 'Add'}
             </button>
           {/if}
         </div>
+        {@render said('passkeys')}
       </section>
     {/if}
 
@@ -316,12 +360,13 @@
               <p>Then only a code from a device, or the recovery words, let a new device in.</p>
               <div class="buttons">
                 <button class="pill" onclick={() => (dropping = false)}>Cancel</button>
-                <button class="pill danger" disabled={!online} onclick={() => { sync.dropPassword(); dropping = false; }}>Yes, take it away</button>
+                <button class="pill danger" disabled={!online} onclick={from('password', () => { sync.dropPassword(); dropping = false; })}>Yes, take it away</button>
               </div>
             </div>
           {/if}
+          {@render said('password')}
         {:else}
-          <form class="row naming password" onsubmit={(e) => { e.preventDefault(); if (pw && sync.setPassword(sync.password?.only ?? pw.email, pw.password)) saving = true; }}>
+          <form class="row naming password" onsubmit={(e) => { e.preventDefault(); savePassword(); }}>
             <Icon name="key" size={20} />
             {#if sync.password.only}
               <!-- The service holds passwords to the email signed up with:
@@ -340,8 +385,13 @@
               </button>
             </span>
             <button type="button" class="pill" onclick={() => (pw = null)}>Cancel</button>
-            <button class="pill primary" disabled={!online || saving || !(sync.password?.only ?? pw.email).includes('@') || pw.password.length < 8}>{saving ? 'Saving…' : 'Save'}</button>
+            <button class="pill primary" disabled={!online || saving || !(sync.password?.only ?? pw.email).trim() || !pw.password}>{saving ? 'Saving…' : 'Save'}</button>
           </form>
+          {#if pwFault}
+            <p class="row said-here" role="alert"><Icon name="warning" size={16} /> {pwFault}</p>
+          {:else}
+            {@render said('password')}
+          {/if}
           {#if sync.password.only}
             <p class="row quiet">On this service, the password signs in with the email you signed up with.</p>
           {/if}
@@ -362,7 +412,7 @@
           {#if sync.invite}
             <button class="pill primary" onclick={() => sync.inviteDone()}>Done</button>
           {:else}
-            <button class="pill" disabled={!online} onclick={() => sync.makeInvite()}>Make an invite</button>
+            <button class="pill" disabled={!online} onclick={from('invites', () => sync.makeInvite())}>Make an invite</button>
           {/if}
         </div>
         {#if sync.invite}
@@ -378,9 +428,10 @@
               <b class:code-text={w.code}>{w.code ?? 'An invite'}</b>
               <span>Not used yet · {left(w.until)}</span>
             </div>
-            <button class="pill" disabled={!online} onclick={() => sync.dropInvite(w.hash)}>Take back</button>
+            <button class="pill" disabled={!online} onclick={from('invites', () => sync.dropInvite(w.hash))}>Take back</button>
           </div>
         {/each}
+        {@render said('invites')}
       </section>
       {#if sync.invites.accounts.some((a) => !a.you)}
         <h2>Other accounts on this server</h2>
@@ -401,11 +452,12 @@
                 <p>Everything it keeps on this server goes: its notes there, its pictures, its devices’ way in. What’s on their devices stays.</p>
                 <div class="buttons">
                   <button class="pill" onclick={() => (removingAccount = null)}>Cancel</button>
-                  <button class="pill danger" disabled={!online} onclick={() => { sync.removeAccount(a.id); removingAccount = null; }}>Yes, remove</button>
+                  <button class="pill danger" disabled={!online} onclick={from('accounts', () => { sync.removeAccount(a.id); removingAccount = null; })}>Yes, remove</button>
                 </div>
               </div>
             {/if}
           {/each}
+          {@render said('accounts')}
         </section>
       {/if}
     {/if}
@@ -433,7 +485,7 @@
       </div>
       {#if forgetting}
         <div class="confirm">
-          <p>To come back, this browser needs a code from another device, {sync.passkeys?.length ? 'a passkey, ' : ''}or the recovery words.</p>
+          <p>{waysBack({ recovery: !!sync.recovery, password: !!sync.password?.id, passkey: !!sync.passkeys?.length })}</p>
           <div class="buttons">
             <button class="pill" onclick={() => (forgetting = false)}>Cancel</button>
             <button class="pill danger" onclick={() => sync.forget()}>Yes, forget</button>
@@ -460,14 +512,15 @@
             <p>Every note and picture the server keeps goes, for good, and every device leaves the account. What’s on your computers stays there, as files.</p>
             <div class="buttons">
               <button class="pill" onclick={() => (deletingAccount = false)}>Cancel</button>
-              <button class="pill danger" disabled={!online} onclick={() => sync.deleteAccount()}>Yes, delete the account</button>
+              <button class="pill danger" disabled={!online} onclick={from('account', () => sync.deleteAccount())}>Yes, delete the account</button>
             </div>
           </div>
         {/if}
+        {@render said('account')}
       </section>
     {/if}
 
-    {#if sync.error}<p class="error" role="alert">{sync.error}</p>{/if}
+    {#if sync.error && errorAt === null}<p class="error" role="alert">{sync.error}</p>{/if}
     <p class="note">Account {sync.account}. Sync is end-to-end encrypted: the server keeps your notes sealed, and never sees a word of them. This browser keeps its keys sealed too.</p>
   </div>
 </article>
@@ -524,6 +577,8 @@
   .words li span { width: 18px; text-align: right; font: 400 12px var(--sans); color: var(--muted); }
   .words p { margin: 0; font-size: 13px; color: var(--muted); }
   .error { color: var(--danger); font-size: 14px; margin: 14px 4px 0; }
+  /* An error said by the part it came from, in the row's place. */
+  .row.said-here { font-size: 14px; gap: 8px; color: var(--danger); }
   .note { color: var(--faint); font-size: 13px; margin: 18px 4px 0; }
   @media (max-width: 480px) {
     .confirm, .code, .words, .invite { padding-left: 16px; }

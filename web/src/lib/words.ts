@@ -1,0 +1,65 @@
+// What the page says, and a few small choices it makes, worked out apart
+// from the screens so they can be tested on their own (words.test.ts).
+
+/// "1 change", "3 pictures"; nothing for none.
+export const count = (n: number, one: string) => (n === 0 ? null : n === 1 ? `1 ${one}` : `${n} ${one}s`);
+
+export type Footer = {
+  /// The socket's state in words (`sync.status`).
+  status: string;
+  changes: number;
+  pictures: number;
+  /// What waits has waited long enough to be said.
+  waitShown: boolean;
+  /// All of it sent a moment ago.
+  allSent: boolean;
+  readOnly: boolean;
+};
+
+/// The footer's line: up to date only when nothing waits to be sent;
+/// else how many changes and pictures wait, and, offline or read only,
+/// why. (The desktop's Settings says it in the same words.)
+export function footer(f: Footer): { ok: boolean; text: string } {
+  const parts = f.waitShown ? [count(f.changes, 'change'), count(f.pictures, 'picture')].filter((p) => p !== null) : [];
+  const ok = f.status === 'Up to date';
+  if (!parts.length && ok && f.allSent && !f.readOnly) return { ok: true, text: 'All sent' };
+  if (!parts.length) return ok && f.readOnly ? { ok: false, text: 'Read only for now' } : { ok, text: f.status };
+  const changes = parts.join(' and ');
+  if (ok && f.readOnly) return { ok: false, text: `Read only for now: ${changes} waiting` };
+  if (ok) return { ok: false, text: `Waiting to send ${changes}` };
+  return { ok: false, text: `${f.status} · Waiting to send ${changes}` };
+}
+
+/// The ways back in for a browser that forgets the account, as the
+/// account has them: a code from another device always.
+export function waysBack(has: { recovery: boolean; password: boolean; passkey: boolean }): string {
+  const ways = ['a code from another of your devices'];
+  if (has.passkey) ways.push('a passkey');
+  if (has.password) ways.push('your email and password');
+  if (has.recovery) ways.push('the recovery words');
+  const list = ways.length === 1 ? ways[0] : `${ways.slice(0, -1).join(', ')} or ${ways.at(-1)}`;
+  return `To come back, this browser needs ${list}.`;
+}
+
+/// `name`, or with a number after it when one of `taken` has it already:
+/// "Passkey from Chrome on Mac 2".
+export function numbered(name: string, taken: (string | null)[]): string {
+  const have = new Set(taken);
+  if (!have.has(name)) return name;
+  let n = 2;
+  while (have.has(`${name} ${n}`)) n++;
+  return `${name} ${n}`;
+}
+
+/// What a link opened in this tab asks for: a pairing code or an invite
+/// to fill in while not yet in an account, or to say this browser is in
+/// one already. `null`: not such a link.
+export function linkAction(hash: string, phase: 'loading' | 'setup' | 'ready'): 'fill' | 'already' | null {
+  if (!/^#(pair|invite)=/.test(hash)) return null;
+  return phase === 'ready' ? 'already' : 'fill';
+}
+
+/// Which ends of a row that scrolls sideways have more past them.
+export function overflow(scrollLeft: number, clientWidth: number, scrollWidth: number): { start: boolean; end: boolean } {
+  return { start: scrollLeft > 1, end: scrollLeft + clientWidth < scrollWidth - 1 };
+}
