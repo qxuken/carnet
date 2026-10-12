@@ -22,6 +22,9 @@ struct Side {
     dir: PathBuf,
     remote: Vec<Remote>,
     vault_in: bool,
+    /// Where the notes go not yet looked at here: what changed in them is
+    /// sent, their places wait.
+    layout_held: bool,
     pictures: crate::pictures::Pictures,
 }
 
@@ -69,6 +72,7 @@ impl Two {
                     dir,
                     remote: Vec::new(),
                     vault_in: false,
+                    layout_held: false,
                 }
             })
             .collect();
@@ -115,8 +119,12 @@ impl Two {
             for i in 0..self.sides.len() {
                 let s = &mut self.sides[i];
                 // What the app does each tick: where the notes go, in step.
-                s.store.reconcile(s.session.has_joined(vault::ROOM)).unwrap();
-                if s.session.has_joined(vault::ROOM) {
+                // (Held: as the app does for up to a second, the notes'
+                // texts go before their places.)
+                if !s.layout_held {
+                    s.store.reconcile(s.session.has_joined(vault::ROOM)).unwrap();
+                }
+                if s.session.has_joined(vault::ROOM) && !s.layout_held {
                     s.pictures.tick(&mut s.store, &mut s.session);
                 }
                 s.vault_in = false;
@@ -923,4 +931,116 @@ fn a_picture_an_old_version_shows_stays_and_a_dropped_one_comes_back() {
     let s = &two.sides[0];
     assert_eq!(std::fs::read(s.dir.join(&src)).ok().as_deref(), Some(photo.as_slice()), "back, byte for byte");
     assert_eq!(s.store.replica.as_ref().unwrap().vault().pictures().get(&src), Some(&crate::pictures::hex(&id)), "named again");
+}
+
+impl Two {
+    /// Every change in note `title`'s history on `side`, by the run of the
+    /// app that made it.
+    fn peers(&mut self, side: usize, title: &str) -> Vec<u64> {
+        let i = self.note(side, title).unwrap_or_else(|| panic!("no {title} on {side}"));
+        let key = self.sides[side].store.notes[i].key.expect("a key");
+        self.sides[side].store.replica.as_mut().unwrap().history(key).iter().map(|r| r.peer).collect()
+    }
+}
+
+/// A note written in a folder by another app while both devices are
+/// online: its pictures' links, written from that folder, stay as they
+/// are on both. The other device puts it where it lives, perhaps at the
+/// top first, until it knows where, and that is no edit of its own.
+#[test]
+fn a_note_written_in_a_folder_keeps_its_picture_links_on_both() {
+    let mut two = Two::new("placed-links");
+    let pond: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+    let a = &mut two.sides[0];
+    std::fs::create_dir_all(a.dir.join("attachments")).unwrap();
+    std::fs::write(a.dir.join("attachments/pond.jpg"), &pond).unwrap();
+    std::fs::create_dir_all(a.dir.join("Projects/Garden")).unwrap();
+    std::fs::create_dir_all(a.dir.join("Home")).unwrap();
+    std::fs::write(a.dir.join("Home/own2.jpg"), b"mine").unwrap();
+    let garden = "# Repro4\n\n![](../../attachments/pond.jpg)\n";
+    let home = "# Repro3\n\n![](own2.jpg)\n";
+    std::fs::write(a.dir.join("Projects/Garden/Repro4.md"), garden).unwrap();
+    std::fs::write(a.dir.join("Home/Repro3.md"), home).unwrap();
+    a.store.rescan();
+    // Their texts there before their places, as the app sends them.
+    a.layout_held = true;
+    two.pump();
+    assert!(two.sides[1].dir.join("Repro4.md").exists(), "at the top until its place comes: {:?}", two.shape(1));
+    assert_eq!(std::fs::read_to_string(two.sides[1].dir.join("Repro4.md")).unwrap(), garden, "as written");
+    two.sides[0].layout_held = false;
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(!two.sides[1].dir.join("Repro4.md").exists(), "{:?}", two.shape(1));
+    assert!(two.sides[1].dir.join("Projects/Garden/Repro4.md").exists(), "{:?}", two.shape(1));
+    assert!(two.sides[1].dir.join("Home/Repro3.md").exists(), "{:?}", two.shape(1));
+    for side in 0..2 {
+        assert_eq!(two.file(side, "Repro4"), garden, "on {side}");
+        assert_eq!(two.file(side, "Repro3"), home, "on {side}");
+    }
+    assert_eq!(std::fs::read(two.sides[1].dir.join("attachments/pond.jpg")).ok(), Some(pond));
+    // A's doing alone, on both.
+    for side in 0..2 {
+        for title in ["Repro4", "Repro3"] {
+            let peers = two.peers(side, title);
+            assert!(peers.windows(2).all(|w| w[0] == w[1]), "{title} edited by another run on {side}: {peers:?}");
+        }
+    }
+
+    // A folder renamed: as deep as it was, so no link changes, here or
+    // there, though there each note follows it on its own.
+    two.sides[0].store.rename_folder("Home", "House").unwrap();
+    two.sides[0].store.rename_folder("Projects", "Work").unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(two.sides[1].dir.join("House/Repro3.md").exists(), "{:?}", two.shape(1));
+    assert!(two.sides[1].dir.join("Work/Garden/Repro4.md").exists(), "{:?}", two.shape(1));
+    for side in 0..2 {
+        assert_eq!(two.file(side, "Repro4"), garden, "on {side}");
+        assert_eq!(two.file(side, "Repro3"), home, "on {side}");
+    }
+}
+
+/// A note moved into another folder on one device: its links rewritten
+/// there, once; the other device follows the move and takes that edit,
+/// without rewriting them again.
+#[test]
+fn a_note_moved_there_has_its_links_rewritten_once() {
+    let mut two = Two::new("moved-links");
+    let pond: Vec<u8> = (0..20_000u32).map(|i| (i % 239) as u8).collect();
+    let a = &mut two.sides[0].store;
+    let src = a.save_attachment("Home", "jpg", &pond).unwrap();
+    assert!(src.starts_with("../attachments/"), "{src}");
+    a.create_folder("", "Home").unwrap();
+    a.create_folder("", "Projects").unwrap();
+    a.create_folder("Projects", "Garden").unwrap();
+    let mut n = crate::store::Note::new("Pond", Doc::new(vec![Block::text("the pond")]));
+    n.folder = "Home".into();
+    n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.clone(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    a.notes.push(n);
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(two.file(1, "Pond").contains(&format!("]({src})")));
+
+    let a = &mut two.sides[0].store;
+    let i = a.notes.iter().position(|n| n.title == "Pond").unwrap();
+    a.move_note(i, "Projects/Garden").unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let moved = format!("](../{src})");
+    assert!(two.sides[1].dir.join("Projects/Garden/Pond.md").exists(), "{:?}", two.shape(1));
+    for side in 0..2 {
+        let text = two.file(side, "Pond");
+        assert!(text.contains(&moved), "on {side}: {text}");
+    }
+    // A's two changes (made, moved), and none of B's.
+    for side in 0..2 {
+        let peers = two.peers(side, "Pond");
+        assert!(peers.windows(2).all(|w| w[0] == w[1]), "edited by another run on {side}: {peers:?}");
+    }
 }
