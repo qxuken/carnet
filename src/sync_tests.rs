@@ -26,6 +26,8 @@ struct Side {
     /// sent, their places wait.
     layout_held: bool,
     pictures: crate::pictures::Pictures,
+    /// The invites the server last listed as waiting, by hash.
+    invites: Option<Vec<[u8; 32]>>,
 }
 
 struct Two {
@@ -33,6 +35,8 @@ struct Two {
     /// The picture worker, as the server runs one beside the hub.
     worker: carnet_server::blobs::Worker<carnet_server::blobs::MemoryBlobs>,
     sides: Vec<Side>,
+    /// The devices' clock, in seconds since 1970.
+    now: u64,
 }
 
 fn temp(name: &str) -> PathBuf {
@@ -73,10 +77,12 @@ impl Two {
                     remote: Vec::new(),
                     vault_in: false,
                     layout_held: false,
+                    invites: None,
                 }
             })
             .collect();
-        let mut two = Two { hub, worker: carnet_server::blobs::Worker::memory(), sides };
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let mut two = Two { hub, worker: carnet_server::blobs::Worker::memory(), sides, now };
         for i in 0..2 {
             two.sides[i].session.connected();
             let outs = two.hub.connect(two.sides[i].conn, &mut OsRandom);
@@ -88,6 +94,7 @@ impl Two {
 
     fn deliver(&mut self, outs: Vec<Out>) {
         let outs = self.worker.done(outs);
+        let now = self.now;
         for o in outs {
             let Out::Send(conn, bytes) = o else { continue };
             let side = self.sides.iter_mut().find(|s| s.conn == conn).expect("a side");
@@ -109,6 +116,13 @@ impl Two {
                     && u.has_room()
                 {
                     side.pictures.retry();
+                }
+                // As the app does: the codes of invites no longer waiting
+                // forgotten in the vault.
+                if let Event::Invites { invites, .. } = &e {
+                    let waiting: Vec<[u8; 32]> = invites.iter().map(|i| i.hash).collect();
+                    side.store.forget_invites_but(&waiting, now);
+                    side.invites = Some(waiting);
                 }
                 if let Event::Changed(room) = e {
                     if room == vault::ROOM {
@@ -1278,4 +1292,54 @@ fn a_name_only_a_mac_allows_goes_as_a_plain_one() {
     }
     let r = two.sides[1].store.replica.as_ref().unwrap();
     assert!(r.vault().layout().notes.values().any(|p| p.name == "2-1 - ratio"));
+}
+
+/// An invite made on one device: its code is in the vault, so the other
+/// shows it too, and this one after a restart. Taken back on the other,
+/// it's gone from the vault on both; used, it's gone once the server no
+/// longer lists it (and a list from before it was made can't have).
+#[test]
+fn an_invites_code_is_known_on_every_device_until_done_with() {
+    let mut two = Two::new("invites");
+    let make = |two: &mut Two| {
+        let (s, now) = (&mut two.sides[0], two.now);
+        let code = s.session.invite(&mut OsRandom).expect("logged in");
+        assert!(s.store.keep_invite(&code, now));
+        two.pump();
+        code
+    };
+    let list = |two: &mut Two, side: usize| {
+        two.sides[side].session.list_invites();
+        two.pump();
+        two.sides[side].invites.clone().expect("a list")
+    };
+    let one = make(&mut two);
+    assert_eq!(list(&mut two, 1), [one.hash()]);
+    assert_eq!(two.sides[1].store.invite_code(&one.hash()), Some(one.text()), "shown on the other device");
+    let restarted = Store::open(two.sides[0].dir.clone()).unwrap();
+    assert_eq!(restarted.invite_code(&one.hash()), Some(one.text()), "and here after a restart");
+    drop(restarted);
+
+    // Taken back on the other device: forgotten on both.
+    let s = &mut two.sides[1];
+    s.session.drop_invite(one.hash());
+    assert!(s.store.forget_invite(&one.hash()));
+    two.pump();
+    assert!(list(&mut two, 0).is_empty());
+    for side in 0..2 {
+        assert_eq!(two.sides[side].store.invite_code(&one.hash()), None, "gone from {side}'s vault");
+    }
+
+    // Used: the server lists it no more. Kept a while, for a list from
+    // before it was made would not name it either; then forgotten, on
+    // both.
+    let two_ = make(&mut two);
+    two.hub.store_mut().drop_invite(two_.hash()).unwrap();
+    assert!(list(&mut two, 1).is_empty());
+    assert_eq!(two.sides[0].store.invite_code(&two_.hash()), Some(two_.text()));
+    two.now += carnet_sync::vault::INVITE_GRACE;
+    list(&mut two, 1);
+    for side in 0..2 {
+        assert_eq!(two.sides[side].store.invite_code(&two_.hash()), None, "gone from {side}'s vault");
+    }
 }

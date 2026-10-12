@@ -4858,6 +4858,11 @@ fn the_owner_invites_someone_and_removes_their_account() {
     a.on_plain(Msg::SyncInviteCopy { at: 0 });
     da.frame(&mut a);
     assert_eq!(copied(&mut da).as_deref(), Some(code.as_str()));
+    // Its code kept in the vault: shown by A's other devices too, and by
+    // A after a restart.
+    let hash = carnet_sync::invite::InviteCode::parse(&code).unwrap().hash();
+    assert_eq!(a.store.invite_code(&hash).as_deref(), Some(code.as_str()));
+    assert_eq!(crate::store::Store::open(dir_a.clone()).unwrap().invite_code(&hash).as_deref(), Some(code.as_str()));
 
     // Someone else makes their own account with it.
     let (mut b, mut db, dir_b) = fresh("invite-b");

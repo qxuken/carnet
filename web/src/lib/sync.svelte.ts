@@ -26,8 +26,9 @@ export type Device = { id: string; name: string | null; seen: number; you: boole
 /// in the passkey manager (hex), `made` when it was added.
 export type Passkey = { id: string; name: string | null; credential: string; made: number };
 
-/// An invite waiting, and its code if it was made here; an account on the
-/// server. The owner's devices see these (docs/SYNC.md §6).
+/// An invite waiting, and its code as the vault keeps it (null for one made
+/// before Carnet kept codes there); an account on the server. The owner's
+/// devices see these (docs/SYNC.md §6).
 export type Invite = { hash: string; until: number; code: string | null };
 export type Account = { id: string; owner: boolean; made: number; seen: number; devices: number; you: boolean };
 export type Invites = { owner: boolean; waiting: Invite[]; accounts: Account[] };
@@ -764,6 +765,8 @@ class Sync {
     this.error = null;
     this.invite = this.vault?.make_invite() ?? null;
     this.flush();
+    // Its code is in the vault now: kept, so a reload still shows it.
+    this.save();
   }
 
   inviteDone() {
@@ -776,6 +779,7 @@ class Sync {
     this.vault?.drop_invite(hash);
     if (this.invites?.waiting.some((w) => w.hash === hash && w.code === this.invite)) this.invite = null;
     this.flush();
+    this.save();
   }
 
   /// Another person's account taken off the server, with all it keeps.

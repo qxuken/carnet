@@ -664,7 +664,7 @@ impl Vault {
     /// An invite not used yet (its hash in hex), taken back.
     pub fn drop_invite(&mut self, hash: &str) -> Result<(), JsError> {
         let hash = unhex(hash).and_then(|h| <[u8; 32]>::try_from(h).ok()).ok_or_else(|| JsError::new("not an invite's hash"))?;
-        self.notes.drop_invite(hash);
+        self.notes.drop_invite(hash, &mut WebRandom);
         Ok(())
     }
 

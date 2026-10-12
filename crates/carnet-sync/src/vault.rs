@@ -17,6 +17,13 @@
 //! that a note brought back showing it (an old version restored) can fetch
 //! it again while the server still keeps it.
 //!
+//! The invites this account made (docs/SYNC.md §6) are kept here too,
+//! code and all, by the code's hash: the server keeps only the hash, so
+//! a code read off the server would let no one in, but each of the
+//! account's devices can show the code again, after a restart too. One
+//! taken back, used or run out is forgotten: the server's list of those
+//! waiting says which.
+//!
 //! What another device wrote is read as a name, a folder or a path from
 //! the notes folder only when it is one on every system
 //! ([`is_plain_path`]): no `..`, no full path, drive or share, no `\` or
@@ -29,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use carnet_core::name::{is_plain_name, is_plain_path};
 use loro::{LoroMap, LoroValue};
 
+use crate::invite::InviteCode;
 use crate::note::{Key, NoteDoc, Version};
 
 /// The vault doc's room.
@@ -37,6 +45,20 @@ pub const ROOM: &str = "vault";
 const NOTES: &str = "notes";
 const FOLDERS: &str = "folders";
 const PICTURES: &str = "pictures";
+const INVITES: &str = "invites";
+
+/// How long an invite made is kept here though the server doesn't list
+/// it: its list may have been on its way as the invite was made, or the
+/// clocks of the devices disagree a little.
+pub const INVITE_GRACE: u64 = 3600;
+
+/// An invite this account made, as the vault keeps it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Invite {
+    pub code: InviteCode,
+    /// When, in seconds since 1970, by the clock of the device that made it.
+    pub made: u64,
+}
 
 /// Where a note lives.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -232,6 +254,80 @@ impl NoteDoc {
         }
     }
 
+    /// The invites this account made and hasn't forgotten, by their
+    /// codes' hashes. An entry whose code isn't one, or doesn't hash to
+    /// its key, is read as not there.
+    pub fn invites(&self) -> BTreeMap<[u8; 32], Invite> {
+        let LoroValue::Map(m) = self.loro().get_map(INVITES).get_deep_value() else { return BTreeMap::new() };
+        m.iter()
+            .filter_map(|(k, v)| {
+                let LoroValue::Map(v) = v else { return None };
+                let code = match v.get("code") {
+                    Some(LoroValue::String(s)) => InviteCode::parse(s)?,
+                    _ => return None,
+                };
+                let made = match v.get("made") {
+                    Some(LoroValue::I64(n)) => u64::try_from(*n).unwrap_or(0),
+                    _ => 0,
+                };
+                (*k == hex(&code.hash())).then(|| (code.hash(), Invite { code, made }))
+            })
+            .collect()
+    }
+
+    /// The code of the invite whose hash is `hash`, if this account made it.
+    pub fn invite_code(&self, hash: &[u8; 32]) -> Option<InviteCode> {
+        self.invites().get(hash).map(|i| i.code)
+    }
+
+    /// An invite made, kept for every device of the account. True if it
+    /// wasn't.
+    pub fn keep_invite(&self, code: &InviteCode, made: u64) -> bool {
+        let key = hex(&code.hash());
+        if self.invites().contains_key(&code.hash()) {
+            return false;
+        }
+        let value: loro::LoroMapValue = vec![("code".to_string(), LoroValue::from(code.text())), ("made".to_string(), LoroValue::I64(i64::try_from(made).unwrap_or(i64::MAX)))].into();
+        let _ = self.loro().get_map(INVITES).insert(&key, LoroValue::Map(value));
+        self.loro().commit();
+        true
+    }
+
+    /// The invite whose hash is `hash` forgotten: taken back. True if it
+    /// was kept.
+    pub fn forget_invite(&self, hash: &[u8; 32]) -> bool {
+        let key = hex(hash);
+        let map = self.loro().get_map(INVITES);
+        if map.get(&key).is_none() {
+            return false;
+        }
+        let _ = map.delete(&key);
+        self.loro().commit();
+        true
+    }
+
+    /// The server listed `waiting` as the invites still waiting (none, for
+    /// an account not the owner's): every other one kept here, used, taken
+    /// back or run out, is forgotten, but for one made within
+    /// [`INVITE_GRACE`] of `now`. True if any was.
+    pub fn forget_invites_but(&self, waiting: &[[u8; 32]], now: u64) -> bool {
+        let map = self.loro().get_map(INVITES);
+        let LoroValue::Map(m) = map.get_deep_value() else { return false };
+        let kept: BTreeMap<String, ([u8; 32], Invite)> = self.invites().into_iter().map(|(h, i)| (hex(&h), (h, i))).collect();
+        let mut gone = false;
+        for k in m.keys() {
+            let keep = kept.get(k).is_some_and(|(h, i)| waiting.contains(h) || i.made.saturating_add(INVITE_GRACE) > now);
+            if !keep {
+                let _ = map.delete(k);
+                gone = true;
+            }
+        }
+        if gone {
+            self.loro().commit();
+        }
+        gone
+    }
+
     /// A folder there, or not. True if that changed.
     pub fn set_folder(&self, folder: &str, there: bool) -> bool {
         if !is_plain_path(folder) || self.layout().folders.contains(folder) == there {
@@ -241,6 +337,10 @@ impl NoteDoc {
         self.loro().commit();
         true
     }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// A picture's value in the map that names one shown: not dropped.
@@ -350,6 +450,46 @@ mod tests {
         // Put back: there again.
         v.set_picture("attachments/a.png", "cc");
         assert!(v.dropped_pictures().is_empty());
+    }
+
+    /// An invite made on one device is known, code and all, on another;
+    /// taken back on either, it is gone from both. One the server no
+    /// longer lists (used, run out) is forgotten once past the grace; one
+    /// just made isn't, though a list from before it says nothing of it.
+    #[test]
+    fn invites_are_kept_for_every_device_until_done_with() {
+        use crate::crypto::tests::Seeded;
+        let (a, b) = (NoteDoc::new(1), NoteDoc::new(2));
+        let mut rng = Seeded(9);
+        let (one, two, three) = (InviteCode::generate(&mut rng), InviteCode::generate(&mut rng), InviteCode::generate(&mut rng));
+        let t = 1_800_000_000;
+        assert!(a.keep_invite(&one, t) && a.keep_invite(&two, t) && !a.keep_invite(&one, t + 5));
+        b.import(&a.updates()).unwrap();
+        assert_eq!(b.invite_code(&one.hash()), Some(one));
+        assert_eq!(b.invites()[&two.hash()], Invite { code: two, made: t });
+
+        // Taken back on B: gone on A too.
+        assert!(b.forget_invite(&one.hash()) && !b.forget_invite(&one.hash()));
+        a.import(&b.updates()).unwrap();
+        assert_eq!(a.invite_code(&one.hash()), None);
+
+        // Two used (the server lists none), three made a moment ago.
+        a.keep_invite(&three, t + 100);
+        assert!(!a.forget_invites_but(&[], t + 200), "within the grace: kept");
+        assert!(a.forget_invites_but(&[three.hash()], t + INVITE_GRACE + 50));
+        assert_eq!(a.invites().into_keys().collect::<Vec<_>>(), [three.hash()]);
+        assert!(!a.forget_invites_but(&[three.hash()], t + 10 * INVITE_GRACE), "still waiting: kept");
+
+        // An entry not a code, or not under its own hash: not there, and
+        // cleared away with the rest.
+        let map = a.loro().get_map(INVITES);
+        let wrong: loro::LoroMapValue = vec![("code".to_string(), LoroValue::from(one.text())), ("made".to_string(), LoroValue::I64(0))].into();
+        map.insert(&hex(&two.hash()), LoroValue::Map(wrong)).unwrap();
+        map.insert("junk", "x").unwrap();
+        a.loro().commit();
+        assert_eq!(a.invites().len(), 1);
+        assert!(a.forget_invites_but(&[three.hash()], t));
+        assert_eq!(a.loro().get_map(INVITES).len(), 1);
     }
 
     /// A place, a folder or a picture's path another device wrote that

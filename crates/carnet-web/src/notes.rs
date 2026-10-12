@@ -10,7 +10,6 @@ use carnet_sync::crypto::BlobId;
 use carnet_core::export::Picture;
 use carnet_core::{compare, doc, name};
 use carnet_sync::crypto::{DeviceKey, Random, RecoveryCode, Ring};
-use carnet_sync::invite::InviteCode;
 use carnet_sync::session::{DeviceInfo, Docs, Event, Identity, PasskeyInfo, Session, Transfer};
 use carnet_sync::wire::{AccountRow, InviteRow};
 use carnet_sync::vault::{self, Place};
@@ -129,7 +128,9 @@ pub enum Said {
     /// words to show, and whether syncing goes on meanwhile.
     Outdated { message: &'static str, syncing: bool },
     /// Whether this account is the server's owner's, and if it is, the
-    /// invites waiting (with the code of each made here) and every account.
+    /// invites waiting (with the code of each the vault keeps: all made by
+    /// the account's devices, but those from before Carnet kept them there)
+    /// and every account.
     Invites { owner: bool, waiting: Vec<(InviteRow, Option<String>)>, accounts: Vec<AccountRow> },
     /// A picture put in here is on the server, and in the vault: its id.
     Uploaded(String),
@@ -242,9 +243,6 @@ pub struct Notes {
     /// server held back (the account full, or read only) is neither.
     offered: HashSet<BlobId>,
     sending: HashSet<BlobId>,
-    /// Invites made here: the server keeps only their hashes, so only
-    /// here can their codes be shown again.
-    made: Vec<InviteCode>,
     /// Dropped pictures shown again, asked for by the id they had: the
     /// paths each is named at again when it comes.
     reviving: HashMap<BlobId, Vec<String>>,
@@ -283,7 +281,7 @@ impl Notes {
             ring: me.ring.clone(),
             name: name.to_string(),
         };
-        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), made: Vec::new(), reviving: HashMap::new() };
+        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), reviving: HashMap::new() };
         // Deleted forever, and pictures dropped, the server hasn't said
         // done: said again once in.
         for line in forgotten.lines() {
@@ -374,11 +372,22 @@ impl Notes {
                     Some(message) => self.said.push(Said::Outdated { message, syncing: false }),
                     None => self.said.push(Said::Outdated { message: carnet_sync::compat::UPDATE_SOON, syncing: true }),
                 },
+                // Each waiting with its code, as the vault keeps it; the
+                // codes of the rest (used, taken back, run out) forgotten.
                 Event::Invites { owner, invites, accounts } => {
+                    let vault = self.rooms.doc(vault::ROOM);
+                    let hashes: Vec<[u8; 32]> = invites.iter().map(|i| i.hash).collect();
+                    if vault.forget_invites_but(&hashes, now_secs()) {
+                        self.session.saved(vault::ROOM, &mut self.rooms, rng);
+                        if !self.changed.iter().any(|r| r == vault::ROOM) {
+                            self.changed.push(vault::ROOM.to_string());
+                        }
+                    }
+                    let vault = self.rooms.doc(vault::ROOM);
                     let waiting = invites
                         .into_iter()
                         .map(|i| {
-                            let code = self.made.iter().find(|c| c.hash() == i.hash).map(InviteCode::text);
+                            let code = vault.invite_code(&i.hash).map(|c| c.text());
                             (i, code)
                         })
                         .collect();
@@ -951,17 +960,23 @@ impl Notes {
     }
 
     /// A new invite, for someone's own account on this server: its code,
-    /// to give them. The list comes again. `None` when not connected.
+    /// to give them. The list comes again. `None` when not connected. The
+    /// server keeps only its hash; the code goes into the vault after it,
+    /// for every device of the account to show again, after a reload too.
     pub fn make_invite(&mut self, rng: &mut impl Random) -> Option<String> {
         let code = self.session.invite(rng)?;
-        let text = code.text();
-        self.made.push(code);
-        Some(text)
+        if self.rooms.doc(vault::ROOM).keep_invite(&code, now_secs()) {
+            self.session.saved(vault::ROOM, &mut self.rooms, rng);
+        }
+        Some(code.text())
     }
 
-    /// An invite not used yet, taken back.
-    pub fn drop_invite(&mut self, hash: [u8; 32]) {
+    /// An invite not used yet, taken back: its code forgotten in the vault.
+    pub fn drop_invite(&mut self, hash: [u8; 32], rng: &mut impl Random) {
         self.session.drop_invite(hash);
+        if self.rooms.doc(vault::ROOM).forget_invite(&hash) {
+            self.session.saved(vault::ROOM, &mut self.rooms, rng);
+        }
     }
 
     /// Another person's account taken off the server, with all it keeps.
@@ -1043,6 +1058,18 @@ impl Notes {
 /// release changes what follows, with a step in [`STATE_UPGRADES`] from
 /// the one before.
 pub const STATE: u32 = 1;
+
+/// Seconds since 1970, by this browser's clock.
+fn now_secs() -> u64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        (js_sys::Date::now() / 1000.0) as u64
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    }
+}
 
 /// Where a picture is ([`doc::find_picture`]), spelled as the vault
 /// spells it: a desktop on a disk that doesn't mind case shows

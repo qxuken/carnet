@@ -234,7 +234,9 @@ fn the_browser_adds_a_passkey_and_takes_it_away() {
 }
 
 /// The owner's browser makes an invite, sees it waiting with its code,
-/// and takes it back.
+/// and takes it back. The code is kept in the vault: the desktop has it,
+/// the browser shows it again after a reload, and one the desktop made
+/// shows its code here too. Taken back, it's gone from the vault.
 #[test]
 fn the_owners_browser_invites_and_takes_back() {
     let mut rng = Seeded(4);
@@ -256,10 +258,45 @@ fn the_owners_browser_invites_and_takes_back() {
     let (_, waiting, _) = invites(&mut web).expect("the list again");
     assert_eq!(waiting.len(), 1);
     assert_eq!(waiting[0].1.as_deref(), Some(code.as_str()), "its code, made here");
+    let hash = waiting[0].0.hash;
+    let desk_code = |desk: &Desk, hash: &[u8; 32]| desk.docs[vault::ROOM].invite_code(hash).map(|c| c.text());
+    assert_eq!(desk_code(&desk, &hash), Some(code.clone()), "in the vault, for the desktop too");
 
-    web.drop_invite(waiting[0].0.hash);
+    // Reloaded: listed again, with its code.
+    let mut web = Notes::open(ORIGIN, web.me.clone(), "Phone", &web.save(), 99).unwrap();
+    web.session.connected();
+    for o in hub.connect(2, &mut rng) {
+        if let Out::Send(_, b) = o {
+            web.receive(&b, &mut rng);
+        }
+    }
     pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert!(invites(&mut web).expect("and again").1.is_empty());
+    web.list_invites();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let (_, waiting, _) = invites(&mut web).expect("listed after a reload");
+    assert_eq!(waiting.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>(), [Some(code.clone())]);
+
+    // One the desktop made: its code shown here too.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let theirs = desk.session.invite(&mut rng).expect("connected");
+    assert!(desk.docs[vault::ROOM].keep_invite(&theirs, now));
+    desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    web.list_invites();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let (_, waiting, _) = invites(&mut web).expect("both");
+    let mut codes: Vec<_> = waiting.iter().map(|(_, c)| c.clone().expect("each with its code")).collect();
+    codes.sort();
+    let mut both = vec![code.clone(), theirs.text()];
+    both.sort();
+    assert_eq!(codes, both);
+
+    // Taken back here: gone from the vault, the desktop's too.
+    web.drop_invite(hash, &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let (_, waiting, _) = invites(&mut web).expect("and again");
+    assert_eq!(waiting.iter().map(|(i, c)| (i.hash, c.clone())).collect::<Vec<_>>(), [(theirs.hash(), Some(theirs.text()))]);
+    assert_eq!(desk_code(&desk, &hash), None);
 }
 
 #[test]
