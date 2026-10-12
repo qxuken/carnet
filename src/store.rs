@@ -614,32 +614,16 @@ impl Store {
 
     /// Moves note `i` into `folder`, file and all, under its own name or
     /// the first free one there. Its pictures stay where they are; the
-    /// note's links to them are rewritten from its new place.
+    /// note's links to them are rewritten from its new place: an edit,
+    /// saved, which syncs like any other. The user's move, here; a note
+    /// put where another device moved it follows with
+    /// [`place_note`](Self::place_note) instead.
     pub fn move_note(&mut self, i: usize, folder: &str) -> io::Result<()> {
         if self.notes[i].folder == folder {
             return Ok(());
         }
-        if self.notes[i].dirty {
-            return Err(io::Error::other("it has changes that are not saved yet"));
-        }
-        // Changed in another app since it was read (a sync, a pull): that
-        // is the version that moves, not ours from before.
-        self.refresh(i);
-        fs::create_dir_all(self.folder_dir(folder))?;
-        let (from_dir, to_dir) = (self.folder_dir(&self.notes[i].folder), self.folder_dir(folder));
-        // The file first: only once it has moved do its links follow.
-        if let Some(from) = self.notes[i].path.clone() {
-            let to = self.free_path(&stem_of(&from), None, folder);
-            rename_retrying(&from, &to)?;
-            self.notes[i].disk = stamp(&to);
-            self.notes[i].path = Some(to);
-        }
-        let old = std::mem::replace(&mut self.notes[i].folder, folder.to_string());
-        if let (Some(key), Some(rel), Some(replica)) =
-            (self.notes[i].key, self.notes[i].rel_path(), self.replica.as_mut())
-        {
-            let _ = replica.moved(key, &rel);
-        }
+        let old = self.place_note(i, folder)?;
+        let (from_dir, to_dir) = (self.folder_dir(&old), self.folder_dir(folder));
         let mut relinked = false;
         let note = &mut self.notes[i];
         for b in 0..note.doc.len() {
@@ -669,6 +653,36 @@ impl Store {
             self.save(i, false)?;
         }
         self.save_pins()
+    }
+
+    /// Note `i`'s file moved into `folder`, under its own name or the
+    /// first free one there, its text as it is. Where the vault says it
+    /// lives, it goes so (docs/SYNC.md §4): its text was written there (a
+    /// note come before its place, put at the top meanwhile), or rewritten
+    /// by the device that moved it, and comes as that device's edit.
+    /// Rewritten here as well, its links would be moved twice, or moved
+    /// for a move nobody made. Returns the folder it was in.
+    fn place_note(&mut self, i: usize, folder: &str) -> io::Result<String> {
+        if self.notes[i].dirty {
+            return Err(io::Error::other("it has changes that are not saved yet"));
+        }
+        // Changed in another app since it was read (a sync, a pull): that
+        // is the version that moves, not ours from before.
+        self.refresh(i);
+        fs::create_dir_all(self.folder_dir(folder))?;
+        if let Some(from) = self.notes[i].path.clone() {
+            let to = self.free_path(&stem_of(&from), None, folder);
+            rename_retrying(&from, &to)?;
+            self.notes[i].disk = stamp(&to);
+            self.notes[i].path = Some(to);
+        }
+        let old = std::mem::replace(&mut self.notes[i].folder, folder.to_string());
+        if let (Some(key), Some(rel), Some(replica)) =
+            (self.notes[i].key, self.notes[i].rel_path(), self.replica.as_mut())
+        {
+            let _ = replica.moved(key, &rel);
+        }
+        Ok(old)
     }
 
     /// Where an image's `src` points, for a note in `folder`: a file on
@@ -1689,8 +1703,11 @@ impl Store {
                 return Ok(Some(true));
             }
             let mut changed = false;
+            // Its text as it is: written for where it lives (a note that
+            // came before its place), or rewritten by the device that
+            // moved it, its edit on its way.
             if self.notes[i].folder != place.folder {
-                self.move_note(i, &place.folder)?;
+                self.place_note(i, &place.folder)?;
                 changed = true;
             }
             // Renamed elsewhere (a file numbered here to make room is
@@ -1771,9 +1788,10 @@ impl Store {
     /// Another device's changes to the note `key` came in (sync took them
     /// into its doc): its file follows. A note with no edits here is
     /// rewritten and reloaded; one with edits has them written beside
-    /// the other device's, both kept; a note new here gets a file, named
-    /// for its title, at the top of the notes folder (where a note goes
-    /// between folders does not sync yet).
+    /// the other device's, both kept; a note new here gets a file where
+    /// the vault says it lives, or, before the vault has said, one named
+    /// for its title at the top of the notes folder, moved there as it is
+    /// once it does.
     pub fn remote_changed(&mut self, key: Key) -> io::Result<Remote> {
         let Some(replica) = self.replica.as_mut() else { return Ok(Remote::Same) };
         replica.persist(key)?;
