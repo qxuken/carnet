@@ -56,6 +56,7 @@ impl Carnet {
             let (a, b) = (a.min(b), a.max(b));
             self.picked = rows[a..=b].to_vec();
             self.pick_anchor = Some(from);
+            self.pick_head = Some(row);
             return true;
         }
         if adds(m) {
@@ -73,12 +74,39 @@ impl Carnet {
                 }
                 None => self.picked.push(row.clone()),
             }
-            self.pick_anchor = Some(row);
+            self.pick_anchor = Some(row.clone());
+            self.pick_head = Some(row);
             return true;
         }
         self.picked.clear();
         self.pick_anchor = Some(row);
+        self.pick_head = None;
         false
+    }
+
+    /// ⇧↑ or ⇧↓ in one of the library's lists, `rows` (the folders, or
+    /// the notes shown), the keyboard on `at`: the range from where it
+    /// began to its moving end goes one row further, or back toward where
+    /// it began — what a ⇧-click on that row would choose. With nothing
+    /// chosen yet, it begins at `at`. The row come to, if any.
+    pub(super) fn pick_step(&mut self, up: bool, at: Pick, rows: &[Pick]) -> Option<Pick> {
+        let pos = |p: &Pick| rows.iter().position(|r| r == p);
+        let ends = (!self.picked.is_empty())
+            .then(|| self.pick_anchor.as_ref().zip(self.pick_head.as_ref()))
+            .flatten()
+            .and_then(|(a, h)| pos(a).zip(pos(h)));
+        let (a, h) = match ends {
+            Some(ends) => ends,
+            None => {
+                let i = pos(&at)?;
+                (i, i)
+            }
+        };
+        let to = if up { h.checked_sub(1) } else { Some(h + 1) }.filter(|&i| i < rows.len()).unwrap_or(h);
+        self.picked = rows[a.min(to)..=a.max(to)].to_vec();
+        self.pick_anchor = Some(rows[a].clone());
+        self.pick_head = Some(rows[to].clone());
+        Some(rows[to].clone())
     }
 
     /// Whether a row is among those chosen.
@@ -156,6 +184,7 @@ impl Carnet {
         let (folders, notes) = self.picked_now();
         self.picked.clear();
         self.pick_anchor = None;
+        self.pick_head = None;
         let mut undo = Vec::new();
         let (mut gone_f, mut gone_n) = (0, 0);
         for f in &folders {
@@ -189,6 +218,7 @@ impl Carnet {
         let (folders, notes) = self.picked_now();
         self.picked.clear();
         self.pick_anchor = None;
+        self.pick_head = None;
         let mut moved_f = 0;
         for f in folders {
             if parent_of(&f) == to || to == f || to.starts_with(&format!("{f}/")) {

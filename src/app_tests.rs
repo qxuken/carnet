@@ -7710,3 +7710,102 @@ fn several_chosen_are_dragged_into_a_folder_together() {
     assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved a folder and a note to \u{201c}Dest\u{201d}"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// What is chosen in the library, by name: a folder's path with a `/`
+/// after it, a note's title; in order.
+fn picked_names(app: &Carnet) -> Vec<String> {
+    let mut v: Vec<String> = app
+        .picked
+        .iter()
+        .map(|p| match p {
+            Pick::Note(id) => app.store.notes.iter().find(|n| n.id == *id).unwrap().title.clone(),
+            Pick::Folder(f) => format!("{f}/"),
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// ⇧↓ from a folder chooses it and the next, and again the one after;
+/// ⇧↑ gives the last back. A plain ↓ lets go and moves on, Esc lets go,
+/// and Delete takes what is chosen to the trash, Undo bringing it back.
+#[test]
+fn shift_with_the_arrows_chooses_folders_from_the_keyboard() {
+    let (mut app, mut d, dir) = library("shift-folders", &[("A/a", "1"), ("B/b", "2"), ("C/c", "3"), ("D/d", "4")]);
+    let at = folder_row(&app, "A");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.folder.as_deref(), Some("A"));
+    key_with(&mut app, &mut d, "down", SHIFT);
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/", "C/"]);
+    assert_eq!(app.folder.as_deref(), Some("A"), "the folder shown stays");
+    key_with(&mut app, &mut d, "up", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/"], "back toward where it began");
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/", "C/"]);
+    // Esc lets go; a plain ↓ moves on from where the keyboard is.
+    key(&mut app, &mut d, "escape");
+    assert!(app.picked.is_empty());
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["C/", "D/"], "from the row the keyboard was on");
+    key(&mut app, &mut d, "up");
+    assert!(app.picked.is_empty(), "a plain arrow lets go");
+    assert_eq!(app.folder.as_deref(), Some("C"), "and moves");
+    // From there up, then to the trash together; Undo brings them back.
+    key_with(&mut app, &mut d, "up", SHIFT);
+    key_with(&mut app, &mut d, "up", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/", "C/"]);
+    key(&mut app, &mut d, "delete");
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.picked.is_empty());
+    assert_eq!(app.store.folders, ["D"]);
+    assert!(!dir.join("A").exists() && !dir.join("B").exists() && !dir.join("C").exists() && dir.join("D/d.md").exists());
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 3 folders to the trash"));
+    app.on_plain(Msg::Undo);
+    d.frame(&mut app);
+    assert!(dir.join("A/a.md").exists() && dir.join("B/b.md").exists() && dir.join("C/c.md").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The same in the notes: after a click on a card, ⇧↓ chooses the notes
+/// below it, ⇧↑ gives one back, a plain ↓ opens the next; Delete takes
+/// what is chosen to the trash, and Undo brings it back.
+#[test]
+fn shift_with_the_arrows_chooses_notes_from_the_keyboard() {
+    let (mut app, mut d, dir) = library("shift-notes", &[("Alpha", "1"), ("Bravo", "2"), ("Charlie", "3"), ("Delta", "4")]);
+    app.on_settings(Msg::SetSort { to: 1 });
+    d_frame_twice(&mut app, &mut d);
+    let card = |app: &Carnet, t: &str| {
+        let i = app.store.notes.iter().position(|n| n.title == t).unwrap();
+        app.card_rects.iter().find(|(n, _)| *n == i).map(|(_, r)| r.center()).unwrap()
+    };
+    let titles: Vec<String> = app.order.iter().map(|&i| app.store.notes[i].title.clone()).collect();
+    let alpha = titles.iter().position(|t| t == "Alpha").unwrap();
+    assert_eq!(titles[alpha..alpha + 4], ["Alpha", "Bravo", "Charlie", "Delta"], "{titles:?}");
+    let at = card(&app, "Alpha");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.store.notes[app.current].title, "Alpha");
+    key_with(&mut app, &mut d, "down", SHIFT);
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["Alpha", "Bravo", "Charlie"]);
+    key_with(&mut app, &mut d, "up", SHIFT);
+    assert_eq!(picked_names(&app), ["Alpha", "Bravo"]);
+    assert_eq!(app.store.notes[app.current].title, "Alpha", "the open note stays open");
+    // A plain ↓ lets go and opens the next.
+    key(&mut app, &mut d, "down");
+    assert!(app.picked.is_empty());
+    assert_eq!(app.store.notes[app.current].title, "Bravo");
+    // From there, two chosen, and to the trash; Undo brings them back.
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["Bravo", "Charlie"]);
+    key(&mut app, &mut d, "backspace");
+    d_frame_twice(&mut app, &mut d);
+    assert!(!dir.join("Bravo.md").exists() && !dir.join("Charlie.md").exists() && dir.join("Delta.md").exists());
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 2 notes to the trash"));
+    app.on_plain(Msg::Undo);
+    d.frame(&mut app);
+    assert!(dir.join("Bravo.md").exists() && dir.join("Charlie.md").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}

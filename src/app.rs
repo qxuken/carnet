@@ -585,6 +585,9 @@ pub struct Carnet {
     pub picked: Vec<Pick>,
     /// The row a ⇧-click's range runs from.
     pick_anchor: Option<Pick>,
+    /// The range's other end, the one ⇧↑ and ⇧↓ move: the row last
+    /// clicked or come to with them.
+    pick_head: Option<Pick>,
     /// A new folder being named.
     naming: Option<Naming>,
     /// How many folders have been named: each naming has a field of its
@@ -599,6 +602,9 @@ pub struct Carnet {
     /// A folder row was the last thing clicked, and the keyboard has gone
     /// nowhere since: ↑ and ↓ walk the folders from the one shown.
     folders_clicked: bool,
+    /// The same for a note's card: ↑ and ↓ walk the notes from the open
+    /// one, ⇧ with them chooses them.
+    cards_clicked: bool,
     pub settings: Settings,
     /// The settings show in place of the note.
     pub settings_open: bool,
@@ -962,11 +968,13 @@ impl Carnet {
             folder: None,
             picked: Vec::new(),
             pick_anchor: None,
+            pick_head: None,
             naming: None,
             namings: 0,
             folder_rows: Vec::new(),
             focus_row: None,
             folders_clicked: false,
+            cards_clicked: false,
             settings,
             settings_open: false,
             reset_armed: false,
@@ -2542,9 +2550,24 @@ impl Carnet {
     /// or Backspace deletes it (to the trash with its notes, Undo away),
     /// ↑ and ↓ go to the row above and below and show it, as a Mac's
     /// sidebars do — so where the keyboard is shows after a click too,
-    /// which hides the focus ring. True when the key was one of those.
+    /// which hides the focus ring — letting go of what was chosen; with ⇧
+    /// they choose the folders from this one on, as a ⇧-click does. True
+    /// when the key was one of those.
     fn folder_row_key(&mut self, row: &FolderRow, k: &kui_native::KeyPress) -> bool {
         let m = k.mods;
+        // ⇧↑ and ⇧↓: the folders chosen from this one to the next, the
+        // keyboard on the row come to.
+        if m.shift
+            && !(m.alt || m.ctrl || m.super_key)
+            && matches!(k.code, KeyCode::Up | KeyCode::Down)
+            && let FolderRow::Folder(f) = row
+        {
+            let rows: Vec<Pick> = self.store.folders.iter().cloned().map(Pick::Folder).collect();
+            if let Some(Pick::Folder(head)) = self.pick_step(k.code == KeyCode::Up, Pick::Folder(f.clone()), &rows) {
+                self.focus_row = Some(FolderRow::Folder(head));
+            }
+            return true;
+        }
         if m.shift || m.alt || (m.ctrl && cfg!(target_os = "macos")) {
             return false;
         }
@@ -2574,6 +2597,13 @@ impl Carnet {
             KeyCode::Up | KeyCode::Down if !m.ctrl && !m.super_key => {
                 let next = at.and_then(|i| if k.code == KeyCode::Up { i.checked_sub(1) } else { Some(i + 1) });
                 if let Some((_, r)) = next.and_then(|i| self.folder_rows.get(i)).cloned() {
+                    // What was chosen is let go of; a range starts here.
+                    self.picked.clear();
+                    self.pick_head = None;
+                    self.pick_anchor = match &r {
+                        FolderRow::Folder(f) => Some(Pick::Folder(f.clone())),
+                        _ => None,
+                    };
                     match &r {
                         FolderRow::All => self.on_plain(Msg::SelectFolder { index: ALL }),
                         FolderRow::Folder(f) => {
@@ -2862,6 +2892,7 @@ impl Carnet {
                 if !id.is_some_and(|id| self.pick_click(Pick::Note(id), core.modifiers())) {
                     self.on_plain(msg);
                 }
+                self.cards_clicked = true;
             }
             Msg::SelectFolder { index } if index != ALL && self.store.folders.get(index as usize).is_some() => {
                 let f = self.store.folders[index as usize].clone();
@@ -3020,6 +3051,7 @@ impl Carnet {
             Msg::SelectFolder { index } => {
                 self.close_history();
                 self.folders_clicked = true;
+                self.cards_clicked = false;
                 self.deleted = false;
                 self.close_peek();
                 let folder = self.store.folders.get(index as usize).cloned();
@@ -3238,6 +3270,7 @@ impl Carnet {
             Msg::ShowDeleted => {
                 self.close_history();
                 self.folders_clicked = true;
+                self.cards_clicked = false;
                 self.refresh_trash();
                 self.deleted = !self.trash.is_empty();
                 self.list_view = true;
@@ -3503,6 +3536,44 @@ impl Carnet {
                 return;
             }
         }
+        // ↑ and ↓ after a click on a note's card, the keyboard on nothing
+        // in particular: the next note opened, the keyboard staying on the
+        // list; with ⇧, the notes chosen from the open one to the next.
+        if matches!(k.code, KeyCode::Up | KeyCode::Down)
+            && self.cards_clicked
+            && !(m.ctrl || m.super_key || m.alt)
+            && core.focus().is_none_or(|f| f == Key::ROOT)
+        {
+            let up = k.code == KeyCode::Up;
+            if m.shift {
+                let rows: Vec<Pick> = self.order.iter().map(|&i| Pick::Note(self.store.notes[i].id)).collect();
+                let open = Pick::Note(self.store.notes[self.current].id);
+                self.pick_step(up, open, &rows);
+            } else {
+                self.picked.clear();
+                self.pick_head = None;
+                let pos = self.order.iter().position(|&i| i == self.current);
+                let next = pos.and_then(|p| if up { p.checked_sub(1) } else { Some(p + 1) });
+                if let Some(&i) = next.and_then(|p| self.order.get(p)) {
+                    self.open(i);
+                    self.pick_anchor = Some(Pick::Note(self.store.notes[i].id));
+                    self.say = Some(self.store.notes[i].display_title().to_string());
+                }
+                self.cards_clicked = true;
+            }
+            return;
+        }
+        // Delete or Backspace with notes chosen that way, or folders, the
+        // keyboard on nothing in particular: all of them to the trash.
+        if matches!(k.code, KeyCode::Backspace | KeyCode::Delete)
+            && !(m.ctrl || m.super_key || m.alt || m.shift)
+            && (self.cards_clicked || self.folders_clicked)
+            && self.picked.len() > 1
+            && core.focus().is_none_or(|f| f == Key::ROOT)
+        {
+            self.trash_picked();
+            return;
+        }
         // F2 with the keyboard on nothing in particular — after a click on
         // a folder, which shows it and leaves the keyboard on the window:
         // the folder shown is renamed, as Finder's selected one is.
@@ -3520,6 +3591,7 @@ impl Carnet {
         }
         if k.code == KeyCode::Escape && !self.picked.is_empty() {
             self.picked.clear();
+            self.pick_head = None;
             return;
         }
         if k.code == KeyCode::Escape && self.settings_open {
@@ -3955,6 +4027,7 @@ impl App for Carnet {
             // The keyboard went somewhere: no longer the folders' arrows.
             if focused.is_some_and(|f| f != Key::ROOT) {
                 self.folders_clicked = false;
+                self.cards_clicked = false;
             }
             // A folder's name let go of — a click elsewhere, Tab: the
             // folder is made, if it has a name, and where the click went
