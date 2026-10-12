@@ -289,7 +289,9 @@ fn read_counting(text: &str, count: Count) -> Read {
         }
         let close = (i + 1..b.len()).find(|&j| b[j] == b']' && !quiet[j]);
         let Some(j) = close else { break };
-        if b.get(j + 1) != Some(&b'(') {
+        // No words: no link, its marks shown as written, so nothing hides
+        // the caret (or a link) where there's nothing to read.
+        if b.get(j + 1) != Some(&b'(') || j == i + 1 {
             i = j + 1;
             continue;
         }
@@ -1867,6 +1869,17 @@ mod tests {
             t,
             "<span style=\"color: red\">a</span><span style=\"color: #0000FF\">b</span><span style=\"color: red\">c</span>"
         );
+    }
+
+    /// A link with no words is none: its marks shown as written, so no
+    /// stretch of hidden marks holds the caret where nothing can be seen.
+    #[test]
+    fn a_link_without_words_is_its_marks() {
+        let t = "![](../attachments/coast.jpg)";
+        assert_eq!(link_at(t, 3), None);
+        assert_eq!(Visible::of(t).text(t), t);
+        let t = "a [](u) b";
+        assert_eq!(Visible::of(t).text(t), t);
     }
 
     #[test]

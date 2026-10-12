@@ -2513,10 +2513,16 @@ pub fn paste(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let p = c.head;
     let raw_or_cell = p.slot.cell.is_some()
         || matches!(kind_at(doc, p.slot), Some(Kind::Raw(_)));
-    if !s.contains('\n') || raw_or_cell {
+    if raw_or_cell {
         return insert(doc, c, &s);
     }
     let parsed = doc::parse_blocks(s.trim_end_matches('\n'));
+    // One line types in, unless it's a picture (as one copied is): a
+    // picture, which a line of words can't hold.
+    let picture = parsed.len() == 1 && matches!(parsed[0].kind, Kind::Image { .. });
+    if !s.contains('\n') && !picture {
+        return insert(doc, c, &s);
+    }
     // Only blank lines (an empty line copied in an editor is "\r\n"):
     // a line break, as Enter makes.
     if parsed.is_empty() {
@@ -2877,6 +2883,26 @@ mod tests {
         assert_eq!(c.head.slot.cell, Some((t.rows[0].id, col)), "into the new header");
         assert!(table_op(&mut d, &mut c, TableOp::DelRow, false));
         assert!(!table(&d).header, "its row gone, the header with it");
+    }
+
+    /// A picture copied (its one line of Markdown) and pasted into a line
+    /// of words is a picture, the line split round it; into an empty line,
+    /// in its place (a line to write on after it, at the note's end).
+    #[test]
+    fn a_pasted_picture_is_a_picture() {
+        let mut d = doc(vec![Block::text("before after")]);
+        let mut c = at(&d, 0, 7);
+        assert!(paste(&mut d, &mut c, "![](../attachments/coast.jpg)"));
+        assert_eq!(texts(&d), ["Text:before ", "Imag:", "Text:after"]);
+        let mut d = doc(vec![Block::text("")]);
+        let mut c = at(&d, 0, 0);
+        assert!(paste(&mut d, &mut c, "![|160](x.png)\n"));
+        assert_eq!(texts(&d), ["Imag:", "Text:"], "and a line to write on after it");
+        // Not a picture alone on its line: words, typed in.
+        let mut d = doc(vec![Block::text("")]);
+        let mut c = at(&d, 0, 0);
+        assert!(paste(&mut d, &mut c, "see ![](x.png) here"));
+        assert_eq!(texts(&d), ["Text:see ![](x.png) here"]);
     }
 
     #[test]
