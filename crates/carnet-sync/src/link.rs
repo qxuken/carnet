@@ -95,7 +95,7 @@ pub fn fair(origin: &str, url: &str) -> bool {
 /// can't give, its last part beginning with a digit (`127.1`,
 /// `2130706433`, `0x7f.1`), some systems read as an address: counted as
 /// one.
-fn inner(host: &str) -> bool {
+pub(crate) fn inner(host: &str) -> bool {
     let host = host.trim_end_matches('.');
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
@@ -106,7 +106,9 @@ fn inner(host: &str) -> bool {
     }
 }
 
-fn inner_ip(ip: IpAddr) -> bool {
+/// Whether an address is this computer's, or on its network: what
+/// [`inner`] counts, for an address a name was looked up to.
+pub(crate) fn inner_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
             let o = v.octets();

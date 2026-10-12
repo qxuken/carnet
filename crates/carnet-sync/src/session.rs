@@ -189,6 +189,39 @@ pub const FULL: &str = "This account is full, so new pictures stay on this devic
 /// so they don't show this beside it.
 pub const READ_ONLY: &str = "This account is read only for now: changes stay on this device, and sync once it can write again.";
 
+/// The most letters of the server's own words shown at once.
+pub const SAID_MAX: usize = 200;
+
+/// Words the server sent, made fit to show: on one line, no letter that
+/// draws nothing or turns the text around, and at most [`SAID_MAX`]
+/// letters. A server could say anything, at any length.
+pub fn server_words(words: &str) -> String {
+    let hidden = |c: char| c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}');
+    let clean: String = words.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).filter(|&c| !hidden(c)).collect();
+    let line = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(SAID_MAX) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line,
+    }
+}
+
+/// Words the server sent, shown as its own and not Carnet's: "The server
+/// says: …", made fit to show ([`server_words`]).
+pub fn server_says(words: &str) -> String {
+    format!("The server says: {}", server_words(words))
+}
+
+/// A refusal ([`Event::Refused`]) as the apps show it: the server's words,
+/// said as its own ([`server_says`]); but for [`FULL`] and [`READ_ONLY`],
+/// which the apps know, and the words of this device's own making.
+pub fn refusal_words(why: &str) -> String {
+    if why == FULL || why == READ_ONLY || why.starts_with(PASSWORD_NOT_SET) { why.to_string() } else { server_says(why) }
+}
+
+/// How this device says a password it couldn't set (its own words, not
+/// the server's).
+const PASSWORD_NOT_SET: &str = "The password couldn't be set: ";
+
 /// How much of a picture goes in one frame.
 pub const BLOB_PIECE: usize = 192 * 1024;
 
@@ -270,7 +303,7 @@ pub struct Session {
     limited: bool,
     /// A password being set: the email, the password, OPAQUE's state,
     /// until the server answers.
-    setting: Option<(String, String, crate::password::Pending)>,
+    setting: Option<(String, zeroize::Zeroizing<String>, crate::password::Pending)>,
     /// The server's greeting, from its last challenge: what it can do.
     server: Option<Greeting>,
     /// New epochs' keys that follow one this device has no key for yet:
@@ -339,11 +372,11 @@ impl Session {
         if !id.contains('@') || id.len() > 254 {
             return Err("That doesn't look like an email address".into());
         }
-        if password.chars().count() < 8 {
-            return Err("A password of 8 letters at least".into());
+        if password.chars().count() < crate::password::MIN_LEN {
+            return Err(format!("A password of {} letters at least", crate::password::MIN_LEN));
         }
         let (request, state) = crate::password::register_start(password, rng)?;
-        self.setting = Some((id.clone(), password.to_string(), crate::password::Pending(state)));
+        self.setting = Some((id.clone(), zeroize::Zeroizing::new(password.to_string()), crate::password::Pending(state)));
         self.send(Frame::Carnet(Carnet::PasswordSetStart { id, request }));
         Ok(())
     }
@@ -767,6 +800,24 @@ impl Session {
         self.send(Frame::Carnet(Carnet::SetRecovery { public, wrapped, card }));
     }
 
+    /// The rooms with changes made here the server isn't known to keep
+    /// yet: those [`Session::waiting`] counts.
+    pub fn waiting_rooms(&self) -> impl Iterator<Item = &str> {
+        self.waiting.iter().map(String::as_str)
+    }
+
+    /// Whether the server has said it keeps `room` as `doc` has it now.
+    /// Not known (not yet joined since this session began): no.
+    pub fn is_kept(&self, room: &str, doc: &NoteDoc) -> bool {
+        self.kept.get(room).is_some_and(|k| covers(k, &doc.version_vector()))
+    }
+
+    /// Whether the account has a recovery code, by the last list of
+    /// devices: `None` before one has come.
+    pub fn has_recovery(&self) -> Option<bool> {
+        self.listed.as_ref().map(|l| !matches!(l.recovery, Ok(None)))
+    }
+
     pub fn cursor(&self) -> u64 {
         self.cursor
     }
@@ -918,7 +969,7 @@ impl Session {
                     Deny::DeviceRemoved => Event::Removed { account: false },
                     Deny::AccountRemoved => Event::Removed { account: true },
                     Deny::Outdated => Event::Outdated(Fit::AppTooOld),
-                    Deny::Other => Event::Denied(reason),
+                    Deny::Other => Event::Denied(server_words(&reason)),
                 });
             }
             Frame::Carnet(Carnet::Changed { rooms }) if self.state == State::Ready => {
@@ -955,7 +1006,7 @@ impl Session {
                             .seal(&self.id.ring, rng);
                         self.send(Frame::Carnet(Carnet::PasswordSetFinish { id, upload, public, wrapped, card }));
                     }
-                    Err(e) => self.events.push(Event::Refused(format!("The password couldn't be set: {e}"))),
+                    Err(e) => self.events.push(Event::Refused(format!("{PASSWORD_NOT_SET}{e}"))),
                 }
             }
             Frame::Carnet(Carnet::PasswordSet) => {
@@ -1337,4 +1388,26 @@ fn pieces(doc: &NoteDoc, peer: u64, start: u64, end: u64) -> Vec<(u64, u64, Vec<
     let mut out = pieces(doc, peer, start, mid);
     out.extend(pieces(doc, peer, mid, end));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a server says is shown as its own, on one line, cut short,
+    /// with nothing in it that hides or turns letters around.
+    #[test]
+    fn the_servers_words_are_shown_as_its_own() {
+        assert_eq!(server_says("only the server's owner can do that"), "The server says: only the server's owner can do that");
+        assert_eq!(server_words("two\nlines\t and\u{202e}evil\u{200b} "), "two lines andevil");
+        let long = server_words(&"é".repeat(1000));
+        assert_eq!(long.chars().count(), SAID_MAX + 1);
+        assert!(long.ends_with('…'));
+        assert_eq!(server_words(""), "");
+        // A refusal: the server's own, marked; the ones the apps know, and
+        // this device's own words, as they are.
+        assert_eq!(refusal_words("only the owner can"), "The server says: only the owner can");
+        assert_eq!(refusal_words(FULL), FULL);
+        assert_eq!(refusal_words("The password couldn't be set: no"), "The password couldn't be set: no");
+    }
 }

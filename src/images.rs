@@ -2,6 +2,14 @@
 //! and handed to kui as RGBA. A view asks for a path every frame and gets
 //! what there is so far — loading, ready, or why not.
 //!
+//! A picture is read by one of a few threads ([`READERS`]), not a thread
+//! each: a note of a hundred photos reads them a few at a time. Each is
+//! read within limits ([`MAX_PIXELS_SIDE`], [`MAX_ALLOC`]): a file that
+//! says it is bigger, as one made to be could, is a card saying it's too
+//! big, not the app's memory gone. Only HEIC, TIFF and AVIF, by their
+//! names, go to macOS's ImageIO; anything else is read as its name says
+//! or not at all, never guessed at from its bytes.
+//!
 //! What is kept is kept within a budget. Each frame (`sweep`, before the
 //! page is drawn) notes which pictures the last frame drew; a picture no
 //! frame has drawn for `IDLE` — its note closed, scrolled past in another
@@ -11,9 +19,9 @@
 //! for again, it is `Loading` at that size, holding its space, and is
 //! decoded anew.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use kui_native::{Core, ImageId, Waker};
@@ -22,6 +30,21 @@ use kui_native::{Core, ImageId, Waker};
 /// cost a screen's worth of memory for pixels no page shows (the page is
 /// at most 980px wide, twice that on a 2x screen).
 const MAX_SIDE: u32 = 2000;
+
+/// The widest or tallest a picture file may say it is, to be read at all.
+const MAX_PIXELS_SIDE: u32 = 16384;
+
+/// The most memory reading one picture may take, in bytes.
+const MAX_ALLOC: u64 = 256 << 20;
+
+/// How many pictures are read at once, each on a thread of its own.
+const READERS: usize = 3;
+
+/// Why a picture isn't shown: it's past what Carnet reads.
+pub const TOO_BIG: &str = "too big to show";
+
+/// Why a picture isn't shown: no reader for its kind.
+pub const UNSUPPORTED: &str = "this kind of picture is not supported";
 
 /// How much decoded pixels the pictures held may come to, in bytes (each
 /// is `w × h × 4`, and kui keeps as much again on the GPU): some twenty
@@ -55,7 +78,17 @@ pub struct Decoded {
     pub rgba: Vec<u8>,
 }
 
-type Inbox = Arc<Mutex<Vec<(PathBuf, Result<Decoded, String>)>>>;
+/// What a reader found of a picture: its size, from the file's header,
+/// then its pixels, or why not.
+enum Landed {
+    Size(u32, u32),
+    Done(Result<Decoded, String>),
+}
+
+type Inbox = Arc<Mutex<Vec<(PathBuf, Landed)>>>;
+
+/// Pictures waiting for a reader.
+type Queue = Arc<(Mutex<VecDeque<PathBuf>>, Condvar)>;
 
 /// A picture and when it was last drawn.
 struct Held {
@@ -91,6 +124,8 @@ pub struct Images {
     /// Wakes the loop when a decode lands; none in tests, which decode in
     /// place instead.
     waker: Option<Waker>,
+    /// The readers' queue, once they are started.
+    queue: Option<Queue>,
 }
 
 impl Default for Images {
@@ -104,6 +139,7 @@ impl Default for Images {
             stale: Vec::new(),
             inbox: Inbox::default(),
             waker: None,
+            queue: None,
         }
     }
 }
@@ -128,30 +164,28 @@ impl Images {
             self.hold(path, failed.clone());
             return failed;
         }
-        // Its size as last shown, or the header alone: a few bytes, read now.
-        let (w, h) = self
-            .sizes
-            .remove(path)
-            .unwrap_or_else(|| image::image_dimensions(path).unwrap_or((0, 0)));
+        // Its size as last shown; or, from the file's header, as soon as a
+        // reader has it (in tests, now).
+        let known = self.sizes.remove(path);
+        let Some(waker) = self.waker.clone() else {
+            let (w, h) = known.unwrap_or_else(|| size(path));
+            let loading = Entry::Loading { w, h };
+            self.hold(path, loading.clone());
+            let r = decode(path);
+            if let Ok(mut q) = self.inbox.lock() {
+                q.push((path.to_path_buf(), Landed::Done(r)));
+            }
+            return loading;
+        };
+        let (w, h) = known.unwrap_or((0, 0));
         let loading = Entry::Loading { w, h };
         self.hold(path, loading.clone());
-        let (inbox, path) = (self.inbox.clone(), path.to_path_buf());
-        match self.waker.clone() {
-            Some(waker) => {
-                std::thread::spawn(move || {
-                    let r = decode(&path);
-                    if let Ok(mut q) = inbox.lock() {
-                        q.push((path, r));
-                    }
-                    waker.wake();
-                });
-            }
-            None => {
-                let r = decode(&path);
-                if let Ok(mut q) = inbox.lock() {
-                    q.push((path, r));
-                }
-            }
+        let inbox = self.inbox.clone();
+        let queue = self.queue.get_or_insert_with(|| readers(inbox, waker));
+        let (jobs, ready) = &**queue;
+        if let Ok(mut q) = jobs.lock() {
+            q.push_back(path.to_path_buf());
+            ready.notify_one();
         }
         loading
     }
@@ -177,7 +211,7 @@ impl Images {
         }
         self.hold(path, Entry::Loading { w: d.w, h: d.h });
         if let Ok(mut q) = self.inbox.lock() {
-            q.push((path.to_path_buf(), Ok(fit(d))));
+            q.push((path.to_path_buf(), Landed::Done(Ok(fit(d)))));
         }
     }
 
@@ -192,7 +226,19 @@ impl Images {
         for id in self.stale.drain(..) {
             core.remove_image(id);
         }
-        for (path, r) in done {
+        for (path, landed) in done {
+            let r = match landed {
+                // The size, before the pixels: the space held.
+                Landed::Size(w, h) => {
+                    if let Some(held) = self.entries.get_mut(&path)
+                        && matches!(held.entry, Entry::Loading { w: 0, h: 0 })
+                    {
+                        held.entry = Entry::Loading { w, h };
+                    }
+                    continue;
+                }
+                Landed::Done(r) => r,
+            };
             let e = match r {
                 Ok(d) => Entry::Ready {
                     id: core.resources.add_image(d.w, d.h, d.rgba),
@@ -321,21 +367,88 @@ impl Images {
     }
 }
 
+/// The readers: a few threads taking pictures from the queue, each
+/// saying the picture's size as soon as its header is read, then its
+/// pixels.
+fn readers(inbox: Inbox, waker: Waker) -> Queue {
+    let queue: Queue = Arc::default();
+    for i in 0..READERS {
+        let (queue, inbox, waker) = (queue.clone(), inbox.clone(), waker.clone());
+        let read = move || {
+            loop {
+                let path = {
+                    let (jobs, ready) = &*queue;
+                    let Ok(mut q) = jobs.lock() else { return };
+                    loop {
+                        if let Some(p) = q.pop_front() {
+                            break p;
+                        }
+                        let Ok(next) = ready.wait(q) else { return };
+                        q = next;
+                    }
+                };
+                let land = |landed: Landed| {
+                    if let Ok(mut q) = inbox.lock() {
+                        q.push((path.clone(), landed));
+                    }
+                    waker.wake();
+                };
+                let (w, h) = size(&path);
+                if w > 0 && h > 0 {
+                    land(Landed::Size(w, h));
+                }
+                land(Landed::Done(decode(&path)));
+            }
+        };
+        let _ = std::thread::Builder::new().name(format!("carnet-picture-{i}")).spawn(read);
+    }
+    queue
+}
+
+/// A picture's size from its file's header alone, or nothing; past what
+/// is read at all, nothing (the picture then says why).
+fn size(path: &Path) -> (u32, u32) {
+    if for_imageio(path) {
+        return (0, 0);
+    }
+    let fits = |(w, h): (u32, u32)| w <= MAX_PIXELS_SIDE && h <= MAX_PIXELS_SIDE && u64::from(w) * u64::from(h) * 4 <= MAX_ALLOC;
+    image::image_dimensions(path).ok().filter(|&wh| fits(wh)).unwrap_or((0, 0))
+}
+
 /// Why a HEIC picture isn't shown, where only macOS reads them.
 pub const HEIC_ELSEWHERE: &str = "HEIC pictures show on macOS";
 
-/// A picture file as RGBA, no side longer than `MAX_SIDE`. What the
-/// `image` crate can't read, macOS may: an iPhone's HEIC.
+/// Whether a picture is read by macOS's ImageIO, not the `image` crate:
+/// by its name, HEIC (an iPhone's photos), TIFF or AVIF. Nothing else is
+/// handed to it, so a file is never read as a kind its name doesn't say.
+fn for_imageio(path: &Path) -> bool {
+    is_heic(path) || path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "tif" | "tiff" | "avif"))
+}
+
+/// A picture file as RGBA, no side longer than `MAX_SIDE`, read within
+/// limits: one past them is [`TOO_BIG`]. HEIC, TIFF and AVIF are macOS's
+/// to read.
 pub fn decode(path: &Path) -> Result<Decoded, String> {
-    let img = match image::open(path) {
-        Ok(img) => img,
-        Err(image::ImageError::IoError(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err("not found".to_string());
-        }
+    if for_imageio(path) {
         #[cfg(target_os = "macos")]
-        Err(image::ImageError::Unsupported(_)) => return crate::imageio::decode(path, MAX_SIDE),
+        return crate::imageio::decode(path, MAX_SIDE);
         #[cfg(not(target_os = "macos"))]
-        Err(image::ImageError::Unsupported(_)) if is_heic(path) => return Err(HEIC_ELSEWHERE.to_string()),
+        return Err(if is_heic(path) { HEIC_ELSEWHERE } else { UNSUPPORTED }.to_string());
+    }
+    let mut reader = match image::ImageReader::open(path) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err("not found".to_string()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_PIXELS_SIDE);
+    limits.max_image_height = Some(MAX_PIXELS_SIDE);
+    limits.max_alloc = Some(MAX_ALLOC);
+    reader.limits(limits);
+    let img = match reader.decode() {
+        Ok(img) => img,
+        Err(image::ImageError::Limits(_)) => return Err(TOO_BIG.to_string()),
+        Err(image::ImageError::Unsupported(_)) => return Err(UNSUPPORTED.to_string()),
         Err(e) => return Err(e.to_string()),
     };
     // `thumbnail` is the fast way down: a box filter in integer steps,
@@ -427,7 +540,7 @@ pub fn heic_to_jpeg(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A small HEIC photo, as an iPhone writes them: its left half red, its
@@ -541,8 +654,62 @@ mod tests {
         assert_eq!(images.get(&paths[0]), Entry::Loading { w: 100, h: 50 });
     }
 
+    /// A PNG's signature and header, and no pixels, saying it is `w × h`:
+    /// what a file made to exhaust a reader looks like.
+    pub(crate) fn png_saying(w: u32, h: u32) -> Vec<u8> {
+        fn crc(bytes: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for &b in bytes {
+                c ^= u32::from(b);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+                }
+            }
+            !c
+        }
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(w.to_be_bytes());
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]);
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend(13u32.to_be_bytes());
+        png.extend(&ihdr);
+        png.extend(crc(&ihdr).to_be_bytes());
+        // Its pixels begun, so a reader goes on to them.
+        png.extend(0u32.to_be_bytes());
+        png.extend(b"IDAT");
+        png.extend(crc(b"IDAT").to_be_bytes());
+        png
+    }
+
+    /// A picture saying it is past the side or the memory a picture may
+    /// take is too big to show, said so, and nothing is allocated for it;
+    /// one at the edge is read.
+    #[test]
+    fn a_picture_past_the_limits_is_too_big_to_show() {
+        let dir = std::env::temp_dir().join(format!("carnet-images-limits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, w, h) in [("wide.png", 20_000, 10), ("huge.png", 16_000, 16_000), ("vast.png", u32::MAX / 2, u32::MAX / 2)] {
+            let p = dir.join(name);
+            std::fs::write(&p, png_saying(w, h)).unwrap();
+            assert_eq!(decode(&p).err().as_deref(), Some(TOO_BIG), "{name}");
+            assert_eq!(size(&p), (0, 0), "{name}: no space held for it");
+        }
+        let p = dir.join("long.png");
+        std::fs::write(&p, encode_png(MAX_PIXELS_SIDE, 1, &vec![9; MAX_PIXELS_SIDE as usize * 4]).unwrap()).unwrap();
+        assert_eq!(size(&p), (MAX_PIXELS_SIDE, 1));
+        assert_eq!(decode(&p).map(|d| (d.w, d.h)), Ok((MAX_SIDE, 1)));
+        // Named as no picture it reads: not read, whatever is in it.
+        let p = dir.join("photo.xyz");
+        std::fs::write(&p, encode_png(2, 2, &[0; 16]).unwrap()).unwrap();
+        assert_eq!(decode(&p).err().as_deref(), Some(UNSUPPORTED));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_heic_photo_is_a_picture_to_keep() {
         assert!(is_image(Path::new("IMG_0001.HEIC")) && is_heic(Path::new("a.heif")) && !is_heic(Path::new("a.png")));
+        assert!(for_imageio(Path::new("a.HEIC")) && for_imageio(Path::new("scan.tiff")) && for_imageio(Path::new("x.avif")));
+        assert!(!for_imageio(Path::new("a.png")) && !for_imageio(Path::new("a.svg")) && !for_imageio(Path::new("noext")));
     }
 }

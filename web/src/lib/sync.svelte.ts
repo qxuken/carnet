@@ -2,7 +2,7 @@
 // that does everything else. Frames from the socket go into the wasm;
 // frames it has to send go out; what it keeps is kept, sealed.
 
-import init, { Join, Vault, app_version, code_from_link, invite_from, protocol, state_refusal } from '../wasm/carnet_web.js';
+import init, { Join, Vault, app_version, code_from_link, invite_from, max_sealed, protocol, state_refusal } from '../wasm/carnet_web.js';
 import * as sealed from './sealed';
 import * as db from './db';
 import * as passkey from './passkey';
@@ -76,8 +76,12 @@ export const NOT_ON_SERVER = 'not on the server';
 const FULL = 'This account is full, so new pictures stay on this device for now. Delete some, or move to a bigger plan.';
 /// Whether the server takes a new picture now (`Usage::has_room`).
 const hasRoom = (u: Usage) => u.writable && (u.limit === null || u.notes + u.pictures < u.limit);
-/// Pictures put in here and not yet on the server: `[path, id]`s.
+/// Pictures put in here and not yet on the server: `[path, id]`s, sealed
+/// like the rest (`uploads`).
 const UPLOADS = 'uploads';
+/// The notes the server may not have as they are here (`Vault::unsent`),
+/// sealed: kept so a reload still knows, before the server says.
+const UNSENT = 'unsent';
 /// The name this browser was given, if one was (sealed like the rest):
 /// the browser's own if not.
 const NAME = 'name';
@@ -156,8 +160,12 @@ class Sync {
   code = $state<string | null>(null);
   /// The device that came in by the last code, by id.
   paired = $state<string | null>(null);
-  /// Recovery words just made: shown once, kept nowhere.
+  /// Recovery words just made: shown once, kept nowhere, when the server
+  /// has said it keeps the code.
   words = $state<string | null>(null);
+  /// Recovery words made, the server not yet saying it keeps them: never
+  /// shown before, so words it didn't take aren't written down.
+  wordsWaiting = $state<string | null>(null);
   /// Whether this account is the server's owner's, and its invites and
   /// accounts, once asked for; `null` until they come.
   invites = $state<Invites | null>(null);
@@ -171,6 +179,12 @@ class Sync {
   /// A pairing code from the link this page was opened by (a QR code),
   /// for the pair screen to use.
   linked = $state<string | null>(null);
+  /// Removed from the account, as the server says, with notes or pictures
+  /// here it may not have: why, for the page to say, until this browser
+  /// is forgotten. Nothing is wiped on the server's word alone.
+  removed = $state<string | null>(null);
+  /// Then: how many notes, and pictures, weren't sent.
+  unsentCounts = $state<{ notes: number; pictures: number }>({ notes: 0, pictures: 0 });
 
   private vault: Vault | null = null;
   private join: Join | null = null;
@@ -184,6 +198,8 @@ class Sync {
   /// The passkey a sign-in is using, by its credential id: forgotten in
   /// the passkey manager if the server has no slot for it.
   private signingInWith: Uint8Array<ArrayBuffer> | null = null;
+  /// The notes the server may not have, as last kept (`UNSENT`).
+  private unsent: string[] = [];
 
   async start() {
     try {
@@ -240,6 +256,7 @@ class Sync {
       }
     }
     this.account = this.vault.account();
+    this.unsent = readList(await sealed.get(UNSENT));
     this.refresh();
     this.phase = 'ready';
     await this.resumeUploads();
@@ -248,7 +265,7 @@ class Sync {
 
   /// Pictures put in here before a reload and not yet sent: sent again.
   private async resumeUploads() {
-    const list = ((await db.get<[string, string][]>(UPLOADS)) ?? []).filter(([, id]) => id);
+    const list = (await uploads()).filter(([, id]) => id);
     for (const [path, id] of list) {
       const bytes = await sealed.get(PICTURE + id);
       if (bytes && this.vault) this.vault.upload(path, bytes);
@@ -270,8 +287,7 @@ class Sync {
     if (!id) throw new Error('That picture is over 32 MB, too big to sync.');
     this.flush();
     await sealed.put(PICTURE + id, bytes);
-    const list = (await db.get<[string, string][]>(UPLOADS)) ?? [];
-    await db.set(UPLOADS, [...list, [path, id]]);
+    await setUploads([...(await uploads()), [path, id]]);
     this.pictures.add(path, new Blob([bytes], { type }));
     const depth = folder ? folder.split('/').length : 0;
     return '../'.repeat(depth) + path;
@@ -294,10 +310,15 @@ class Sync {
     ws.onclose = () => {
       if (this.ws !== ws) return;
       this.vault?.disconnected();
+      // Words the server may or may not have kept: never shown.
+      if (this.wordsWaiting) {
+        this.wordsWaiting = null;
+        this.error = 'The connection dropped before the server said it kept the new recovery code. Make one again once online.';
+      }
       if (this.join) {
         this.joining = false;
         this.error ??= "Couldn't reach the server. Check the connection and try again.";
-        this.join = null;
+        this.dropJoin();
         return;
       }
       this.status = navigator.onLine ? 'Offline: trying again' : 'Offline';
@@ -313,6 +334,15 @@ class Sync {
     // keep yet.
     this.waiting = this.vault?.waiting() ?? 0;
     this.picturesWaiting = this.vault?.pictures_waiting() ?? 0;
+    // What the server may not have, kept as it changes: after a reload,
+    // before the server has said what it keeps, this is what knows.
+    if (this.vault && !this.removed) {
+      const now = this.vault.unsent(this.unsent);
+      if (now.join() !== this.unsent.join()) {
+        this.unsent = now;
+        void sealed.put(UNSENT, new TextEncoder().encode(JSON.stringify(now)));
+      }
+    }
   }
 
   private frame(bytes: Uint8Array) {
@@ -324,7 +354,7 @@ class Sync {
       if (failed) {
         this.error = sentence(failed);
         this.joining = false;
-        this.join = null;
+        this.dropJoin();
         this.ws?.close();
         return;
       }
@@ -332,7 +362,7 @@ class Sync {
       const challenge = this.join.challenge();
       if (me && challenge) {
         const fresh = this.join.is_new_account();
-        this.join = null;
+        this.dropJoin();
         void sealed.put(IDENTITY, me);
         this.vault = Vault.open(location.origin, me, deviceName(), new Uint8Array());
         this.account = this.vault.account();
@@ -399,7 +429,8 @@ class Sync {
   }
 
   /// A picture put or fetched over HTTP, by the short-lived link the
-  /// server gave (its sealed bytes only: they open only here).
+  /// server gave (its sealed bytes only: they open only here). A fetch
+  /// is read as it comes, and stopped past what a picture may be.
   private async transfer(t: Transfer) {
     let bytes: Uint8Array | undefined;
     let error: string | undefined;
@@ -408,7 +439,7 @@ class Sync {
         ? await fetch(t.url, { method: 'PUT', body: t.body, headers: { 'Content-Type': 'application/octet-stream' } })
         : await fetch(t.url, { cache: 'no-store' });
       if (!res.ok) error = `HTTP ${res.status}`;
-      else if (!t.put) bytes = new Uint8Array(await res.arrayBuffer());
+      else if (!t.put) bytes = await capped(res, max_sealed());
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -452,6 +483,9 @@ class Sync {
     } else if ('pairFailed' in s) {
       this.code = null;
       this.error = sentence(`Pairing ended: ${s.pairFailed}`);
+    } else if ('recoverySet' in s) {
+      this.words = this.wordsWaiting;
+      this.wordsWaiting = null;
     } else if ('rekeyed' in s) {
       // A device was removed: the new key kept at once, or a reload
       // would lose what it opens.
@@ -460,7 +494,7 @@ class Sync {
       if (this.wantDevices) this.listDevices();
     } else if ('uploaded' in s) {
       const id = s.uploaded;
-      void db.get<[string, string][]>(UPLOADS).then((list) => db.set(UPLOADS, (list ?? []).filter(([, i]) => i !== id)));
+      void uploads().then((list) => setUploads(list.filter(([, i]) => i !== id)));
     } else if ('outdated' in s) {
       // Too old, this app or the server: nothing syncs until one is
       // updated. Or soon too old: it goes on, and Settings says so.
@@ -471,9 +505,10 @@ class Sync {
         ? 'The account is deleted, with everything the server kept of it.'
         : s.account
           ? 'This account isn’t on the server any more: it was deleted, or removed by the server’s owner.'
-          : 'This browser was removed from the account on another device.';
+          : 'This browser was removed from the account.';
+      const deleting = this.deleting;
       this.deleting = false;
-      void this.leave(why);
+      void this.turnedAway(why, deleting);
     }
   }
 
@@ -495,7 +530,7 @@ class Sync {
       if (!this.vault) return;
       const named = new Set(this.vault.picture_ids());
       // Not yet in the vault, still kept: those on their way.
-      for (const [, id] of (await db.get<[string, string][]>(UPLOADS)) ?? []) named.add(id);
+      for (const [, id] of await uploads()) named.add(id);
       const gone = (await db.keys()).filter((k) => k.startsWith(PICTURE) && !named.has(k.slice(PICTURE.length)));
       if (gone.length) await db.delMany(gone);
     }, 10_000);
@@ -521,6 +556,7 @@ class Sync {
   /// when it's done.
   setPassword(email: string, password: string): boolean {
     if (!this.vault) return false;
+    this.error = null;
     try {
       this.vault.set_password(email, password);
     } catch (e) {
@@ -558,7 +594,11 @@ class Sync {
     try {
       const have = (this.passkeys ?? []).map((p) => passkey.fromHex(p.credential)).filter((c) => c.length);
       const made = await passkey.make(new Uint8Array(this.vault.account_id()), `Carnet notes (${this.account})`, have);
-      this.vault.add_passkey(`Passkey from ${deviceName()}`, made.credential, made.prf);
+      try {
+        this.vault.add_passkey(`Passkey from ${deviceName()}`, made.credential, made.prf);
+      } finally {
+        made.prf.fill(0);
+      }
       this.flush();
     } catch (e) {
       this.addingPasskey = false;
@@ -594,6 +634,8 @@ class Sync {
     }
     this.signingInWith = used.credential;
     this.begin(() => Join.passkey(location.origin, used.prf));
+    // The wasm has its own copy, and wipes it once used.
+    used.prf.fill(0);
   }
 
   /// Makes a new account by an invite: this browser its first device.
@@ -615,6 +657,7 @@ class Sync {
 
   private begin(make: () => Join) {
     this.error = null;
+    this.dropJoin();
     try {
       this.join = make();
     } catch (e) {
@@ -756,10 +799,17 @@ class Sync {
     this.code = null;
   }
 
-  /// A new recovery code: its words in `words`, until `wordsDone`.
+  /// Whether the account has a recovery code a new one would replace.
+  hasRecovery(): boolean {
+    return this.vault?.has_recovery() ?? false;
+  }
+
+  /// A new recovery code: its words in `words` once the server keeps it,
+  /// until `wordsDone`.
   makeRecovery() {
     this.error = null;
-    this.words = this.vault?.make_recovery() ?? null;
+    this.words = null;
+    this.wordsWaiting = this.vault?.make_recovery() ?? null;
     this.flush();
   }
 
@@ -828,9 +878,12 @@ class Sync {
   async keepNow() {
     clearTimeout(this.saveTimer);
     if (!this.vault) return;
+    // Both taken now: the vault may be gone by the time the first is kept.
+    const state = this.vault.save();
+    const me = this.vault.identity();
     try {
-      await sealed.put(STATE, this.vault.save());
-      await sealed.put(IDENTITY, this.vault.identity());
+      await sealed.put(STATE, state);
+      await sealed.put(IDENTITY, me);
     } catch (e) {
       // A newer Carnet, in another tab, took the database on.
       if (e instanceof db.Newer) this.halt(e.message);
@@ -847,7 +900,7 @@ class Sync {
     ws?.close();
     clearTimeout(this.saveTimer);
     clearTimeout(this.pruneTimer);
-    this.vault = null;
+    this.dropVault();
     this.error = why;
     this.phase = 'loading';
     void navigator.serviceWorker?.getRegistration().then((r) => r?.update()).catch(() => {});
@@ -888,16 +941,95 @@ class Sync {
     await this.leave(null);
   }
 
-  /// Everything kept here dropped, and back to the start.
+  /// Removed from the account, as the server says (`Denied`, which it
+  /// sends before any login, so it could say it of anyone): with nothing
+  /// here it may not have, everything kept here goes ([`leave`]). With
+  /// notes or pictures not sent, nothing is wiped on its word alone: the
+  /// page says so, offers them to download, then forgets this browser
+  /// when asked ([`forgetRemoved`]).
+  private async turnedAway(why: string, deleting: boolean) {
+    const v = this.vault;
+    if (deleting || !v) return this.leave(why);
+    const pictures = await uploads();
+    if (this.vault !== v) return;
+    const notes = v.unsent(this.unsent);
+    if (!notes.length && !pictures.length && !v.pictures_waiting()) return this.leave(why);
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+    this.unsent = notes;
+    await this.keepNow();
+    this.unsentCounts = { notes: v.unsent_notes_count(notes), pictures: pictures.length };
+    this.removed = why;
+  }
+
+  /// The notes and pictures not sent, as one ZIP file, downloaded.
+  async downloadUnsent() {
+    const v = this.vault;
+    if (!v) return;
+    const paths: string[] = [];
+    const files: Uint8Array[] = [];
+    for (const [path, id] of await uploads()) {
+      const bytes = await sealed.get(PICTURE + id);
+      if (bytes) {
+        paths.push(path);
+        files.push(bytes);
+      }
+    }
+    if (this.vault !== v) return;
+    const zip = v.unsent_zip(this.unsent, paths, files);
+    const url = URL.createObjectURL(new Blob([new Uint8Array(zip)], { type: 'application/zip' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'Carnet notes not sent.zip';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
+  /// Removed, and what wasn't sent dealt with: this browser forgotten.
+  forgetRemoved() {
+    void this.leave(this.removed);
+  }
+
+  /// The vault let go of, its keys wiped from the wasm's memory.
+  private dropVault() {
+    const v = this.vault;
+    this.vault = null;
+    v?.free();
+  }
+
+  /// The joining let go of, likewise.
+  private dropJoin() {
+    const j = this.join;
+    this.join = null;
+    j?.free();
+  }
+
+  /// Everything kept here dropped, and back to the start: the database
+  /// deleted whole, and the page's own settings in this browser.
   private async leave(why: string | null) {
     const ws = this.ws;
     this.ws = null;
     ws?.close();
     clearTimeout(this.saveTimer);
     clearTimeout(this.pruneTimer);
-    this.vault = null;
-    await db.clear();
+    this.dropVault();
+    this.dropJoin();
+    try {
+      await db.destroy();
+    } catch {
+      // Not deleted (the browser refused): every record cleared instead.
+      await db.clear().catch(() => {});
+    }
     sealed.drop();
+    try {
+      for (const k of Object.keys(localStorage)) if (k.startsWith('carnet.')) localStorage.removeItem(k);
+    } catch {
+      // No storage to clear: a private window, storage refused.
+    }
+    this.unsent = [];
+    this.removed = null;
+    this.unsentCounts = { notes: 0, pictures: 0 };
     this.pictures.clear();
     this.notes = [];
     this.folders = [];
@@ -908,6 +1040,7 @@ class Sync {
     this.invite = null;
     this.code = null;
     this.words = null;
+    this.wordsWaiting = null;
     this.usage = null;
     this.readOnly = false;
     this.status = '';
@@ -917,6 +1050,67 @@ class Sync {
 }
 
 export const sync = new Sync();
+
+/// A list kept as JSON, sealed; none for one not kept, or not a list.
+function readList(kept: Uint8Array | null): string[] {
+  try {
+    const v = kept ? JSON.parse(new TextDecoder().decode(kept)) : [];
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/// The pictures put in here and not yet on the server (`UPLOADS`). Kept
+/// unsealed by an earlier Carnet: read once, and sealed.
+async function uploads(): Promise<[string, string][]> {
+  const kept = await sealed.get(UPLOADS);
+  if (kept) {
+    try {
+      return JSON.parse(new TextDecoder().decode(kept)) as [string, string][];
+    } catch {
+      return [];
+    }
+  }
+  const before = await db.get<unknown>(UPLOADS);
+  if (!Array.isArray(before)) return [];
+  const list = before.filter((e): e is [string, string] => Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'string');
+  await setUploads(list);
+  return list;
+}
+
+const setUploads = (list: [string, string][]) => sealed.put(UPLOADS, new TextEncoder().encode(JSON.stringify(list)));
+
+/// An answer's body, read as it comes, refused past `most` bytes: by its
+/// stated length before any is read, else as soon as it goes past.
+async function capped(res: Response, most: number): Promise<Uint8Array> {
+  const said = Number(res.headers.get('Content-Length'));
+  if (said > most) {
+    void res.body?.cancel();
+    throw new Error('an answer past what a picture may be');
+  }
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
+  const reader = res.body.getReader();
+  const parts: Uint8Array[] = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    got += value.length;
+    if (got > most) {
+      void reader.cancel();
+      throw new Error('an answer past what a picture may be');
+    }
+    parts.push(value);
+  }
+  const out = new Uint8Array(got);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
 
 /// What this browser is called: the name it was given, or its own.
 async function myName(): Promise<string> {

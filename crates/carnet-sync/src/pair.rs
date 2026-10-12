@@ -235,13 +235,20 @@ impl Opener {
                 let sealed = seal_parts(&k.to_new, &[&ring.to_bytes(), account], rng);
                 OpenerOut::Paired(vec![approve, step(STEP_KEY, &sealed)], device.clone())
             }
-            (_, Carnet::PairClose { reason }) => OpenerOut::Failed(reason.clone(), Vec::new()),
+            (_, Carnet::PairClose { reason }) => OpenerOut::Failed(theirs(reason), Vec::new()),
             (state, _) => {
                 self.state = state;
                 OpenerOut::Nothing
             }
         }
     }
+}
+
+/// Why the server (or a device through it) says a joining ended, shown
+/// as its words: but for [`NO_SLOT`], which the apps know and say
+/// themselves.
+fn theirs(reason: &str) -> String {
+    if reason == NO_SLOT { reason.into() } else { crate::session::server_says(reason) }
 }
 
 /// The pairing closed, at the server too, for `reason`.
@@ -325,8 +332,8 @@ impl Joiner {
                     _ => Joining::Failed("the vault key did not open".into()),
                 };
             }
-            Carnet::PairClose { reason } => self.state = Joining::Failed(reason),
-            Carnet::Denied { reason, .. } => self.state = Joining::Failed(reason),
+            Carnet::PairClose { reason } => self.state = Joining::Failed(theirs(&reason)),
+            Carnet::Denied { reason, .. } => self.state = Joining::Failed(theirs(&reason)),
             _ => {}
         }
     }
@@ -401,7 +408,7 @@ impl Recoverer {
                     self.state = Joining::In(Admitted { account, ring, challenge: bytes.to_vec() });
                 }
             }
-            Carnet::Denied { reason, .. } => self.state = Joining::Failed(reason),
+            Carnet::Denied { reason, .. } => self.state = Joining::Failed(theirs(&reason)),
             _ => {}
         }
     }
@@ -413,7 +420,8 @@ impl Recoverer {
 pub struct PasswordJoiner {
     origin: String,
     id: String,
-    password: String,
+    /// Wiped as it's dropped.
+    password: zeroize::Zeroizing<String>,
     device: Vec<u8>,
     key: DeviceKey,
     /// The first challenge, kept for the recovery that follows.
@@ -441,7 +449,7 @@ impl PasswordJoiner {
         PasswordJoiner {
             origin: origin.into(),
             id: crate::password::id(email),
-            password: password.into(),
+            password: zeroize::Zeroizing::new(password.into()),
             device,
             key,
             challenge: None,
@@ -492,7 +500,7 @@ impl PasswordJoiner {
                     Err(e) => self.state = Joining::Failed(e),
                 }
             }
-            Carnet::Denied { reason, .. } => self.state = Joining::Failed(reason),
+            Carnet::Denied { reason, .. } => self.state = Joining::Failed(theirs(&reason)),
             _ => {}
         }
     }
@@ -550,7 +558,7 @@ impl Enroller {
                     self.state = Joining::In(Admitted { account, ring: Ring::new(self.vault.clone()), challenge: bytes.to_vec() });
                 }
             }
-            Carnet::Denied { reason, .. } => self.state = Joining::Failed(reason),
+            Carnet::Denied { reason, .. } => self.state = Joining::Failed(theirs(&reason)),
             _ => {}
         }
     }

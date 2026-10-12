@@ -94,6 +94,12 @@ fn open(key: &[u8; 32], iv: [u8; 12], aad: &[u8], sealed: &[u8]) -> Result<Vec<u
 #[derive(Clone, PartialEq, Eq)]
 pub struct VaultKey([u8; 32]);
 
+impl Drop for VaultKey {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
 impl fmt::Debug for VaultKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("VaultKey(…)")
@@ -219,6 +225,12 @@ impl Ring {
 /// nothing more to keep.
 #[derive(Clone)]
 pub struct BoxSecret([u8; 32]);
+
+impl Drop for BoxSecret {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
 
 impl fmt::Debug for BoxSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -507,6 +519,12 @@ pub fn recovery_message(origin: &str, recovery: &[u8; 32], device: &[u8], device
 /// gone. No slow hash: 128 random bits cannot be guessed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RecoveryCode([u8; 16]);
+
+impl Drop for RecoveryCode {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
 
 impl fmt::Debug for RecoveryCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

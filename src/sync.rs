@@ -13,8 +13,10 @@
 //! - `sync.txt` beside the settings: the server, the account, this
 //!   device's id, the feed's cursor. Nothing secret.
 //! - The OS's keychain (Keychain, Credential Manager, Secret Service):
-//!   this device's signing key and the vault key. Where there is none, a
-//!   file only the user can read, beside `sync.txt`.
+//!   this device's signing key and the vault key. On Linux, where a
+//!   desktop may run no Secret Service, a file only the user can read,
+//!   beside `sync.txt`, and Settings → Sync says so. On macOS and Windows
+//!   a keychain that won't keep them is an error, never a file.
 
 use std::collections::HashMap;
 use std::io;
@@ -41,17 +43,28 @@ pub trait Secrets: Send + std::marker::Sync {
     fn get(&self, name: &str) -> Option<Vec<u8>>;
     fn set(&self, name: &str, bytes: &[u8]) -> io::Result<()>;
     fn delete(&self, name: &str);
+    /// Whether the keys were last read from, or written to, a file rather
+    /// than a keychain.
+    fn in_file(&self) -> bool {
+        false
+    }
 }
 
-/// The OS's keychain, or, where there is none to use, a file in `dir`
-/// only the user can read.
+/// Whether a key may be kept in a file when the keychain won't take it:
+/// only on Linux, where a desktop may run no Secret Service. macOS and
+/// Windows always have one.
+const FILE_FALLBACK: bool = cfg!(target_os = "linux");
+
+/// The OS's keychain, or, on Linux where there is none to use, a file in
+/// `dir` only the user can read.
 pub struct Keychain {
     dir: PathBuf,
+    in_file: std::sync::atomic::AtomicBool,
 }
 
 impl Keychain {
     pub fn new(dir: PathBuf) -> Self {
-        Keychain { dir }
+        Keychain { dir, in_file: Default::default() }
     }
 
     fn file(&self, name: &str) -> PathBuf {
@@ -68,17 +81,45 @@ impl Keychain {
 }
 
 impl Secrets for Keychain {
+    /// The file first: a write to the keychain removes it, so a file
+    /// there is the newest copy, and an older one left in the keychain
+    /// can't hide it. On macOS and Windows a file is only ever an earlier
+    /// Carnet's, and goes into the keychain as it's read.
     fn get(&self, name: &str) -> Option<Vec<u8>> {
-        self.entry(name).and_then(|e| e.get_secret().ok()).or_else(|| std::fs::read(self.file(name)).ok())
+        let file = self.file(name);
+        if let Ok(b) = std::fs::read(&file) {
+            let moved = !FILE_FALLBACK && self.entry(name).is_some_and(|e| e.set_secret(&b).is_ok()) && std::fs::remove_file(&file).is_ok();
+            self.in_file.store(!moved, std::sync::atomic::Ordering::Relaxed);
+            return Some(b);
+        }
+        self.in_file.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.entry(name).and_then(|e| e.get_secret().ok())
     }
 
     fn set(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
-        if self.entry(name).is_some_and(|e| e.set_secret(bytes).is_ok()) {
-            let _ = std::fs::remove_file(self.file(name));
-            return Ok(());
+        let kept = match self.entry(name) {
+            Some(e) => e.set_secret(bytes).map_err(|e| e.to_string()),
+            None => Err("there is no keychain to use".into()),
+        };
+        let file = self.file(name);
+        match kept {
+            Ok(()) => {
+                // An older copy left in a file would be read first.
+                match std::fs::remove_file(&file) {
+                    Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                    _ => {}
+                }
+                self.in_file.store(false, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+            Err(_) if FILE_FALLBACK => {
+                std::fs::create_dir_all(&self.dir)?;
+                write_private(&file, bytes)?;
+                self.in_file.store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(format!("the keychain wouldn't keep them ({e})"))),
         }
-        std::fs::create_dir_all(&self.dir)?;
-        write_private(&self.file(name), bytes)
     }
 
     fn delete(&self, name: &str) {
@@ -86,6 +127,11 @@ impl Secrets for Keychain {
             let _ = e.delete_credential();
         }
         let _ = std::fs::remove_file(self.file(name));
+        self.in_file.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn in_file(&self) -> bool {
+        self.in_file.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -226,6 +272,10 @@ pub fn device_name() -> String {
 /// The keychain entry's name.
 const SECRET: &str = "sync";
 
+/// Said in Settings → Sync while the keys are in a file (Linux with no
+/// Secret Service).
+pub const KEYS_IN_FILE: &str = "This computer has no keychain running, so sync's keys are kept in a file only you can read.";
+
 /// How a device comes in.
 #[derive(Clone, Debug, PartialEq)]
 pub enum How {
@@ -331,8 +381,12 @@ pub struct Sync {
     pub error: Option<String>,
     /// A pairing code being shown.
     pub code: Option<String>,
-    /// Recovery words just made, shown once.
+    /// Recovery words just made, shown once, when the server has said it
+    /// keeps them.
     pub words: Option<String>,
+    /// Recovery words made, the server not yet saying it keeps them: shown
+    /// only then, so words it never took are never written down.
+    words_waiting: Option<String>,
     /// A device just let in by pairing, for a notice.
     pub paired: Option<String>,
     /// The last device let in by a code shown here, for Settings to say
@@ -448,6 +502,7 @@ impl Sync {
             error: None,
             code: None,
             words: None,
+            words_waiting: None,
             paired: None,
             joined: None,
             devices: None,
@@ -555,6 +610,12 @@ impl Sync {
                 );
             }
         }
+    }
+
+    /// Whether this device's keys are in a file, not a keychain: Linux
+    /// with no Secret Service (Settings → Sync says so).
+    pub fn keys_in_file(&self) -> bool {
+        self.is_on() && self.secrets.in_file()
     }
 
     pub fn is_on(&self) -> bool {
@@ -934,7 +995,8 @@ impl Sync {
     }
 
     /// Makes a recovery code: the server keeps the vault key under it, and
-    /// its words are shown once, in [`Sync::words`], never kept here.
+    /// once it says so its words are shown once, in [`Sync::words`], never
+    /// kept here. It replaces any code before.
     pub fn make_recovery(&mut self) {
         if let Phase::On { session, link, .. } = &mut self.phase
             && session.is_ready()
@@ -942,7 +1004,22 @@ impl Sync {
             let code = RecoveryCode::generate(&mut OsRandom);
             session.set_recovery(&code, &mut OsRandom);
             flush(session, link.as_ref());
-            self.words = Some(code.words());
+            self.words = None;
+            self.words_waiting = Some(code.words());
+        }
+    }
+
+    /// A recovery code made, the server not yet saying it keeps it.
+    pub fn making_recovery(&self) -> bool {
+        self.words_waiting.is_some()
+    }
+
+    /// Whether the account has a recovery code, as far as is known: one
+    /// made would replace it. Not known yet: taken to.
+    pub fn has_recovery(&self) -> bool {
+        match &self.phase {
+            Phase::On { session, .. } => session.has_recovery() != Some(false),
+            _ => false,
         }
     }
 
@@ -1034,6 +1111,11 @@ impl Sync {
                             NetEvent::Disconnected(why) => {
                                 session.disconnected();
                                 self.status = Status::Offline(why);
+                                // Words the server may or may not have
+                                // kept: never shown, and said so.
+                                if self.words_waiting.take().is_some() {
+                                    self.error = Some("The connection dropped before the server said it kept the new recovery code. Make one again once online.".into());
+                                }
                             }
                         }
                     }
@@ -1122,7 +1204,7 @@ impl Sync {
                             {
                                 p.held_back();
                             }
-                            self.error = Some(sentence(&why));
+                            self.error = Some(sentence(&session::refusal_words(&why)));
                         }
                         Event::Invites { owner, invites, accounts } => {
                             self.invites = Some(Invites { owner, waiting: invites, accounts });
@@ -1151,7 +1233,9 @@ impl Sync {
                             self.code = None;
                             self.error = Some(format!("Pairing ended: {why}"));
                         }
-                        Event::RecoverySet | Event::Unreadable(_) => {}
+                        // The server keeps the code: its words shown now.
+                        Event::RecoverySet => self.words = self.words_waiting.take().or(self.words.take()),
+                        Event::Unreadable(_) => {}
                         Event::Password { allowed, id, only } => {
                             self.password = Some((allowed, id));
                             self.password_email = only;
@@ -1324,7 +1408,7 @@ impl Sync {
                 // Pictures to put or fetch: over HTTP, by their links.
                 if let Some(http) = &self.http {
                     for t in session.take_transfers() {
-                        http.send(t);
+                        http.send_for(&config.origin, t);
                     }
                 }
                 if session.cursor() != self.saved_cursor {

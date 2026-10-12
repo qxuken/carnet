@@ -16,6 +16,8 @@
   let removingAccount = $state<string | null>(null);
   /// The passkey whose removal is asked to be confirmed.
   let removingPasskey = $state<string | null>(null);
+  /// Making a recovery code asked once, where it would replace one.
+  let replacingWords = $state(false);
   /// The most passkeys an account has (`passkey::MAX`).
   const MAX_PASSKEYS = 20;
   /// This browser's name, as typed while it's being changed.
@@ -211,10 +213,21 @@
         </div>
         {#if sync.words}
           <button class="pill primary" onclick={() => sync.wordsDone()}>Done</button>
-        {:else}
-          <button class="pill" disabled={!online} onclick={() => sync.makeRecovery()}>Make one</button>
+        {:else if sync.wordsWaiting}
+          <button class="pill" disabled>Making one…</button>
+        {:else if !replacingWords}
+          <button class="pill" disabled={!online} onclick={() => (sync.hasRecovery() ? (replacingWords = true) : sync.makeRecovery())}>Make one</button>
         {/if}
       </div>
+      {#if replacingWords}
+        <div class="confirm">
+          <p>Replace the recovery code? The words you have now will stop working.</p>
+          <div class="buttons">
+            <button class="pill" onclick={() => (replacingWords = false)}>Cancel</button>
+            <button class="pill danger" disabled={!online} onclick={() => { sync.makeRecovery(); replacingWords = false; }}>Yes, replace</button>
+          </div>
+        </div>
+      {/if}
       {#if sync.words}
         <div class="words">
           <ol aria-label="Recovery words">
@@ -321,7 +334,7 @@
             <!-- An eye inside its right end shows the letters, or hides them. -->
             <span class="pw">
               <!-- svelte-ignore a11y_autofocus -->
-              <input bind:value={pw.password} type={showPw ? 'text' : 'password'} autocomplete="new-password" placeholder="8 letters or more" aria-label="New password" autofocus={!!sync.password.only} />
+              <input bind:value={pw.password} type={showPw ? 'text' : 'password'} autocomplete="new-password" placeholder="10 letters or more" aria-label="New password" autofocus={!!sync.password.only} />
               <button type="button" class="eye" onclick={() => (showPw = !showPw)} aria-label={showPw ? 'Hide password' : 'Show password'} title={showPw ? 'Hide password' : 'Show password'}>
                 <Icon name={showPw ? 'eye-off' : 'eye'} size={18} />
               </button>

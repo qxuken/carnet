@@ -985,3 +985,50 @@ fn ten_thousand_notes_state() {
         t.elapsed()
     );
 }
+
+/// What the browser hasn't sent is known, even after a reload, when this
+/// session knows nothing yet: what the page kept says, until the server
+/// says it keeps it. And it comes out as Markdown files, by folder and
+/// title, for a browser removed before it could send them.
+#[test]
+fn what_is_not_sent_is_known_across_a_reload_and_handed_over() {
+    let mut rng = Seeded(9);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let k = Key::random();
+    let ks = k.to_string();
+    desk.docs.insert(ks.clone(), NoteDoc::new(7));
+    desk.docs[&ks].record("# Plan\n\nA walk.\n", Origin::Save);
+    let v = desk.docs.entry(vault::ROOM.to_string()).or_insert_with(|| NoteDoc::new(7));
+    v.set_place(k, &Place { folder: "Home".into(), name: "Plan".into(), pinned: false, trashed: false });
+    for room in [vault::ROOM.to_string(), ks.clone()] {
+        desk.session.saved(&room, &mut DeskDocs(&mut desk.docs), &mut rng);
+    }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.unsent(&[]).is_empty(), "all sent");
+
+    // Typed offline: waiting, and its file.
+    web.session.disconnected();
+    let (_, base) = web.source(&ks).unwrap();
+    web.edit(&ks, &base, "# Plan\n\nA walk. Water.\n", &mut rng).unwrap();
+    let unsent = web.unsent(&[]);
+    assert_eq!(unsent, std::slice::from_ref(&ks));
+    assert_eq!(web.note_files(&unsent), [("Home/Plan.md".to_string(), "# Plan\n\nA walk. Water.\n".to_string())]);
+    // The library waiting too: every note.
+    assert_eq!(web.note_files(&[vault::ROOM.to_string()]).len(), 1);
+
+    // Reloaded: this session knows nothing yet, but the page's list does.
+    let again = Notes::open(ORIGIN, web.me.clone(), "Phone", &web.save(), 99).unwrap();
+    assert!(again.unsent(&[]).is_empty(), "nothing known by the session alone");
+    assert_eq!(again.unsent(&unsent), unsent);
+    // Back online and sent: kept, so no longer unsent.
+    let mut web = again;
+    web.session.connected();
+    for o in hub.connect(2, &mut rng) {
+        if let Out::Send(_, b) = o {
+            web.receive(&b, &mut rng);
+        }
+    }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(desk.docs[&ks].text(), "# Plan\n\nA walk. Water.\n");
+    assert!(web.unsent(&unsent).is_empty(), "the server keeps it now");
+}

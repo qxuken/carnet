@@ -84,3 +84,24 @@ export const delMany = (keys: string[]) =>
     for (const k of keys) s.delete(k);
   });
 export const clear = () => run('readwrite', (s) => s.clear());
+
+/// The whole database deleted, its files with it, not its records only
+/// marked gone. This page's connection is closed first; another tab's
+/// closes when asked (its `onversionchange`), and the deletion waits for
+/// it.
+export async function destroy(): Promise<void> {
+  const was = opened;
+  opened = null;
+  if (was) {
+    try {
+      (await was).close();
+    } catch {
+      // Never opened: nothing to close.
+    }
+  }
+  await new Promise<void>((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(NAME);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}

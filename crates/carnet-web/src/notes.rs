@@ -393,7 +393,7 @@ impl Notes {
                     if why == carnet_sync::session::FULL {
                         self.offered.clear();
                     }
-                    self.errors.push(why);
+                    self.errors.push(carnet_sync::session::refusal_words(&why));
                 }
                 Event::Usage(u) => {
                     // Room again (a plan raised): pictures held back go.
@@ -510,6 +510,49 @@ impl Notes {
                 todos: s.todos,
                 modified: s.modified,
             });
+        }
+        out
+    }
+
+    /// The rooms the server may not have as they are here: those waiting
+    /// to be sent, and those of `before` (waiting when this browser last
+    /// looked, perhaps before a reload, when this session knew nothing
+    /// yet) the server hasn't said it keeps since.
+    pub fn unsent(&self, before: &[String]) -> Vec<String> {
+        let mut rooms: Vec<String> = self.session.waiting_rooms().map(str::to_string).collect();
+        for room in before {
+            let kept = self.rooms.docs.get(room).is_none_or(|d| self.session.is_kept(room, d));
+            if !kept && !rooms.contains(room) {
+                rooms.push(room.clone());
+            }
+        }
+        rooms.sort();
+        rooms
+    }
+
+    /// The notes of `rooms` as Markdown files, by where the desktop keeps
+    /// them (`folder/Title.md`), each name once; every note, where the
+    /// library is among them (a note moved or renamed, not yet sent).
+    pub fn note_files(&self, rooms: &[String]) -> Vec<(String, String)> {
+        let all = rooms.iter().any(|r| r == vault::ROOM);
+        let mut taken = HashSet::new();
+        let mut out = Vec::new();
+        for n in self.notes() {
+            if !all && !rooms.contains(&n.key) {
+                continue;
+            }
+            let Some(d) = self.rooms.docs.get(&n.key) else { continue };
+            let folder = if n.trashed { "Deleted".to_string() } else { n.folder.clone() };
+            let stem = name::slug(&n.title);
+            let path = (1..)
+                .map(|i| {
+                    let file = if i == 1 { format!("{stem}.md") } else { format!("{stem} {i}.md") };
+                    if folder.is_empty() { file } else { format!("{folder}/{file}") }
+                })
+                .find(|p| !taken.contains(&p.to_lowercase()))
+                .expect("a free name");
+            taken.insert(path.to_lowercase());
+            out.push((path, d.text()));
         }
         out
     }

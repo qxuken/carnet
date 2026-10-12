@@ -1,7 +1,9 @@
 //! Any line, and any edit the page makes to one at any caret: styling,
 //! colour, links, cutting, typing, splitting, joining. Nothing may panic.
 //! Carets are where the page puts them: between letters, inside the marks
-//! of the letter before (`Visible::at`).
+//! of the letter before (`Visible::at`). Nor may a line be slow: reading
+//! one takes time about in proportion to its length, so libFuzzer's `-timeout` (and `-max_len`,
+//! 4 KB unless raised) finds one that is not.
 #![no_main]
 
 use carnet_core::inline::{self, Kind, Visible};

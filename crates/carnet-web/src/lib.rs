@@ -4,6 +4,7 @@
 
 pub mod editor;
 pub mod notes;
+pub mod zip;
 
 use carnet_core::{inline, page};
 use carnet_sync::crypto::{DeviceKey, Random, RecoveryCode};
@@ -95,14 +96,16 @@ impl Join {
     }
 
     /// By a passkey: its PRF output, as the browser gave it for
-    /// [`passkey_salt`], at the server at `origin`.
-    pub fn passkey(origin: &str, prf: &[u8]) -> Result<Join, JsError> {
+    /// [`passkey_salt`], at the server at `origin`. Taken whole, so it is
+    /// wiped here once used, not left in memory freed.
+    pub fn passkey(origin: &str, prf: Vec<u8>) -> Result<Join, JsError> {
+        let prf = zeroize::Zeroizing::new(prf);
         if prf.len() != carnet_sync::passkey::PRF_LEN {
             return Err(JsError::new("That passkey didn't give what Carnet needs to unlock your notes"));
         }
         let device = WebRandom.bytes::<8>().to_vec();
         let key = DeviceKey::generate(&mut WebRandom);
-        Ok(Join { way: Way::Passkey(Recoverer::passkey(origin, prf, device.clone(), key.clone())), device, key })
+        Ok(Join { way: Way::Passkey(Recoverer::passkey(origin, &prf, device.clone(), key.clone())), device, key })
     }
 
     pub fn receive(&mut self, frame: &[u8]) {
@@ -178,6 +181,13 @@ const PASSKEY_GONE: &str = "That passkey doesn't open an account here any more: 
 #[wasm_bindgen]
 pub fn passkey_salt() -> Vec<u8> {
     carnet_sync::passkey::salt().to_vec()
+}
+
+/// The most a picture's sealed bytes may be: the largest picture
+/// (`MAX_BLOB`), sealed. A fetch stops past it.
+#[wasm_bindgen]
+pub fn max_sealed() -> f64 {
+    carnet_sync::crypto::sealed_len(carnet_sync::crypto::MAX_BLOB) as f64
 }
 
 /// The protocol this build speaks (`compat`): what the socket's address
@@ -371,6 +381,31 @@ impl Vault {
 
     pub fn folders(&self) -> Vec<String> {
         self.notes.folders()
+    }
+
+    /// The notes the server may not have as they are here: what's waiting
+    /// to be sent, and of `before` (this list as the page kept it last,
+    /// before a reload, say) what the server hasn't said it keeps since.
+    /// For the page to keep, so a reload still knows.
+    pub fn unsent(&self, before: Vec<String>) -> Vec<String> {
+        self.notes.unsent(&before)
+    }
+
+    /// How many notes [`Vault::unsent_zip`] holds for `rooms`.
+    pub fn unsent_notes_count(&self, rooms: Vec<String>) -> u32 {
+        self.notes.note_files(&rooms).len() as u32
+    }
+
+    /// The notes of `rooms` (from [`Vault::unsent`]) as Markdown files, and
+    /// the pictures given (their paths, and bytes in the same order), as
+    /// one ZIP file: what a browser removed from its account hands over of
+    /// what it hadn't sent.
+    pub fn unsent_zip(&self, rooms: Vec<String>, picture_paths: Vec<String>, pictures: js_sys::Array) -> Vec<u8> {
+        let mut files: Vec<(String, Vec<u8>)> = self.notes.note_files(&rooms).into_iter().map(|(p, t)| (p, t.into_bytes())).collect();
+        for (path, bytes) in picture_paths.into_iter().zip(pictures.iter()) {
+            files.push((path, js_sys::Uint8Array::new(&bytes).to_vec()));
+        }
+        crate::zip::zip(&files)
     }
 
     pub fn html(&self, key: &str) -> String {
@@ -576,8 +611,9 @@ impl Vault {
     /// A passkey made in this browser added to the account: its name, its
     /// credential id and its PRF output, as the browser gave them. Said
     /// when kept (`passkeySet`), or refused.
-    pub fn add_passkey(&mut self, name: &str, credential: &[u8], prf: &[u8]) -> Result<(), JsError> {
-        self.notes.add_passkey(name, credential, prf, &mut WebRandom).map_err(|e| JsError::new(&e))
+    pub fn add_passkey(&mut self, name: &str, credential: &[u8], prf: Vec<u8>) -> Result<(), JsError> {
+        let prf = zeroize::Zeroizing::new(prf);
+        self.notes.add_passkey(name, credential, &prf, &mut WebRandom).map_err(|e| JsError::new(&e))
     }
 
     /// The passkey (its id in hex) taken away from the account.
@@ -648,7 +684,14 @@ impl Vault {
         self.notes.pair_cancel();
     }
 
-    /// A new recovery code: its twelve words, to show once.
+    /// Whether the account has a recovery code, by the last list of
+    /// devices; not known yet (no list come): taken to.
+    pub fn has_recovery(&self) -> bool {
+        self.notes.session.has_recovery() != Some(false)
+    }
+
+    /// A new recovery code: its twelve words, to show once the server says
+    /// it keeps it (`recoverySet`).
     pub fn make_recovery(&mut self) -> Option<String> {
         self.notes.make_recovery(&mut WebRandom)
     }
