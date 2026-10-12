@@ -574,17 +574,21 @@ pub fn shortcut(text: &str) -> Option<Kind> {
     }
     match text {
         "---" | "***" | "___" => Some(Kind::Divider),
-        "/table" | "/table " => Some(Kind::Table(Table::new(3, 3))),
         _ => None,
     }
 }
 
 /// What a line opens when Enter is pressed at its end: a code block for
 /// `` ``` `` (a language after it kept on the fence, `` ```rust ``) or
-/// `/code`. Not as it is typed, as other shortcuts are: the language
-/// comes after the marks, and the Enter that follows them would be an
-/// empty first line in the code.
+/// `/code`, and a table for `/table`. Not as it is typed, as other
+/// shortcuts are: the language comes after the marks, and the Enter that
+/// follows them would be an empty first line in the code.
 pub fn fence(line: &str) -> Option<Kind> {
+    // `/table` the same way: as it's typed, a slash menu (the desktop's)
+    // is still choosing, and Enter is its choice.
+    if line.trim_end() == "/table" {
+        return Some(Kind::Table(Table::new(3, 3)));
+    }
     let lang = match line.trim_end() {
         "/code" => "",
         l => l.strip_prefix("```")?.trim(),
@@ -2026,8 +2030,8 @@ Second line of the same paragraph.
         assert!(matches!(shortcut("3. x"), Some(Kind::Item { style: ListStyle::Number, .. })));
         assert!(matches!(shortcut("## "), Some(Kind::Heading { level: 2, .. })));
         assert!(matches!(shortcut("---"), Some(Kind::Divider)));
-        assert!(matches!(shortcut("/table"), Some(Kind::Table(_))));
-        assert!(shortcut("```").is_none() && shortcut("/code").is_none(), "code opens on Enter");
+        assert!(shortcut("```").is_none() && shortcut("/code").is_none() && shortcut("/table").is_none(), "code and tables open on Enter");
+        assert!(matches!(fence("/table"), Some(Kind::Table(_))));
         assert_eq!(fence("```"), Some(Kind::Raw("```\n\n```".into())));
         assert_eq!(fence("```rust "), Some(Kind::Raw("```rust\n\n```".into())));
         assert_eq!(fence("/code"), Some(Kind::Raw("```\n\n```".into())));

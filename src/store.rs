@@ -2935,7 +2935,7 @@ fn welcome() -> Note {
                 text: "Type to make blocks".into(),
             }),
             item(ListStyle::Todo, 0, true, "Start a line with \"- \" for a bullet, \"1. \" for numbers, \"[] \" for a checklist"),
-            item(ListStyle::Todo, 0, false, "\"# \" makes a heading, \"---\" a divider, \"/table\" a table"),
+            item(ListStyle::Todo, 0, false, "\"# \" makes a heading, \"---\" a divider, \"/table\" and Enter a table"),
             item(ListStyle::Todo, 0, false, "Enter continues a list; Enter on an empty item steps out of it"),
             item(ListStyle::Todo, 1, false, "Tab indents an item, Shift+Tab brings it back"),
             Block::new(Kind::Heading {

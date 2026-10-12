@@ -166,6 +166,7 @@ fn arrows_cross_blocks_and_table_cells() {
     type_in(&mut app, &mut d, "Intro");
     key(&mut app, &mut d, "enter");
     type_in(&mut app, &mut d, "/table");
+    key(&mut app, &mut d, "enter");
     let table = blocks(&app)[1].id;
     let Kind::Table(t) = &blocks(&app)[1].kind else { panic!("{:?}", texts(&app)) };
     let (rows, cols) = (t.rows.iter().map(|r| r.id).collect::<Vec<_>>(), t.cols.clone());
@@ -404,6 +405,7 @@ fn a_narrow_window_folds_the_library_and_keeps_the_window_buttons() {
 fn a_click_in_a_second_column_puts_the_caret_there() {
     let (mut app, mut d, dir) = body("cell-click");
     type_in(&mut app, &mut d, "/table");
+    key(&mut app, &mut d, "enter");
     type_in(&mut app, &mut d, "a");
     key(&mut app, &mut d, "tab");
     type_in(&mut app, &mut d, "bee");
@@ -1781,6 +1783,7 @@ fn hidden_marks_at_line_edges_in_cells_and_other_scripts() {
     key(&mut app, &mut d, "end");
     key(&mut app, &mut d, "enter");
     type_in(&mut app, &mut d, "/table");
+    key(&mut app, &mut d, "enter");
     type_in(&mut app, &mut d, "a **b** c");
     let cell = app.caret.head.slot;
     assert!(cell.cell.is_some());
