@@ -7180,11 +7180,13 @@ fn a_divider_is_selected_before_backspace_takes_it() {
     app.on_plain(Msg::InsertDivider);
     d_frame_twice(&mut app, &mut d);
     assert_eq!(texts(&app), ["Words", "---", ""]);
-    // The divider's block as drawn: the most washed of what fills its row.
+    // The divider's block as drawn: the most washed of what is in its
+    // row, the ornament's ink aside.
     let wash = |app: &Carnet, d: &Drive| {
         let id = blocks(app)[1].id;
         let r = app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).expect("the divider's row");
-        d.core.nodes().iter().filter(|n| n.rect == r).map(|n| n.bg.a).fold(0.0, f32::max)
+        let inside = |n: &Rect| n.x >= r.x && n.y >= r.y && n.x + n.w <= r.x + r.w && n.y + n.h <= r.y + r.h && n.w > r.w * 0.5;
+        d.core.nodes().iter().filter(|n| inside(&n.rect)).map(|n| n.bg.a).fold(0.0, f32::max)
     };
     assert_eq!(wash(&app, &d), 0.0, "not selected: no wash");
     key(&mut app, &mut d, "backspace");
@@ -7551,3 +7553,57 @@ fn a_click_on_a_cell_picture_draws_its_ring_at_once() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+/// A divider chosen draws one way however it was come to — by ← or by ↑:
+/// the ornament in the accent on the selection's wash, the wash as wide
+/// as the text (a table's width, no wider) and a band round the ornament,
+/// not its whole tall row.
+#[test]
+fn a_chosen_divider_is_washed_to_the_texts_width_whichever_arrow_chose_it() {
+    let (mut app, mut d, dir) = body("rule-chosen");
+    app.edit(Step::Other, |doc, c| {
+        *doc = carnet_core::doc::Doc::new(vec![
+            Block::text("Above"),
+            Block::new(Kind::Table(carnet_core::doc::Table::new(2, 2))),
+            Block::new(Kind::Divider),
+            Block::text("Below"),
+        ]);
+        *c = Caret::at(page::start(Slot::block(doc.blocks()[3].id)));
+        true
+    });
+    d.core.set_inspect(true);
+    for _ in 0..3 {
+        d.frame(&mut app);
+    }
+    let rule = blocks(&app)[2].id;
+    let row = |app: &Carnet, id: u64| app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).unwrap();
+    let wash = |d: &Drive| {
+        let sel = d.core.theme().selection;
+        let all: Vec<Rect> = d.core.nodes().iter().filter(|n| n.bg == sel && n.rect.w > 0.0).map(|n| n.rect).collect();
+        assert_eq!(all.len(), 1, "one wash: {all:?}");
+        all[0]
+    };
+    // ↑ from the line below: the divider chosen whole, as ← chooses it.
+    key(&mut app, &mut d, "up");
+    assert_eq!(page::chosen_atom(app.doc(), app.caret), Some(Slot::block(rule)));
+    d.frame(&mut app);
+    let by_up = wash(&d);
+    // The next ↓ is past it; ← from there chooses it again.
+    key(&mut app, &mut d, "down");
+    assert_eq!(app.caret, Caret::at(page::start(Slot::block(blocks(&app)[3].id))));
+    key(&mut app, &mut d, "left");
+    assert_eq!(page::chosen_atom(app.doc(), app.caret), Some(Slot::block(rule)));
+    d.frame(&mut app);
+    let by_left = wash(&d);
+    assert_eq!(by_up, by_left, "one way, whichever arrow");
+    // As wide as the text, and the table: the rows' own padding inside.
+    let (words, table, tall) = (row(&app, blocks(&app)[0].id), row(&app, blocks(&app)[1].id), row(&app, rule));
+    for r in [words, table] {
+        assert!(by_up.x >= r.x + 8.0 - 0.5 && by_up.x + by_up.w <= r.x + r.w - 8.0 + 0.5, "no wider than the text: {r:?} {by_up:?}");
+        assert!((by_up.w - (r.w - 16.0)).abs() < 1.0, "the text's width: {r:?} {by_up:?}");
+    }
+    assert!(by_up.h < tall.h * 0.7, "a band round the ornament, not its row: {tall:?} {by_up:?}");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}

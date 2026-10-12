@@ -57,12 +57,24 @@ describe('across a picture', () => {
 });
 
 describe('vertical', () => {
-  it('goes one line at a time from and to a heading, measured', () => {
-    expect(vertical(note, at(16), false, false)).toEqual({ at: 12 });
-    expect(vertical(note, at(8), true, false)).toEqual({ at: 12 });
-    expect(vertical(note, at(25), false, false)).toEqual({ at: 23 });
+  it('goes one line at a time onto words, measured', () => {
     expect(vertical(note, at(2), true, false)).toEqual({ line: 2, leaving: true });
     expect(vertical(note, at(8), false, false)).toEqual({ line: 1, leaving: true });
+  });
+  it('chooses a divider or a picture whole, as ← and → do, and the next is past it', () => {
+    // ↑ from the heading, ↓ from the words: the picture, each from its side.
+    expect(vertical(note, at(16), false, false)).toEqual({ sel: { anchor: 13, head: 12 } });
+    expect(vertical(note, at(16), false, false)).toEqual({ sel: across(note, at(14), false) });
+    expect(vertical(note, at(8), true, false)).toEqual({ sel: { anchor: 12, head: 13 } });
+    // ↓ from the heading, ↑ from below: the divider.
+    expect(vertical(note, at(16), true, false)).toEqual({ sel: across(note, at(21), true) });
+    expect(vertical(note, at(25), false, false)).toEqual({ sel: { anchor: 23, head: 22 } });
+    // Chosen, the next press is past it, onto the line beyond.
+    expect(vertical(note, { anchor: 22, head: 23 }, true, false)).toEqual({ line: 6, leaving: false });
+    expect(vertical(note, { anchor: 23, head: 22 }, false, false)).toEqual({ line: 4, leaving: false });
+    // Shift extends to its near edge, not round it.
+    expect(vertical(note, at(25), false, true)).toEqual({ at: 23 });
+    expect(vertical(note, at(16), true, true)).toEqual({ at: 22 });
   });
   it('leaves a picture, or a chosen one, for the next line', () => {
     expect(vertical(note, at(12), true, false)).toEqual({ line: 4, leaving: false });

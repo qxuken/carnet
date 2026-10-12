@@ -36,8 +36,8 @@ export function across(lines: Lines, sel: Sel, right: boolean): Sel | null {
   if (sel.anchor !== sel.head) return null;
   const n = lines.lineAt(sel.head);
   const line = lines.line(n);
-  // The caret on a picture's line (come to by ↑ or ↓): it's drawn chosen
-  // already, so the next is past it.
+  // The caret on a picture's line: it's drawn chosen already, so the
+  // next is past it.
   if (lines.kind(n) === 'image') return past(lines, n, right);
   let k = n;
   if (lines.kind(n) !== 'divider') {
@@ -59,10 +59,11 @@ function past(lines: Lines, n: number, right: boolean): Sel {
 }
 
 /// What ↑ or ↓ does: `null`, CodeMirror's own move; `at`, the caret put
-/// there; `line`, onto that line at the caret's column, measured
-/// (`leaving`: only once the caret is on its own line's first row, going
-/// up, or its last, going down; within its line, CodeMirror's).
-export type Vertical = null | { at: number } | { line: number; leaving: boolean };
+/// there; `sel`, a divider or a picture chosen whole; `line`, onto that
+/// line at the caret's column, measured (`leaving`: only once the caret
+/// is on its own line's first row, going up, or its last, going down;
+/// within its line, CodeMirror's).
+export type Vertical = null | { at: number } | { sel: Sel } | { line: number; leaving: boolean };
 
 export function vertical(lines: Lines, sel: Sel, down: boolean, extend: boolean): Vertical {
   const chosen = extend ? null : chosenAtom(lines, sel);
@@ -80,9 +81,12 @@ export function vertical(lines: Lines, sel: Sel, down: boolean, extend: boolean)
   }
   const kind = lines.kind(k);
   const to = lines.line(k);
-  // Onto a picture (which CodeMirror's own motion passes over when it is
-  // at an edge, measured as nothing, the words beside it), or a table
-  // (into its cell, page.ts), or a divider: its line.
+  // Onto a divider or a picture (which CodeMirror's own motion passes
+  // over when it is at an edge, measured as nothing, the words beside
+  // it): chosen whole, as ← and → choose it (`across`), the head on the
+  // side it was come to from; the next press is past it. Extending, to
+  // its near edge. Onto a table: into its cell (page.ts).
+  if (isAtom(kind) && !extend) return { sel: down ? { anchor: to.from, head: to.to } : { anchor: to.to, head: to.from } };
   if (kind === 'image' || kind === 'table') return { at: to.from };
   if (kind === 'divider') return { at: down ? to.from : to.to };
   // Off a picture, a divider or a table's line: onto the next, measured.
