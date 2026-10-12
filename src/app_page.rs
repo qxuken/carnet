@@ -668,6 +668,10 @@ impl Carnet {
                             self.slot_line(ui, l, Slot::block(id), text, ink, hint, false, cov);
                         },
                     );
+                    // The `/` menu, as under a paragraph.
+                    if let Some((_, shown)) = slash.as_ref().filter(|(b, _)| *b == id) {
+                        self.slash_menu(ui, l, id, shown);
+                    }
                 });
             }
             Kind::Heading { level, text } => {
@@ -1844,8 +1848,10 @@ impl Carnet {
         match ev.kind() {
             Some("key") => {
                 if let Some((KeyPhase::Down, k)) = ev.key_press() {
-                    // Enter, Tab and the deletes are writing too, with a
-                    // modifier or without (⌘⌫ takes the line back); Esc
+                    // A letter's press is writing (it types its text:
+                    // `page_key_press`); Enter, Tab and the deletes are
+                    // too, with a modifier or without (⌘⌫ takes the line
+                    // back); Esc
                     // steps out of it. Everything else — the arrows, the
                     // chords that move or style — leaves it as it was:
                     // what takes the keyboard elsewhere (the search, a new
@@ -2350,6 +2356,11 @@ impl Carnet {
             _ => {
                 if let Some(s) = k.text.as_deref().filter(|s| !s.is_empty()) {
                     let s = s.to_string();
+                    // A typed letter is writing, as text from an input
+                    // method is: the colour picker left behind.
+                    self.tint_open = None;
+                    self.typing = true;
+                    self.typed_at = core.now();
                     self.type_text(&s);
                 }
             }

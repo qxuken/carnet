@@ -247,6 +247,11 @@ pub struct Store {
     /// Deleted forever, here or elsewhere, and pictures put out of use:
     /// what sync has to tell the server.
     forgotten: Forgotten,
+    /// Notes reloaded with another device's change, by note id: their
+    /// docs as they were just before, for the app to carry the caret of
+    /// the open one through the change ([`carnet_core::compare::carry`]).
+    /// The first since last taken is kept.
+    pub before_remote: HashMap<u64, Doc>,
 }
 
 /// What sync has to tell the server of things gone (docs/SYNC.md §4): the
@@ -398,6 +403,7 @@ impl Store {
             vault_changed: false,
             from_remote: HashSet::new(),
             forgotten: Forgotten::default(),
+            before_remote: HashMap::new(),
         };
         let pins = store.read_pins();
         let mut taken = HashSet::new();
@@ -1948,7 +1954,7 @@ impl Store {
             self.keep_before_sync(i, &path, &editor, &merged)?;
             write_atomic(&path, &merged)?;
             let (fresh, written) = self.notes[i].reread(&path)?;
-            self.notes[i] = fresh;
+            self.reloaded(i, fresh);
             self.track(i, &written, Origin::Save);
             return Ok(Remote::Merged(i));
         }
@@ -1962,16 +1968,23 @@ impl Store {
         if outside && let Some(merged) = self.replica.as_mut().map(|r| r.absorb_as(key, &before, Origin::OtherApp)).transpose()?.flatten() {
             write_atomic(&path, &merged)?;
             let (fresh, written) = self.notes[i].reread(&path)?;
-            self.notes[i] = fresh;
+            self.reloaded(i, fresh);
             self.track(i, &written, Origin::OtherApp);
             return Ok(Remote::Updated(i));
         }
         self.keep_before_sync(i, &path, &before, &text)?;
         write_atomic(&path, &text)?;
         let (fresh, written) = self.notes[i].reread(&path)?;
-        self.notes[i] = fresh;
+        self.reloaded(i, fresh);
         self.track(i, &written, Origin::OtherApp);
         Ok(Remote::Updated(i))
+    }
+
+    /// Note `i` reloaded as `fresh` with another device's change: what it
+    /// was kept in [`before_remote`](Self::before_remote).
+    fn reloaded(&mut self, i: usize, fresh: Note) {
+        let was = std::mem::replace(&mut self.notes[i], fresh);
+        self.before_remote.entry(was.id).or_insert(was.doc);
     }
 
     /// A change from another device that empties note `i`, or takes more
@@ -2086,8 +2099,9 @@ impl Store {
     /// note, if nobody has touched it and no other note holds anything
     /// (a new note not yet written in doesn't count), goes, since
     /// the account's own comes with the rest and a second device would
-    /// otherwise have two. It goes to the trash like any note, and out of
-    /// the replica, so it is never sent. True if it went.
+    /// otherwise have two. It simply goes: its file, not to the trash
+    /// (nobody wrote in it, so Deleted has nothing to give back), and out
+    /// of the replica, so it is never sent. True if it went.
     pub fn drop_welcome(&mut self) -> io::Result<bool> {
         let fresh = welcome().markdown();
         let welcome = |n: &Note| !n.dirty && n.folder.is_empty() && n.path.is_some() && n.markdown() == fresh;
@@ -2096,7 +2110,16 @@ impl Store {
             return Ok(false);
         }
         let key = self.notes[i].key;
-        self.trash(i)?;
+        if let Some(path) = self.notes[i].path.clone() {
+            match fs::remove_file(self.inside(path)?) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        let pinned = self.notes.remove(i).pinned;
+        if pinned {
+            self.save_pins()?;
+        }
         if let Some(key) = key {
             self.changed.retain(|k| *k != key);
             if let Some(r) = self.replica.as_mut() {
@@ -3052,9 +3075,9 @@ mod tests {
         let _ = fs::remove_dir_all(&replica);
     }
 
-    /// A device joining an account leaves its own welcome note, untouched,
-    /// to the trash and out of what it syncs; touched, or beside other
-    /// notes, it stays.
+    /// A device joining an account lets its own welcome note, untouched,
+    /// go: not to Deleted, and out of what it syncs; touched, or beside
+    /// other notes, it stays.
     #[test]
     fn a_joining_device_drops_its_untouched_welcome_only() {
         let dir = temp_dir("drop-welcome");
@@ -3065,7 +3088,9 @@ mod tests {
         assert!(s.notes.is_empty());
         assert!(s.take_changed().is_empty(), "not sent");
         assert!(s.replica.as_ref().unwrap().keys().is_empty(), "nor kept to send later");
-        assert!(dir.join(".trash/Welcome to Carnet.md").exists(), "in the trash, as any note");
+        assert!(!dir.join("Welcome to Carnet.md").exists(), "its file gone");
+        assert!(!dir.join(".trash/Welcome to Carnet.md").exists(), "and not to the trash");
+        assert!(s.trashed().is_empty(), "nothing in Deleted");
         let _ = fs::remove_dir_all(&dir);
 
         let dir = temp_dir("keep-welcome");
@@ -3186,7 +3211,7 @@ mod tests {
             let s = if replica {
                 Store::open(dir.clone()).unwrap()
             } else {
-                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default() };
+                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default(), before_remote: HashMap::new() };
                 for (path, _) in s.note_files().unwrap() {
                     s.notes.push(Note::load(&path).unwrap());
                 }

@@ -343,6 +343,63 @@ fn search_with_no_match_makes_the_note_and_then_clears() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Esc in the search clears what was typed, and the whole list is back;
+/// a second Esc leaves the field.
+#[test]
+fn esc_clears_the_search_then_leaves_it() {
+    let (store, dir) = temp_store("search-esc");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.frame(&mut app);
+    d.frame(&mut app);
+    let all = app.order.len();
+    assert!(all > 0);
+    let k = *app.fields.iter().find(|(_, f)| **f == Field::Search).unwrap().0;
+    d.focus(&mut app, k);
+    d.text(&mut app, "zzz nothing like it");
+    d.frame(&mut app);
+    assert!(app.order.is_empty());
+    key(&mut app, &mut d, "escape");
+    d.frame(&mut app);
+    assert_eq!(app.query, "");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some(""));
+    assert_eq!(app.order.len(), all, "the whole list is back");
+    assert_eq!(d.core.focus(), Some(k), "the keyboard stays in the search");
+    key(&mut app, &mut d, "escape");
+    d.frame(&mut app);
+    assert_ne!(d.core.focus(), Some(k), "a second Esc leaves it");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// "Lately" in Settings → Sync names what happened to the account as
+/// that (a password set, a passkey added), not as a note this device
+/// lacks; a note deleted forever as such; a note's own events by its name.
+#[test]
+fn lately_names_account_events_as_such() {
+    use super::settings_view::lately_words;
+    let (store, dir) = temp_store("lately");
+    let welcome = store.notes[0].key.expect("the welcome note has a key").to_string();
+    let words = |room: &str, what: &str| lately_words(&store, room, what);
+    let (g, warn, w) = words("", "set the password");
+    assert!(matches!(g, crate::icons::Glyph::Key) && !warn);
+    assert_eq!(w, "Password set");
+    assert_eq!(words("", "took the password away").2, "Password taken away");
+    assert_eq!(words("", "added a passkey").2, "Passkey added");
+    assert_eq!(words("", "took a passkey away").2, "Passkey taken away");
+    let (g, _, w) = words(&carnet_sync::Key::random().to_string(), "deleted forever");
+    assert!(matches!(g, crate::icons::Glyph::Trash));
+    assert_eq!(w, "A note deleted forever");
+    assert_eq!(words(&welcome, "deleted forever").2, "\u{201c}Welcome to Carnet\u{201d} deleted forever");
+    assert_eq!(words(&welcome, "rolled back").2, "Welcome to Carnet: packing undone");
+    let (_, warn, w) = words(&welcome, "a snapshot by device 00 did not hold what it said: rolled back");
+    assert!(warn);
+    assert_eq!(w, "Welcome to Carnet: a packed copy was wrong, and was undone");
+    for (room, what) in [("", "set the password"), ("", "added a passkey"), (&*carnet_sync::Key::random().to_string(), "deleted forever")] {
+        assert!(!words(room, what).2.contains("not on this device"), "{what}: said as a note");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_empty_fields_say_what_they_are_for() {
     let (store, dir) = temp_store("placeholder");
@@ -1086,6 +1143,26 @@ fn a_slash_opens_the_blocks_menu() {
     d.click(&mut app, row.x, row.y);
     d.frame(&mut app);
     assert!(texts(&app).contains(&"---".to_string()), "{:?}", texts(&app));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// In a quote the `/` menu shows and Tab takes its choice, as in a
+/// paragraph: not a tab typed after the word.
+#[test]
+fn the_slash_menu_works_in_a_quote() {
+    let (mut app, mut d, dir) = body("slash-quote");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "> ");
+    assert!(matches!(blocks(&app)[0].kind, Kind::Quote(_)));
+    for c in ["/", "c", "o", "d", "e"] {
+        key(&mut app, &mut d, c);
+    }
+    d.frame(&mut app);
+    assert!(app.slash_now().is_some());
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("Code block")), "the menu shows");
+    key(&mut app, &mut d, "tab");
+    assert!(matches!(&blocks(&app)[0].kind, Kind::Raw(r) if r.starts_with("```")), "{:?}", texts(&app));
+    assert!(!texts(&app).iter().any(|t| t.contains('\t') || t.contains("/code")), "{:?}", texts(&app));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -2163,6 +2240,35 @@ fn focus_steps_the_other_blocks_back_while_typing() {
     d.move_to(&mut app, 700.0, 20.0);
     settle(&mut app, &mut d);
     assert_eq!(opacity(&d, &app, ids[0]), 1.0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Letters typed on the keyboard come as key presses carrying their text,
+/// not as an input method's text: they are writing as much as Enter is.
+/// The toolbar fades, and with Focus on the other blocks step back.
+#[test]
+fn letters_typed_from_the_keyboard_are_writing_too() {
+    let (mut app, mut d, dir) = body("letters");
+    app.settings.focus = true;
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "First");
+    key(&mut app, &mut d, "enter");
+    // Out of the writing: the pointer up to the strip.
+    d.move_to(&mut app, 700.0, 20.0);
+    settle(&mut app, &mut d);
+    assert!(!app.in_flow());
+    assert_eq!(tool_opacity(&d, "t-bold"), 1.0);
+    for c in ["h", "i"] {
+        key(&mut app, &mut d, c);
+    }
+    assert_eq!(texts(&app)[..2], ["First", "hi"]);
+    assert!(app.in_flow(), "typed letters are typing");
+    settle(&mut app, &mut d);
+    assert_eq!(tool_opacity(&d, "t-bold"), 0.0, "the toolbar fades");
+    let first = blocks(&app)[0].id;
+    let r = app.row_rects.iter().find(|(i, _)| *i == first).map(|(_, r)| *r).unwrap();
+    let dim = d.core.nodes().iter().find(|n| n.rect == r && n.events.iter().any(|(k, _)| *k == "layout")).map(|n| n.opacity).unwrap();
+    assert!(dim < 0.5, "the block written before steps back: {dim}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -3717,6 +3823,156 @@ fn a_new_device_comes_in_by_email_and_password() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// The server gone: Settings → Sync says "Offline", and why in plain
+/// words with an icon; what the network said ("Connection refused (os
+/// error 61)") only on hover.
+#[test]
+fn offline_is_said_in_plain_words() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-offline-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (mut a, mut da, dir_a) = fresh("offline");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut da, &|a| a.sync.status == crate::sync::Status::Online);
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(rt);
+    until("offline", &mut a, &mut da, &|a| matches!(a.sync.status, crate::sync::Status::Offline(_)));
+    a.settings_open = true;
+    assert!(drawn(&mut da, &mut a, "Offline"));
+    assert!(drawn(&mut da, &mut a, "Can't reach the server. Trying again\u{2026}"), "{:?}", a.sync.status);
+    let jargon = da.core.nodes().iter().filter_map(|n| n.text.clone()).find(|t| t.contains("error") || t.contains("refused") || t.contains("closed"));
+    assert_eq!(jargon, None, "the network's own words on the page");
+    assert!(a.sync.offline_detail.is_some(), "kept for the tooltip");
+    assert_eq!(crate::sync::offline_words("IO error: Connection refused (os error 61)"), "Can't reach the server. Trying again\u{2026}");
+    assert_eq!(crate::sync::offline_words("timed out connecting"), "Can't reach the server. Trying again\u{2026}");
+    assert!(crate::sync::offline_words("invalid peer certificate: UnknownIssuer").contains("certificate"));
+    remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Another device's edit to the open note leaves the caret where it was
+/// in the words: on the line it was on, after the same letters, whether
+/// the change was in another block, before it in its own, or a block put
+/// in above; with edits here not yet saved (a merge) too. The next letter
+/// typed lands there, not on the first line.
+#[test]
+fn a_remote_edit_leaves_the_caret_where_it_was() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-caret-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&[(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // Block `i`'s words, and where the caret is: (block, byte).
+    let words = |app: &Carnet, i: usize| app.doc().blocks().get(i).and_then(|b| b.text_ref()).unwrap_or("").to_string();
+    let caret = |app: &Carnet| (app.doc().index_of(app.caret.head.slot.block).unwrap(), app.caret.head.byte);
+
+    let (mut a, mut da, dir_a) = fresh("caret-a");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Shopping");
+    key(&mut a, &mut da, "enter");
+    type_in(&mut a, &mut da, "- milk1");
+    key(&mut a, &mut da, "enter");
+    type_in(&mut a, &mut da, "bread1");
+    a.save_current();
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+    let (mut b, mut db, dir_b) = fresh("caret-b");
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    until("B has the note", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| x[1].0.store.notes.iter().any(|n| n.title == "Shopping"));
+    let i = b.store.notes.iter().position(|n| n.title == "Shopping").unwrap();
+    b.open(i);
+    d_frame_twice(&mut b, &mut db);
+    a.settings_open = false;
+    d_frame_twice(&mut a, &mut da);
+    assert_eq!((words(&a, 0), words(&a, 1)), ("milk1".to_string(), "bread1".to_string()));
+    assert_eq!(caret(&a), (1, 6), "A's caret at the end of the second item");
+    // B: an edit there, saved, sent; A waits for it.
+    let edit = |b: &mut Carnet, db: &mut Drive, f: &dyn Fn(&mut Doc)| {
+        let note = &mut b.store.notes[b.current];
+        f(&mut note.doc);
+        note.touch();
+        b.save_current();
+        db.frame(b);
+    };
+
+    // In another block: " WEB" at the end of the first item.
+    edit(&mut b, &mut db, &|d| d.block_mut(0).text_mut().unwrap().push_str(" WEB"));
+    until("A has B's WEB", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| words(x[0].0, 0) == "milk1 WEB");
+    assert_eq!(caret(&a), (1, 6), "still at the end of the second item");
+    key(&mut a, &mut da, "x");
+    assert_eq!((words(&a, 0), words(&a, 1)), ("milk1 WEB".to_string(), "bread1x".to_string()), "typed where it was");
+    a.save_current();
+    until("B has A's x", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| words(x[1].0, 1) == "bread1x");
+
+    // In its own block, before it: the caret moves with its words.
+    edit(&mut b, &mut db, &|d| d.block_mut(1).text_mut().unwrap().insert_str(0, "fresh "));
+    until("A has B's fresh", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| words(x[0].0, 1) == "fresh bread1x");
+    assert_eq!(caret(&a), (1, 13), "after bread1x still");
+    // A block put in above: the same line, the same place in it.
+    edit(&mut b, &mut db, &|d| d.insert(0, Block::text("At noon")));
+    until("A has B's line", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| words(x[0].0, 0) == "At noon");
+    assert_eq!(caret(&a), (2, 13), "the item, one block down now");
+    key(&mut a, &mut da, "y");
+    assert_eq!(words(&a, 2), "fresh bread1xy");
+
+    // Unsaved here, a change there: merged, and the caret kept too.
+    key(&mut a, &mut da, "z");
+    edit(&mut b, &mut db, &|d| d.block_mut(1).text_mut().unwrap().push_str(" NOW"));
+    until("A has B's NOW", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| words(x[0].0, 1) == "milk1 WEB NOW");
+    assert_eq!(words(&a, 2), "fresh bread1xyz");
+    assert_eq!(caret(&a), (2, 15), "after the z typed here");
+    assert!(a.caret.is_empty());
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// A recovery code's words show once the server says it keeps them, not
 /// before; making another, when there is one, is asked first, as the
 /// words written down stop working. And keys kept in a file, not a
@@ -3772,6 +4028,8 @@ fn the_recovery_code_is_replaced_only_when_asked() {
     assert!(drawn(&mut da, &mut a, crate::sync::KEYS_IN_FILE), "keys in a file, said so");
 
     // None yet: made at once, its words shown only once the server keeps it.
+    assert!(drawn(&mut da, &mut a, "Make one"));
+    assert!(drawn(&mut da, &mut a, "Twelve words that let a new device in when none of yours is left."));
     a.on_plain(Msg::SyncRecovery);
     assert!(!a.sync_words_armed && a.sync.words.is_none(), "not shown before the server says");
     assert!(drawn(&mut da, &mut a, "Making one\u{2026}"));
@@ -3779,6 +4037,11 @@ fn the_recovery_code_is_replaced_only_when_asked() {
     let first = a.sync.words.clone().unwrap();
     a.on_plain(Msg::SyncRecoveryDone);
     until("the code listed", &mut a, &mut da, &|x| x.sync.has_recovery());
+
+    // One there: the row says so, and its button replaces it.
+    assert!(drawn(&mut da, &mut a, "Replace"));
+    assert!(!drawn(&mut da, &mut a, "Make one"));
+    assert!(drawn(&mut da, &mut a, "This account has one: twelve words that let a new device in when none of yours is left."));
 
     // One there: asked first; Cancel makes none.
     a.on_plain(Msg::SyncRecovery);
@@ -4551,7 +4814,7 @@ fn a_device_paired_late_gets_every_note() {
     };
     until("B has every note", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| titles(&x[0].0.store) == titles(&x[1].0.store));
     assert_eq!(titles(&b.store).len(), MANY + 1);
-    // B's own welcome note went to B's Deleted, and only there.
+    // B's own welcome note simply went: in nobody's Deleted.
     for _ in 0..100 {
         da.frame(&mut a);
         db.frame(&mut b);
@@ -4560,7 +4823,9 @@ fn a_device_paired_late_gets_every_note() {
     let trashed = |dir: &std::path::Path| std::fs::read_dir(dir.join(".trash")).map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".md")).collect::<Vec<_>>()).unwrap_or_default();
     eprintln!("A trash {:?} / B trash {:?}", trashed(&dir_a), trashed(&dir_b));
     assert!(trashed(&dir_a).is_empty(), "B's welcome note in A's Deleted");
-    assert_eq!(trashed(&dir_b).len(), 1, "B's welcome note in B's");
+    assert!(trashed(&dir_b).is_empty(), "B's welcome note in B's Deleted");
+    b.refresh_trash();
+    assert!(b.trash.is_empty(), "B's Deleted shows nothing");
 
     // Its inspector: nothing on the server it lacks.
     b.settings_open = true;
@@ -4670,8 +4935,8 @@ fn two_apps_sync_through_a_server() {
     assert!(b.sync.is_on());
     assert!(b.sync_code.is_empty(), "the code doesn't stay on screen once used");
     assert!(a.sync.joined.is_some(), "Settings says so where the code was");
-    // B's own welcome note, untouched, went to its trash and was never
-    // sent. Each has the same notes on disk, and only those.
+    // B's own welcome note, untouched, went (not to its Deleted) and was
+    // never sent. Each has the same notes on disk, and only those.
     let titles = |s: &Store| {
         let mut t: Vec<String> = s.notes.iter().filter(|n| n.path.is_some()).map(|n| n.title.clone()).collect();
         t.sort();
@@ -4682,6 +4947,7 @@ fn two_apps_sync_through_a_server() {
     });
     assert_eq!(titles(&a.store), ["Ferry times", "Welcome to Carnet"], "one welcome note, not two");
     assert!(b.store.notes.iter().all(|n| !n.is_blank() || n.id == mine), "no empty stand-in besides");
+    assert!(b.store.trashed().is_empty(), "nor the welcome note in B's Deleted");
 
     // B edits; A, with the note open and no edits of its own, shows it.
     let i = b.store.notes.iter().position(|n| n.title == "Ferry times").unwrap();
@@ -7220,3 +7486,54 @@ fn a_chosen_cell_picture_shows_its_ring_and_no_caret() {
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+/// A click on a picture in a table's cell, from anywhere — the caret in
+/// another block, or the keyboard in the title — chooses it, and its ring
+/// is drawn the frame the click is taken in, with no caret beside it.
+#[test]
+fn a_click_on_a_cell_picture_draws_its_ring_at_once() {
+    let (mut app, mut d, dir) = body("cell-picture-click");
+    let rgba: Vec<u8> = (0..200 * 100).flat_map(|_| [30u8, 90, 160, 255]).collect();
+    let png = crate::images::encode_png(200, 100, &rgba).unwrap();
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    let pic = "![](attachments/wide.png)";
+    let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec![format!("x{pic}"), String::new()]]);
+    app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("after")]);
+    let Kind::Table(t) = &blocks(&app)[0].kind else { panic!() };
+    let slot = Slot { block: blocks(&app)[0].id, cell: Some((t.rows[1].id, t.cols[0])) };
+    let end = 1 + pic.len();
+    let below = Slot::block(blocks(&app)[1].id);
+    d.core.set_inspect(true);
+    for from in ["the paragraph below", "the title"] {
+        app.caret = Caret::at(Pos { slot: below, byte: 2 });
+        for _ in 0..3 {
+            d.frame(&mut app);
+        }
+        if from == "the title" {
+            app.focus(Field::Title);
+            d.frame(&mut app);
+            d.frame(&mut app);
+        }
+        let pieces = app.cell_pieces.get(&slot).expect("a cell of pieces").clone();
+        let r = d.core.layout_of(pieces.iter().find(|p| p.picture).unwrap().key).expect("the picture's box");
+        let cell = *app.cell_rects.get(&slot).unwrap();
+        let near = |n: &kui_native::NodeInfo| n.rect.y >= cell.y && n.rect.y + n.rect.h <= cell.y + cell.h && n.rect.x >= cell.x && n.rect.x <= cell.x + cell.w;
+        let caret = |d: &Drive| d.core.nodes().iter().any(|n| near(n) && n.rect.w == 2.0 && n.rect.h >= 8.0 && n.bg.a > 0.0);
+        let ring = |d: &Drive| {
+            d.core.nodes().iter().any(|n| (n.rect.w - (r.w + 8.0)).abs() < 0.5 && (n.rect.h - (r.h + 8.0)).abs() < 0.5 && n.border_w == 2.0 && n.border_color.a > 0.0)
+        };
+        // One click, and the one frame it is taken in.
+        d.click(&mut app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!((app.caret.anchor, app.caret.head), (Pos { slot, byte: 1 }, Pos { slot, byte: end }), "from {from}");
+        assert!(page_focused(&app, &d), "from {from}: the keyboard on the page");
+        assert!(ring(&d), "from {from}: its ring, that frame");
+        assert!(!caret(&d), "from {from}: no caret beside it");
+    }
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+

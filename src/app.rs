@@ -2012,6 +2012,9 @@ impl Carnet {
         // before it: this device's untouched welcome note, the account's
         // own on its way.
         let moved = self.store.notes.get(self.current).is_none_or(|n| n.id != open);
+        // The open note as it was before another device's change reloaded
+        // it: what the caret is carried through.
+        let mut before = std::mem::take(&mut self.store.before_remote);
         if remote.is_empty() && !moved {
             return;
         }
@@ -2021,6 +2024,14 @@ impl Carnet {
                 // reconcile moves those after it.)
                 store::Remote::Updated(i) | store::Remote::Merged(i) if self.store.notes.get(i).is_some_and(|n| n.id == open) => {
                     self.histories.remove(&open);
+                    // The caret and the selection stay where they were in
+                    // the words, wherever the change put them: not on the
+                    // first line, where the next letter would land.
+                    if let Some(old) = before.remove(&open)
+                        && !self.reading()
+                    {
+                        self.caret = carnet_core::compare::carry(&old, &self.store.notes[i].doc, self.caret);
+                    }
                     self.caret = page::fix(self.doc(), self.caret);
                     if matches!(r, store::Remote::Merged(_)) {
                         self.notify("Changed on another device too: merged", None);
@@ -3989,8 +4000,13 @@ impl App for Carnet {
                     self.on_field_submit(field);
                 }
             }
-            // Escape let go of a field: a folder's name is dropped.
+            // Escape let go of a field: a folder's name is dropped; a
+            // search typed is cleared, the keyboard kept there for the
+            // next (a second Esc lets go of it).
             Some("cancel") => {
+                if self.fields.get(&ev.key) == Some(&Field::Search) && !self.query.is_empty() {
+                    self.on_plain(Msg::ClearSearch);
+                }
                 if self.fields.get(&ev.key) == Some(&Field::Folder) {
                     // A rename dropped: the keyboard back on its row.
                     if let Some(f) = self.naming.as_ref().and_then(|n| n.rename.clone()) {

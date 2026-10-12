@@ -791,17 +791,9 @@ impl Carnet {
         if !log.is_empty() {
             ui.text_in(NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 8.0, b: 2.0 }), "Lately", small(t.muted));
             for (i, e) in log.iter().take(10).enumerate() {
-                let (g, ink, what) = if e.what == "rolled back" {
-                    (Icon::Undo, t.fg, "packing undone".to_string())
-                } else if e.what.starts_with("replaced") {
-                    (Icon::Upload, t.fg, "replaced with a device's copy".to_string())
-                } else if e.what.contains("did not hold") {
-                    let undone = e.what.ends_with("rolled back");
-                    (Icon::Warning, t.warning, if undone { "a packed copy was wrong, and was undone".into() } else { "a packed copy was wrong".into() })
-                } else {
-                    (Icon::Clock, t.fg, e.what.clone())
-                };
-                let words = format!("{}: {what} \u{b7} {} \u{b7} {}", title_of(self, &e.room), ago(e.at), name_of(&e.device));
+                let (g, warn, what) = lately_words(&self.store, &e.room, &e.what);
+                let ink = if warn { t.warning } else { t.fg };
+                let words = format!("{what} \u{b7} {} \u{b7} {}", ago(e.at), name_of(&e.device));
                 ui.with_key(ui.child_key("sync-log").index(i as u64), NodeSpec::row().grow_width().pad_xy(18.0, 3.0).selectable(), |ui| line(ui, g, ink, &words, small(t.fg)));
             }
         }
@@ -1096,7 +1088,7 @@ impl Carnet {
                     Status::Online => ("Online".to_string(), t.fg),
                     Status::Connecting | Status::Starting => ("Connecting\u{2026}".to_string(), t.muted),
                     Status::Unlocking => ("Waiting for the keychain\u{2026}".to_string(), t.muted),
-                    Status::Offline(why) => (format!("Offline: {why}"), t.muted),
+                    Status::Offline(_) => ("Offline".to_string(), t.muted),
                     Status::Off => ("Off".to_string(), t.muted),
                 };
                 let whom = format!(
@@ -1123,6 +1115,18 @@ impl Carnet {
                 ui.with(NodeSpec::column().grow_width().pad_xy(18.0, 14.0).gap(4.0).selectable(), |ui| {
                     ui.text(&word, TextStyle::new(Type::STRONG.size).color(ink));
                     ui.text(&whom, TextStyle::new(Type::SMALL.size).color(t.muted));
+                    // Why offline, in plain words; what the network said,
+                    // if anything, only on hover.
+                    if let Status::Offline(why) = &status {
+                        let mut spec = NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center);
+                        if let Some(detail) = &self.sync.offline_detail {
+                            spec = spec.tooltip(detail);
+                        }
+                        ui.with_keyed("sync-offline", spec, |ui| {
+                            crate::icons::icon(ui, Icon::Warning, t.muted, 14.0, false);
+                            ui.text_in(NodeSpec::row().grow_width().min_width(0.0), why, TextStyle::new(Type::SMALL.size).color(t.muted));
+                        });
+                    }
                     // Changes the server isn't known to keep yet: not "up
                     // to date" while any wait — once they have waited a
                     // moment, and then "All sent" a moment more.
@@ -1290,8 +1294,13 @@ impl Carnet {
                 let words = self.sync.words.clone();
                 let armed = self.sync_words_armed;
                 let making = self.sync.making_recovery();
+                // One there already (or not known not to be): what the
+                // button does is replace it, and the confirm asks first.
+                let has = self.sync.has_recovery();
                 let what = if armed {
                     "Replace the recovery code? The words you have now will stop working."
+                } else if has {
+                    "This account has one: twelve words that let a new device in when none of yours is left."
                 } else {
                     "Twelve words that let a new device in when none of yours is left."
                 };
@@ -1304,7 +1313,7 @@ impl Carnet {
                     } else if making {
                         pill_button(ui, l, "sync-words", "Making one\u{2026}", false, false, Msg::SyncRecovery);
                     } else {
-                        pill_button(ui, l, "sync-words", "Make one", false, status == Status::Online, Msg::SyncRecovery);
+                        pill_button(ui, l, "sync-words", if has { "Replace" } else { "Make one" }, false, status == Status::Online, Msg::SyncRecovery);
                     }
                 });
                 if let Some(words) = &words {
@@ -2230,6 +2239,46 @@ fn left(now: u64, until: u64) -> String {
         3600..86_400 => unit(s.div_ceil(3600), "hour"),
         _ => unit(s.div_ceil(86_400), "day"),
     }
+}
+
+/// One thing the server logged, as "Lately" says it: its icon, whether
+/// it warns, and its words (when, and by which device, follow). What
+/// happened to a note is said with the note's name; what happened to the
+/// account (a password, a passkey) is said as that, not as a note; a note
+/// deleted forever is gone, so it is said as such.
+pub(super) fn lately_words(store: &crate::store::Store, room: &str, what: &str) -> (Icon, bool, String) {
+    let account = |g: Icon, words: &str| (g, false, words.to_string());
+    match what {
+        "set the password" => return account(Icon::Key, "Password set"),
+        "took the password away" => return account(Icon::Key, "Password taken away"),
+        "added a passkey" => return account(Icon::Key, "Passkey added"),
+        "took a passkey away" => return account(Icon::Key, "Passkey taken away"),
+        "deleted forever" => {
+            // Gone here too, as a rule: named only if this device still
+            // knows it.
+            let known = carnet_sync::Key::parse(room).is_some_and(|k| store.notes.iter().any(|n| n.key == Some(k)) || store.replica.as_ref().is_some_and(|r| r.entry(k).is_some()));
+            let words = if known { format!("\u{201c}{}\u{201d} deleted forever", sync_room_title(store, room)) } else { "A note deleted forever".into() };
+            return (Icon::Trash, false, words);
+        }
+        _ => {}
+    }
+    if room.is_empty() {
+        let mut c = what.chars();
+        let words = c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default();
+        return (Icon::Clock, false, words);
+    }
+    let title = sync_room_title(store, room);
+    let (g, warn, said) = if what == "rolled back" {
+        (Icon::Undo, false, "packing undone".to_string())
+    } else if what.starts_with("replaced") {
+        (Icon::Upload, false, "replaced with a device's copy".to_string())
+    } else if what.contains("did not hold") {
+        let undone = what.ends_with("rolled back");
+        (Icon::Warning, true, if undone { "a packed copy was wrong, and was undone".into() } else { "a packed copy was wrong".into() })
+    } else {
+        (Icon::Clock, false, what.to_string())
+    };
+    (g, warn, format!("{title}: {said}"))
 }
 
 /// What the inspector calls a room on the server (docs/SYNC.md §9): a
