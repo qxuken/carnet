@@ -585,6 +585,37 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     return true;
   };
 
+  /// ← and → over a divider, as the page's arrows go (page.rs `left`,
+  /// `right`): it's one thing to the eye, so an arrow onto it chooses it
+  /// whole, and the next is past it. Not a place before it and one after.
+  const across = (right: boolean) => (v: EditorView) => {
+    const sel = v.state.selection.main;
+    const all = v.state.field(looks);
+    const doc = v.state.doc;
+    const rule = (k: number) => all[k - 1]?.k === 'divider';
+    const caret = (at: number) => {
+      v.dispatch({ selection: { anchor: at }, scrollIntoView: true, userEvent: 'select' });
+      return true;
+    };
+    if (!sel.empty) {
+      const line = doc.lineAt(sel.from);
+      if (!rule(line.number) || sel.from !== line.from || sel.to !== line.to) return false;
+      const k = right ? line.number + 1 : line.number - 1;
+      if (k < 1 || k > doc.lines) return caret(right ? line.to : line.from);
+      return caret(right ? doc.line(k).from : doc.line(k).to);
+    }
+    const line = doc.lineAt(sel.head);
+    let k = line.number;
+    if (!rule(k)) {
+      if (sel.head !== (right ? line.to : line.from)) return false;
+      k = right ? k + 1 : k - 1;
+      if (k < 1 || k > doc.lines || !rule(k)) return false;
+    }
+    const to = doc.line(k);
+    v.dispatch({ selection: right ? { anchor: to.from, head: to.to } : { anchor: to.to, head: to.from }, scrollIntoView: true, userEvent: 'select' });
+    return true;
+  };
+
   const extensions: Extension[] = [
     looks.init(() => JSON.parse(pe.looks())),
     pictureField,
@@ -618,6 +649,8 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
       return tr;
     }),
     keymap.of([
+      { key: 'ArrowRight', run: across(true) },
+      { key: 'ArrowLeft', run: across(false) },
       { key: 'ArrowDown', run: vertical(true) },
       { key: 'ArrowUp', run: vertical(false) },
       { key: 'Enter', run: run(() => pe.enter(false)) },

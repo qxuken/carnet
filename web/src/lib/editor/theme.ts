@@ -213,7 +213,8 @@ export const theme = EditorView.theme({
   '.cm-cellpic': { display: 'inline-block', maxWidth: '100%', verticalAlign: 'top', borderRadius: 'var(--radius)', cursor: 'default' },
   // Chosen (the arrows, a click): the accent's ring 4px out, as the
   // desktop draws it, and no caret in its cell nor the browser's wash.
-  '.cm-cellpic.cm-cellpic-chosen': { outline: '2px solid var(--accent)', outlineOffset: '4px' },
+  // Its ring inside its own edge, so it never covers a letter beside it.
+  '.cm-cellpic.cm-cellpic-chosen': { outline: '2px solid var(--accent)', outlineOffset: '-2px' },
   '.cm-tablewrap .cm-cell-picked': { caretColor: 'transparent' },
   '.cm-cell-picked ::selection, .cm-cell-picked::selection': { background: 'transparent' },
   '.cm-cellpic-img': { display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)' },

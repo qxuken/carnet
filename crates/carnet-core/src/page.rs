@@ -361,6 +361,20 @@ pub fn chosen_cell_picture(doc: &Doc, c: Caret) -> Option<(usize, usize)> {
     inline::cell_pictures(text(doc, slot)).into_iter().map(|p| p.at).find(|&at| at == ends)
 }
 
+/// The divider or picture block a selection covers whole, and nothing
+/// more: chosen, as the arrows choose one before stepping past it.
+fn chosen_atom(doc: &Doc, c: Caret) -> Option<Slot> {
+    let slot = c.head.slot;
+    (c.anchor.slot == slot && is_atomic(doc, slot) && c.anchor.byte.min(c.head.byte) == 0 && c.anchor.byte.max(c.head.byte) == 1).then_some(slot)
+}
+
+/// A divider's or picture's slot chosen whole, the head on the side the
+/// arrows came on to it from.
+fn whole(slot: Slot, rightwards: bool) -> Caret {
+    let (a, b) = if rightwards { (0, 1) } else { (1, 0) };
+    Caret { anchor: Pos { slot, byte: a }, head: Pos { slot, byte: b } }
+}
+
 /// The picture among cell `slot`'s words drawn as the letter at `drawn`
 /// of them: where it is in the text.
 fn cell_picture_drawn_at(doc: &Doc, slot: Slot, v: &Visible, drawn: usize) -> Option<(usize, usize)> {
@@ -373,6 +387,13 @@ fn cell_picture_drawn_at(doc: &Doc, slot: Slot, v: &Visible, drawn: usize) -> Op
 /// picture among a cell's words is chosen first ([`chosen_cell_picture`]),
 /// and the next ← puts the caret before it.
 pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
+    // A divider or a picture chosen whole: the next ← is past it, on
+    // the end of what is before it (it's one thing to the eye, not a
+    // place before it and one after).
+    if !extend && let Some(slot) = chosen_atom(doc, c) {
+        let all = slots(doc);
+        return Caret::at(index(&all, slot).checked_sub(1).map_or(start(slot), |i| end(doc, all[i])));
+    }
     if !extend && !c.is_empty() {
         return Caret::at(ordered(doc, c).0);
     }
@@ -396,6 +417,8 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     } else {
         let all = slots(doc);
         match index(&all, p.slot).checked_sub(1) {
+            // Onto a divider or a picture: chosen whole.
+            Some(i) if !extend && is_atomic(doc, all[i]) => return whole(all[i], false),
             Some(i) => end(doc, all[i]),
             None => p,
         }
@@ -409,6 +432,10 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
 /// As [`left`], rightwards: a picture among a cell's words chosen first,
 /// then the caret after it.
 pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
+    if !extend && let Some(slot) = chosen_atom(doc, c) {
+        let all = slots(doc);
+        return Caret::at(all.get(index(&all, slot) + 1).map_or(end(doc, slot), |&s| start(s)));
+    }
     if !extend && !c.is_empty() {
         return Caret::at(ordered(doc, c).1);
     }
@@ -431,6 +458,8 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     } else {
         let all = slots(doc);
         match all.get(index(&all, p.slot) + 1) {
+            // Onto a divider or a picture: chosen whole.
+            Some(&s) if !extend && is_atomic(doc, s) => return whole(s, true),
             Some(&s) => start(s),
             None => p,
         }
@@ -2942,6 +2971,26 @@ mod tests {
         assert_eq!(texts(&d), ["Text:see ![](x.png) here"]);
     }
 
+    /// A divider is one thing to the eye: an arrow onto it chooses it
+    /// whole, and the next is past it, either way. Shift still extends.
+    #[test]
+    fn the_arrows_cross_a_divider_in_two() {
+        let d = doc(vec![Block::text("above"), Block::new(Kind::Divider), Block::text("below")]);
+        let rule = block_slots(&d.blocks()[1])[0];
+        let below = block_slots(&d.blocks()[2])[0];
+        let above = block_slots(&d.blocks()[0])[0];
+        let c = right(&d, at(&d, 0, 5), false, false);
+        assert_eq!(c, Caret { anchor: Pos { slot: rule, byte: 0 }, head: Pos { slot: rule, byte: 1 } });
+        assert!(coverage(&d, c).whole.contains(&d.blocks()[1].id), "drawn chosen");
+        assert_eq!(right(&d, c, false, false), Caret::at(Pos { slot: below, byte: 0 }));
+        let c = left(&d, at(&d, 2, 0), false, false);
+        assert_eq!(c, Caret { anchor: Pos { slot: rule, byte: 1 }, head: Pos { slot: rule, byte: 0 } });
+        assert_eq!(left(&d, c, false, false), Caret::at(Pos { slot: above, byte: 5 }));
+        // Shift: a selection grows over it as before.
+        let c = right(&d, at(&d, 0, 5), false, true);
+        assert_eq!((c.anchor.slot, c.head), (above, Pos { slot: rule, byte: 0 }));
+    }
+
     #[test]
     fn a_table_goes_in_two_backspaces() {
         let mut d = doc(vec![
@@ -3849,13 +3898,15 @@ mod tests {
         let mut c = left(&d, Caret::at(p(end)), false, false);
         delete(&mut d, &mut c, false);
         assert_eq!(text(&d, x), "ab");
-        // A picture on its own line: → lands on it, and on past it, as it did.
+        // A picture on its own line: → chooses it whole, as a divider is
+        // chosen, and the next → is past it.
         let (d, id, _, _) = with_table();
         let pic = Slot::block(id);
         let c = right(&d, at(&d, 0, 5), false, false);
-        assert_eq!(c, Caret::at(Pos { slot: pic, byte: 0 }));
-        assert_eq!(right(&d, c, false, false), Caret::at(Pos { slot: pic, byte: 1 }));
+        assert_eq!(c, Caret { anchor: Pos { slot: pic, byte: 0 }, head: Pos { slot: pic, byte: 1 } });
         assert_eq!(chosen_cell_picture(&d, c), None);
+        let past = right(&d, c, false, false);
+        assert!(past.is_empty() && past.head.slot != pic, "{past:?}");
     }
 
     fn set_cell(d: &mut Doc, slot: Slot, to: &str) {
