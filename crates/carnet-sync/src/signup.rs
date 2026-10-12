@@ -60,11 +60,11 @@ impl Sent {
     /// soon, when the last one went, and when another may be asked for.
     pub fn line(&self, to: &str) -> String {
         match self {
-            Sent::Now(_) => format!("We sent an invite to {to}. Paste its code here"),
+            Sent::Now(_) => format!("We sent an invite to {to}. Paste its code here."),
             Sent::Lately { ago, again_in } => {
                 let ago = if *ago < 60 { "a moment ago".to_string() } else { format!("{} ago", minutes((ago + 30) / 60)) };
                 format!(
-                    "We emailed {to} {ago}. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in {}",
+                    "We emailed {to} {ago}. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in {}.",
                     minutes(again_in.div_ceil(60).max(1))
                 )
             }
@@ -176,13 +176,13 @@ mod tests {
         assert!(a.lately() && a.more().is_none());
         assert_eq!(
             a.line("ann@example.com"),
-            "We emailed ann@example.com a moment ago. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in 10 minutes"
+            "We emailed ann@example.com a moment ago. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in 10 minutes."
         );
         let a = answered(&answer(202, r#"{"sent":false,"mailed_ago":130,"again_in":30}"#), None).unwrap();
         let line = a.line("a@b.co");
-        assert!(line.starts_with("We emailed a@b.co 2 minutes ago.") && line.ends_with("another email in 1 minute"), "{line}");
+        assert!(line.starts_with("We emailed a@b.co 2 minutes ago.") && line.ends_with("another email in 1 minute."), "{line}");
         let sent = answered(&answer(202, r#"{"sent":true}"#), None).unwrap();
         assert!(!sent.lately());
-        assert_eq!(sent.line("ann@example.com"), "We sent an invite to ann@example.com. Paste its code here");
+        assert_eq!(sent.line("ann@example.com"), "We sent an invite to ann@example.com. Paste its code here.");
     }
 }

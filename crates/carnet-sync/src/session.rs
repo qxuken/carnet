@@ -173,6 +173,24 @@ pub struct Usage {
     pub until: Option<u64>,
 }
 
+impl Usage {
+    /// Whether the server takes a new picture now: the account can write,
+    /// and is under its limit, if it has one. A picture held back (the
+    /// server said [`FULL`] or [`READ_ONLY`]) is offered again once it is.
+    pub fn has_room(&self) -> bool {
+        self.writable && self.limit.is_none_or(|limit| self.notes + self.pictures < limit)
+    }
+}
+
+/// What the server says (`Refused`) of pictures offered while the account
+/// is full: they stay on the device until [`Usage::has_room`].
+pub const FULL: &str = "This account is full, so new pictures stay on this device for now. Delete some, or move to a bigger plan.";
+
+/// What the server says (`Refused`) of pictures offered while the account
+/// can't write. The apps say read only once, as [`Event::ReadOnly`] has it,
+/// so they don't show this beside it.
+pub const READ_ONLY: &str = "This account is read only for now: changes stay on this device, and sync once it can write again.";
+
 /// How much of a picture goes in one frame.
 pub const BLOB_PIECE: usize = 192 * 1024;
 

@@ -29,6 +29,9 @@ const BESIDE_MIN: f32 = 180.0;
 /// How strongly a picture that's the user's own file, not Carnet's, is
 /// drawn: faint, so it reads as apart from the note's own.
 const THEIRS_OPACITY: f32 = 0.45;
+/// What the card in place of the user's own picture says when it isn't on
+/// this device (another device's file, which doesn't sync): the web's words.
+pub(super) const ELSEWHERE: &str = "This picture is only on the device that has it. Move it into Carnet there to sync it.";
 /// How long the writing pauses, in seconds, before an empty line says
 /// what can go on it.
 const HINT_AFTER: f64 = 1.2;
@@ -804,10 +807,16 @@ impl Carnet {
                 let Some((nw, nh)) = natural else {
                     // Nothing to show: a small card saying why, as wide as
                     // its words, at an edge too — never a well of the
-                    // page's width, nor a sliver of an edge's. No text in
+                    // page's width, nor a sliver of an edge's (but for
+                    // another device's own picture, below). No text in
                     // it to select: a press selects it as it would the
                     // picture, to be moved or deleted.
                     let (glyph, why) = match &entry {
+                        // The user's own picture, not here: with sync on,
+                        // it's on the device the note was written on, and
+                        // pictures outside Carnet's attachments don't sync
+                        // (docs/SYNC.md §4). Said as the web says it.
+                        Some(images::Entry::Failed(e)) if e == "not found" && theirs && self.sync.is_on() => (Glyph::CloudOff, ELSEWHERE),
                         Some(images::Entry::Failed(e)) if e == "not found" => (Glyph::Warning, "Picture not found"),
                         Some(images::Entry::Failed(e)) if e == images::HEIC_ELSEWHERE => {
                             (Glyph::Warning, "HEIC pictures show on macOS; this one can't show here")
@@ -821,28 +830,30 @@ impl Carnet {
                     };
                     let path = store::decode_src(src);
                     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-                    ui.with(
-                        NodeSpec::row()
-                            .width(Sizing::Fit)
-                            .max_width(max_w)
-                            .pad_xy(12.0, 10.0)
-                            .gap(10.0)
-                            .radius(radius::CARD)
-                            .bg(t.sunken)
-                            .border(2.0, ring)
-                            .cross_align(Align::Center),
-                        |ui| {
-                            icons::icon(ui, glyph, t.muted, 18.0, false);
-                            ui.with(NodeSpec::column().gap(2.0), |ui| {
+                    // Another device's own picture stands in the box the
+                    // picture takes there, as the web draws it: the width
+                    // the note gives it, or the text's (under half of it at
+                    // an edge), and a picture's height at least.
+                    let elsewhere = why == ELSEWHERE;
+                    let box_w = width.map_or(if floated { (self.text_w * 0.45).max(BESIDE_MIN) } else { max_w }, |w| w as f32).clamp(48.0, max_w);
+                    let card = if elsewhere {
+                        NodeSpec::row().min_width(box_w).max_width(box_w).min_height(120.0).center()
+                    } else {
+                        NodeSpec::row().width(Sizing::Fit).max_width(max_w).cross_align(Align::Center)
+                    };
+                    ui.with(card.pad_xy(12.0, 10.0).gap(10.0).radius(radius::CARD).bg(t.sunken).border(2.0, ring), |ui| {
+                        icons::icon(ui, glyph, t.muted, 18.0, false);
+                        let words_w = ((if elsewhere { box_w } else { max_w }) - 64.0).max(40.0);
+                        ui.with(NodeSpec::column().gap(2.0).max_width(words_w), |ui| {
+                            if elsewhere {
+                                // A line or two, in the box's room.
+                                ui.text_in(NodeSpec::row().max_width(words_w), why, TextStyle::new(Type::UI.size).color(t.fg));
+                            } else {
                                 ui.text(why, TextStyle::new(Type::UI.size).color(t.fg).nowrap());
-                                ui.text_in(
-                                    NodeSpec::row().max_width((max_w - 64.0).max(40.0)),
-                                    &name,
-                                    TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis(),
-                                );
-                            });
-                        },
-                    );
+                            }
+                            ui.text_in(NodeSpec::row().max_width(words_w), &name, TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis());
+                        });
+                    });
                     return;
                 };
                 let (drawn, fit) = page::picture_width(nw, width, self.text_w, max_w, floated);

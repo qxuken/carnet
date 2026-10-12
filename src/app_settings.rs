@@ -995,6 +995,7 @@ impl Carnet {
                     self.sync.account().unwrap_or_default()
                 );
                 let usage = self.sync.usage.clone();
+                let read_only = self.sync.read_only;
                 let update_soon = self.sync.update_soon;
                 let waiting = self.sync.waiting();
                 // A line said of the account: an icon, then words.
@@ -1027,18 +1028,18 @@ impl Carnet {
                             }
                         }
                         said(ui, Icon::Cloud, t.muted, &line);
-                        if !u.writable {
-                            said(
-                                ui,
-                                Icon::Warning,
-                                t.danger,
-                                "Read only for now: what's written here stays here, and syncs once the account can write again.",
-                            );
-                        } else if let Some(limit) = u.limit
+                        if u.writable
+                            && !read_only
+                            && let Some(limit) = u.limit
                             && let Some(over) = over_limit(u.notes + u.pictures, limit)
                         {
                             said(ui, Icon::Warning, t.warning, &over);
                         }
+                    }
+                    // Read only: said here, and only here (not again as
+                    // an error below the card).
+                    if read_only || usage.as_ref().is_some_and(|u| !u.writable) {
+                        said(ui, Icon::Warning, t.danger, crate::sync::READ_ONLY);
                     }
                     if update_soon {
                         ui.text(crate::sync::UPDATE_SOON, TextStyle::new(Type::SMALL.size).color(t.danger));

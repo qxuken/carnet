@@ -1927,9 +1927,11 @@ impl Carnet {
         // server's rooms while the inspector does.
         // The devices name who made each version, too.
         self.sync.want_devices = self.settings_open || self.versions.is_some();
-        // Invites are used elsewhere: asked afresh each time Settings opens.
+        // Invites are used elsewhere: asked afresh each time Settings opens;
+        // the devices too, so who's online is as of now.
         if self.settings_open && !self.sync.want_invites {
             self.sync.invites = None;
+            self.sync.devices_again();
         }
         self.sync.want_invites = self.settings_open;
         self.sync.want_inspection = self.settings_open && self.sync_inspector;

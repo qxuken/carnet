@@ -44,8 +44,15 @@ use crate::store::{Store, is_owned};
 /// The index's first line: whose ids it holds ([`Pictures::mark`]).
 const UNDER: &str = "under\t";
 
-/// A picture asked for and not come is asked again after this.
+/// A picture asked for and not come is asked again after this; one
+/// offered and not answered, offered again.
 const RETRY: Duration = Duration::from_secs(30);
+
+/// A picture the server held back (the account full, or read only) is
+/// offered again after this, though nothing said there's room: room may
+/// have been made without a word (pictures deleted on another device).
+/// Said there's room ([`Pictures::retry`]), it's offered at once.
+const HELD_AGAIN: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, PartialEq)]
 struct Known {
@@ -65,8 +72,13 @@ pub struct Pictures {
     under: Option<String>,
     /// Where the index is kept; none in tests that don't keep it.
     file: Option<PathBuf>,
-    /// Offered or being sent, the server's word awaited.
-    waiting: HashSet<BlobId>,
+    /// Offered, and when: the server's word awaited.
+    offered: HashMap<BlobId, Instant>,
+    /// Wanted by the server, and being sent.
+    sending: HashSet<BlobId>,
+    /// Offered and held back by the server (the account full, or read
+    /// only), and when: offered again once there's room.
+    held: HashMap<BlobId, Instant>,
     /// Asked for, and when.
     asked: HashMap<BlobId, Instant>,
     /// Dropped pictures a note shows again (a version brought back),
@@ -153,17 +165,44 @@ impl Pictures {
     }
 
     /// Whether pictures are on their way, up or down: the sweep waits.
+    /// One held back by the server isn't on its way.
     pub fn busy(&self) -> bool {
         let now = Instant::now();
-        !self.waiting.is_empty() || !self.reviving.is_empty() || self.asked.values().any(|at| now.duration_since(*at) < RETRY)
+        let recent = |at: &Instant| now.duration_since(*at) < RETRY;
+        !self.sending.is_empty() || self.offered.values().any(recent) || !self.reviving.is_empty() || self.asked.values().any(recent)
     }
 
-    /// The pictures being sent, or wanted back: paths from the notes
-    /// folder.
+    /// The pictures being sent, held back, or wanted back: paths from the
+    /// notes folder.
     pub fn busy_paths(&self) -> BTreeSet<String> {
-        let mut out: BTreeSet<String> = self.index.iter().filter(|(_, k)| self.waiting.contains(&k.id)).map(|(p, _)| p.clone()).collect();
+        let going = |id: &BlobId| self.offered.contains_key(id) || self.sending.contains(id) || self.held.contains_key(id);
+        let mut out: BTreeSet<String> = self.index.iter().filter(|(_, k)| going(&k.id)).map(|(p, _)| p.clone()).collect();
         out.extend(self.reviving.values().flatten().cloned());
         out
+    }
+
+    /// The server held back what was offered (`Refused`: the account
+    /// full, or read only): no answer comes for it, so it's not awaited,
+    /// and it's offered again once there's room.
+    pub fn held_back(&mut self) {
+        let now = Instant::now();
+        for (id, _) in self.offered.drain() {
+            self.held.insert(id, now);
+        }
+    }
+
+    /// There's room again (the plan raised, the account writable again,
+    /// or a new login): what was held back, or offered and not answered,
+    /// is offered at the next [`Pictures::tick`].
+    pub fn retry(&mut self) {
+        self.held.clear();
+        self.offered.clear();
+    }
+
+    /// Whether any picture is held back by the server.
+    #[cfg(test)]
+    pub fn is_holding(&self) -> bool {
+        !self.held.is_empty()
     }
 
     /// What names the key a session's picture ids are made under: the id
@@ -182,7 +221,9 @@ impl Pictures {
             return;
         }
         self.index.clear();
-        self.waiting.clear();
+        self.offered.clear();
+        self.sending.clear();
+        self.held.clear();
         self.asked.clear();
         self.reviving.clear();
         self.under = Some(mark);
@@ -247,6 +288,11 @@ impl Pictures {
 
         // Here and not (or not so) in the vault: in it if the server has
         // it, else offered.
+        // Not while one is awaited or being sent; one held back, after
+        // a while, or once there's room.
+        let now = Instant::now();
+        self.offered.retain(|_, at| now.duration_since(*at) < RETRY);
+        self.held.retain(|_, at| now.duration_since(*at) < HELD_AGAIN);
         let mut offer = Vec::new();
         for (rel, k) in &self.index {
             if vault.get(rel).is_some_and(|v| *v == hex(&k.id)) {
@@ -254,15 +300,18 @@ impl Pictures {
             }
             if k.stored {
                 wrote |= store.set_picture(rel, &hex(&k.id));
-            } else if !self.waiting.contains(&k.id) && !offer.contains(&k.id) {
+            } else if !self.offered.contains_key(&k.id) && !self.sending.contains(&k.id) && !self.held.contains_key(&k.id) && !offer.contains(&k.id) {
                 offer.push(k.id);
             }
         }
-        self.waiting.extend(offer.iter().copied());
-        session.offer_blobs(offer);
+        // Offered only if it goes: one not sent (logging in) is offered
+        // at the next tick.
+        if session.is_ready() {
+            self.offered.extend(offer.iter().map(|id| (*id, now)));
+            session.offer_blobs(offer);
+        }
 
         // In the vault and not here: asked for.
-        let now = Instant::now();
         for (rel, id) in &vault {
             // One beside a note is the user's, on the device that has it.
             if present.contains(rel.as_str()) || !is_owned(rel) {
@@ -304,20 +353,22 @@ impl Pictures {
         self.under(session);
         match e {
             Event::BlobWanted(id) => {
+                self.offered.remove(id);
+                self.held.remove(id);
                 let path = self.index.iter().find(|(_, k)| k.id == *id).map(|(p, _)| store.dir.join(p));
                 match path.and_then(|p| fs::read(p).ok()) {
                     // Still the picture it was: sent.
-                    Some(bytes) if session.blob_id(&bytes) == *id => {
-                        session.put_blob(&bytes, rng);
+                    Some(bytes) if session.blob_id(&bytes) == *id && session.put_blob(&bytes, rng) => {
+                        self.sending.insert(*id);
                     }
-                    _ => {
-                        self.waiting.remove(id);
-                    }
+                    _ => {}
                 }
                 Ok(false)
             }
             Event::BlobStored(id) => {
-                self.waiting.remove(id);
+                self.offered.remove(id);
+                self.sending.remove(id);
+                self.held.remove(id);
                 let mut wrote = false;
                 let mut changed = false;
                 for (rel, k) in self.index.iter_mut().filter(|(_, k)| k.id == *id) {
@@ -371,7 +422,8 @@ impl Pictures {
             }
             // Asked, or offered, again later.
             Event::BlobFailed(id) => {
-                self.waiting.remove(id);
+                self.offered.remove(id);
+                self.sending.remove(id);
                 self.reviving.remove(id);
                 Ok(false)
             }

@@ -58,7 +58,8 @@ type Said =
   | { passwordSet: true }
   | { passkeys: Passkey[] }
   | { passkeySet: true }
-  | { writable: true };
+  | { writable: true }
+  | { readOnly: true };
 
 const IDENTITY = 'identity';
 const STATE = 'state';
@@ -70,6 +71,11 @@ export const NOTES_CHANGED = 'carnet-notes-changed';
 /// hasn't got; any other failure is one the vault doesn't name
 /// (pictures.ts says which).
 export const NOT_ON_SERVER = 'not on the server';
+/// What the server says of pictures offered while the account is full
+/// (`carnet_sync::session::FULL`): taken back once there's room.
+const FULL = 'This account is full, so new pictures stay on this device for now. Delete some, or move to a bigger plan.';
+/// Whether the server takes a new picture now (`Usage::has_room`).
+const hasRoom = (u: Usage) => u.writable && (u.limit === null || u.notes + u.pictures < u.limit);
 /// Pictures put in here and not yet on the server: `[path, id]`s.
 const UPLOADS = 'uploads';
 /// The name this browser was given, if one was (sealed like the rest):
@@ -122,6 +128,9 @@ class Sync {
   devices = $state<Device[] | null>(null);
   /// What the account keeps on the server, asked with the devices.
   usage = $state<Usage | null>(null);
+  /// The account can't write for now (a plan lapsed, a suspension), as
+  /// the server said: the status line and Settings say so, once.
+  readOnly = $state(false);
   /// The server will stop taking this app soon: why, for Settings.
   updateSoon = $state<string | null>(null);
   /// What the server said it can do (`compat::feature`), as it greeted
@@ -407,7 +416,14 @@ class Sync {
 
   private said(s: Said) {
     if ('devices' in s) this.devices = s.devices;
-    else if ('usage' in s) this.usage = s.usage;
+    else if ('usage' in s) {
+      this.usage = s.usage;
+      // Room again (a plan raised): the pictures held back are on their
+      // way (notes.rs), and "full" goes.
+      const u = s.usage;
+      if (hasRoom(u) && this.error === FULL) this.error = null;
+      if (!u.writable) this.readOnly = true;
+    }
     else if ('password' in s) this.password = s.password;
     else if ('passwordSet' in s) {
       this.passwordSets++;
@@ -418,8 +434,9 @@ class Sync {
     else if ('writable' in s) {
       // Writable again (a plan renewed, a suspension lifted): the
       // read-only words go; what waited is on its way.
-      if (this.error?.startsWith('This account is read only')) this.error = null;
-    }
+      this.readOnly = false;
+      if (this.usage) this.usage = { ...this.usage, writable: true };
+    } else if ('readOnly' in s) this.readOnly = true;
     else if ('invites' in s) this.invites = s.invites;
     else if ('code' in s) {
       this.code = s.code;
@@ -887,6 +904,8 @@ class Sync {
     this.invite = null;
     this.code = null;
     this.words = null;
+    this.usage = null;
+    this.readOnly = false;
     this.status = '';
     this.error = why;
     this.phase = 'setup';

@@ -410,10 +410,24 @@ impl<S: Storage> Hub<S> {
     }
 
     /// A socket gone. A pairing it was in is over, and the other side told.
+    /// A device logged in that went offline with it (no other socket of
+    /// its own open) was last seen now, and the account's other devices
+    /// online are sent their list again, so none says it's online (§7).
     pub fn disconnect(&mut self, conn: ConnId) -> Vec<Out> {
-        self.conns.remove(&conn);
+        let gone = self.conns.remove(&conn).and_then(|c| match c.state {
+            State::Ready { account, device } => Some((account, device)),
+            _ => None,
+        });
         self.leases.retain(|_, l| l.conn != conn);
-        self.end_pairing_of(conn, "the other device went away")
+        let mut out = self.end_pairing_of(conn, "the other device went away");
+        if let Some((account, device)) = gone
+            && !self.online(&account).contains(&device)
+        {
+            let seen = self.store.set_seen(&account, &device, self.now);
+            let _ = self.kept(seen);
+            out.extend(self.lists_to_others(conn, &account));
+        }
+        out
     }
 
     pub fn receive(&mut self, conn: ConnId, bytes: &[u8], rng: &mut impl Random) -> Vec<Out> {

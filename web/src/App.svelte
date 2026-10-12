@@ -134,9 +134,11 @@
   const status = $derived.by(() => {
     const n = sync.waiting;
     const ok = sync.status === 'Up to date';
-    if (!n) return { ok, text: sync.status };
+    // Read only: said here (and in Settings), not again as an error.
+    const readOnly = sync.readOnly || (sync.usage !== null && !sync.usage.writable);
+    if (!n) return ok && readOnly ? { ok: false, text: 'Read only for now' } : { ok, text: sync.status };
     const changes = n === 1 ? '1 change' : `${n} changes`;
-    if (ok && sync.usage && !sync.usage.writable) return { ok: false, text: `Read only for now: ${changes} waiting` };
+    if (ok && readOnly) return { ok: false, text: `Read only for now: ${changes} waiting` };
     if (ok) return { ok: false, text: `Waiting to send ${changes}` };
     return { ok: false, text: `${sync.status} · ${changes} waiting` };
   });

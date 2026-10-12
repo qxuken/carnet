@@ -29,7 +29,7 @@ use carnet_sync::invite::InviteCode;
 use carnet_sync::http::Http;
 use carnet_sync::net::{Link, NetEvent, sync_url};
 use carnet_sync::pair::{Admitted, Enroller, Joiner, Joining, PairCode, PasswordJoiner, Recoverer};
-use carnet_sync::session::{DeviceInfo, Event, Identity, PasskeyInfo, Session, Usage};
+use carnet_sync::session::{self, DeviceInfo, Event, Identity, PasskeyInfo, Session, Usage};
 use carnet_sync::vault;
 use carnet_sync::wire::{AccountRow, InviteRow, LogRow, RoomRow};
 
@@ -344,6 +344,12 @@ pub struct Sync {
     /// Settings shows the devices: list them when they aren't.
     pub want_devices: bool,
     asked_devices: bool,
+    /// The devices (and what the account keeps) to be asked for again,
+    /// though listed: Settings opened, so what it shows is fresh.
+    devices_due: bool,
+    /// The account can't write for now ([`Event::ReadOnly`], until
+    /// [`Event::Writable`]): Settings says so, once, in the account's card.
+    pub read_only: bool,
     /// What the account keeps on the server, and may (a hosted plan's
     /// limit), as last asked: with the devices.
     pub usage: Option<Usage>,
@@ -418,7 +424,7 @@ pub struct Sync {
 }
 
 /// What Settings says while the account can't write.
-const READ_ONLY: &str = "This account is read only for now: what's written here stays here, and syncs once the account can write again.";
+pub const READ_ONLY: &str = "Read only for now: what's written here stays here, and syncs once the account can write again.";
 
 /// What the server says of invites (§6): whether this account is the
 /// owner's; if so, the invites waiting and every account.
@@ -447,6 +453,8 @@ impl Sync {
             devices: None,
             want_devices: false,
             asked_devices: false,
+            devices_due: false,
+            read_only: false,
             usage: None,
             asked_usage: false,
             password: None,
@@ -794,6 +802,14 @@ impl Sync {
     /// The notes folder may have changed outside sync's sight (another
     /// app, looked at again): the places and pictures are compared with
     /// the vault soon.
+    /// Settings opened: the devices it lists, who's online among them, and
+    /// what the account keeps, asked for again, the list shown meanwhile.
+    /// (A server that tells when a device comes or goes keeps the list
+    /// fresh while it stays open, docs/SYNC.md §7.)
+    pub fn devices_again(&mut self) {
+        self.devices_due = true;
+    }
+
     pub fn poke(&mut self) {
         self.layout_due = true;
     }
@@ -884,6 +900,7 @@ impl Sync {
         self.code = None;
         self.words = None;
         self.devices = None;
+        self.read_only = false;
         self.joined = None;
         self.passkeys.clear();
         self.inspection = None;
@@ -1040,6 +1057,11 @@ impl Sync {
                 for e in events {
                     match e {
                         Event::LoggedIn => {
+                            // A new session: what was offered and not
+                            // answered, or held back, is offered again.
+                            if let Some(p) = self.pictures.as_mut() {
+                                p.retry();
+                            }
                             self.status = Status::Online;
                             self.devices = None;
                             self.asked_devices = false;
@@ -1081,7 +1103,21 @@ impl Sync {
                             }
                             self.devices = None;
                         }
-                        Event::Refused(why) => self.error = Some(sentence(&why)),
+                        // Pictures held back: offered again once there's
+                        // room. Read only, the card says so already.
+                        Event::Refused(why) if why == session::READ_ONLY => {
+                            if let Some(p) = self.pictures.as_mut() {
+                                p.held_back();
+                            }
+                        }
+                        Event::Refused(why) => {
+                            if why == session::FULL
+                                && let Some(p) = self.pictures.as_mut()
+                            {
+                                p.held_back();
+                            }
+                            self.error = Some(sentence(&why));
+                        }
                         Event::Invites { owner, invites, accounts } => {
                             self.invites = Some(Invites { owner, waiting: invites, accounts });
                             self.asked_invites = false;
@@ -1122,16 +1158,24 @@ impl Sync {
                         // The session asks for the list again itself.
                         Event::PasskeySet => {}
                         Event::Usage(u) => {
+                            // Room again (a plan raised, pictures deleted):
+                            // the pictures held back go now, and "full" goes.
+                            if u.has_room() {
+                                if let Some(p) = self.pictures.as_mut() {
+                                    p.retry();
+                                }
+                                if self.error.as_deref() == Some(session::FULL) {
+                                    self.error = None;
+                                }
+                            }
                             self.usage = Some(u);
                             self.asked_usage = false;
                         }
-                        Event::ReadOnly => self.error = Some(READ_ONLY.into()),
+                        Event::ReadOnly => self.read_only = true,
                         // Writable again: what waited is on its way, and
                         // the plan's line is asked for again.
                         Event::Writable => {
-                            if self.error.as_deref() == Some(READ_ONLY) {
-                                self.error = None;
-                            }
+                            self.read_only = false;
                             self.usage = None;
                             self.asked_usage = false;
                         }
@@ -1155,9 +1199,16 @@ impl Sync {
                         e @ (Event::BlobWanted(_) | Event::BlobStored(_) | Event::BlobGot(..) | Event::BlobFailed(_)) => blobs.push(e),
                     }
                 }
-                if self.want_devices && self.devices.is_none() && !self.asked_devices && session.is_ready() {
+                if self.want_devices && (self.devices.is_none() || self.devices_due) && !self.asked_devices && session.is_ready() {
                     session.list_devices();
                     self.asked_devices = true;
+                    // What the account keeps, with them, as when first asked.
+                    if self.devices_due && !self.asked_usage {
+                        session.usage();
+                        self.asked_usage = true;
+                        self.usage_moves = session.moves();
+                    }
+                    self.devices_due = false;
                 }
                 if self.want_invites && self.invites.is_none() && !self.asked_invites && session.is_ready() {
                     session.list_invites();
