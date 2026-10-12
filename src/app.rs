@@ -3798,6 +3798,7 @@ impl App for Carnet {
             ui.request_paste();
         }
         if let Some((key, at, what)) = self.pending_menu.take() {
+            let hung = what == MenuFor::Tools;
             let items = match what {
                 MenuFor::Note(id) => self.note_menu(id),
                 MenuFor::Folder(f) => self.folder_menu(&f),
@@ -3806,6 +3807,9 @@ impl App for Carnet {
                 MenuFor::Picked => self.picked_menu(),
                 MenuFor::Page => self.page_menu(),
             };
+            // A menu hung from a toolbar button opens under it, but kept
+            // inside the window: near the right edge, moved left.
+            let at = if hung { chrome::keep_in_window(ui, at, &items) } else { at };
             ui.open_menu(Menu::new(key, at, items));
         }
         self.menu_open = ui.core().menu().is_some();
@@ -3924,11 +3928,14 @@ impl App for Carnet {
                     self.page(ui, &l, main_w);
                     // The words scrolling up under the strip fade out
                     // rather than being cut at its edge. Paint only: a
-                    // press here is the page's.
+                    // press here is the page's. Clear of the library's
+                    // edge, which lies over the page's first points: the
+                    // fade drawn over it notched the line.
+                    let edge = if self.side_w(narrow) > 0.0 { chrome::EDGE_W } else { 0.0 };
                     ui.leaf(
                         NodeSpec::row()
-                            .float(FloatConfig::parent().offset(0.0, STRIP_H))
-                            .size(main_w - 12.0, 22.0)
+                            .float(FloatConfig::parent().offset(edge, STRIP_H))
+                            .size(main_w - 12.0 - edge, 22.0)
                             .gradient(kui_native::Gradient::to(kui_native::Side::Bottom, [l.t.bg, l.t.bg.with_alpha(0.0)]))
                             .role(Role::None),
                     );

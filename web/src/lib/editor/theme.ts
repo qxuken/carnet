@@ -18,7 +18,9 @@ export const theme = EditorView.theme({
   // A block's space above, as the reader spaces them; items close.
   '.cm-block': { paddingTop: '12px !important' },
   '.cm-bullet.cm-block, .cm-number.cm-block, .cm-todo.cm-block': { paddingTop: '4px !important' },
-  '.cm-title': { font: '400 36px/46px var(--serif)', paddingBottom: '6px !important' },
+  // The title's space below, the desktop's: its own and the first
+  // block's above it (a paragraph's 12 here, as it is the desktop's 6).
+  '.cm-title': { font: '400 36px/46px var(--serif)', paddingBottom: '12px !important' },
   // A heading's space above, the desktop's: its own and the block's
   // before it.
   '.cm-h1': { font: '400 30px/40px var(--serif)', paddingTop: '34px !important' },
@@ -40,7 +42,13 @@ export const theme = EditorView.theme({
     border: 'solid var(--on-accent)', borderWidth: '0 2px 2px 0', transform: 'rotate(45deg)',
   },
   '.cm-ticked': { color: 'var(--muted)', textDecoration: 'line-through', textDecorationColor: 'var(--faint)' },
-  '.cm-quote': { borderLeft: '3px solid var(--border-strong)', paddingLeft: '14px !important', color: 'var(--muted)', fontFamily: 'var(--serif)' },
+  // Its rule as tall as its words, as the desktop's and the reader's are:
+  // placed by the content box (and drawn left of it), not down the space
+  // above the block too.
+  '.cm-quote': {
+    paddingLeft: '17px !important', color: 'var(--muted)', fontFamily: 'var(--serif)',
+    background: 'linear-gradient(var(--border-strong), var(--border-strong)) -17px 0 / 3px 100% no-repeat content-box border-box',
+  },
   // A paragraph's dropped first letter (page.ts `ini`), as the desktop and
   // the reader drop it (styles.css `p.initial`): three lines tall in the
   // headings' serif, in the accent unless it has a colour of its own.
@@ -66,8 +74,9 @@ export const theme = EditorView.theme({
   '.cm-marked': { borderRadius: '3px' },
   // A divider as the desktop draws it by default (settings `divider =
   // dots`): three dots 3px round, 15px apart, faint, with the desktop's
-  // space round them (styles.css `hr` the same).
-  '.cm-divider': { textAlign: 'center', paddingTop: '26px !important', paddingBottom: '16px' },
+  // space round them (styles.css `hr` the same). Its line is the words'
+  // height, the dots at its middle: the line's own half is part of it.
+  '.cm-divider': { textAlign: 'center', paddingTop: '14px !important', paddingBottom: '4px' },
   '.cm-rule': {
     display: 'inline-block', width: '33px', height: '3px', verticalAlign: 'middle', color: 'var(--faint)',
     background: 'radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x',
@@ -95,13 +104,18 @@ export const theme = EditorView.theme({
   // below it as in the reader.
   '.cm-pics.cm-float': { padding: '12px 0 0' },
   '.cm-float + .cm-line, .cm-pics-beside + .cm-line': { paddingTop: '0 !important' },
+  // A heading beside them keeps what it has above it more than a
+  // paragraph does, as on the desktop: its top that much below theirs.
+  '.cm-float + .cm-h1, .cm-pics-beside + .cm-h1': { paddingTop: '22px !important' },
+  '.cm-float + .cm-h2, .cm-pics-beside + .cm-h2': { paddingTop: '16px !important' },
+  '.cm-float + .cm-h3, .cm-pics-beside + .cm-h3': { paddingTop: '10px !important' },
   '.cm-pics.cm-float::before': { content: 'none' },
   '.cm-float .cm-pics-row': {
     '--share': 'calc((100cqi - (var(--n) - 1) * 16px) / var(--n))',
     display: 'flex', gap: '16px', alignItems: 'flex-start', clear: 'both', maxWidth: '100%',
   },
-  '.cm-left .cm-pics-row': { float: 'left', margin: '8px 20px 14px 0' },
-  '.cm-right .cm-pics-row': { float: 'right', margin: '8px 0 14px 20px' },
+  '.cm-left .cm-pics-row': { float: 'left', margin: '8px 20px 20px 0' },
+  '.cm-right .cm-pics-row': { float: 'right', margin: '8px 0 20px 20px' },
   '.cm-float .cm-picture-box': { flex: 'none' },
   '.cm-float .cm-picture': { minWidth: '48px', maxWidth: 'var(--share)' },
   '.cm-float .cm-picture-box:not(.cm-sized) .cm-picture': { maxWidth: 'min(45cqi, var(--share))' },
@@ -116,10 +130,12 @@ export const theme = EditorView.theme({
   '.cm-alone ~ .cm-line, .cm-divider': { display: 'block' },
   // A table never runs beside them (carnet_core::page::runs_beside): it
   // starts below, at its full width, cleared inside its line, measured.
-  '.cm-line.cm-table': { display: 'block', paddingTop: '0 !important', paddingBottom: '8px' },
+  // Its space above is in two: the line's, which a picture at an edge
+  // takes up (its own space below is the rest), and the clearing's.
+  '.cm-line.cm-table': { display: 'block', paddingTop: '12px !important', paddingBottom: '8px' },
   // No empty line of the caret's above and below it.
   '.cm-line.cm-table > .cm-widgetBuffer': { position: 'absolute' },
-  '.cm-table::before': { content: "''", display: 'block', clear: 'both', paddingTop: '20px' },
+  '.cm-table::before': { content: "''", display: 'block', clear: 'both', paddingTop: '8px' },
   // Its place until it comes (styles.css `.picture-card`) the same.
   '.cm-pics .picture-card': { margin: '0' },
   '.cm-float .picture-card': { flex: 'none', maxWidth: 'var(--share)' },
@@ -158,7 +174,8 @@ export const theme = EditorView.theme({
   // A table as the desktop draws it (styles.css `.note table` the same):
   // the text's width, its columns sharing it alike; one hairline in the
   // border's colour for the rounded frame and the rules; the header row
-  // small and quiet on a wash; the cells roomy, in the words' type.
+  // small and quiet on a wash, 13 as the desktop rounds its 12.5; the
+  // cells roomy, in the words' type.
   '.cm-tablewrap': { display: 'block', overflowX: 'auto' },
   '.cm-tablewrap table': {
     width: '100%', tableLayout: 'fixed', borderCollapse: 'separate', borderSpacing: '0',
@@ -171,7 +188,7 @@ export const theme = EditorView.theme({
   '.cm-tablewrap tr:first-child > *': { borderTop: '0' },
   '.cm-tablewrap tr > :first-child': { borderLeft: '0' },
   '.cm-tablewrap th:focus, .cm-tablewrap td:focus': { boxShadow: 'inset 0 0 0 2px var(--accent-soft)' },
-  '.cm-tablewrap th': { background: 'var(--sunken)', color: 'var(--muted)', font: '400 12.5px/18px var(--sans)', padding: '9px 14px' },
+  '.cm-tablewrap th': { background: 'var(--sunken)', color: 'var(--muted)', font: '400 13px/18px var(--sans)', padding: '9px 14px' },
   '.cm-tablewrap tr:first-child > :first-child': { borderTopLeftRadius: 'calc(var(--radius) - 1px)' },
   '.cm-tablewrap tr:first-child > :last-child': { borderTopRightRadius: 'calc(var(--radius) - 1px)' },
   // A picture among a cell's words (table.ts): as wide as the note gives
