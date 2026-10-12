@@ -8,6 +8,7 @@ mod common;
 
 use carnet_server::blobs::{MemoryBlobs, Worker};
 use carnet_server::limits::TOO_MANY;
+use carnet_server::storage::{PasskeySlot, PasswordSlot};
 use carnet_server::{ConnId, Hub, Out, Storage};
 use carnet_sync::crypto::{DeviceKey, VaultKey, login_message, recovery_message};
 use carnet_sync::elo::{self, Header};
@@ -487,5 +488,96 @@ fn too_many_tries_from_one_address_are_turned_away() {
             spoilt += 1;
         }
         assert_eq!(spoilt, 10);
+    }
+}
+
+/// A recovery key is one account's. Another account setting it as its
+/// own code is refused, and so is a key any account's password or passkey
+/// signs with: the account it was still finds it, and nobody's recovery
+/// goes elsewhere. An account setting its own code again, or a new one,
+/// is let.
+#[test]
+fn a_recovery_key_is_never_taken_from_another_account() {
+    for store in stores() {
+        let mut raw = Raw::new(store);
+        let (a1, b1) = (raw.a1.clone(), raw.b1.clone());
+        let a = raw.login(A, b"a1", &a1);
+        let b = raw.login(B, b"b1", &b1);
+        let set = |public: [u8; 32]| Frame::Carnet(Carnet::SetRecovery { public, wrapped: vec![1; 40], card: vec![2; 40] });
+        let is_set = |outs: &[Out], conn: ConnId| frames(outs, conn).iter().any(|f| matches!(f, Frame::Carnet(Carnet::RecoverySet)));
+
+        let code = DeviceKey::generate(&mut raw.rng).public();
+        let outs = raw.send(a, &set(code));
+        assert!(is_set(&outs, a), "A's own code");
+        let outs = raw.send(b, &set(code));
+        assert!(refused(&outs, b).is_some() && !is_set(&outs, b), "B naming A's code as its own");
+        assert_eq!(raw.hub.store().recovery(&code).map(|(acct, _)| acct).as_deref(), Some(A), "A's code is A's still");
+        assert!(raw.hub.store().recovery_card(B).is_empty(), "B has none");
+
+        // A passkey's key and a password's, of A: not B's code either.
+        let passkey = DeviceKey::generate(&mut raw.rng).public();
+        raw.hub.store_mut().add_passkey(A, PasskeySlot { public: passkey, wrapped: vec![3; 40], card: vec![4; 40], made: 0 }).unwrap();
+        let password = DeviceKey::generate(&mut raw.rng).public();
+        raw.hub
+            .store_mut()
+            .set_password(A, PasswordSlot { id: "a@example.com".into(), record: vec![5; 40], public: password, wrapped: vec![6; 40], card: vec![7; 40] })
+            .unwrap();
+        for key in [passkey, password] {
+            let outs = raw.send(b, &set(key));
+            assert!(refused(&outs, b).is_some() && !is_set(&outs, b), "another account's slot's key");
+            assert!(raw.hub.store().recovery(&key).is_none(), "a recovery finds the slot it was, and nothing first");
+        }
+        assert_eq!(raw.hub.store().passkey_slot(&passkey).map(|(acct, _)| acct).as_deref(), Some(A));
+        assert_eq!(raw.hub.store().password_slot(&password).map(|(acct, _)| acct).as_deref(), Some(A));
+
+        // Its own code again, or a new one: let.
+        let outs = raw.send(a, &set(code));
+        assert!(is_set(&outs, a), "A setting its code again");
+        let mine = DeviceKey::generate(&mut raw.rng).public();
+        let outs = raw.send(b, &set(mine));
+        assert!(is_set(&outs, b), "B's own new code");
+        assert_eq!(raw.hub.store().recovery(&mine).map(|(acct, _)| acct).as_deref(), Some(B));
+
+        // And the store itself refuses, whoever asks it.
+        assert!(raw.hub.store_mut().set_recovery(B, code, vec![1], vec![2]).is_err(), "the store gives no key away");
+        assert_eq!(raw.hub.store().recovery(&code).map(|(acct, _)| acct).as_deref(), Some(A));
+        assert_eq!(raw.hub.store().recovery(&mine).map(|(acct, _)| acct).as_deref(), Some(B), "and B's own is as it was");
+        let newer = DeviceKey::generate(&mut raw.rng).public();
+        raw.hub.store_mut().set_recovery(A, newer, vec![1], vec![2]).unwrap();
+        assert!(raw.hub.store().recovery(&code).is_none(), "a new code replaces the last");
+        assert_eq!(raw.hub.store().recovery(&newer).map(|(acct, _)| acct).as_deref(), Some(A));
+    }
+}
+
+/// A device id an account has had is never given again: not to another
+/// key (which would be that device's name taken), and not to a removed
+/// device (which would be let back in). The same device added again is
+/// no change, and another account may have one of that id.
+#[test]
+fn a_device_id_the_account_has_had_is_never_given_again() {
+    for store in stores() {
+        let mut raw = Raw::new(store);
+        let (a2, other) = (raw.a2.public(), DeviceKey::generate(&mut raw.rng).public());
+        let s = raw.hub.store_mut();
+        assert!(s.add_device(A, b"a2", other).is_err(), "another key under a2's id");
+        s.add_device(A, b"a2", a2).unwrap();
+        s.revoke_device(A, b"a2").unwrap();
+        assert!(s.add_device(A, b"a2", a2).is_err(), "a removed device stays removed");
+        let d = s.device(A, b"a2").unwrap();
+        assert!(d.revoked && d.public == a2);
+        s.add_device(B, b"a2", other).unwrap();
+
+        // Over the socket: a recovery naming a device the account has.
+        let recovery = DeviceKey::generate(&mut raw.rng);
+        raw.hub.store_mut().set_recovery(A, recovery.public(), vec![1; 40], vec![2; 40]).unwrap();
+        let newcomer = DeviceKey::generate(&mut raw.rng);
+        for device in [&b"a1"[..], b"a2"] {
+            let (conn, nonce) = raw.open("");
+            let signature = recovery.sign(&recovery_message(ORIGIN, &recovery.public(), device, &newcomer.public(), &nonce));
+            let outs = raw.send(conn, &Frame::Carnet(Carnet::Recover { public: recovery.public(), signature, device: device.to_vec(), device_public: newcomer.public() }));
+            assert!(denied(&outs, conn).is_some(), "{device:?} taken over by a recovery");
+        }
+        assert_eq!(raw.hub.store().device(A, b"a1").unwrap().public, raw.a1.public());
+        assert!(raw.hub.store().device(A, b"a2").unwrap().revoked);
     }
 }

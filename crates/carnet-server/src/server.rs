@@ -27,10 +27,10 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{ConnectInfo, RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::http::StatusCode;
@@ -43,7 +43,7 @@ use futures_util::{SinkExt, StreamExt};
 use carnet_sync::invite::InviteCode;
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::blobs::{self as pictures, BlobFiles, Blobs, Counts, FileBlobs, Job, Worker};
 use crate::links::Signer;
@@ -81,6 +81,44 @@ pub use crate::hub::INVITE_DAYS;
 /// The largest frame a socket takes: past it, the socket closes.
 pub const MAX_FRAME: usize = 1 << 20;
 
+/// How long a socket may take, and how much may wait for it
+/// (docs/SYNC.md §6). [`SocketLimits::default`] unless a test wants
+/// them sooner.
+#[derive(Clone, Copy, Debug)]
+pub struct SocketLimits {
+    /// To log in, from the socket opening: no challenge waits longer for
+    /// its answer. Past it, the socket closes.
+    pub login: Duration,
+    /// With nothing heard from it: then it's gone, and its socket closes.
+    pub idle: Duration,
+    /// Quiet this long, it's sent a WebSocket ping, which a browser
+    /// answers by itself: an app that's there is never idle.
+    pub ping: Duration,
+    /// Bytes waiting to be written to it: past this, it isn't reading,
+    /// and its socket closes, what waited dropped.
+    pub queue: usize,
+}
+
+/// To log in: 30 seconds, the challenge's life (§7).
+pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Nothing heard for 5 minutes: ten of the apps' pings (every 30 s), or
+/// five of the server's own, missed.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Quiet for a minute: pinged.
+pub const PING_AFTER: Duration = Duration::from_secs(60);
+/// 16 frames' worth may wait for a socket: a room's backfill and the
+/// others' writes meanwhile, many times over. A socket reads no more of
+/// its device's frames while a frame's worth waits (or the hub hasn't
+/// done what it gave it), so asking again and again without reading
+/// gets nowhere; past this, something sent unasked piled up.
+pub const MAX_QUEUED: usize = 16 * MAX_FRAME;
+
+impl Default for SocketLimits {
+    fn default() -> Self {
+        SocketLimits { login: LOGIN_TIMEOUT, idle: IDLE_TIMEOUT, ping: PING_AFTER, queue: MAX_QUEUED }
+    }
+}
+
 fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -102,7 +140,7 @@ pub fn invite(store: &mut (impl Storage + ?Sized), owner: bool) -> Result<Invite
 
 /// What a socket or a request asks of the hub's thread.
 enum ToHub {
-    Open { conn: ConnId, to: mpsc::UnboundedSender<Message>, client: String, app: compat::Client },
+    Open { conn: ConnId, to: Line, client: String, app: compat::Client },
     Frame { conn: ConnId, bytes: Vec<u8> },
     Closed { conn: ConnId },
     /// Whether the hub answers: `/v1/health`.
@@ -308,6 +346,7 @@ struct App {
     trusted: Arc<[Network]>,
     gate: Arc<std::sync::Mutex<Gate>>,
     refused: Arc<AtomicU64>,
+    sockets: SocketLimits,
 }
 
 /// Sockets by client: how many each has open, and how fast it opens them.
@@ -349,12 +388,15 @@ fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, 
         hub = hub.with_passwords(p);
     }
     hub.compact_when(compact_after, 256 * 1024);
-    let mut sockets: std::collections::HashMap<ConnId, mpsc::UnboundedSender<Message>> = Default::default();
+    let mut sockets: std::collections::HashMap<ConnId, Line> = Default::default();
     let mut rng = OsRandom;
     let mut seen = Snapshot::default();
     while let Some(msg) = rx.blocking_recv() {
         let began = Instant::now();
         hub.tick(now());
+        // A frame done: its socket may give the next, once what it
+        // brought is queued.
+        let mut done = None;
         let outs = match msg {
             ToHub::Open { conn, to, client, app } => {
                 sockets.insert(conn, to);
@@ -364,6 +406,7 @@ fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, 
             ToHub::Frame { conn, bytes } => {
                 seen.frames_in += 1;
                 seen.bytes_in += bytes.len() as u64;
+                done = Some((conn, bytes.len() + OVERHEAD));
                 hub.receive(conn, &bytes, &mut rng)
             }
             ToHub::Closed { conn } => {
@@ -394,9 +437,11 @@ fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, 
             match o {
                 Out::Send(conn, bytes) => {
                     if let Some(s) = sockets.get(&conn) {
-                        seen.frames_out += 1;
-                        seen.bytes_out += bytes.len() as u64;
-                        let _ = s.send(Message::Binary(bytes.into()));
+                        let n = bytes.len() as u64;
+                        if s.send(Message::Binary(bytes.into())) {
+                            seen.frames_out += 1;
+                            seen.bytes_out += n;
+                        }
                     }
                 }
                 Out::Close(conn) => {
@@ -417,6 +462,14 @@ fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, 
                 }
             }
         }
+        if let Some((conn, cost)) = done
+            && let Some(s) = sockets.get(&conn)
+        {
+            if hub.logged_in(conn) {
+                s.meter.ready.store(true, Ordering::Release);
+            }
+            s.meter.handled(cost);
+        }
         seen.handled.add(began.elapsed());
     }
 }
@@ -434,6 +487,18 @@ pub async fn serve_with(config: Config, listener: TcpListener, metrics: Option<T
 
 /// [`serve_with`], with what a host adds.
 pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option<TcpListener>, host: Host, stop: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+    serve_limited(config, listener, metrics, host, SocketLimits::default(), stop).await
+}
+
+/// [`serve_hosted`], its sockets' timeouts and queues as said.
+pub async fn serve_limited(
+    config: Config,
+    listener: TcpListener,
+    metrics: Option<TcpListener>,
+    host: Host,
+    sockets: SocketLimits,
+    stop: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     let started = now();
     let Host { routes, quota, admission, signup, passwords, password_emails, first_invite, store: hosted_store, blobs: hosted_blobs, ready } = host;
     let passwords = if passwords { Some(opaque_key(&config.data)?) } else { None };
@@ -527,6 +592,7 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
         trusted: config.trusted.clone().into(),
         gate: Arc::new(std::sync::Mutex::new(gate)),
         refused: refused.clone(),
+        sockets,
     };
     // One stop, for both listeners.
     let (stopping, stopped) = tokio::sync::watch::channel(false);
@@ -983,38 +1049,197 @@ impl Drop for Held {
     }
 }
 
+/// What a message costs a socket's queue beside its bytes: the queue's
+/// own keeping of it. A pong is four bytes; a million of them waiting
+/// are a lot more than four megabytes.
+const OVERHEAD: usize = 64;
+
+fn cost(m: &Message) -> usize {
+    OVERHEAD
+        + match m {
+            Message::Binary(b) | Message::Ping(b) | Message::Pong(b) => b.len(),
+            Message::Text(t) => t.len(),
+            Message::Close(c) => c.as_ref().map_or(0, |c| c.reason.len()),
+        }
+}
+
+/// One socket's counts, shared by its task, its writer and the hub.
+#[derive(Default)]
+struct Meter {
+    /// What waits to be written to it ([`cost`]).
+    queued: AtomicUsize,
+    /// What it gave the hub that the hub hasn't done yet.
+    given: AtomicUsize,
+    /// Past its budget: nothing more is queued, and it closes.
+    over: AtomicBool,
+    /// Logged in: no login timeout.
+    ready: AtomicBool,
+    /// Its task woken: something above changed.
+    changed: Notify,
+}
+
+impl Meter {
+    /// Written.
+    fn sent(&self, cost: usize) {
+        self.queued.fetch_sub(cost, Ordering::AcqRel);
+        self.changed.notify_one();
+    }
+
+    /// Done by the hub.
+    fn handled(&self, cost: usize) {
+        self.given.fetch_sub(cost, Ordering::AcqRel);
+        self.changed.notify_one();
+    }
+
+    /// Whether its device's next frame is read: the hub has done all it
+    /// was given, and (nearly) all it sent is written.
+    fn caught_up(&self, pace: usize) -> bool {
+        self.given.load(Ordering::Acquire) == 0 && self.queued.load(Ordering::Acquire) < pace
+    }
+}
+
+/// A socket's way out, for the hub and its own task: messages queued, up
+/// to its budget.
+#[derive(Clone)]
+struct Line {
+    to: mpsc::UnboundedSender<Message>,
+    meter: Arc<Meter>,
+    budget: usize,
+}
+
+impl Line {
+    /// `m` queued, whether it was. Past the budget it isn't, nor is
+    /// anything after, and the socket's task closes the socket.
+    fn send(&self, m: Message) -> bool {
+        let meter = &self.meter;
+        if meter.over.load(Ordering::Acquire) {
+            return false;
+        }
+        let cost = cost(&m);
+        if meter.queued.fetch_add(cost, Ordering::AcqRel) + cost > self.budget {
+            meter.over.store(true, Ordering::Release);
+            meter.changed.notify_one();
+            return false;
+        }
+        if self.to.send(m).is_err() {
+            meter.queued.fetch_sub(cost, Ordering::AcqRel);
+            return false;
+        }
+        true
+    }
+}
+
+/// Why a socket's task stops reading it.
+enum End {
+    /// The device closed it, or it broke.
+    Gone,
+    /// Past its budget: it isn't reading, so nothing more is sent.
+    Over,
+    /// Too long to log in, or nothing heard: it's told, briefly.
+    Late(&'static str),
+}
+
+/// What a socket closed for taking too long is told.
+const LOGIN_LATE: &str = "took too long to sign in";
+const QUIET: &str = "nothing heard for too long";
+
 /// One device's socket: frames in to the hub, the hub's frames out.
+///
+/// Its next frame goes to the hub only once the hub has done the last,
+/// and what came of it is mostly written; one more is held meanwhile, and
+/// nothing more read. So a device that asks without reading is held to
+/// its own pace, and the hub's queue holds a frame per socket at most (it
+/// needs no bound of its own, and the hub never waits on a socket). Past
+/// [`SocketLimits::queue`] (pongs to pings never read, the others' writes
+/// piling up unread, one answer too big), the socket closes.
 async fn socket_task(app: App, socket: WebSocket, client: String, said: compat::Client) {
     let conn = app.next.fetch_add(1, Ordering::Relaxed);
+    let limits = app.sockets;
     let (to, mut from_hub) = mpsc::unbounded_channel::<Message>();
-    if app.hub.send(ToHub::Open { conn, to: to.clone(), client, app: said }).is_err() {
+    let meter = Arc::new(Meter::default());
+    let line = Line { to, meter: meter.clone(), budget: limits.queue };
+    // A frame's worth waiting, or half the budget if that's less.
+    let pace = MAX_FRAME.min(limits.queue / 2);
+    if app.hub.send(ToHub::Open { conn, to: line.clone(), client, app: said }).is_err() {
         return;
     }
     let (mut sink, mut stream) = socket.split();
-    let writer = tokio::spawn(async move {
-        while let Some(m) = from_hub.recv().await {
-            let closing = matches!(m, Message::Close(_));
-            if sink.send(m).await.is_err() || closing {
-                break;
-            }
-        }
-    });
-    while let Some(Ok(m)) = stream.next().await {
-        match m {
-            Message::Binary(b) => {
-                if app.hub.send(ToHub::Frame { conn, bytes: b.to_vec() }).is_err() {
+    let mut writer = tokio::spawn({
+        let meter = meter.clone();
+        async move {
+            while let Some(m) = from_hub.recv().await {
+                let (cost, closing) = (cost(&m), matches!(m, Message::Close(_)));
+                let sent = sink.send(m).await;
+                meter.sent(cost);
+                if sent.is_err() || closing {
                     break;
                 }
             }
-            // The Loro Protocol's keepalive: a text "ping", a text "pong".
-            Message::Text(t) if t.as_str() == "ping" => {
-                let _ = to.send(Message::Text("pong".into()));
-            }
-            Message::Close(_) => break,
-            _ => {}
         }
-    }
+    });
+    let opened = tokio::time::Instant::now();
+    let mut heard = opened;
+    let mut pinged = false;
+    // A frame read while the hub or the writer was behind.
+    let mut held: Option<Vec<u8>> = None;
+    let give = |bytes: Vec<u8>| {
+        meter.given.fetch_add(bytes.len() + OVERHEAD, Ordering::AcqRel);
+        app.hub.send(ToHub::Frame { conn, bytes }).is_ok()
+    };
+    let end = loop {
+        if meter.over.load(Ordering::Acquire) {
+            break End::Over;
+        }
+        if held.is_some() && meter.caught_up(pace) && !held.take().is_some_and(give) {
+            break End::Gone;
+        }
+        let idle = (heard + limits.idle, QUIET);
+        let (deadline, why) = match opened + limits.login {
+            login if !meter.ready.load(Ordering::Acquire) && login < idle.0 => (login, LOGIN_LATE),
+            _ => idle,
+        };
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => break End::Late(why),
+            _ = tokio::time::sleep_until(heard + limits.ping), if !pinged => {
+                pinged = true;
+                line.send(Message::Ping(Default::default()));
+            }
+            // Written, done, over, or logged in: looked at again.
+            _ = meter.changed.notified() => {}
+            m = stream.next(), if held.is_none() => {
+                let Some(Ok(m)) = m else { break End::Gone };
+                heard = tokio::time::Instant::now();
+                pinged = false;
+                match m {
+                    Message::Binary(b) if meter.caught_up(pace) => {
+                        if !give(b.to_vec()) {
+                            break End::Gone;
+                        }
+                    }
+                    Message::Binary(b) => held = Some(b.to_vec()),
+                    // The Loro Protocol's keepalive: a text "ping", a text
+                    // "pong", queued like anything else.
+                    Message::Text(t) if t.as_str() == "ping" => {
+                        line.send(Message::Text("pong".into()));
+                    }
+                    Message::Close(_) => break End::Gone,
+                    _ => {}
+                }
+            }
+        }
+    };
     let _ = app.hub.send(ToHub::Closed { conn });
-    drop(to);
-    let _ = writer.await;
+    match end {
+        End::Over => writer.abort(),
+        End::Late(why) => {
+            line.send(Message::Close(Some(CloseFrame { code: close_code::POLICY, reason: why.into() })));
+        }
+        End::Gone => {}
+    }
+    drop(line);
+    // What waits is written, a moment allowed; a device that doesn't
+    // take it is let go.
+    if tokio::time::timeout(Duration::from_secs(5), &mut writer).await.is_err() {
+        writer.abort();
+    }
 }

@@ -84,8 +84,16 @@ impl std::fmt::Display for Failed {
 
 impl std::error::Error for Failed {}
 
+/// Why a store refuses a device id the account has had.
+pub const DEVICE_TAKEN: &str = "that device id is the account's already";
+/// Why it refuses a recovery key another account's code has.
+pub const RECOVERY_TAKEN: &str = "that recovery key is another account's";
+
 pub trait Storage {
     fn device(&self, account: &[u8], device: &[u8]) -> Option<Device>;
+    /// A new device in the account. An id the account has had already is
+    /// refused (removed or not: a removed device stays removed), unless
+    /// it's the same device again, its key the same and not removed.
     fn add_device(&mut self, account: &[u8], device: &[u8], public: [u8; 32]) -> Result<(), Failed>;
     fn revoke_device(&mut self, account: &[u8], device: &[u8]) -> Result<(), Failed>;
     /// Every device the account has had, removed ones too.
@@ -185,7 +193,8 @@ pub trait Storage {
 
     /// The account's recovery code (§7): its public key, the key ring
     /// wrapped under it, and its card. One per account: a new one replaces
-    /// the last, and the keys sealed to the last go with it.
+    /// the last, and the keys sealed to the last go with it. A key another
+    /// account's code has is refused, never taken from it.
     fn set_recovery(&mut self, account: &[u8], public: [u8; 32], wrapped: Vec<u8>, card: Vec<u8>) -> Result<(), Failed>;
     /// The account a recovery key is for, and its wrapped key ring.
     fn recovery(&self, public: &[u8; 32]) -> Option<(Vec<u8>, Vec<u8>)>;
@@ -487,8 +496,14 @@ impl Storage for Memory {
 
     fn add_device(&mut self, account: &[u8], device: &[u8], public: [u8; 32]) -> Result<(), Failed> {
         let a = self.accounts.entry(account.to_vec()).or_default();
-        a.devices.insert(device.to_vec(), Device { public, revoked: false, card: Vec::new(), seen: 0 });
-        Ok(())
+        match a.devices.get(device) {
+            Some(d) if d.public == public && !d.revoked => Ok(()),
+            Some(_) => Err(Failed(DEVICE_TAKEN.into())),
+            None => {
+                a.devices.insert(device.to_vec(), Device { public, revoked: false, card: Vec::new(), seen: 0 });
+                Ok(())
+            }
+        }
     }
 
     fn devices(&self, account: &[u8]) -> Vec<(Vec<u8>, Device)> {
@@ -778,6 +793,9 @@ impl Storage for Memory {
     }
 
     fn set_recovery(&mut self, account: &[u8], public: [u8; 32], wrapped: Vec<u8>, card: Vec<u8>) -> Result<(), Failed> {
+        if self.recovery.get(&public).is_some_and(|(a, _)| a != account) {
+            return Err(Failed(RECOVERY_TAKEN.into()));
+        }
         self.recovery.retain(|_, (a, _)| a != account);
         self.recovery.insert(public, (account.to_vec(), wrapped));
         let a = self.accounts.entry(account.to_vec()).or_default();

@@ -658,13 +658,18 @@ impl Storage for Sharded {
 
     fn add_device(&mut self, account: &[u8], device: &[u8], public: [u8; 32]) -> Result<(), Failed> {
         self.with(account, |db| {
-            db.execute(
-                "INSERT INTO devices (id, public) VALUES (?1, ?2)
-                 ON CONFLICT (id) DO UPDATE SET public = excluded.public, revoked = 0",
-                params![device, public.as_slice()],
-            )
-            .map(|_| ())
-            .map_err(failed)
+            let added = db
+                .execute("INSERT INTO devices (id, public) VALUES (?1, ?2) ON CONFLICT (id) DO NOTHING", params![device, public.as_slice()])
+                .map_err(failed)?;
+            if added == 1 {
+                return Ok(());
+            }
+            // The id was there: the same device again is no change; any
+            // other (a removed one, another's key) is refused.
+            let (had, revoked): (Vec<u8>, bool) = db
+                .query_row("SELECT public, revoked FROM devices WHERE id = ?1", params![device], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(failed)?;
+            if had == public && !revoked { Ok(()) } else { Err(Failed(crate::storage::DEVICE_TAKEN.into())) }
         })?
         .ok_or_else(|| Failed("no such account".into()))?
     }
@@ -1007,6 +1012,15 @@ impl Storage for Sharded {
     }
 
     fn set_recovery(&mut self, account: &[u8], public: [u8; 32], wrapped: Vec<u8>, card: Vec<u8>) -> Result<(), Failed> {
+        // Another account's key: refused before anything is written.
+        let had: Option<Vec<u8>> = self
+            .directory
+            .query_row("SELECT account FROM recovery WHERE public = ?1", params![public.as_slice()], |r| r.get(0))
+            .optional()
+            .map_err(failed)?;
+        if had.is_some_and(|a| a != account) {
+            return Err(Failed(crate::storage::RECOVERY_TAKEN.into()));
+        }
         self.with(account, |db| -> Result<(), Failed> {
             let tx = db.unchecked_transaction().map_err(failed)?;
             tx.execute(
@@ -1023,9 +1037,10 @@ impl Storage for Sharded {
         })?
         .ok_or_else(|| Failed("no such account".into()))??;
         let tx = self.directory.unchecked_transaction().map_err(failed)?;
+        // Its own last key goes; a plain insert, so a key another
+        // account's row has fails rather than moves.
         tx.execute("DELETE FROM recovery WHERE account = ?1", params![account]).map_err(failed)?;
-        tx.execute("INSERT OR REPLACE INTO recovery (public, account) VALUES (?1, ?2)", params![public.as_slice(), account])
-            .map_err(failed)?;
+        tx.execute("INSERT INTO recovery (public, account) VALUES (?1, ?2)", params![public.as_slice(), account]).map_err(failed)?;
         tx.commit().map_err(failed)
     }
 
