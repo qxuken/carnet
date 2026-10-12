@@ -149,7 +149,7 @@ notes.example.com {
 }
 ```
 
-**Tell it which proxy is yours.** The server limits how much one address may ask of it: sockets opened (30 at once, then one every 2 seconds, at most 64 open), and tries that guess at something or cost it work (a login that fails, an invite used, a pairing joined, a recovery: 10 at once, then one every 6 seconds). A login that succeeds is never counted, so your own devices are never shut out. Behind a proxy, every request comes from the proxy's address, so name it, and the server counts by the address it says each request is for (`CF-Connecting-IP`, else `X-Forwarded-For` read from the right). It believes those headers from the proxies named, and nobody else:
+**Tell it which proxy is yours.** The server limits how much one address (an IPv6 address's whole /64) may ask of it: sockets opened (30 at once, then one every 2 seconds, at most 64 open), and tries that guess at something or cost it work (a login that fails, an invite used, a pairing joined, a recovery: 10 at once, then one every 6 seconds). A login that succeeds is never counted, so your own devices are never shut out. Behind a proxy, every request comes from the proxy's address, so name it, and the server counts by the address it says each request is for (`CF-Connecting-IP`, else `X-Forwarded-For` read from the right). It believes those headers from the proxies named, and nobody else:
 
 ```bash
 carnet-server --trusted-proxy 127.0.0.1          # nginx or Caddy on the same machine

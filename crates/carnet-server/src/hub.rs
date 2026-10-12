@@ -403,6 +403,11 @@ impl<S: Storage> Hub<S> {
         out
     }
 
+    /// Whether `conn` is a device logged in: past its challenge, for good.
+    pub fn logged_in(&self, conn: ConnId) -> bool {
+        self.conns.get(&conn).is_some_and(|c| matches!(c.state, State::Ready { .. }))
+    }
+
     /// What this server can do, as its greeting lists it.
     pub fn features(&self) -> Vec<String> {
         features(self.passwords.is_some(), self.signup)
@@ -675,9 +680,21 @@ impl<S: Storage> Hub<S> {
                 if wrapped.len() > MAX_WRAPPED * 8 || card.len() > MAX_CARD {
                     return self.deny(conn, "a wrapped key past its size");
                 }
-                match self.store.set_recovery(&account, public, wrapped, card) {
+                let refuse = |reason: &str| vec![carnet(conn, Carnet::Refused { reason: reason.into() })];
+                // A key another account's code has, or any password's or
+                // passkey's: never two slots one key, so a recovery finds
+                // the one it was made for, and no account takes over
+                // another's.
+                if self.store.recovery(&public).is_some_and(|(a, _)| a != account)
+                    || self.store.password_slot(&public).is_some()
+                    || self.store.passkey_slot(&public).is_some()
+                {
+                    return refuse("the recovery code couldn't be set");
+                }
+                let set = self.store.set_recovery(&account, public, wrapped, card);
+                match self.kept(set) {
                     Ok(()) => vec![carnet(conn, Carnet::RecoverySet)],
-                    Err(_) => Vec::new(),
+                    Err(_) => refuse("the server could not keep the recovery code"),
                 }
             }
             Carnet::SetCard { card } => {

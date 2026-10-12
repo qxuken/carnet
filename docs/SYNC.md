@@ -295,10 +295,17 @@ Invite codes are 80 random bits as 16 Crockford base32 characters in groups of f
 
 **TLS** is the reverse proxy's job; the server speaks plain HTTP behind it (nginx, Caddy, or Cloudflare, including a Tunnel for a home server with no open port). Cloudflare terminating TLS is harmless here: all it sees is ciphertext.
 
-**Limits** (`limits.rs`), counted per client address. The address is taken from `CF-Connecting-IP` or `X-Forwarded-For` (read from the right, past the trusted hops) only when `--trusted-proxy` names the proxy:
+**Limits** (`limits.rs`), counted per client: an IPv4 address, or an IPv6 address's /64 (a home or a server is handed a whole /64, so each of its addresses counted apart would never run out). An IPv4 address written as IPv6 counts as itself. The address is taken from `CF-Connecting-IP` or `X-Forwarded-For` (read from the right, past the trusted hops) only when `--trusted-proxy` names the proxy:
 
 - sockets: 30 at once, then one every 2 s, and at most 64 open; past that, `429` before the upgrade;
 - tries that guess at something or cost work (a failed login, an invite, joining a pairing, a recovery or password sign-in): 10 at once, then one every 6 s; past that, `Denied`. A login that succeeds is never counted, so a reconnecting device never shuts itself out.
+
+**Each socket** (`server.rs`, `SocketLimits`):
+
+- **Logging in:** a socket not logged in 30 s after it opened is closed ("took too long to sign in"), whatever it sends meanwhile: the challenge lives no longer (§7). Enrolling, pairing, a recovery or a password sign-in all end in that login.
+- **Quiet:** a socket nothing comes from for a minute is sent a WebSocket ping, which a browser answers by itself (the apps also ping every 30 s); nothing for 5 minutes, and it's closed ("nothing heard for too long").
+- **At its own pace:** a socket's next frame goes to the hub only once the hub has done the last and what came of it is mostly written (under 1 MiB waiting); one more is held meanwhile, and nothing more read. A device that asks without reading (a room's backfill again and again) is answered as fast as it reads, and the hub's queue holds at most a frame per socket, so the queue needs no bound of its own and the hub never waits on a socket.
+- **What waits for it:** at most 16 MiB (16 frames' worth, a message counted with 64 bytes of keeping beside its own), pongs to its pings among it. Past that it isn't reading: it's closed at once, and what waited dropped.
 
 **Backup:** `carnet-server backup DIR` copies every database (`VACUUM INTO`) and the pictures into a folder laid out like `data/`, consistent while serving. Everything in it is ciphertext or public keys, so it can go anywhere.
 
@@ -351,7 +358,7 @@ The desktop uses the `keyring` crate. In the browser, everything kept (the ident
 
 Every connection opens with a challenge-response.
 
-**The nonce** ("number used once") is 32 bytes from the server's CSPRNG, fresh for each connection. It is unpredictable, so a signature can't be made in advance; single-use, forgotten the moment a `Hello` arrives, valid or not, so a captured signature can't be replayed; and short-lived, held only in memory beside the socket for 30 seconds.
+**The nonce** ("number used once") is 32 bytes from the server's CSPRNG, fresh for each connection. It is unpredictable, so a signature can't be made in advance; single-use, forgotten the moment a `Hello` arrives, valid or not, so a captured signature can't be replayed; and short-lived, held only in memory beside the socket for 30 seconds: a socket not logged in by then is closed (§6).
 
 **What's signed:**
 
@@ -376,7 +383,7 @@ The server checks the signature against the device's public key and that the dev
    - the new device logs in on the same socket.
 
    A nameplate is spent on the first join, right code or not, so a guesser gets one try and a second joiner racing the first finds nothing. That's why six digits are enough.
-3. **Recovery,** when every device is lost: the new device derives the code's keys from the 12 words, signs the challenge with the recovery signing key (naming the new device, so the signature admits that device and no other), and is let in. The server returns the wrapped key ring and every epoch's key sealed to the code since. Setting a new code replaces the old one, which then finds nothing.
+3. **Recovery,** when every device is lost: the new device derives the code's keys from the 12 words, signs the challenge with the recovery signing key (naming the new device, so the signature admits that device and no other), and is let in. The server returns the wrapped key ring and every epoch's key sealed to the code since. Setting a new code replaces the old one, which then finds nothing. A code's key is one slot's: the server refuses one that another account's code, or any password or passkey, already signs with, so no account can claim another's way in. Likewise a device id the account has had is never given again, to another key or back to a removed device.
 
 There's no email in self-hosting, and passwords are optional (below). Losing every device and the recovery code means the notes on the server can't be read. The local `.md` files are untouched, because they never depended on sync.
 

@@ -707,11 +707,19 @@ impl Storage for Postgres {
             &[
                 ACCOUNT,
                 "INSERT INTO devices (account, id, public, created) VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (account, id) DO UPDATE SET public = excluded.public, revoked = FALSE",
+                 ON CONFLICT (account, id) DO NOTHING",
+                "SELECT public, revoked FROM devices WHERE account = $1 AND id = $2",
             ],
             |tx, st| {
                 Self::account_known(tx, &st[0], account)?;
-                tx.execute(&st[1], &[&account, &device, &public.as_slice(), &int(now())]).map(|_| ()).map_err(failed)
+                if tx.execute(&st[1], &[&account, &device, &public.as_slice(), &int(now())]).map_err(failed)? == 1 {
+                    return Ok(());
+                }
+                // The id was there: the same device again is no change;
+                // any other (a removed one, another's key) is refused.
+                let row = tx.query_one(&st[2], &[&account, &device]).map_err(failed)?;
+                let (had, revoked): (Vec<u8>, bool) = (row.get(0), row.get(1));
+                if had == public && !revoked { Ok(()) } else { Err(Failed(crate::storage::DEVICE_TAKEN.into())) }
             },
         )
     }
@@ -996,7 +1004,9 @@ impl Storage for Postgres {
         self.write(
             &[
                 ACCOUNT,
-                "DELETE FROM recovery WHERE public = $2 AND account <> $1",
+                "SELECT 1 FROM recovery WHERE public = $2 AND account <> $1",
+                // Its own row replaced; a key another account's row has
+                // breaks `public`'s uniqueness, and the whole fails.
                 "INSERT INTO recovery (account, public, wrapped, created, card) VALUES ($1, $2, $3, $4, $5)
                  ON CONFLICT (account) DO UPDATE SET public = excluded.public, wrapped = excluded.wrapped,
                      card = excluded.card, created = excluded.created",
@@ -1006,7 +1016,10 @@ impl Storage for Postgres {
             ],
             |tx, st| {
                 Self::account_known(tx, &st[0], account)?;
-                tx.execute(&st[1], &[&account, &public.as_slice()]).map_err(failed)?;
+                // Another account's key: refused, never taken from it.
+                if tx.query_opt(&st[1], &[&account, &public.as_slice()]).map_err(failed)?.is_some() {
+                    return Err(Failed(crate::storage::RECOVERY_TAKEN.into()));
+                }
                 tx.execute(&st[2], &[&account, &public.as_slice(), &wrapped, &int(now()), &card]).map_err(failed)?;
                 tx.execute(&st[3], &[&account]).map(|_| ()).map_err(failed)
             },

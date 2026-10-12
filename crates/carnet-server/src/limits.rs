@@ -2,7 +2,10 @@
 //! I/O in it: token buckets by client, and which address a request is
 //! from when a proxy stands in front.
 //!
-//! A client is an IP address. Two things are limited: sockets opened (the
+//! A client is an IPv4 address, or an IPv6 network's first 64 bits (a
+//! /64): one household's, or one server's, is handed a whole /64, so
+//! counting each IPv6 address apart would give one of them endless
+//! buckets. Two things are limited: sockets opened (the
 //! server, before the upgrade), and tries that cost the server work or
 //! guess at something (the hub: a login that fails, an invite used, a
 //! pairing joined, a recovery). A login that succeeds costs nothing, so a
@@ -132,28 +135,38 @@ pub fn networks(list: &str) -> Result<Vec<Network>, String> {
     list.split(',').filter(|s| !s.trim().is_empty()).map(str::parse).collect()
 }
 
-/// Who a request is from: the address it came from, unless that is a
-/// proxy named as trusted, which says who it came from for. Cloudflare's
-/// `CF-Connecting-IP` first; else `X-Forwarded-For`, read from the right
-/// (the proxy's own addition) past every trusted proxy. Anyone else's
-/// headers are ignored: they could say anything.
+/// Who a request is from, as the limits count it ([`client`]): the
+/// address it came from, unless that is a proxy named as trusted, which
+/// says who it came from for. Cloudflare's `CF-Connecting-IP` first; else
+/// `X-Forwarded-For`, read from the right (the proxy's own addition) past
+/// every trusted proxy. Anyone else's headers are ignored: they could say
+/// anything.
 pub fn client_of(peer: IpAddr, cf: Option<&str>, forwarded: Option<&str>, trusted: &[Network]) -> IpAddr {
     let trusted_ip = |ip: IpAddr| trusted.iter().any(|n| n.contains(ip));
     if !trusted_ip(peer) {
-        return peer.to_canonical();
+        return client(peer);
     }
     if let Some(ip) = cf.and_then(|c| c.trim().parse::<IpAddr>().ok()) {
-        return ip.to_canonical();
+        return client(ip);
     }
     let mut last = peer;
     for hop in forwarded.unwrap_or_default().rsplit(',') {
         let Ok(ip) = hop.trim().parse::<IpAddr>() else { break };
         if !trusted_ip(ip) {
-            return ip.to_canonical();
+            return client(ip);
         }
         last = ip;
     }
-    last.to_canonical()
+    client(last)
+}
+
+/// The client an address counts as: an IPv4 address itself (written as
+/// IPv6 or not), an IPv6 address its /64, the rest zero.
+pub fn client(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !u128::from(u64::MAX)).into()),
+        v4 => v4,
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +202,33 @@ mod tests {
         assert!(networks("10.0.0.0/33").is_err() && networks("nope").is_err());
         assert!("::1".parse::<Network>().unwrap().contains(ip("::1")));
         assert!("0.0.0.0/0".parse::<Network>().unwrap().contains(ip("8.8.8.8")));
+    }
+
+    #[test]
+    fn an_ipv6_client_is_its_64_and_an_ipv4_one_its_address() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let none: &[Network] = &[];
+        let of = |s: &str| client_of(ip(s), None, None, none).to_string();
+        // One /64, any address in it: one client, one bucket.
+        assert_eq!(of("2001:db8:1:2::1"), "2001:db8:1:2::");
+        assert_eq!(of("2001:db8:1:2:ffff:ffff:ffff:ffff"), of("2001:db8:1:2::1"));
+        assert_ne!(of("2001:db8:1:3::1"), of("2001:db8:1:2::1"), "the next /64 is someone else");
+        // IPv4, as itself or mapped into IPv6: the whole address.
+        assert_eq!(of("198.51.100.7"), "198.51.100.7");
+        assert_eq!(of("::ffff:198.51.100.7"), "198.51.100.7");
+        assert_ne!(of("198.51.100.8"), of("198.51.100.7"));
+        // What a trusted proxy says is grouped the same.
+        let trusted = networks("127.0.0.1").unwrap();
+        assert_eq!(client_of(ip("127.0.0.1"), Some("2001:db8::abcd"), None, &trusted).to_string(), "2001:db8::");
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("2001:db8:0:0:1::9"), &trusted).to_string(), "2001:db8::");
+
+        // So a /64's addresses share the limits: its 31st socket at once,
+        // and its 11th try, are refused whichever address asks.
+        let mut sockets = Limiter::new(SOCKETS);
+        let opened = (0..40u16).filter(|n| sockets.allow(&of(&format!("2001:db8:1:2::{n:x}")), 0.0)).count();
+        assert_eq!(opened, SOCKETS.burst as usize);
+        let mut tries = Limiter::new(TRIES);
+        let tried = (0..40u16).filter(|n| tries.allow(&of(&format!("2001:db8:1:2:{n:x}::1")), 0.0)).count();
+        assert_eq!(tried, TRIES.burst as usize);
     }
 }
