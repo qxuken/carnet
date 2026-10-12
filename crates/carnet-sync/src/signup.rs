@@ -10,18 +10,23 @@
 use crate::http::Answer;
 
 /// A server's address as typed, as the app uses it: no slash at its end,
-/// and `https://` unless it says otherwise. `None` for nothing typed.
+/// and `https://` unless it says otherwise, or `http://` for this
+/// computer (`localhost`, `127.0.0.1`, `[::1]`), where a server of one's
+/// own being tried out has no certificate. `None` for nothing typed.
 pub fn origin(typed: &str) -> Option<String> {
     let o = typed.trim().trim_end_matches('/');
     if o.is_empty() || o.contains(char::is_whitespace) {
         return None;
     }
-    Some(if o.contains("://") { o.to_string() } else { format!("https://{o}") })
-}
-
-/// Where a server says what it is.
-pub fn info_url(origin: &str) -> String {
-    format!("{origin}/v1/info")
+    if o.contains("://") {
+        return Some(o.to_string());
+    }
+    let host = match o.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => o.split([':', '/']).next().unwrap_or(""),
+    };
+    let here = host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.");
+    Some(format!("{}://{o}", if here { "http" } else { "https" }))
 }
 
 /// Where a server takes a signup.
@@ -32,14 +37,6 @@ pub fn signup_url(origin: &str) -> String {
 /// The signup asked for: the email, as JSON.
 pub fn body(email: &str) -> Vec<u8> {
     serde_json::json!({ "email": email.trim() }).to_string().into_bytes()
-}
-
-/// Whether a server's `/v1/info` says it takes signups
-/// ([`crate::info::ServerInfo::takes_signups`]), and its signup page if
-/// it has one (empty if not).
-pub fn takes_signups(info: &Answer) -> Option<String> {
-    let info = crate::info::read(info).ok().filter(crate::info::ServerInfo::takes_signups)?;
-    Some(info.signup_page.unwrap_or_default())
 }
 
 /// An invite asked for, and answered yes.
@@ -139,23 +136,16 @@ mod tests {
     fn a_servers_address_as_typed() {
         assert_eq!(origin(" notes.example.com/ ").as_deref(), Some("https://notes.example.com"));
         assert_eq!(origin("http://127.0.0.1:8787").as_deref(), Some("http://127.0.0.1:8787"));
+        // This computer: plain http, as a server tried out here serves.
+        assert_eq!(origin("localhost:8880").as_deref(), Some("http://localhost:8880"));
+        assert_eq!(origin("127.0.0.1:8787/").as_deref(), Some("http://127.0.0.1:8787"));
+        assert_eq!(origin("[::1]:8080").as_deref(), Some("http://[::1]:8080"));
+        assert_eq!(origin("localhost.example.com").as_deref(), Some("https://localhost.example.com"));
+        assert_eq!(origin("https://localhost:8443").as_deref(), Some("https://localhost:8443"));
         assert_eq!(origin("  "), None);
         assert_eq!(origin("not an address"), None);
         assert_eq!(signup_url("https://x.co"), "https://x.co/v1/signup");
         assert_eq!(body(" ann@example.com "), br#"{"email":"ann@example.com"}"#);
-    }
-
-    #[test]
-    fn a_server_says_whether_it_takes_signups() {
-        let v = r#""protocol":1,"oldest":1,"deprecated":1"#;
-        let page = format!(r#"{{"server":"carnet-server","signup":"https://x.co/start",{v},"features":["signup"]}}"#);
-        assert_eq!(takes_signups(&answer(200, &page)).as_deref(), Some("https://x.co/start"));
-        let listed = format!(r#"{{"server":"carnet-server",{v},"features":["signup"]}}"#);
-        assert_eq!(takes_signups(&answer(200, &listed)).as_deref(), Some(""), "listed, with no page of its own");
-        let own = format!(r#"{{"server":"carnet-server","passwords":false,{v},"features":["passkeys"]}}"#);
-        assert_eq!(takes_signups(&answer(200, &own)), None, "a server of one's own");
-        assert_eq!(takes_signups(&answer(404, r#"{"signup":"https://x.co/start"}"#)), None);
-        assert_eq!(takes_signups(&answer(200, "<html>")), None);
     }
 
     #[test]

@@ -620,8 +620,9 @@ impl Sync {
         if origin.trim().is_empty() {
             return self.error = Some("Which server? Its address goes in Server, above".into());
         }
-        let origin = origin.trim().trim_end_matches('/').to_string();
-        let origin = if origin.contains("://") { origin } else { format!("https://{origin}") };
+        let Some(origin) = carnet_sync::signup::origin(origin) else {
+            return self.error = Some("That isn't a server's address".into());
+        };
         let device = OsRandom.bytes::<8>().to_vec();
         let key = DeviceKey::generate(&mut OsRandom);
         let starter = match how {
