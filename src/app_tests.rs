@@ -3966,6 +3966,20 @@ fn a_remote_edit_leaves_the_caret_where_it_was() {
     assert_eq!(caret(&a), (2, 15), "after the z typed here");
     assert!(a.caret.is_empty());
 
+    // The title changed there: the title shown here follows, the caret
+    // where it was.
+    a.save_current();
+    let note = &mut b.store.notes[b.current];
+    note.title = "Shopping list".into();
+    note.touch();
+    b.save_current();
+    db.frame(&mut b);
+    until("A has B's title", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| x[0].0.store.notes[x[0].0.current].title == "Shopping list");
+    d_frame_twice(&mut a, &mut da);
+    let title = da.key_of("title").expect("the title field");
+    assert_eq!(da.core.edit_text(title).as_deref(), Some("Shopping list"), "the field shows it");
+    assert_eq!(caret(&a), (2, 15), "the caret where it was");
+
     let _ = stop.send(());
     rt.block_on(served).unwrap().unwrap();
     remove_test_dir(dir_a);

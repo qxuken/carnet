@@ -417,6 +417,9 @@ impl Carnet {
                 NodeSpec::row().grow_width().label("Title"),
             );
             self.fields.insert(k, Field::Title);
+            if std::mem::take(&mut self.title_from_remote) {
+                ui.set_edit_text(k, &title);
+            }
             self.apply_focus(ui, k, Field::Title);
             // Come up to from the note: the caret at the end, then, for ↑,
             // along the last line to the column it left.
