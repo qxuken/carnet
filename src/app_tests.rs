@@ -6991,9 +6991,10 @@ fn the_waiting_line_waits_a_moment_and_says_all_sent() {
 }
 
 /// A picture among a table cell's words: drawn in the cell, as wide as
-/// the cell's room (it is wider), its shape kept, the words under it; one
-/// letter to the caret, chosen by a press and taken whole by Backspace;
-/// one pasted with the caret in a cell goes into the cell.
+/// the cell's room (it is wider, whatever width the note writes), its
+/// shape kept, the words under it; one letter to the caret, chosen by a
+/// press and taken whole by Backspace; one pasted with the caret in a cell
+/// goes into the cell.
 #[test]
 fn a_picture_in_a_cell_is_drawn_in_it_and_taken_whole() {
     let (mut app, mut d, dir) = body("cell-picture");
@@ -7028,14 +7029,16 @@ fn a_picture_in_a_cell_is_drawn_in_it_and_taken_whole() {
     assert_eq!((app.caret.anchor, app.caret.head), (Pos { slot, byte: 0 }, Pos { slot, byte: pic.len() }));
     key(&mut app, &mut d, "backspace");
     assert_eq!(page::text(app.doc(), slot), "Words");
-    // → steps over a picture whole.
+    // → chooses a picture whole, and → again is past it.
     if let Some(Kind::Table(t)) = app.store.notes[app.current].doc.get_mut(slot.block).map(|b| &mut b.kind) {
         t.rows[1].cells[0] = format!("a{pic}b");
     }
     app.caret = Caret::at(Pos { slot, byte: 1 });
     d.frame(&mut app);
     key(&mut app, &mut d, "right");
-    assert_eq!(app.caret.head, Pos { slot, byte: 1 + pic.len() });
+    assert_eq!((app.caret.anchor, app.caret.head), (Pos { slot, byte: 1 }, Pos { slot, byte: 1 + pic.len() }));
+    key(&mut app, &mut d, "right");
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 1 + pic.len() }));
     // Pasted with the caret in a cell: into the cell, after the caret.
     let small: Vec<u8> = (0..12).flat_map(|_| [10u8, 20, 30, 255]).collect();
     app.paste_picture(4, 3, &small);
@@ -7049,10 +7052,10 @@ fn a_picture_in_a_cell_is_drawn_in_it_and_taken_whole() {
 }
 
 /// A picture on its own line carried onto a table's cell goes among its
-/// words, its line gone, its width kept and its side dropped, the cell
-/// ringed while it is over it and no drop line; one in a cell carried out
-/// between lines is a line of its own again, its width kept. Each is one
-/// step of the history.
+/// words, its line gone, written plainly (no width nor side: the cell
+/// decides), the cell ringed while it is over it and no drop line; one in
+/// a cell carried out between lines is a line of its own again, its own
+/// width. Each is one step of the history.
 #[test]
 fn a_picture_is_carried_into_a_cell_and_out_again() {
     let (mut app, mut d, dir) = body("cell-dnd");
@@ -7098,7 +7101,7 @@ fn a_picture_is_carried_into_a_cell_and_out_again() {
     d.input(&mut app, InputEvent::mouse_up());
     d.frame(&mut app);
     assert!(app.pic_drag.is_none());
-    let md = "![|150](attachments/wide.png)";
+    let md = "![](attachments/wide.png)";
     assert_eq!(page::text(app.doc(), x), format!("x{md}"), "at the end of its words");
     assert!(app.doc().get(id).is_none(), "its line gone");
     assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (1, 1 + md.len()), "selected in the cell");
@@ -7133,14 +7136,14 @@ fn a_picture_is_carried_into_a_cell_and_out_again() {
         d.frame(&mut app);
     }
 
-    // Out, above the first line: a line of its own, its width kept.
+    // Out, above the first line: a line of its own, its own width.
     let pieces = app.cell_pieces.get(&y).expect("the cell's pieces").clone();
     let pr = d.core.layout_of(pieces.iter().find(|p| p.picture).unwrap().key).unwrap();
     let above = rect(&app, blocks(&app)[0].id);
     d.drag(&mut app, Vec2::new(pr.x + pr.w / 2.0, pr.y + pr.h / 2.0), Vec2::new(above.x + 40.0, above.y + 2.0));
     d.frame(&mut app);
     assert!(
-        matches!(&blocks(&app)[0].kind, Kind::Image { src, width: Some(150), float: Float::None, .. } if src == "attachments/wide.png"),
+        matches!(&blocks(&app)[0].kind, Kind::Image { src, width: None, float: Float::None, .. } if src == "attachments/wide.png"),
         "{:?}",
         texts(&app)
     );
@@ -7149,6 +7152,67 @@ fn a_picture_is_carried_into_a_cell_and_out_again() {
     key_with(&mut app, &mut d, "z", CTRL);
     assert_eq!(page::text(app.doc(), y), format!("y{md}"), "one undo puts it back");
     assert!(!blocks(&app).iter().any(|b| matches!(b.kind, Kind::Image { .. })));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A picture among a cell's words is shown chosen or with the caret
+/// beside it, never both: ← from after it chooses it (its ring, no caret),
+/// ← again puts the caret before it (a caret, no ring); a press chooses
+/// it, with no caret. It is drawn its own width, not the one the note
+/// writes for it: the cell decides.
+#[test]
+fn a_chosen_cell_picture_shows_its_ring_and_no_caret() {
+    let (mut app, mut d, dir) = body("cell-picture-chosen");
+    let rgba: Vec<u8> = (0..200 * 100).flat_map(|_| [30u8, 90, 160, 255]).collect();
+    let png = crate::images::encode_png(200, 100, &rgba).unwrap();
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    let pic = "![|60](attachments/wide.png)";
+    let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec![format!("x{pic}"), String::new()]]);
+    app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
+    let Kind::Table(t) = &blocks(&app)[0].kind else { panic!() };
+    let slot = Slot { block: blocks(&app)[0].id, cell: Some((t.rows[1].id, t.cols[0])) };
+    let end = 1 + pic.len();
+    // After it, at the cell's end: the caret beside it.
+    app.caret = Caret::at(Pos { slot, byte: end });
+    d.core.set_inspect(true);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let pieces = app.cell_pieces.get(&slot).expect("a cell of pieces").clone();
+    let r = d.core.layout_of(pieces.iter().find(|p| p.picture).unwrap().key).expect("the picture's box");
+    assert!((r.w - 200.0).abs() <= 1.0, "its own width, not the note's 60: {r:?}");
+    // The caret's bar in the cell (beside it, or after `x` above it), and
+    // its ring 4px out.
+    let cell = *app.cell_rects.get(&slot).unwrap();
+    let near = |n: &kui_native::NodeInfo| n.rect.y >= cell.y && n.rect.y + n.rect.h <= cell.y + cell.h && n.rect.x >= cell.x && n.rect.x <= cell.x + cell.w;
+    let caret = |d: &Drive| d.core.nodes().iter().any(|n| near(n) && n.rect.w == 2.0 && n.rect.h >= 8.0 && n.bg.a > 0.0);
+    let ring = |d: &Drive| {
+        d.core.nodes().iter().any(|n| (n.rect.w - (r.w + 8.0)).abs() < 0.5 && (n.rect.h - (r.h + 8.0)).abs() < 0.5 && n.border_w == 2.0 && n.border_color.a > 0.0)
+    };
+    assert!(caret(&d) && !ring(&d), "the caret, no ring");
+    // ←: chosen. The ring, no caret.
+    key(&mut app, &mut d, "left");
+    d.frame(&mut app);
+    assert_eq!((app.caret.anchor, app.caret.head), (Pos { slot, byte: end }, Pos { slot, byte: 1 }));
+    assert!(ring(&d), "its ring");
+    assert!(!caret(&d), "no caret beside it");
+    // ← again: the caret before it, no ring.
+    key(&mut app, &mut d, "left");
+    d.frame(&mut app);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 1 }));
+    assert!(caret(&d) && !ring(&d), "the caret, no ring");
+    // A press on it: chosen, no caret.
+    d.click(&mut app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d.frame(&mut app);
+    assert_eq!((app.caret.anchor, app.caret.head), (Pos { slot, byte: 1 }, Pos { slot, byte: end }));
+    assert!(ring(&d) && !caret(&d), "chosen by a press: the ring alone");
+    // A letter typed: in its place.
+    type_in(&mut app, &mut d, "z");
+    assert_eq!(page::text(app.doc(), slot), "xz");
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);

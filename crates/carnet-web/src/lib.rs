@@ -924,6 +924,13 @@ impl PageEditor {
         self.e.cell_select(line as usize, r as usize, c as usize, a as usize, h as usize)
     }
 
+    /// ← (`right` false) or → in a table's cell beside a picture, or
+    /// with one chosen: the page's move, which chooses the picture before
+    /// it passes it. False, nothing done, for any other: the browser's.
+    pub fn cell_arrow(&mut self, right: bool) -> bool {
+        self.e.cell_arrow(right)
+    }
+
     /// Where the caret is, when in a cell: `[line, row, column, anchor,
     /// head]`; none otherwise.
     pub fn cell_caret(&self) -> Option<Vec<u32>> {

@@ -1314,9 +1314,10 @@ impl Carnet {
 
     /// A table cell's text: as any slot's, but where pictures stand among
     /// its words, one under another with the stretches of words around
-    /// them, each picture as wide as the note gives it or its own, `room`
-    /// at most. A picture is one letter to the caret, which stands beside
-    /// it where no words are; chosen, it wears the accent's ring.
+    /// them, each picture its own width, `room` at most: the cell decides,
+    /// whatever width the note writes. A picture is one letter to the
+    /// caret, which stands beside it where no words are; chosen, it wears
+    /// the accent's ring, and the caret isn't shown.
     #[allow(clippy::too_many_arguments)]
     fn cell_line(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, style: TextStyle, cov: &Coverage, room: f32) {
         let pictures = carnet_core::inline::cell_pictures(text);
@@ -1379,11 +1380,12 @@ impl Carnet {
         self.slot_keys.entry(slot).or_insert(column);
     }
 
-    /// A picture among a cell's words: as wide as the note gives it, or
-    /// its own, `room` at most, its shape kept; one not shown a small card
-    /// saying why, as a picture on its own line has. `chosen`, the
-    /// accent's ring round it; the caret beside it on the left or the
-    /// right (`side`, `true` the right). Returns its box's node.
+    /// A picture among a cell's words: its own width, `room` at most, its
+    /// shape kept (a width the note writes for it is not drawn by: the
+    /// cell decides); one not shown a small card saying why, as a picture
+    /// on its own line has. `chosen`, the accent's ring round it; the
+    /// caret beside it on the left or the right (`side`, `true` the
+    /// right), drawn while nothing is selected. Returns its box's node.
     fn cell_picture(&mut self, ui: &mut Ui<'_>, l: &Look, p: &carnet_core::doc::CellPicture, room: f32, chosen: bool, side: Option<bool>) -> Key {
         let t = l.t;
         let folder = self.page_folder();
@@ -1398,6 +1400,8 @@ impl Carnet {
         let label = if p.alt.is_empty() { "Picture".to_string() } else { format!("Picture: {}", p.alt) };
         let key = ui.child_key("picture");
         let blink = ui.caret_visible();
+        // A selection (this picture chosen, or more) shows no caret.
+        let bar = side.filter(|_| self.caret.is_empty());
         // The caret beside it, `right` or left: its height, outside its edge.
         let caret = |h: f32, right: bool| {
             NodeSpec::row()
@@ -1412,7 +1416,7 @@ impl Carnet {
             let (glyph, why) = self.unshown_why(entry.as_ref(), theirs, &p.src, p.wiki);
             let path = store::decode_src(&p.src);
             let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            let w = p.width.map_or(room, |w| (w as f32).min(room));
+            let w = room;
             let words_w = (w - 54.0).max(40.0);
             ui.with_keyed(
                 "picture",
@@ -1434,7 +1438,7 @@ impl Carnet {
                         ui.text_in(NodeSpec::row().max_width(words_w), why, TextStyle::new(Type::SMALL.size).color(t.fg));
                         ui.text_in(NodeSpec::row().max_width(words_w), &name, TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis());
                     });
-                    if let Some(right) = side {
+                    if let Some(right) = bar {
                         ui.leaf_keyed("caret", caret(36.0, right));
                     }
                 },
@@ -1444,7 +1448,7 @@ impl Carnet {
             }
             return key;
         };
-        let (dw, _) = page::picture_width(nw, p.width, room, room, false);
+        let (dw, _) = page::picture_width(nw, None, room, room, false);
         let dh = dw * nh / nw;
         ui.with_keyed("picture", NodeSpec::row().size(dw, dh).on_layout(Value::Null).role(Role::Image).label(label), |ui| {
             match &entry {
@@ -1467,7 +1471,7 @@ impl Carnet {
                     .role(Role::None)
                     .float(FloatConfig::parent().offset(-4.0, -4.0).clipped()),
             );
-            if let Some(right) = side {
+            if let Some(right) = bar {
                 ui.leaf_keyed("caret", caret(dh, right));
             }
         });

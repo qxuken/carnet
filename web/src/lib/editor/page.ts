@@ -15,7 +15,7 @@ import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type Decoration
 import type { PageEditor } from '../../wasm/carnet_web.js';
 import { HIGHLIGHT, inkCss, washCss } from '../colors';
 import { show, unshown } from '../pictures';
-import { TableWidget, place, type Cell, type TableContext } from './table';
+import { TableWidget, mark, place, type Cell, type TableContext } from './table';
 import { pictureCarry, pictureRoom, pictureTools } from './picture';
 
 /// How a line is drawn (`PageEditor.looks`).
@@ -540,6 +540,8 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
           ({ deco: this.deco, atomic: this.atomic } = build(u.view, toggle, tables));
         }
         if (u.selectionSet || u.docChanged) o.moved();
+        // Out of a cell: a picture chosen in it is no longer.
+        if (u.selectionSet) mark(tables);
       }
     },
     {

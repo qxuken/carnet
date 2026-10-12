@@ -348,8 +348,30 @@ fn split_text(t: &str, byte: usize, styled: bool) -> (String, String) {
 
 // ------------------------------------------------------------ motions
 
+/// The picture among a cell's words that the caret selects end to end,
+/// and nothing more: where it is in the cell's text. A picture so chosen
+/// wears its ring and the caret isn't shown; the arrows choose one before
+/// they step past it ([`left`], [`right`]).
+pub fn chosen_cell_picture(doc: &Doc, c: Caret) -> Option<(usize, usize)> {
+    let slot = c.head.slot;
+    if slot.cell.is_none() || c.anchor.slot != slot || c.is_empty() {
+        return None;
+    }
+    let ends = (c.anchor.byte.min(c.head.byte), c.anchor.byte.max(c.head.byte));
+    inline::cell_pictures(text(doc, slot)).into_iter().map(|p| p.at).find(|&at| at == ends)
+}
+
+/// The picture among cell `slot`'s words drawn as the letter at `drawn`
+/// of them: where it is in the text.
+fn cell_picture_drawn_at(doc: &Doc, slot: Slot, v: &Visible, drawn: usize) -> Option<(usize, usize)> {
+    slot.cell?;
+    inline::cell_pictures(text(doc, slot)).into_iter().map(|p| p.at).find(|&(a, b)| v.drawn(a) == drawn && v.drawn(b) == drawn + 1)
+}
+
 /// One character (or word) left, into the previous slot at an edge; with
-/// `extend` the anchor stays. A selection collapses to its start.
+/// `extend` the anchor stays. A selection collapses to its start. A
+/// picture among a cell's words is chosen first ([`chosen_cell_picture`]),
+/// and the next ← puts the caret before it.
 pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     if !extend && !c.is_empty() {
         return Caret::at(ordered(doc, c).0);
@@ -360,6 +382,11 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     // By the words: marks are not there to step over.
     let v = visible(doc, p.slot);
     let d = v.drawn(p.byte);
+    if !extend && !word && d > 0
+        && let Some((a, b)) = cell_picture_drawn_at(doc, p.slot, &v, prev_char(&v.text(t), d))
+    {
+        return Caret { anchor: Pos { byte: b, ..p }, head: Pos { byte: a, ..p } };
+    }
     let head = if is_atomic(doc, p.slot) && p.byte > 0 {
         Pos { byte: 0, ..p }
     } else if !is_atomic(doc, p.slot) && d > 0 {
@@ -379,6 +406,8 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     }
 }
 
+/// As [`left`], rightwards: a picture among a cell's words chosen first,
+/// then the caret after it.
 pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     if !extend && !c.is_empty() {
         return Caret::at(ordered(doc, c).1);
@@ -388,6 +417,11 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     let t = text(doc, p.slot);
     let v = visible(doc, p.slot);
     let d = v.drawn(p.byte);
+    if !extend && !word && d < v.drawn_len()
+        && let Some((a, b)) = cell_picture_drawn_at(doc, p.slot, &v, d)
+    {
+        return Caret { anchor: Pos { byte: a, ..p }, head: Pos { byte: b, ..p } };
+    }
     let head = if is_atomic(doc, p.slot) && p.byte < 1 {
         Pos { byte: 1, ..p }
     } else if !is_atomic(doc, p.slot) && d < v.drawn_len() {
@@ -1671,18 +1705,19 @@ pub enum PicDrop {
 /// Picture `id` moved to `to`, and selected. Beside a picture on its own
 /// line, both go to the left edge, side by side; beside one at an edge,
 /// it joins that edge. Into a table's cell, its line goes and the cell's
-/// words hold it, its width kept and its side left behind, which means
-/// nothing among words. One step of the history either way.
+/// words hold it, written plainly ([`doc::CellPicture::plain`]): its alt
+/// text kept, its width and side left behind, as the cell decides how
+/// wide it is. One step of the history either way.
 pub fn move_picture(doc: &mut Doc, c: &mut Caret, id: u64, to: PicDrop) -> bool {
     let Some(from) = doc.index_of(id) else { return false };
     match to {
         PicDrop::Cell { slot, at } => {
-            let Kind::Image { src, alt, width, wiki, .. } = doc.blocks()[from].kind.clone() else { return false };
+            let Kind::Image { src, alt, wiki, .. } = doc.blocks()[from].kind.clone() else { return false };
             if !is_cell(doc, slot) {
                 return false;
             }
-            let md = wiki.then(|| doc::image_wiki(&alt, &src, width, doc::Float::None)).flatten();
-            let md = md.unwrap_or_else(|| doc::image_markdown(&alt, &src, width, doc::Float::None));
+            let md = wiki.then(|| doc::image_wiki(&alt, &src, None, doc::Float::None)).flatten();
+            let md = md.unwrap_or_else(|| doc::image_markdown(&alt, &src, None, doc::Float::None));
             doc.remove(from);
             let Some((a, b)) = put_in_cell(doc, slot, at, &md) else { return false };
             doc.ensure_tail();
@@ -1721,16 +1756,16 @@ pub fn move_picture(doc: &mut Doc, c: &mut Caret, id: u64, to: PicDrop) -> bool 
 
 /// The picture among the words of cell `from` that starts at byte `at`
 /// moved to `to`, and selected: to another place in those words, or
-/// another cell's, as it is written; out of the table to a line of its
-/// own, or beside another picture (as [`move_picture`] puts one), its
-/// width kept and a side it had among words left behind. Spaces it
-/// leaves doubled in the words are made one. One step of the history.
+/// another cell's, written plainly (a width or side written in by hand
+/// left behind); out of the table to a line of its own, or beside another
+/// picture (as [`move_picture`] puts one), with no width: its own. Spaces
+/// it leaves doubled in the words are made one. One step of the history.
 pub fn move_cell_picture(doc: &mut Doc, c: &mut Caret, from: Slot, at: usize, to: PicDrop) -> bool {
     if !is_cell(doc, from) {
         return false;
     }
     let Some(p) = inline::cell_pictures(text(doc, from)).into_iter().find(|p| p.at.0 == at) else { return false };
-    let written = text(doc, from)[p.at.0..p.at.1].to_string();
+    let written = p.plain();
     match to {
         PicDrop::Cell { slot, at: to_at } => {
             if !is_cell(doc, slot) {
@@ -1753,7 +1788,7 @@ pub fn move_cell_picture(doc: &mut Doc, c: &mut Caret, from: Slot, at: usize, to
         PicDrop::Before(i) => {
             take_from_cell(doc, from, p.at);
             let i = i.min(doc.len());
-            doc.insert(i, Block::new(Kind::Image { src: p.src, alt: p.alt, width: p.width, float: doc::Float::None, wiki: p.wiki }));
+            doc.insert(i, Block::new(Kind::Image { src: p.src, alt: p.alt, width: None, float: doc::Float::None, wiki: p.wiki }));
             doc.ensure_tail();
             *c = select_blocks(doc, i, i);
             true
@@ -1767,7 +1802,7 @@ pub fn move_cell_picture(doc: &mut Doc, c: &mut Caret, from: Slot, at: usize, to
             take_from_cell(doc, from, p.at);
             let Some(ti) = doc.index_of(t) else { return false };
             let i = if after { ti + 1 } else { ti };
-            doc.insert(i, Block::new(Kind::Image { src: p.src, alt: p.alt, width: p.width, float: side, wiki: p.wiki }));
+            doc.insert(i, Block::new(Kind::Image { src: p.src, alt: p.alt, width: None, float: side, wiki: p.wiki }));
             set_image_float(doc, t, side);
             doc.ensure_tail();
             *c = select_blocks(doc, i, i);
@@ -2507,13 +2542,15 @@ pub fn copy(doc: &Doc, c: Caret) -> Option<String> {
 
 /// Ctrl+V: one line types in; several lines that read as structure (a
 /// list, a table, headings) become blocks at the caret, the text after the
-/// caret carrying on below them.
+/// caret carrying on below them. In a table's cell, the words go in, their
+/// pictures written plainly ([`doc::plain_pictures`]).
 pub fn paste(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let s = s.replace("\r\n", "\n");
     let p = c.head;
-    let raw_or_cell = p.slot.cell.is_some()
-        || matches!(kind_at(doc, p.slot), Some(Kind::Raw(_)));
-    if raw_or_cell {
+    if p.slot.cell.is_some() {
+        return insert(doc, c, &doc::plain_pictures(&s));
+    }
+    if matches!(kind_at(doc, p.slot), Some(Kind::Raw(_))) {
         return insert(doc, c, &s);
     }
     let parsed = doc::parse_blocks(s.trim_end_matches('\n'));
@@ -3018,8 +3055,8 @@ mod tests {
         assert_eq!(down, [Slot::block(d.blocks()[2].id)]);
     }
 
-    /// A picture in a cell is one letter to the caret: the arrows step
-    /// over it, Backspace and Delete take it whole, a word typed beside it
+    /// A picture in a cell is one letter to the caret: the arrows choose
+    /// it whole, Backspace and Delete take it whole, a word typed beside it
     /// goes beside it, and a style put on it goes round it. The same text
     /// in a paragraph is the `!` and link it looks like.
     #[test]
@@ -3032,14 +3069,15 @@ mod tests {
         let s = block_slots(&d.blocks()[0])[0];
         let p = |byte| Caret::at(Pos { slot: s, byte });
         let end = 1 + pic.len();
-        // →: over `a`, then over the picture whole, then over `b`.
+        // →: over `a`, then the picture chosen whole; ← puts the caret
+        // back before it.
         let mut c = p(0);
         c = right(&d, c, false, false);
         assert_eq!(c.head.byte, 1);
         c = right(&d, c, false, false);
-        assert_eq!(c.head.byte, end, "past the picture");
+        assert_eq!((c.anchor.byte, c.head.byte), (1, end), "the picture, whole");
         c = left(&d, c, false, false);
-        assert_eq!(c.head.byte, 1, "back before it");
+        assert_eq!(c, p(1), "back before it");
         assert_eq!(visible(&d, s).text(text(&d, s)), "a!b", "one letter in the words");
         // A double click on it chooses no word in it.
         let w = word_at(&d, Pos { slot: s, byte: 1 });
@@ -3637,14 +3675,14 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_moves_into_a_cell_its_width_kept_its_side_dropped() {
+    fn a_picture_moves_into_a_cell_written_plainly() {
         let (mut d, id, x, _) = with_table();
         let mut c = at(&d, 0, 0);
         let (done, md, back) = undone(&mut d, &mut c, |d, c| move_picture(d, c, id, PicDrop::Cell { slot: x, at: usize::MAX }));
         assert!(done && back, "{md}");
-        assert!(md.contains("| x![view|260](a.png) |"), "{md}");
+        assert!(md.contains("| x![view](a.png) |"), "its alt kept, no width nor side: {md}");
         assert!(!d.blocks().iter().any(|b| matches!(b.kind, Kind::Image { .. })), "its line gone");
-        let pic = "![view|260](a.png)";
+        let pic = "![view](a.png)";
         assert_eq!(text(&d, x), format!("x{pic}"));
         assert_eq!((c.anchor, c.head), (Pos { slot: x, byte: 1 }, Pos { slot: x, byte: 1 + pic.len() }), "selected");
         // Where the drop is among the words; inside another picture, past it.
@@ -3663,7 +3701,7 @@ mod tests {
         let wid = w.id;
         d.insert(0, w);
         assert!(move_picture(&mut d, &mut c, wid, PicDrop::Cell { slot: x, at: 0 }));
-        assert_eq!(text(&d, x), "![[photo.png|90]]x");
+        assert_eq!(text(&d, x), "![[photo.png]]x");
         // Not into a cell that isn't there.
         let (mut d, id, x, _) = with_table();
         let gone = Slot { cell: Some((1, 2)), ..x };
@@ -3674,22 +3712,29 @@ mod tests {
     #[test]
     fn a_cells_picture_moves_to_another_cell_or_along_its_words() {
         let (mut d, _, x, yz) = with_table();
-        let pic = "![|left|300](p.png)";
+        // A width and a side written by hand stay behind.
+        let pic = "![sea|left|300](p.png)";
+        let plain = "![sea](p.png)";
         set_cell(&mut d, x, &format!("a {pic} b"));
         let mut c = at(&d, 0, 0);
         let (done, md, back) = undone(&mut d, &mut c, |d, c| move_cell_picture(d, c, x, 2, PicDrop::Cell { slot: yz, at: 1 }));
         assert!(done && back, "{md}");
         assert_eq!(text(&d, x), "a b", "a space, not two");
-        assert_eq!(text(&d, yz), format!("y{pic} z"), "as it was written");
-        assert_eq!((c.anchor.byte, c.head.byte, c.head.slot), (1, 1 + pic.len(), yz));
+        assert_eq!(text(&d, yz), format!("y{plain} z"), "written plainly");
+        assert_eq!((c.anchor.byte, c.head.byte, c.head.slot), (1, 1 + plain.len(), yz));
         // Along its own words: to the end, and back to the start.
         set_cell(&mut d, x, &format!("{pic} ab"));
         assert!(move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Cell { slot: x, at: usize::MAX }));
-        assert_eq!(text(&d, x), format!("ab{pic}"));
+        assert_eq!(text(&d, x), format!("ab{plain}"));
         assert!(move_cell_picture(&mut d, &mut c, x, 2, PicDrop::Cell { slot: x, at: 0 }));
-        assert_eq!(text(&d, x), format!("{pic}ab"));
+        assert_eq!(text(&d, x), format!("{plain}ab"));
+        // An embed stays one, its alt kept.
+        set_cell(&mut d, yz, "![[photo.png|the view|260]]");
+        assert!(move_cell_picture(&mut d, &mut c, yz, 0, PicDrop::Cell { slot: x, at: 0 }));
+        assert_eq!(text(&d, x), format!("![[photo.png|the view]]{plain}ab"));
+        set_cell(&mut d, x, &format!("{plain}ab"));
         // Where it is already: nothing.
-        assert!(!move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Cell { slot: x, at: pic.len() }));
+        assert!(!move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Cell { slot: x, at: plain.len() }));
         // No picture there: nothing.
         assert!(!move_cell_picture(&mut d, &mut c, x, 1, PicDrop::Cell { slot: yz, at: 0 }));
     }
@@ -3701,8 +3746,8 @@ mod tests {
         let mut c = at(&d, 0, 0);
         let (done, md, back) = undone(&mut d, &mut c, |d, c| move_cell_picture(d, c, x, 0, PicDrop::Before(0)));
         assert!(done && back, "{md}");
-        assert!(md.starts_with("![sea|300](p.png)\n"), "{md}");
-        assert!(matches!(&d.blocks()[0].kind, Kind::Image { src, alt, width: Some(300), float: Float::None, wiki: false } if src == "p.png" && alt == "sea"));
+        assert!(md.starts_with("![sea](p.png)\n"), "its own width: {md}");
+        assert!(matches!(&d.blocks()[0].kind, Kind::Image { src, alt, width: None, float: Float::None, wiki: false } if src == "p.png" && alt == "sea"));
         assert_eq!(text(&d, x), "after");
         assert_eq!(c, select_blocks(&d, 0, 0), "selected");
         // At the note's end, past the last line.
@@ -3714,13 +3759,103 @@ mod tests {
         set_cell(&mut d, x, "![|120](r.png)");
         assert!(move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Beside { id, after: true }));
         let i = d.index_of(id).unwrap();
-        assert!(matches!(&d.blocks()[i + 1].kind, Kind::Image { src, width: Some(120), float: Float::Right, .. } if src == "r.png"));
+        assert!(matches!(&d.blocks()[i + 1].kind, Kind::Image { src, width: None, float: Float::Right, .. } if src == "r.png"));
         assert_eq!(text(&d, x), "");
         // Beside what isn't a picture: nothing.
         set_cell(&mut d, x, "![](s.png)");
         let words = d.blocks().iter().find(|b| b.text_ref() == Some("words")).unwrap().id;
         assert!(!move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Beside { id: words, after: false }));
         assert_eq!(text(&d, x), "![](s.png)");
+    }
+
+    /// Pasted into a cell, or put there as a file dropped or picked: a
+    /// picture written plainly, its alt kept, its width and side left
+    /// behind. Not in code, and not in a paragraph.
+    #[test]
+    fn a_picture_pasted_or_dropped_into_a_cell_is_written_plainly() {
+        let (mut d, _, x, yz) = with_table();
+        let mut c = Caret::at(Pos { slot: x, byte: 1 });
+        assert!(paste(&mut d, &mut c, "![view|right|160](a.png)\n"));
+        assert_eq!(text(&d, x), "x![view](a.png) ");
+        let mut c = Caret::at(Pos { slot: yz, byte: 0 });
+        assert!(paste(&mut d, &mut c, "see ![[b.png|160]] and `![|9](c.png)` ![](<d e.png> \"t\")"));
+        assert_eq!(text(&d, yz), "see ![[b.png]] and `![|9](c.png)` ![](<d e.png> \"t\")y z", "plain ones as they were");
+        let mut c = Caret::at(Pos { slot: x, byte: 0 });
+        assert!(insert_cell_picture(&mut d, &mut c, "attachments/p q.png"));
+        assert!(text(&d, x).starts_with("![](<attachments/p q.png>)x"), "{}", text(&d, x));
+        // In a paragraph, a picture pasted keeps what it was given.
+        let (mut d, _, _, _) = with_table();
+        let mut c = at(&d, 0, 5);
+        assert!(paste(&mut d, &mut c, "![view|right|160](a.png)"));
+        assert!(d.blocks().iter().any(|b| matches!(b.kind, Kind::Image { width: Some(160), float: Float::Right, .. })));
+    }
+
+    /// ← and → choose a picture among a cell's words before they step
+    /// past it, so the caret and the chosen picture are never both shown:
+    /// from after it, ← chooses it and ← again puts the caret before it;
+    /// from before it, → and → again, mirrored. Shift grows a selection as
+    /// ever; a letter typed over a chosen picture takes its place, and
+    /// Backspace or Delete takes it. A picture on its own line is as it was.
+    #[test]
+    fn the_arrows_choose_a_cells_picture_before_passing_it() {
+        let (mut d, _, x, _) = with_table();
+        let pic = "![](p.png)";
+        set_cell(&mut d, x, &format!("a{pic}b"));
+        let p = |byte| Pos { slot: x, byte };
+        let end = 1 + pic.len();
+        // ←, from after it.
+        let c = left(&d, Caret::at(p(end)), false, false);
+        assert_eq!((c.anchor, c.head), (p(end), p(1)), "chosen");
+        assert_eq!(chosen_cell_picture(&d, c), Some((1, end)));
+        let c = left(&d, c, false, false);
+        assert_eq!(c, Caret::at(p(1)), "then the caret before it");
+        assert_eq!(chosen_cell_picture(&d, c), None);
+        assert_eq!(left(&d, c, false, false), Caret::at(p(0)), "then on over `a`");
+        // →, from before it.
+        let c = right(&d, Caret::at(p(1)), false, false);
+        assert_eq!((c.anchor, c.head), (p(1), p(end)), "chosen");
+        let c = right(&d, c, false, false);
+        assert_eq!(c, Caret::at(p(end)), "then the caret after it");
+        // Chosen by ←, → puts the caret after it; chosen by →, ← before it.
+        assert_eq!(right(&d, left(&d, Caret::at(p(end)), false, false), false, false), Caret::at(p(end)));
+        assert_eq!(left(&d, right(&d, Caret::at(p(1)), false, false), false, false), Caret::at(p(1)));
+        // Shift: a selection grows over it whole, as before.
+        let c = right(&d, Caret::at(p(1)), false, true);
+        assert_eq!((c.anchor, c.head), (p(1), p(end)));
+        let c = right(&d, c, false, true);
+        assert_eq!((c.anchor, c.head), (p(1), p(end + 1)));
+        let c = left(&d, Caret::at(p(end + 1)), false, true);
+        let c = left(&d, c, false, true);
+        assert_eq!((c.anchor, c.head), (p(end + 1), p(1)));
+        // By the word: past it, as before.
+        assert!(right(&d, Caret::at(p(1)), true, false).is_empty());
+        // In bold: chosen inside its marks, and passed.
+        set_cell(&mut d, x, &format!("a **{pic}** b"));
+        let c = right(&d, Caret::at(p(2)), false, false);
+        assert_eq!(chosen_cell_picture(&d, c), Some((4, 4 + pic.len())), "{c:?}");
+        assert!(right(&d, c, false, false).head.byte >= 4 + pic.len());
+        // Typed over: a letter in its place.
+        set_cell(&mut d, x, &format!("a{pic}b"));
+        let mut c = left(&d, Caret::at(p(end)), false, false);
+        let mut t = Typing::default();
+        t.type_text(&mut d, &mut c, "z");
+        assert_eq!((text(&d, x), c), ("azb", Caret::at(p(2))));
+        // Backspace and Delete: taken whole.
+        set_cell(&mut d, x, &format!("a{pic}b"));
+        let mut c = right(&d, Caret::at(p(1)), false, false);
+        backspace(&mut d, &mut c, false);
+        assert_eq!(text(&d, x), "ab");
+        set_cell(&mut d, x, &format!("a{pic}b"));
+        let mut c = left(&d, Caret::at(p(end)), false, false);
+        delete(&mut d, &mut c, false);
+        assert_eq!(text(&d, x), "ab");
+        // A picture on its own line: → lands on it, and on past it, as it did.
+        let (d, id, _, _) = with_table();
+        let pic = Slot::block(id);
+        let c = right(&d, at(&d, 0, 5), false, false);
+        assert_eq!(c, Caret::at(Pos { slot: pic, byte: 0 }));
+        assert_eq!(right(&d, c, false, false), Caret::at(Pos { slot: pic, byte: 1 }));
+        assert_eq!(chosen_cell_picture(&d, c), None);
     }
 
     fn set_cell(d: &mut Doc, slot: Slot, to: &str) {
