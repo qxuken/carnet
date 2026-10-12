@@ -56,3 +56,5 @@ s3 = ["dep:rusty-s3", "dep:ureq", "dep:md-5", "dep:url"]
 tokio-tungstenite = "0.30"
 # tests/link.rs: the desktop's own socket against this binary.
 carnet-sync = { path = "../carnet-sync", features = ["net"] }
+# s3.rs: a put link signed at a moment of the test's own (rusty-s3's clock).
+jiff = { version = "0.2", default-features = false, features = ["std"] }

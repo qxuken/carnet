@@ -309,14 +309,14 @@ impl Pictures {
             }
             if k.stored {
                 wrote |= store.set_picture(rel, &hex(&k.id));
-            } else if !self.offered.contains_key(&k.id) && !self.sending.contains(&k.id) && !self.held.contains_key(&k.id) && !offer.contains(&k.id) {
-                offer.push(k.id);
+            } else if !self.offered.contains_key(&k.id) && !self.sending.contains(&k.id) && !self.held.contains_key(&k.id) && !offer.iter().any(|(id, _)| *id == k.id) {
+                offer.push((k.id, k.size as usize));
             }
         }
         // Offered only if it goes: one not sent (logging in) is offered
         // at the next tick.
         if session.is_ready() {
-            self.offered.extend(offer.iter().map(|id| (*id, now)));
+            self.offered.extend(offer.iter().map(|(id, _)| (*id, now)));
             session.offer_blobs(offer);
         }
 

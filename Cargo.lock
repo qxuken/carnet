@@ -900,6 +900,7 @@ dependencies = [
  "carnet-sync",
  "futures-util",
  "hmac 0.13.0",
+ "jiff",
  "loro-protocol",
  "md-5",
  "postgres",

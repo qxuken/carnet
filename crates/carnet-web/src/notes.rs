@@ -831,9 +831,10 @@ impl Notes {
         if !self.session.is_ready() {
             return;
         }
-        let mut ids: Vec<BlobId> = self.uploads.keys().filter(|id| !self.offered.contains(*id) && !self.sending.contains(*id)).copied().collect();
+        let mut ids: Vec<(BlobId, usize)> =
+            self.uploads.iter().filter(|(id, _)| !self.offered.contains(*id) && !self.sending.contains(*id)).map(|(id, (_, bytes))| (*id, bytes.len())).collect();
         ids.sort_unstable();
-        self.offered.extend(ids.iter().copied());
+        self.offered.extend(ids.iter().map(|(id, _)| *id));
         self.session.offer_blobs(ids);
     }
 

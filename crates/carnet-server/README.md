@@ -243,7 +243,7 @@ cargo build --release -p carnet-server --features postgres,s3
     ```json
     {"CORSRules": [{"AllowedOrigins": ["https://notes.example.com"], "AllowedMethods": ["GET", "PUT"], "AllowedHeaders": ["content-type"], "MaxAgeSeconds": 3600}]}
     ```
-  - **A put's size.** A link signed for `PUT` can't say "at most 32 MiB", only an exact length, and the server gives the link before the device says how long the picture is. A picture put past 32 MiB is found when it's next asked about, deleted, and never said kept, linked or counted. Until then it's one account's one picture, put within its link's five minutes.
+  - **A put's size.** A device says how long each picture is, sealed, when it offers it, and its `PUT` link is signed with that `Content-Length`: the bucket refuses a put of any other length, so nothing past 32 MiB, or past what was offered, gets in. Within its five minutes a link may put its picture again, over the first: harmless (only the account's own device has the link, and a picture that isn't the one its id names opens on no device), so a conditional put isn't asked for, and CORS needs no more headers.
 - **What stays in the data folder:** `opaque.key` (every password depends on it) and `links.key`. Keep `--data` pointing at the folder, and keep it in backups. Postgres holds no secret.
 - **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only.
 
@@ -293,7 +293,7 @@ cargo build --release -p carnet-server --features postgres,s3
 | `GET /v1/health` | `{"ok": true}` while the hub answers; `503` if not |
 | `GET /v1/sync` | the WebSocket: Carnet's frames (log in, use an invite, pair, what changed) and the Loro Protocol's rooms, one per note |
 | `GET /v1/blobs/<link>` | a sealed picture, by a link the socket gave: one picture, for minutes |
-| `PUT /v1/blobs/<link>` | one put the same way, its `Content-Length` said, at most 32 MiB |
+| `PUT /v1/blobs/<link>` | one put the same way, its `Content-Length` said: the length the device offered the picture as, at most 32 MiB |
 | `GET /metrics` | on the metrics address only: Prometheus' text format |
 
 ## Tests

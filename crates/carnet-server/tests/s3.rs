@@ -32,18 +32,22 @@ fn agent() -> ureq::Agent {
     ureq::Agent::new_with_config(ureq::Agent::config_builder().http_status_as_error(false).build())
 }
 
-/// Offered: a link to put it straight into the bucket; put there, it's
-/// kept, and its fetch link gets it back, for the link's time in a
-/// browser's cache. A link one way doesn't go the other, or changed.
+/// Offered: a link to put it straight into the bucket, of the length the
+/// device said and no other; put there, it's kept, and its fetch link
+/// gets it back, for the link's time in a browser's cache. A link one way
+/// doesn't go the other, or changed.
 #[test]
 fn a_picture_goes_straight_to_the_bucket_and_back() {
     let Some((s3, config)) = bucket("roundtrip") else { return };
     let mut w = Worker::new(s3.clone());
     let acct = b"acct".to_vec();
-    let offer = Job::Offer { conn: 1, account: acct.clone(), ids: vec![[1; 32]], room: None, writable: true };
+    let sealed: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let offer = Job::Offer { conn: 1, account: acct.clone(), ids: vec![[1; 32]], sizes: vec![sealed.len() as u64], room: None, writable: true };
     let [Carnet::BlobLink { put: true, url: put, .. }] = &said(&mut w, offer.clone())[..] else { panic!("a put link") };
     assert!(put.starts_with(config.url.split("/roundtrip").next().unwrap()), "the bucket's own: {put}");
-    let sealed: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    for other in [&sealed[..sealed.len() - 1], &[sealed.as_slice(), b"x"].concat()] {
+        assert_eq!(agent().put(put).send(other).unwrap().status().as_u16(), 403, "another length puts nothing");
+    }
     let mut changed = put.clone();
     changed.pop();
     changed.push(if put.ends_with('0') { '1' } else { '0' });

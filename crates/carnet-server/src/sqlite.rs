@@ -34,7 +34,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use carnet_sync::wire::{decode_vv, encode_vv};
 
 use crate::rows::{AccountRows, BaseRow, DeviceRow, InviteRow, PasskeyRow, PasswordRow, RecordRow, RecoveryRow, RekeyRow};
-use crate::storage::{Base, Device, Failed, Logged, PasskeySlot, PasswordSlot, Shelf, Span, Storage, covers};
+use crate::storage::{Base, Device, Failed, Live, Logged, PasskeySlot, PasswordSlot, Shelf, Span, Storage, covers};
 
 /// A picture as a database kept it: its id, its sealed bytes.
 pub type Kept = ([u8; 32], Vec<u8>);
@@ -730,6 +730,37 @@ impl Storage for Sharded {
         .ok()
         .flatten()
         .unwrap_or_default()
+    }
+
+    fn live(&self, account: &[u8], room: &str) -> Live {
+        self.with(account, |db| {
+            db.query_row(
+                "SELECT (SELECT COUNT(*) FROM records WHERE room = ?1 AND shelved_by = 0),
+                        (SELECT COALESCE(SUM(LENGTH(bytes)), 0) FROM records WHERE room = ?1 AND shelved_by = 0),
+                        EXISTS (SELECT 1 FROM bases WHERE room = ?1 AND shelved_by = 0)",
+                params![room],
+                |r| Ok(Live { records: uint(r.get(0)?), bytes: uint(r.get(1)?), based: r.get(2)? }),
+            )
+            .unwrap_or_default()
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    }
+
+    fn room_count(&self, account: &[u8]) -> u64 {
+        self.with(account, |db| {
+            db.query_row(
+                "SELECT COUNT(*) FROM (SELECT room FROM records WHERE shelved_by = 0 UNION SELECT room FROM bases WHERE shelved_by = 0)",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(uint)
+            .unwrap_or(0)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or(0)
     }
 
     fn changed_since(&self, account: &[u8], seq: u64) -> Vec<(String, u64)> {

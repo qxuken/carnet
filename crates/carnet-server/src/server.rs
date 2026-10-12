@@ -938,10 +938,10 @@ async fn blob_get(State(l): State<Links>, axum::extract::Path(token): axum::extr
     }
 }
 
-/// A sealed picture put by its link: its length said up front and no more
-/// than the link allows, written to the spool as it comes, then kept
-/// whole and on the disk before the 204 that says so. Already kept, it
-/// stays as it was.
+/// A sealed picture put by its link: its length said up front, and the
+/// length the link was given for (the device said it when it offered the
+/// picture), written to the spool as it comes, then kept whole and on the
+/// disk before the 204 that says so. Already kept, it stays as it was.
 async fn blob_put(
     State(l): State<Links>,
     axum::extract::Path(token): axum::extract::Path<String>,
@@ -958,6 +958,9 @@ async fn blob_put(
     };
     if len > g.max {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+    if len != g.max {
+        return (StatusCode::BAD_REQUEST, "not the length this link is for").into_response();
     }
     let n = l.http.next.fetch_add(1, Ordering::Relaxed);
     let tmp = l.files.spool.join(format!("put-{n}"));

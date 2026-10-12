@@ -517,18 +517,23 @@ async fn a_picture_goes_by_its_links_over_http() {
 
     let pic: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
     let id = a.session.blob_id(&pic);
-    a.session.offer_blobs(vec![id]);
+    a.session.offer_blobs(vec![(id, pic.len())]);
     a.settle(&mut ws).await;
     assert!(a.events.contains(&Event::BlobWanted(id)), "{:?}", a.events);
     assert!(a.session.put_blob(&pic, &mut OsRandom));
     let [Transfer::Put { url, sealed, .. }] = &a.session.take_transfers()[..] else { panic!("a put") };
     let (put_path, sealed) = (path_of(url), sealed.clone());
 
-    // The put: refused without its length, past its size, longer than
-    // it said, or by a changed link; then done.
+    // The put: refused without its length, past its size, of another
+    // length than the device said in its offer, or by a changed link;
+    // then done.
     let len = |n: usize| format!("Content-Length: {n}\r\n");
     assert_eq!(request(srv.addr, "PUT", &put_path, "", b"").await.0, 411);
     assert_eq!(request(srv.addr, "PUT", &put_path, &len(64 << 20), b"").await.0, 413);
+    let longer = [sealed.as_slice(), b"x"].concat();
+    assert_eq!(request(srv.addr, "PUT", &put_path, &len(longer.len()), &longer).await.0, 413);
+    let shorter = &sealed[..sealed.len() - 1];
+    assert_eq!(request(srv.addr, "PUT", &put_path, &len(shorter.len()), shorter).await.0, 400);
     let mut changed = put_path.clone().into_bytes();
     let last = changed.len() - 1;
     changed[last] = if changed[last] == b'0' { b'1' } else { b'0' };
@@ -551,7 +556,7 @@ async fn a_picture_goes_by_its_links_over_http() {
     assert_eq!(a.session.take_events(), [Event::BlobFailed(id)]);
 
     // Offered again: there already.
-    a.session.offer_blobs(vec![id]);
+    a.session.offer_blobs(vec![(id, pic.len())]);
     a.settle(&mut ws).await;
     assert_eq!(a.events.last(), Some(&Event::BlobStored(id)), "there already");
 

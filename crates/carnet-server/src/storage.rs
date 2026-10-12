@@ -55,6 +55,25 @@ pub struct Shelf {
     pub since: u64,
 }
 
+/// What a room holds past its base, counted without reading a record:
+/// whether it's due for compaction, or past what the server takes
+/// (docs/SYNC.md §6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Live {
+    /// Live records, and their bytes.
+    pub records: u64,
+    pub bytes: u64,
+    /// It has a base.
+    pub based: bool,
+}
+
+impl Live {
+    /// Nothing kept: a room never written to, or removed.
+    pub fn is_empty(&self) -> bool {
+        self.records == 0 && !self.based
+    }
+}
+
 /// Something done to an account's rooms that every device should be able
 /// to see: a rollback, a repair, a snapshot that failed its check.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +149,21 @@ pub trait Storage {
     /// `room`'s records, in the order they came: the live ones, not those
     /// a base has set aside.
     fn spans(&self, account: &[u8], room: &str) -> Vec<Span>;
+
+    /// How many live records `room` has and their bytes, and whether it
+    /// has a base: what [`spans`](Storage::spans) and
+    /// [`base`](Storage::base) would say, counted where the records are,
+    /// none read (the hub asks after every write).
+    fn live(&self, account: &[u8], room: &str) -> Live {
+        let spans = self.spans(account, room);
+        Live { records: spans.len() as u64, bytes: spans.iter().map(|s| s.record.len() as u64).sum(), based: self.base(account, room).is_some() }
+    }
+
+    /// How many rooms have anything kept: [`rooms`](Storage::rooms),
+    /// counted.
+    fn room_count(&self, account: &[u8]) -> u64 {
+        self.rooms(account).len() as u64
+    }
 
     /// The room's base, if it has one.
     fn base(&self, account: &[u8], room: &str) -> Option<Base>;
@@ -271,6 +305,12 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     }
     fn spans(&self, account: &[u8], room: &str) -> Vec<Span> {
         (**self).spans(account, room)
+    }
+    fn live(&self, account: &[u8], room: &str) -> Live {
+        (**self).live(account, room)
+    }
+    fn room_count(&self, account: &[u8]) -> u64 {
+        (**self).room_count(account)
     }
     fn base(&self, account: &[u8], room: &str) -> Option<Base> {
         (**self).base(account, room)
@@ -480,9 +520,18 @@ pub struct Memory {
     passwords: HashMap<Vec<u8>, PasswordSlot>,
     /// By account, the oldest first.
     passkeys: HashMap<Vec<u8>, Vec<PasskeySlot>>,
+    /// How many times a room's records were read whole.
+    spans_read: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Memory {
+    /// A count of the times a room's records are read whole
+    /// ([`Storage::spans`]), kept however the store is boxed: a write
+    /// mustn't (the tests').
+    pub fn spans_read(&self) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.spans_read.clone()
+    }
+
     /// Every record kept, of every account: what a stolen disk would hold.
     pub fn all_records(&self) -> Vec<&[u8]> {
         self.accounts.values().flat_map(|a| a.rooms.values().flatten().map(|s| s.record.as_slice())).collect()
@@ -592,7 +641,20 @@ impl Storage for Memory {
     }
 
     fn spans(&self, account: &[u8], room: &str) -> Vec<Span> {
+        self.spans_read.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.accounts.get(account).and_then(|a| a.rooms.get(room)).cloned().unwrap_or_default()
+    }
+
+    fn live(&self, account: &[u8], room: &str) -> Live {
+        let Some(a) = self.accounts.get(account) else { return Live::default() };
+        let spans = a.rooms.get(room).map_or(&[][..], Vec::as_slice);
+        Live { records: spans.len() as u64, bytes: spans.iter().map(|s| s.record.len() as u64).sum(), based: a.bases.contains_key(room) }
+    }
+
+    fn room_count(&self, account: &[u8]) -> u64 {
+        let Some(a) = self.accounts.get(account) else { return 0 };
+        let live = a.rooms.iter().filter(|(r, s)| !s.is_empty() && !a.bases.contains_key(*r)).count();
+        (live + a.bases.len()) as u64
     }
 
     fn changed_since(&self, account: &[u8], seq: u64) -> Vec<(String, u64)> {

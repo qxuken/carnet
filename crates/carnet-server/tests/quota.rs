@@ -34,7 +34,7 @@ fn usage(net: &mut Net, conn: carnet_server::ConnId) -> carnet_sync::session::Us
 
 fn offer(net: &mut Net, conn: carnet_server::ConnId, pic: &[u8]) -> Vec<Event> {
     let id = net.device(conn).session.blob_id(pic);
-    net.device(conn).session.offer_blobs(vec![id]);
+    net.device(conn).session.offer_blobs(vec![(id, pic.len())]);
     net.pump();
     events(net, conn)
 }
@@ -70,7 +70,8 @@ fn a_plan_limits_pictures_and_a_lapsed_one_reads_only() {
         assert!(said.contains(&Event::Refused(FULL.into())), "{said:?}");
         assert!(!said.iter().any(|e| matches!(e, Event::BlobWanted(_))));
         assert!(offer(&mut net, a, &big).iter().any(|e| matches!(e, Event::BlobStored(_))));
-        // Notes' text is never refused for size.
+        // Notes' text isn't refused at the limit (only past a ceiling far
+        // above it: `caps.rs`).
         net.write(a, "more words, past the limit");
         let account = net.hub.store().account_list()[0].0.clone();
         let before = net.hub.store().usage(&account);

@@ -19,8 +19,8 @@ use loro_protocol::ProtocolMessage;
 
 use crate::blobs::Job;
 use crate::limits::{self, Limiter};
-use crate::quota::{Admission, ByInvite, NO_ACCOUNT_EMAIL, PasswordEmails, Quota, Unlimited, password_email_is};
-use crate::storage::{self, Logged, Storage, covers};
+use crate::quota::{Admission, ByInvite, NO_ACCOUNT_EMAIL, NOTES_FULL, PasswordEmails, Quota, ROOM_FULL, Unlimited, password_email_is};
+use crate::storage::{self, Live, Logged, Storage, covers};
 
 pub type ConnId = u64;
 
@@ -36,6 +36,20 @@ pub enum Out {
 
 /// The largest record kept; one past it is refused, not stored.
 pub const MAX_RECORD: usize = 256 * 1024;
+
+/// The longest room id taken: a note's is 32 hex digits, the vault's
+/// `vault`. A longer one is never joined, written, or repaired.
+pub const MAX_ROOM_ID: usize = 64;
+
+/// What one account's notes may hold (docs/SYNC.md §6, §11), against an
+/// account that never compacts: far past what a note's history takes,
+/// since compaction keeps a room to 200 records or 256 KiB of them. A
+/// room past [`ROOM_RECORDS`] live records or [`ROOM_BYTES`] of them
+/// takes no more until it's compacted; an account with [`MAX_ROOMS`]
+/// rooms, no new one.
+pub const ROOM_RECORDS: u64 = 10_000;
+pub const ROOM_BYTES: u64 = 64 << 20;
+pub const MAX_ROOMS: u64 = 100_000;
 
 /// How long an invite is good for.
 pub const INVITE_DAYS: u64 = 7;
@@ -81,6 +95,10 @@ struct Conn {
     /// The protocol its app speaks (`compat`), which app it is and its
     /// version, as its address said.
     app: Client,
+    /// Told why a write was refused as more than the server keeps
+    /// (`ROOM_FULL`, `NOTES_FULL`): once a socket, however often it sends
+    /// again.
+    told_full: bool,
 }
 
 /// A pairing open (§7): the device in that opened it, and the new device
@@ -182,12 +200,25 @@ pub struct Hub<S: Storage> {
     now: u64,
     /// By account and room.
     leases: HashMap<(Vec<u8>, String), Lease>,
-    /// When a room last took a record, by account and room (this run's).
+    /// When a room last took a record, by account and room (this run's),
+    /// for [`QUIET`] after: older says no more than none.
     last_write: HashMap<(Vec<u8>, String), u64>,
     last_purge: u64,
     /// A room is compacted past this many live records, or bytes of them.
     compact_count: usize,
     compact_bytes: usize,
+    /// A room takes no more deltas past these, an account no new room
+    /// past `max_rooms` ([`ROOM_RECORDS`], [`ROOM_BYTES`], [`MAX_ROOMS`]
+    /// unless said).
+    room_records: u64,
+    room_bytes: u64,
+    max_rooms: u64,
+    /// What each account's notes take, as last counted and written since:
+    /// what a write is held to [`Quota::notes_ceiling`] by, without the
+    /// whole account counted each time. Never less than they take (a
+    /// record a longer one covers isn't taken off); counted anew hourly,
+    /// and when anything is removed.
+    notes: HashMap<Vec<u8>, u64>,
     stats: Stats,
     /// Tries by client: a failed login, an invite, a pairing joined, a
     /// recovery.
@@ -220,6 +251,10 @@ impl<S: Storage> Hub<S> {
             last_purge: 0,
             compact_count: 200,
             compact_bytes: 256 * 1024,
+            room_records: ROOM_RECORDS,
+            room_bytes: ROOM_BYTES,
+            max_rooms: MAX_ROOMS,
+            notes: HashMap::new(),
             stats: Stats::default(),
             tries: Limiter::new(limits::TRIES),
             quota: std::sync::Arc::new(Unlimited),
@@ -291,6 +326,11 @@ impl<S: Storage> Hub<S> {
         &self.stats
     }
 
+    /// What it keeps for compaction: rooms' last writes, and leases.
+    pub fn compaction_kept(&self) -> (usize, usize) {
+        (self.last_write.len(), self.leases.len())
+    }
+
     /// What it holds open now.
     pub fn open(&self) -> Open {
         Open {
@@ -321,10 +361,51 @@ impl<S: Storage> Hub<S> {
     pub fn compact_when(&mut self, count: usize, bytes: usize) {
         self.compact_count = count;
         self.compact_bytes = bytes;
+        // A room is always compacted well before it's refused.
+        self.room_records = self.room_records.max(count as u64 * 10);
+        self.room_bytes = self.room_bytes.max(bytes as u64 * 10);
+    }
+
+    /// What a room may hold before it takes no more deltas, and how many
+    /// rooms an account may have ([`ROOM_RECORDS`], [`ROOM_BYTES`],
+    /// [`MAX_ROOMS`] unless said).
+    pub fn room_caps(&mut self, records: u64, bytes: u64, rooms: u64) {
+        self.room_records = records;
+        self.room_bytes = bytes;
+        self.max_rooms = rooms;
+    }
+
+    /// What `account`'s notes take, as last counted and written since.
+    fn notes_used(&mut self, account: &[u8]) -> u64 {
+        if let Some(&n) = self.notes.get(account) {
+            return n;
+        }
+        let n = self.store.usage(account);
+        self.notes.insert(account.to_vec(), n);
+        n
+    }
+
+    /// Why a write of `room` can't be taken now, if it can't: the room
+    /// past what it holds until compacted, or the account's notes past
+    /// their ceiling or as many as it may have. And what the room holds,
+    /// counted without a record read.
+    fn room_full(&mut self, account: &[u8], room: &str) -> (Option<&'static str>, Live) {
+        let live = self.store.live(account, room);
+        let why = if live.records >= self.room_records || live.bytes >= self.room_bytes {
+            Some(ROOM_FULL)
+        } else if self.notes_used(account) >= self.quota.notes_ceiling(account) || (live.is_empty() && self.store.room_count(account) >= self.max_rooms) {
+            Some(NOTES_FULL)
+        } else {
+            None
+        };
+        (why, live)
     }
 
     /// The driver says what time it is (the hub has no clock of its own).
-    /// Once an hour, what bases set aside more than [`KEEP`] ago goes.
+    /// Once an hour, what bases set aside more than [`KEEP`] ago goes, and
+    /// what's kept for compaction once it can't matter (a room's last
+    /// write past [`QUIET`], a lease past its time); what notes take is
+    /// counted anew.
     pub fn tick(&mut self, now: u64) {
         self.now = now;
         if now >= self.last_purge + 3600 {
@@ -332,6 +413,9 @@ impl<S: Storage> Hub<S> {
             self.tries.prune(now as f64);
             let purged = self.store.purge(now.saturating_sub(KEEP));
             let _ = self.kept(purged);
+            self.last_write.retain(|_, &mut t| now < t + QUIET);
+            self.leases.retain(|_, l| l.until > now);
+            self.notes.clear();
         }
     }
 
@@ -395,7 +479,7 @@ impl<S: Storage> Hub<S> {
     pub fn connect_from(&mut self, conn: ConnId, client: &str, app: Client, rng: &mut impl Random) -> Vec<Out> {
         let nonce: [u8; 32] = rng.bytes();
         let protocol = app.protocol;
-        self.conns.insert(conn, Conn { state: State::Challenged(nonce), rooms: HashSet::new(), client: client.to_string(), app });
+        self.conns.insert(conn, Conn { state: State::Challenged(nonce), rooms: HashSet::new(), client: client.to_string(), app, told_full: false });
         let mut out = vec![self.challenge(conn, nonce)];
         if compat::takes(protocol) == compat::Fit::AppTooOld {
             out.extend(self.deny_as(conn, compat::APP_TOO_OLD, Deny::Outdated));
@@ -438,6 +522,11 @@ impl<S: Storage> Hub<S> {
         });
         self.leases.retain(|_, l| l.conn != conn);
         let mut out = self.end_pairing_of(conn, "the other device went away");
+        if let Some((account, _)) = &gone
+            && self.online(account).is_empty()
+        {
+            self.notes.remove(account);
+        }
         if let Some((account, device)) = gone
             && !self.online(&account).contains(&device)
         {
@@ -713,6 +802,7 @@ impl<S: Storage> Hub<S> {
             Carnet::Inspect => vec![self.inspected(conn, &account)],
             Carnet::RollBack { room } => match self.store.roll_back(&account, &room) {
                 Ok(true) => {
+                    self.notes.remove(&account);
                     let _ = self.store.log(&account, Logged { at: self.now, device: me, room, what: "rolled back".into() });
                     vec![self.inspected(conn, &account)]
                 }
@@ -721,19 +811,28 @@ impl<S: Storage> Hub<S> {
                 })],
             },
             // Pictures: allowed here (logged in, this account); the worker
-            // gives the links, and checks what was put.
-            Carnet::BlobOffer { ids } => {
+            // gives the links, and checks what was put. No more than
+            // `MAX_IDS` of a frame are answered: a device sends no more.
+            Carnet::BlobOffer { mut ids, mut sizes } => {
+                ids.truncate(wire::MAX_IDS);
+                sizes.truncate(ids.len());
                 // Room left for pictures: the limit, less the notes.
                 let limit = self.quota.limit(&account);
                 let room = limit.bytes.map(|b| b.saturating_sub(self.store.usage(&account)));
-                vec![Out::Blob(Job::Offer { conn, account, ids, room, writable: limit.writable })]
+                vec![Out::Blob(Job::Offer { conn, account, ids, sizes, room, writable: limit.writable })]
             }
             Carnet::Usage => {
                 let notes = self.store.usage(&account);
                 vec![Out::Blob(Job::Usage { conn, limit: self.quota.limit(&account), account, notes })]
             }
-            Carnet::BlobFetch { ids } => vec![Out::Blob(Job::Fetch { conn, account, ids })],
-            Carnet::BlobDrop { ids } => vec![Out::Blob(Job::Drop { conn, account, ids })],
+            Carnet::BlobFetch { mut ids } => {
+                ids.truncate(wire::MAX_IDS);
+                vec![Out::Blob(Job::Fetch { conn, account, ids })]
+            }
+            Carnet::BlobDrop { mut ids } => {
+                ids.truncate(wire::MAX_IDS);
+                vec![Out::Blob(Job::Drop { conn, account, ids })]
+            }
             Carnet::RoomRemove { room } => self.remove_room(conn, &account, &me, room),
             // Deleted from one of its own devices. The server's owner's
             // can't be: it's what lets everyone else on.
@@ -773,6 +872,10 @@ impl<S: Storage> Hub<S> {
                 out
             }
             Carnet::Repair { room } => {
+                // Only a room the server keeps: a lease is held for each.
+                if !fair_room(&room) || self.store.live(&account, &room).is_empty() {
+                    return vec![carnet(conn, Carnet::Refused { reason: "that note isn't on the server to repair".into() })];
+                }
                 // Its own copy, as the room's base: asked of it now, whoever
                 // else holds a lease, and whatever the base is.
                 self.leases.insert((account, room.clone()), Lease { conn, until: self.now + LEASE, repair: true });
@@ -818,6 +921,7 @@ impl<S: Storage> Hub<S> {
         }
         self.leases.retain(|(a, _), _| a != gone);
         self.last_write.retain(|(a, _), _| a != gone);
+        self.notes.remove(gone);
         out.push(Out::Blob(Job::Gone { account: gone.to_vec() }));
         self.admission.removed(gone);
         Ok(out)
@@ -827,7 +931,7 @@ impl<S: Storage> Hub<S> {
     /// taken again. The vault's room is every note's, never removed. The
     /// devices in it are told, and leave it.
     fn remove_room(&mut self, conn: ConnId, account: &[u8], me: &[u8], room: String) -> Vec<Out> {
-        if room == carnet_sync::vault::ROOM || room.is_empty() || room.len() > 64 {
+        if room == carnet_sync::vault::ROOM || !fair_room(&room) {
             return vec![carnet(conn, Carnet::Refused { reason: "that can't be removed".into() })];
         }
         if !self.store.is_removed(account, &room) {
@@ -839,6 +943,7 @@ impl<S: Storage> Hub<S> {
             let key = (account.to_vec(), room.clone());
             self.leases.remove(&key);
             self.last_write.remove(&key);
+            self.notes.remove(account);
         }
         let mut ids: Vec<ConnId> = self.conns.keys().copied().collect();
         ids.sort_unstable();
@@ -864,6 +969,7 @@ impl<S: Storage> Hub<S> {
             let _ = self.store.verify_base(account, room, base.seq);
         } else {
             let back = self.store.roll_back(account, room).unwrap_or(false);
+            self.notes.remove(account);
             let what = format!(
                 "a snapshot by device {} did not hold what it said{}",
                 hex(&base.by),
@@ -966,9 +1072,8 @@ impl<S: Storage> Hub<S> {
     /// (this device is the account's only one online, or the room has
     /// taken nothing for a while). The device has had everything the
     /// server holds before this reaches it: one socket keeps its order.
-    fn compact_now(&mut self, conn: ConnId, account: &[u8], room: &str, spans: &[storage::Span]) -> Option<Out> {
-        let bytes: usize = spans.iter().map(|s| s.record.len()).sum();
-        if spans.len() < self.compact_count && bytes < self.compact_bytes {
+    fn compact_now(&mut self, conn: ConnId, account: &[u8], room: &str, live: Live) -> Option<Out> {
+        if live.records < self.compact_count as u64 && live.bytes < self.compact_bytes as u64 {
             return None;
         }
         let key = (account.to_vec(), room.to_string());
@@ -1007,6 +1112,9 @@ impl<S: Storage> Hub<S> {
         }
         self.stats.snapshots += 1;
         self.leases.remove(&key);
+        if let Some(n) = self.notes.get_mut(account) {
+            *n += record.len() as u64;
+        }
         if repair {
             let _ = self.store.log(account, Logged { at: self.now, device: me.to_vec(), room: room.into(), what: "replaced the server's copy with its own".into() });
         }
@@ -1284,6 +1392,22 @@ impl<S: Storage> Hub<S> {
             ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, .. } if self.store.is_removed(account, &room_id) => {
                 vec![carnet(conn, Carnet::RoomRemoved { room: room_id })]
             }
+            // A room id no device makes, or far more rooms on one socket
+            // than an account may have (twice: its own, and as many new
+            // ones refused when written): not joined.
+            ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, .. }
+                if !fair_room(&room_id)
+                    || self.conns.get(&conn).is_some_and(|c| c.rooms.len() as u64 >= self.max_rooms.saturating_mul(2) && !c.rooms.contains(&room_id)) =>
+            {
+                vec![send(conn, ProtocolMessage::JoinError {
+                    crdt: CrdtType::Elo,
+                    room_id,
+                    code: loro_protocol::JoinErrorCode::Unknown,
+                    message: format!("a room id is 1 to {MAX_ROOM_ID} bytes, and a socket joins at most {} rooms", self.max_rooms.saturating_mul(2)),
+                    receiver_version: None,
+                    app_code: None,
+                })]
+            }
             ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, version, .. } => {
                 let has = wire::decode_vv(&version).unwrap_or_default();
                 let base = self.store.base(account, &room_id);
@@ -1302,7 +1426,8 @@ impl<S: Storage> Hub<S> {
                 for batch in elo::batches(records) {
                     out.push(send(conn, update(&room_id, &batch, BatchId([0; 8]))));
                 }
-                out.extend(self.compact_now(conn, account, &room_id, &spans));
+                let live = Live { records: spans.len() as u64, bytes: spans.iter().map(|s| s.record.len() as u64).sum(), based: base.is_some() };
+                out.extend(self.compact_now(conn, account, &room_id, live));
                 out
             }
             ProtocolMessage::Leave { room_id, .. } => {
@@ -1341,6 +1466,18 @@ impl<S: Storage> Hub<S> {
                         }
                     }
                 }
+                // Past what the room or the account keeps: not taken, the
+                // device told once, and asked to compact if it may.
+                if let (Some(why), live) = self.room_full(account, &room_id) {
+                    let mut out = self.refuse(conn, &room_id, batch_id, UpdateStatusCode::PayloadTooLarge);
+                    if let Some(c) = self.conns.get_mut(&conn)
+                        && !std::mem::replace(&mut c.told_full, true)
+                    {
+                        out.push(carnet(conn, Carnet::Refused { reason: why.into() }));
+                    }
+                    out.extend(self.compact_now(conn, account, &room_id, live));
+                    return out;
+                }
                 let mut kept = Vec::new();
                 let mut newest = None;
                 let mut failed = false;
@@ -1350,6 +1487,9 @@ impl<S: Storage> Hub<S> {
                         Ok(Some(seq)) => {
                             self.stats.records += 1;
                             self.stats.record_bytes += record.len() as u64;
+                            if let Some(n) = self.notes.get_mut(account) {
+                                *n += record.len() as u64;
+                            }
                             kept.push(record);
                             newest = Some(seq);
                         }
@@ -1364,9 +1504,10 @@ impl<S: Storage> Hub<S> {
                 if let Some(seq) = newest {
                     self.last_write.insert((account.to_vec(), room_id.clone()), self.now);
                     out.extend(self.tell_others(conn, account, &room_id, &kept, seq));
-                    // A device writing on alone: the room may be due now.
-                    let spans = self.store.spans(account, &room_id);
-                    out.extend(self.compact_now(conn, account, &room_id, &spans));
+                    // A device writing on alone: the room may be due now,
+                    // as counted where the records are, none read.
+                    let live = self.store.live(account, &room_id);
+                    out.extend(self.compact_now(conn, account, &room_id, live));
                 }
                 out
             }
@@ -1408,6 +1549,11 @@ impl<S: Storage> Hub<S> {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// A room id a device makes: 1 to [`MAX_ROOM_ID`] bytes.
+fn fair_room(room: &str) -> bool {
+    !room.is_empty() && room.len() <= MAX_ROOM_ID
 }
 
 fn carnet(conn: ConnId, c: Carnet) -> Out {

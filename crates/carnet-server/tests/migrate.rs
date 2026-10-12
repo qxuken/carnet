@@ -406,7 +406,7 @@ async fn a_server_moves_to_postgres_and_a_bucket_and_its_devices_carry_on() {
     assert!(a.events.contains(&Event::PasswordSet), "{:?}", a.events);
     let pic: Vec<u8> = (0..200_000u32).map(|i| (i % 249) as u8).collect();
     let id = a.session.blob_id(&pic);
-    a.session.offer_blobs(vec![id]);
+    a.session.offer_blobs(vec![(id, pic.len())]);
     a.settle(&mut ws).await;
     assert!(a.session.put_blob(&pic, &mut OsRandom));
     let http = carnet_sync::http::Http::start(Vec::new(), || {}).unwrap();
@@ -541,7 +541,7 @@ async fn the_pictures_go_first_while_the_server_runs() {
     // A picture offered, and its put to do.
     async fn offer(a: &mut Device, ws: &mut Socket, picture: &[u8]) -> ([u8; 32], String, Vec<u8>) {
         let id = a.session.blob_id(picture);
-        a.session.offer_blobs(vec![id]);
+        a.session.offer_blobs(vec![(id, picture.len())]);
         a.settle(ws).await;
         assert!(a.session.put_blob(picture, &mut OsRandom));
         let [Transfer::Put { url, sealed, .. }] = &a.session.take_transfers()[..] else { panic!("a put") };

@@ -353,6 +353,15 @@ pub const MAX_BLOB: usize = 32 * 1024 * 1024;
 
 const BLOB_MAGIC: &[u8; 4] = b"CRNB";
 
+/// What sealing adds to a picture: the magic, the epoch, the IV, the tag.
+const BLOB_OVER: u64 = 4 + 4 + 12 + 16;
+
+/// How long a picture of `plain` bytes is once sealed ([`seal_blob`]):
+/// what a device says it will put, and the server holds it to.
+pub fn sealed_len(plain: usize) -> u64 {
+    plain as u64 + BLOB_OVER
+}
+
 pub fn blob_id(ring: &Ring, plain: &[u8]) -> BlobId {
     use sha2::Digest;
     let first = ring.0.values().next().expect("a ring has a key");
@@ -667,6 +676,7 @@ pub(crate) mod tests {
         assert_eq!(id, blob_id(&ring, &picture), "the same picture, the same id");
         assert_ne!(id, blob_id(&ring, &[7u8; 4999]));
         let sealed = seal_blob(&ring, &id, &picture, &mut rng);
+        assert_eq!(sealed.len() as u64, sealed_len(picture.len()), "as long as the device says");
         assert!(!sealed.windows(64).any(|w| w == &picture[..64]), "not in the clear");
         assert_eq!(open_blob(&ring, &id, &sealed), Ok(picture.clone()));
         // Under another id (the server swapping blobs): no.

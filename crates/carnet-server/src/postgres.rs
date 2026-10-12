@@ -48,7 +48,7 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use carnet_sync::wire::{decode_vv, encode_vv};
 
 use crate::rows::{AccountRows, BaseRow, DeviceRow, InviteRow, PasskeyRow, PasswordRow, RecordRow, RecoveryRow, RekeyRow};
-use crate::storage::{Base, Device, Failed, Logged, PasskeySlot, PasswordSlot, Shelf, Span, Storage, covers};
+use crate::storage::{Base, Device, Failed, Live, Logged, PasskeySlot, PasswordSlot, Shelf, Span, Storage, covers};
 
 /// The schema, step by step: a database has the first so many (its
 /// `carnet_schema.version`), and is given the rest when opened. Only ever
@@ -764,6 +764,28 @@ impl Storage for Postgres {
                 .iter()
                 .map(|r| Span { peer: uint(r.get(0)), start: uint(r.get(1)), end: uint(r.get(2)), seq: uint(r.get(3)), record: r.get(4) })
                 .collect())
+        })
+    }
+
+    fn live(&self, account: &[u8], room: &str) -> Live {
+        self.read(Live::default(), |c| {
+            let st = c.st(
+                "SELECT (SELECT COUNT(*) FROM records WHERE account = $1 AND room = $2 AND shelved_by = 0),
+                        (SELECT COALESCE(SUM(LENGTH(bytes)), 0) FROM records WHERE account = $1 AND room = $2 AND shelved_by = 0)::BIGINT,
+                        EXISTS (SELECT 1 FROM bases WHERE account = $1 AND room = $2 AND shelved_by = 0)",
+            )?;
+            let r = c.client.query_one(&st, &[&account, &room]).map_err(failed)?;
+            Ok(Live { records: uint(r.get(0)), bytes: uint(r.get(1)), based: r.get(2) })
+        })
+    }
+
+    fn room_count(&self, account: &[u8]) -> u64 {
+        self.read(0, |c| {
+            let st = c.st(
+                "SELECT COUNT(*) FROM (SELECT room FROM records WHERE account = $1 AND shelved_by = 0
+                     UNION SELECT room FROM bases WHERE account = $1 AND shelved_by = 0) AS kept",
+            )?;
+            Ok(uint(c.client.query_one(&st, &[&account]).map_err(failed)?.get(0)))
         })
     }
 

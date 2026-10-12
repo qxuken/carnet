@@ -98,7 +98,7 @@ fn a_picture_dropped_goes_after_a_while_unless_wanted() {
     let ids: Vec<[u8; 32]> = pics.iter().map(|p| net.device(a).session.blob_id(p)).collect();
     for p in &pics {
         let id = net.device(a).session.blob_id(p);
-        net.device(a).session.offer_blobs(vec![id]);
+        net.device(a).session.offer_blobs(vec![(id, p.len())]);
         net.pump();
         let Net { peers, rng, .. } = &mut net;
         let Some(Peer::Device(d)) = peers.get_mut(&a) else { panic!() };
@@ -113,7 +113,7 @@ fn a_picture_dropped_goes_after_a_while_unless_wanted() {
     assert!(ids.iter().all(|id| net.worker.blobs.is_marked(&account, id)));
     // Asked for, and offered: wanted after all.
     net.device(a).session.get_blob(ids[0]);
-    net.device(a).session.offer_blobs(vec![ids[1]]);
+    net.device(a).session.offer_blobs(vec![(ids[1], pics[1].len())]);
     net.pump();
     assert!(!net.worker.blobs.is_marked(&account, &ids[0]) && !net.worker.blobs.is_marked(&account, &ids[1]));
 
