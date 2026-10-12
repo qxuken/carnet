@@ -3,7 +3,9 @@
 //! Crockford base32 characters in fours (`K7QF-2M9D-XW4H-P3TA`): no I, L,
 //! O or U, so a code read aloud or copied by hand comes back right, and
 //! reading one forgives case, dashes, spaces, and I, L and O typed for 1
-//! and 0. The server keeps only its hash.
+//! and 0. The server keeps only its hash, so a code read off the server
+//! lets no one in; the code itself is kept in the account's vault
+//! (`vault.rs`), sealed, for each of the account's devices to show again.
 
 use sha2::{Digest, Sha256};
 

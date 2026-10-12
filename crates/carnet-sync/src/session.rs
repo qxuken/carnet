@@ -648,7 +648,9 @@ impl Session {
     /// A new invite, for someone to make an account of their own: the
     /// code, made here, to give them; the server keeps only its hash, good
     /// for a week. `None` while not logged in. Only the owner's devices
-    /// may: another's is refused.
+    /// may: another's is refused. The app keeps the code in the vault
+    /// ([`NoteDoc::keep_invite`](crate::NoteDoc::keep_invite)) once this
+    /// has gone, so the account's devices can show it again.
     pub fn invite(&mut self, rng: &mut impl Random) -> Option<crate::invite::InviteCode> {
         if self.state != State::Ready {
             return None;

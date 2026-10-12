@@ -433,9 +433,6 @@ pub struct Sync {
     /// Settings shows them: list them when they aren't.
     pub want_invites: bool,
     asked_invites: bool,
-    /// Invites made here this run: the server keeps only their hashes, so
-    /// their codes can be shown again only from here.
-    pub made: Vec<InviteCode>,
     /// The invite just made, shown until put away.
     pub invite: Option<String>,
     /// The server's rooms and log, as last inspected (§9).
@@ -521,7 +518,6 @@ impl Sync {
             invites: None,
             want_invites: false,
             asked_invites: false,
-            made: Vec::new(),
             invite: None,
             inspection: None,
             inspected_at: None,
@@ -792,24 +788,31 @@ impl Sync {
     }
 
     /// A new invite, for someone to make an account of their own on this
-    /// server: its code in [`Sync::invite`], and the list again.
-    pub fn make_invite(&mut self) {
+    /// server: its code in [`Sync::invite`], and the list again. The server
+    /// keeps only its hash; the code is kept in the vault, for every device
+    /// of the account to show again ([`Sync::invite_code`]).
+    pub fn make_invite(&mut self, store: &mut Store) {
         if let Phase::On { session, link, .. } = &mut self.phase
             && let Some(code) = session.invite(&mut OsRandom)
         {
+            // The invite to the server first, then its code to the vault:
+            // a device that sees the code then sees the invite listed.
+            store.keep_invite(&code, unix_now());
+            send_vault(session, store);
             flush(session, link.as_ref());
             self.invite = Some(code.text());
-            self.made.push(code);
         }
     }
 
-    /// An invite not used yet, taken back.
-    pub fn drop_invite(&mut self, hash: [u8; 32]) {
+    /// An invite not used yet, taken back: its code forgotten in the vault.
+    pub fn drop_invite(&mut self, store: &mut Store, hash: [u8; 32]) {
         if let Phase::On { session, link, .. } = &mut self.phase {
             session.drop_invite(hash);
+            store.forget_invite(&hash);
+            send_vault(session, store);
             flush(session, link.as_ref());
         }
-        if self.made.iter().any(|c| c.hash() == hash && Some(c.text()) == self.invite) {
+        if self.invite.as_deref().and_then(InviteCode::parse).is_some_and(|c| c.hash() == hash) {
             self.invite = None;
         }
     }
@@ -823,9 +826,11 @@ impl Sync {
         }
     }
 
-    /// The code of an invite made here, by its hash.
-    pub fn invite_code(&self, hash: &[u8; 32]) -> Option<String> {
-        self.made.iter().find(|c| &c.hash() == hash).map(InviteCode::text)
+    /// The code of an invite this account made, by its hash: kept in the
+    /// vault, on whichever of its devices made it. `None` for one made
+    /// before Carnet kept them there.
+    pub fn invite_code(&self, store: &Store, hash: &[u8; 32]) -> Option<String> {
+        store.invite_code(hash)
     }
 
     /// What this device is called in the others' lists, changed now; a
@@ -973,7 +978,6 @@ impl Sync {
         self.inspection = None;
         self.inspected_at = None;
         self.invites = None;
-        self.made.clear();
         self.invite = None;
     }
 
@@ -1140,6 +1144,7 @@ impl Sync {
                 let mut rooms = Vec::new();
                 let mut gone = None;
                 let mut blobs = Vec::new();
+                let mut listed: Option<Vec<[u8; 32]>> = None;
                 let events = session.take_events();
                 self.layout_due |= busy || !events.is_empty();
                 for e in events {
@@ -1207,6 +1212,7 @@ impl Sync {
                             self.error = Some(sentence(&session::refusal_words(&why)));
                         }
                         Event::Invites { owner, invites, accounts } => {
+                            listed = Some(invites.iter().map(|i| i.hash).collect());
                             self.invites = Some(Invites { owner, waiting: invites, accounts });
                             self.asked_invites = false;
                         }
@@ -1337,6 +1343,11 @@ impl Sync {
                         "This device was removed from the account on another device. Its notes stay here.".into()
                     });
                     return changed;
+                }
+                // The invites the server lists as waiting: the codes of the
+                // rest (used, taken back, run out) forgotten in the vault.
+                if let Some(waiting) = listed {
+                    store.forget_invites_but(&waiting, unix_now());
                 }
                 let mut vault_in = false;
                 for room in rooms {
@@ -1479,6 +1490,20 @@ fn identity(config: &Config, keys: Keys, name: String) -> Identity {
         ring: keys.ring,
         name,
     }
+}
+
+/// The vault's changes made here, sent now.
+fn send_vault(session: &mut Session, store: &mut Store) {
+    if store.take_vault_changed()
+        && let Some(replica) = store.replica.as_mut()
+    {
+        session.saved(vault::ROOM, replica, &mut OsRandom);
+    }
+}
+
+/// Seconds since 1970, by this device's clock.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 fn flush(session: &mut Session, link: Option<&Link>) {

@@ -1457,10 +1457,12 @@ impl Carnet {
                     }
                     let now = SystemTime::now();
                     let secs = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-                    // Each waiting: its code, to select or copy, when this
-                    // device made it (another's is known by its hash only).
+                    // Each waiting: its code, to select or copy, kept in the
+                    // vault by whichever of the account's devices made it
+                    // (one made before they were kept there is known by its
+                    // hash only).
                     for (i, w) in inv.waiting.iter().enumerate() {
-                        let code = self.sync.invite_code(&w.hash);
+                        let code = self.sync.invite_code(&self.store, &w.hash);
                         let title = code.clone().unwrap_or_else(|| "An invite".into());
                         let what = format!("Not used yet \u{b7} {}", left(secs, w.until));
                         ui.with_key(ui.child_key("sync-waiting").index(i as u64), NodeSpec::column().grow_width(), |ui| {

@@ -3007,15 +3007,15 @@ impl Carnet {
                 }
             }
             Msg::SyncRenameCancel => self.sync_rename = None,
-            Msg::SyncInvite => self.sync.make_invite(),
+            Msg::SyncInvite => self.sync.make_invite(&mut self.store),
             Msg::SyncInviteDone => self.sync.invite = None,
             Msg::SyncInviteDrop { at } => {
                 if let Some(hash) = self.sync.invites.as_ref().and_then(|i| i.waiting.get(at as usize)).map(|w| w.hash) {
-                    self.sync.drop_invite(hash);
+                    self.sync.drop_invite(&mut self.store, hash);
                 }
             }
             Msg::SyncInviteCopy { at } => {
-                let code = self.sync.invites.as_ref().and_then(|i| i.waiting.get(at as usize)).and_then(|w| self.sync.invite_code(&w.hash));
+                let code = self.sync.invites.as_ref().and_then(|i| i.waiting.get(at as usize)).and_then(|w| self.sync.invite_code(&self.store, &w.hash));
                 if let Some(code) = code {
                     self.clip_out = Some((code, None));
                     self.say = Some("Copied".into());

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carnet_core::doc::{self, Block, Doc, Kind, ListStyle, Table};
+use carnet_sync::invite::InviteCode;
 use carnet_sync::vault::{Layout, Place};
 use carnet_sync::{Key, Newer, Origin, Replica, Revision, Version};
 
@@ -1299,6 +1300,39 @@ impl Store {
         let _ = r.persist_vault();
         self.vault_changed = true;
         self.forgotten.pictures.extend(unused);
+        true
+    }
+
+    /// An invite this account made, kept in the vault (docs/SYNC.md §6):
+    /// its code, for every device of the account to show again. Kept on
+    /// disk at once, and sent.
+    pub fn keep_invite(&mut self, code: &InviteCode, made: u64) -> bool {
+        self.vault_write(|v| v.keep_invite(code, made))
+    }
+
+    /// The invite whose hash is `hash` taken back: its code forgotten.
+    pub fn forget_invite(&mut self, hash: &[u8; 32]) -> bool {
+        self.vault_write(|v| v.forget_invite(hash))
+    }
+
+    /// The server listed `waiting` as the invites still waiting: the codes
+    /// of the others (used, taken back, run out) forgotten.
+    pub fn forget_invites_but(&mut self, waiting: &[[u8; 32]], now: u64) -> bool {
+        self.vault_write(|v| v.forget_invites_but(waiting, now))
+    }
+
+    /// The code of an invite this account made, by its hash, as shown.
+    pub fn invite_code(&self, hash: &[u8; 32]) -> Option<String> {
+        self.replica.as_ref()?.vault().invite_code(hash).map(|c| c.text())
+    }
+
+    fn vault_write(&mut self, write: impl FnOnce(&carnet_sync::NoteDoc) -> bool) -> bool {
+        let Some(r) = self.replica.as_ref() else { return false };
+        if !write(r.vault()) {
+            return false;
+        }
+        let _ = r.persist_vault();
+        self.vault_changed = true;
         true
     }
 

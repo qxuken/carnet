@@ -116,7 +116,7 @@ carnet-server invite --data ./data
 docker exec carnet carnet-server invite
 ```
 
-Each is single-use and good for a week. Only its hash is kept: an invite made in the app never reaches the server at all, only its hash does.
+Each is single-use and good for a week. Only its hash is kept: an invite made in the app never reaches the server at all, only its hash does. The app keeps the code in the account's own end-to-end-encrypted vault, so the owner's devices can show it again; the server can't read it there.
 
 ## TLS: a proxy in front
 
