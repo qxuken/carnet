@@ -120,11 +120,10 @@ button { font: inherit; color: inherit; }
 .note a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent-ink) 40%, transparent); }
 .note img { max-width: 100%; height: auto; border-radius: var(--radius); background: var(--sunken); }
 /* A picture among a table cell's words: as wide as the note gives it, or
-   its own, under half the note's when it has no width given; its place
-   until it comes the same (pictures.ts). A cell is as wide as what it
-   holds: a share of it would be a share of nothing. */
-.note :is(td, th) img { display: block; max-width: 45cqi; }
-.note :is(td, th) img[width] { max-width: 100cqi; }
+   its own, and never wider than its cell, the columns being fixed shares
+   of the table, as the desktop fits it; its place until it comes the
+   same (pictures.ts). */
+.note :is(td, th) img { display: block; max-width: 100%; }
 .note :is(td, th) .picture-card { width: min(45cqi, 280px); min-height: 72px; }
 /* Pictures at an edge, one after another (`--n` of them): a row there,
    side by side, each its share of the page's width, and one no width was
