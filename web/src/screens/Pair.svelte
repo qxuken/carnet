@@ -255,7 +255,7 @@
     <h1>Your notes, here</h1>
 
     {#if step === 'choose'}
-      <p>How would you like to get in?</p>
+      <p>Choose sign-in method</p>
       <div class="choices">
         {#each choices as c (c.way)}
           <button

@@ -827,28 +827,31 @@ impl Carnet {
                 },
             );
         };
-        // Where in the way in: "Step 2 of 3". With nothing to choose
-        // between, there are two.
-        let (n, of) = match step {
-            Step::Server => (1, 3),
-            Step::Way => (2, 3),
-            Step::Form if choice => (3, 3),
-            Step::Form => (2, 2),
+        // Where in the way in, past the first step: "Step 2 of 3". With
+        // nothing to choose between, there are two.
+        let place = match step {
+            Step::Server => None,
+            Step::Way => Some((2, 3)),
+            Step::Form if choice => Some((3, 3)),
+            Step::Form => Some((2, 2)),
         };
-        ui.text_in(
-            NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 14.0, b: 0.0 }),
-            &format!("Step {n} of {of}"),
-            TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
-        );
+        if let Some((n, of)) = place {
+            ui.text_in(
+                NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 14.0, b: 0.0 }),
+                &format!("Step {n} of {of}"),
+                TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
+            );
+        }
         // A row of a field and its buttons.
         let row = NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 4.0, b: 14.0 }).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap();
         match step {
             Step::Server => {
-                setting(ui, l, "Where are your notes?", Some("Your own server, or a hosted one."), |_| {});
+                // (A word on the hosted service goes here, once there's one.)
+                setting(ui, l, "Cloud sync setup", Some("Enter the server URL."), |_| {});
                 let checking = self.connect.checking();
                 ui.with(row, |ui| {
                     let server = self.sync_server.clone();
-                    let k = field(self, ui, "sync-server", &server, "notes.example.com", Field::SyncServer);
+                    let k = field(self, ui, "sync-server", &server, "https://notes.example.com", Field::SyncServer);
                     if reset {
                         ui.set_edit_text(k, &server);
                     }
@@ -887,7 +890,7 @@ impl Carnet {
                 rule(ui, l);
                 ui.text_in(
                     NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 14.0, b: 4.0 }),
-                    "How are you getting in?",
+                    "Choose sign-in method",
                     TextStyle::new(Type::STRONG.size).color(t.fg),
                 );
                 // Only the ways this server lists.

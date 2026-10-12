@@ -3463,7 +3463,7 @@ fn settings_sync_says_what_is_wrong_in_place() {
     app.settings_open = true;
     assert!(drawn(&mut d, &mut app, "Sync"));
     // The server first.
-    assert!(drawn(&mut d, &mut app, "Where are your notes?") && drawn(&mut d, &mut app, "Step 1 of 3"));
+    assert!(drawn(&mut d, &mut app, "Cloud sync setup") && !drawn(&mut d, &mut app, "Step 1 of 3"), "no step count on the first");
     assert!(d.key_of("sync-code").is_none(), "no way in before the server");
     app.sync_server = "notes.example.com".into();
     app.sync_code = "47-12".into();
@@ -3931,7 +3931,7 @@ fn a_server_that_takes_only_codes_goes_straight_to_the_code() {
     check_server(&mut a, &mut d, &format!("{origin}/elsewhere"));
     assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::NotCarnet));
     assert!(drawn(&mut d, &mut a, carnet_sync::info::Problem::NotCarnet.words()));
-    assert!(drawn(&mut d, &mut a, "Where are your notes?"), "still on the first step");
+    assert!(drawn(&mut d, &mut a, "Cloud sync setup"), "still on the first step");
 
     // Codes only: the code's form, straight away.
     check_server(&mut a, &mut d, &origin);
@@ -4615,7 +4615,7 @@ fn two_apps_sync_through_a_server() {
     // then an empty code field, not the old code.
     b.settings_open = true;
     d_frame_twice(&mut b, &mut db);
-    assert!(drawn(&mut db, &mut b, "Where are your notes?"));
+    assert!(drawn(&mut db, &mut b, "Cloud sync setup"));
     assert_eq!(b.sync_server, origin);
     b.on_plain(Msg::SyncCheck);
     until("B's server asked again", &mut [(&mut b, &mut db)], &|x| x[0].0.connect.step() == crate::connect::Step::Form);
