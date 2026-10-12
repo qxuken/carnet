@@ -11,13 +11,18 @@ export function dropFor(lines: number): string {
   return n >= 2 ? `drop${n}` : 'drop-none';
 }
 
-/// The lines `el`'s words take: the distinct tops of its line boxes.
+/// The lines `el`'s words take: the distinct tops of its words' boxes.
+/// A letter already dropped is a box taller than a line, not a line of
+/// its own: left out.
 export function linesOf(el: HTMLElement): number {
+  const line = parseFloat(getComputedStyle(el).lineHeight) || 27;
   const r = document.createRange();
   r.selectNodeContents(el);
   const tops = new Set<number>();
-  for (const rect of r.getClientRects()) if (rect.height > 0) tops.add(Math.round(rect.top));
-  return tops.size;
+  for (const rect of r.getClientRects()) {
+    if (rect.height > 0 && rect.height <= line * 1.2) tops.add(Math.round(rect.top));
+  }
+  return Math.max(tops.size, 1);
 }
 
 /// Each of `els` given the drop its lines call for. Whether any changed:
@@ -31,7 +36,13 @@ export function dropLetters(els: Iterable<HTMLElement>): boolean {
     const now = dropFor(linesOf(el));
     el.classList.remove('drop-measure');
     el.classList.add(now);
-    if (now !== was) changed = true;
+    if (now === was) continue;
+    changed = true;
+    // Chromium lays a first letter's `initial-letter` out once, and not
+    // again for a class come after: the paragraph laid out anew.
+    el.style.display = 'none';
+    void el.offsetHeight;
+    el.style.display = '';
   }
   return changed;
 }

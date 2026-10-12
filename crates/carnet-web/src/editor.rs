@@ -605,6 +605,16 @@ impl Editor {
         self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Table(Table::new(3, 3))))
     }
 
+    /// A divider below the caret's block (in place of an empty paragraph),
+    /// the caret carried on into what follows, as the desktop's toolbar
+    /// puts one in.
+    pub fn insert_divider(&mut self) -> bool {
+        if !matches!(self.focus, Focus::Body) {
+            return false;
+        }
+        self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Divider))
+    }
+
     /// The address of the link the caret is in.
     pub fn link_here(&self) -> Option<String> {
         if !matches!(self.focus, Focus::Body) {
@@ -1136,6 +1146,17 @@ mod tests {
         assert!(e.table_op(4));
         assert!(e.look(1).head);
         assert_eq!(e.look(1).cells.len(), 2);
+    }
+
+    /// The toolbar's divider, as the desktop's: between two paragraphs it
+    /// makes no empty line, and the caret goes on into the next.
+    #[test]
+    fn a_divider_from_the_toolbar_goes_between_without_a_line() {
+        let mut e = Editor::open("# T\n\nIntro\n\nNext\n");
+        e.select(1, 5, 1, 5);
+        assert!(e.insert_divider());
+        assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nNext\n");
+        assert_eq!(e.lines().iter().map(|l| l.text.as_str()).filter(|t| t.is_empty()).count(), 0, "no empty line made");
     }
 
     #[test]

@@ -236,6 +236,7 @@
     { icon: () => (turned.h1 ? 'h2' : 'h1'), label: 'Heading', f: heading, on: () => turned.h1 || turned.h2 || turned.h3 },
     { icon: () => 'quote', label: 'Quote', f: (pe) => pe.turn(TURN.quote), on: () => turned.quote },
     { icon: () => 'table', label: 'Table', f: (pe) => pe.insert_table() },
+    { icon: () => 'divider', label: 'Divider', f: (pe) => pe.insert_divider() },
     { icon: () => 'picture', label: 'Picture', f: () => (chooser?.click(), false) },
     { icon: () => 'bold', label: 'Bold', f: (pe) => pe.style(0), on: () => !!(flags & 1), gap: true },
     { icon: () => 'italic', label: 'Italic', f: (pe) => pe.style(1), on: () => !!(flags & 2) },

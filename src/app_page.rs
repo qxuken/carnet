@@ -1857,9 +1857,11 @@ impl Carnet {
         };
         let picture = self.picture_at_caret().is_some();
         let mut items = Vec::new();
-        if page::link_at(doc, self.caret).is_some() {
+        if let Some((_, _, url)) = page::link_at(doc, self.caret) {
+            // Only a link a note may follow is offered to open (export.rs
+            // `safe_href`): a `javascript:` one isn't, as on the web.
             items.extend([
-                item("Open link", "open-link"),
+                item("Open link", "open-link").enabled(carnet_core::export::safe_href(&url).is_some()),
                 item("Copy link address", "copy-link"),
                 item("Remove link", "unlink"),
                 MenuItem::separator(),
@@ -2535,7 +2537,10 @@ impl Carnet {
                     if le.existing {
                         button(ui, "link-remove", "Remove link", 2, false);
                     }
-                    button(ui, "link-open", "Open", 1, false);
+                    // Only a link a note may follow (export.rs `safe_href`).
+                    if carnet_core::export::safe_href(&le.url).is_some() {
+                        button(ui, "link-open", "Open", 1, false);
+                    }
                     ui.leaf(NodeSpec::row().grow_width());
                     button(ui, "link-done", "Done", 0, true);
                 });

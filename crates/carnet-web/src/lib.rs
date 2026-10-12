@@ -962,6 +962,10 @@ impl PageEditor {
         self.e.insert_table()
     }
 
+    pub fn insert_divider(&mut self) -> bool {
+        self.e.insert_divider()
+    }
+
     /// A picture (`src` as the note links it) on its own line below the
     /// caret's block.
     pub fn insert_picture(&mut self, src: &str) -> bool {
