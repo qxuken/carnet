@@ -602,6 +602,27 @@ impl Editor {
         true
     }
 
+    /// ← (`right` false) or → in a table's cell, where a picture is
+    /// beside the caret or chosen: [`page::left`] or [`page::right`], which
+    /// choose the picture first and pass it after, the caret staying in
+    /// the cell. False, the caret as it was, for any other move: the
+    /// browser's, as a cell's words are its.
+    pub fn cell_arrow(&mut self, right: bool) -> bool {
+        let c = self.caret;
+        if !matches!(self.focus, Focus::Body) || c.head.slot.cell.is_none() {
+            return false;
+        }
+        let next = if right { page::right(&self.doc, c, false, false) } else { page::left(&self.doc, c, false, false) };
+        let picture = page::chosen_cell_picture(&self.doc, c).is_some() || page::chosen_cell_picture(&self.doc, next).is_some();
+        if !picture || next.head.slot != c.head.slot {
+            return false;
+        }
+        self.history.seal();
+        self.typing.moved();
+        self.caret = next;
+        true
+    }
+
     /// Where the caret is when it is in a table's cell: CodeMirror's line,
     /// the row, the column, and the selection in the cell's words (UTF-16).
     pub fn cell_caret(&self) -> Option<(usize, usize, usize, usize, usize)> {
@@ -1211,16 +1232,17 @@ mod tests {
     }
 
     /// A picture carried into a table's cell, along to another, and out
-    /// to a line of its own again, as the desktop carries one: its width
-    /// kept, its side dropped, each move one step of the history, and the
-    /// picture selected where it lands.
+    /// to a line of its own again, as the desktop carries one: written
+    /// plainly in a cell (its alt kept, no width nor side), out again with
+    /// no width, each move one step of the history, and the picture
+    /// selected where it lands.
     #[test]
     fn a_picture_is_carried_into_a_cell_between_cells_and_out() {
         let md = "# T\n\nWords\n\n![view|right|260](a.png)\n\n| A | B |\n| --- | --- |\n| x | y z |\n";
         let mut e = Editor::open(md);
         assert_eq!(e.look(2).kind, "image");
         assert!(e.move_picture(2, PicTo::Cell(3, 1, 0, None)));
-        assert_eq!(e.markdown(), "# T\n\nWords\n\n| A | B |\n| --- | --- |\n| x![view|260](a.png) | y z |\n");
+        assert_eq!(e.markdown(), "# T\n\nWords\n\n| A | B |\n| --- | --- |\n| x![view](a.png) | y z |\n");
         assert_eq!(e.cell_caret(), Some((2, 1, 0, 1, 2)), "selected in the cell");
         assert_eq!(e.look(2).cells[1][0].pictures.len(), 1);
         assert!(e.undo());
@@ -1228,18 +1250,18 @@ mod tests {
         assert!(e.redo());
         // To the next cell, between its words.
         assert!(e.move_cell_picture(2, 1, 0, 1, PicTo::Cell(2, 1, 1, Some(2))));
-        assert!(e.markdown().contains("| x | y ![view|260](a.png)z |"), "{}", e.markdown());
+        assert!(e.markdown().contains("| x | y ![view](a.png)z |"), "{}", e.markdown());
         assert_eq!(e.cell_caret(), Some((2, 1, 1, 2, 3)));
         // Out, above the words: a line of its own.
         assert!(e.move_cell_picture(2, 1, 1, 2, PicTo::Line(1)));
-        assert_eq!(e.markdown(), "# T\n\n![view|260](a.png)\n\nWords\n\n| A | B |\n| --- | --- |\n| x | y z |\n");
+        assert_eq!(e.markdown(), "# T\n\n![view](a.png)\n\nWords\n\n| A | B |\n| --- | --- |\n| x | y z |\n");
         assert_eq!(e.picture_here().map(|p| p.0), Some(1), "selected");
         assert!(e.undo());
-        assert!(e.markdown().contains("| x | y ![view|260](a.png)z |"), "{}", e.markdown());
+        assert!(e.markdown().contains("| x | y ![view](a.png)z |"), "{}", e.markdown());
         // Beside a picture: at the left with it.
         let mut e = Editor::open("# T\n\n![](b.png)\n\n| A |\n| --- |\n| ![|90](c.png) |\n");
         assert!(e.move_cell_picture(2, 1, 0, 0, PicTo::Beside(1, true)));
-        assert_eq!(e.markdown(), "# T\n\n![|left](b.png)\n\n![|left|90](c.png)\n\n| A |\n| --- |\n|  |\n");
+        assert_eq!(e.markdown(), "# T\n\n![|left](b.png)\n\n![|left](c.png)\n\n| A |\n| --- |\n|  |\n");
         // Nothing there: nothing done.
         assert!(!e.move_cell_picture(3, 1, 0, 0, PicTo::Line(0)));
         assert!(!e.move_picture(3, PicTo::Line(0)));
@@ -1341,6 +1363,42 @@ mod tests {
         assert!(e.markdown().contains("| ![](<../attachments/b c.png>) |"), "{}", e.markdown());
         assert_eq!(e.cell_caret(), Some((1, 1, 1, 1, 1)), "after it");
         assert_eq!(e.look(1).cells[1][1].pictures.len(), 1);
+    }
+
+    /// ← and → in a cell: beside a picture, the page's move, which chooses
+    /// it (its letter, and nothing more) before it passes it; any other
+    /// move left to the browser. A letter typed over a chosen picture takes
+    /// its place; one pasted in is written plainly.
+    #[test]
+    fn the_arrows_choose_a_cells_picture_first() {
+        let mut e = Editor::open("# T\n\n| A | B |\n|---|---|\n| a![](p.png)b | |\n\nAfter\n");
+        // From after it: ← chooses it, ← again is before it.
+        assert!(e.cell_select(1, 1, 0, 2, 2));
+        assert!(e.cell_arrow(false));
+        assert_eq!(e.cell_caret(), Some((1, 1, 0, 2, 1)), "chosen");
+        assert!(e.cell_arrow(false));
+        assert_eq!(e.cell_caret(), Some((1, 1, 0, 1, 1)), "before it");
+        // Further on: the browser's.
+        assert!(!e.cell_arrow(false));
+        assert_eq!(e.cell_caret(), Some((1, 1, 0, 1, 1)), "as it was");
+        // From before it: → chooses it, → again is after it.
+        assert!(e.cell_arrow(true));
+        assert_eq!(e.cell_caret(), Some((1, 1, 0, 1, 2)), "chosen");
+        assert!(e.cell_arrow(true));
+        assert_eq!(e.cell_caret(), Some((1, 1, 0, 2, 2)), "after it");
+        assert!(!e.cell_arrow(true));
+        // Out of the cell: not this.
+        assert!(e.cell_select(1, 1, 1, 0, 0));
+        assert!(!e.cell_arrow(true) && !e.cell_arrow(false));
+        // Chosen, and a letter typed: in its place.
+        assert!(e.cell_select(1, 1, 0, 1, 1));
+        assert!(e.cell_arrow(true));
+        assert!(e.input("z"));
+        assert!(e.markdown().contains("| azb |"), "{}", e.markdown());
+        // Pasted in: plainly, its alt kept.
+        assert!(e.cell_select(1, 1, 1, 0, 0));
+        assert!(e.paste("![sea|right|160](q.png)"));
+        assert!(e.markdown().contains("| azb | ![sea](q.png) |"), "{}", e.markdown());
     }
 
     #[test]

@@ -995,10 +995,38 @@ pub struct CellPicture {
     pub src_at: (usize, usize),
     pub src: String,
     pub alt: String,
+    /// The width written for it. A cell gives its pictures the room it
+    /// has, so it is read, never drawn by: see [`CellPicture::plain`].
     pub width: Option<u32>,
+    /// The side written for it (`|left`), which means nothing among words.
+    pub float: Float,
     /// Written as Obsidian embeds one (`![[…]]`): `src` a name to look
     /// for ([`find_picture`]).
     pub wiki: bool,
+}
+
+impl CellPicture {
+    /// The picture as a cell holds one: its alt text and its source, and
+    /// no width nor side, which a cell decides for it. An embed stays one.
+    pub fn plain(&self) -> String {
+        let wiki = self.wiki.then(|| image_wiki(&self.alt, &self.src, None, Float::None)).flatten();
+        wiki.unwrap_or_else(|| image_markdown(&self.alt, &self.src, None, Float::None))
+    }
+
+    /// Whether it is written with a width or a side: more than [`Self::plain`].
+    pub fn dressed(&self) -> bool {
+        self.width.is_some() || self.float != Float::None
+    }
+}
+
+/// `text` with each picture among its words (as a cell reads them)
+/// written plainly ([`CellPicture::plain`]): what goes into a cell.
+pub fn plain_pictures(text: &str) -> String {
+    let mut out = text.to_string();
+    for p in inline::cell_pictures(text).iter().rev().filter(|p| p.dressed()) {
+        out.replace_range(p.at.0..p.at.1, &p.plain());
+    }
+    out
 }
 
 /// The alt text's own words, the width at its end (`|400`) and the side
@@ -1030,7 +1058,7 @@ pub fn inline_picture(text: &str, at: usize) -> Option<CellPicture> {
         if raw.contains(['[', ']', '\n']) {
             return None;
         }
-        let Some(Kind::Image { src, alt, width, wiki, .. }) = wiki_image(&format!("![[{}]]", raw.replace("\\|", "|"))) else { return None };
+        let Some(Kind::Image { src, alt, width, float, wiki }) = wiki_image(&format!("![[{}]]", raw.replace("\\|", "|"))) else { return None };
         // The source as written: before the first `|` (or `\|`), its
         // spaces left out.
         let first = raw.split('|').next().unwrap_or(raw);
@@ -1040,7 +1068,7 @@ pub fn inline_picture(text: &str, at: usize) -> Option<CellPicture> {
         if text.get(s..s + src.len()) != Some(src.as_str()) {
             return None;
         }
-        return Some(CellPicture { at: (at, at + 3 + len + 2), src_at: (s, s + src.len()), src, alt, width, wiki });
+        return Some(CellPicture { at: (at, at + 3 + len + 2), src_at: (s, s + src.len()), src, alt, width, float, wiki });
     }
     let inner = rest.strip_prefix("![")?;
     let close = inner.find(']')?;
@@ -1067,8 +1095,8 @@ pub fn inline_picture(text: &str, at: usize) -> Option<CellPicture> {
         return None;
     }
     let alt = alt.replace("\\|", "|");
-    let (alt, width, _) = alt_parts(&alt);
-    Some(CellPicture { at: (at, end), src_at: (s, e), src: src.to_string(), alt: alt.to_string(), width, wiki: false })
+    let (alt, width, float) = alt_parts(&alt);
+    Some(CellPicture { at: (at, end), src_at: (s, e), src: src.to_string(), alt: alt.to_string(), width, float, wiki: false })
 }
 
 /// Every picture in a line of words, as [`inline_picture`] reads them,

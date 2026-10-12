@@ -5,10 +5,13 @@
 // a cell goes to the page, which draws the cell again; an input method
 // composing in a cell is let be, and its words go in when it's done.
 //
-// A picture among a cell's words (`![|260](a.png)`) is one letter of
-// them to the page: drawn here as the picture, fetched as a picture on a
-// line of its own is, in a box the caret can't go into, which Backspace
-// and Delete take whole and a press selects.
+// A picture among a cell's words (`![](a.png)`) is one letter of them to
+// the page: drawn here as the picture, its own width at most the cell's
+// (a width the note writes for it is the cell's to decide), fetched as a
+// picture on a line of its own is, in a box the caret can't go into,
+// which Backspace and Delete take whole. A press chooses it, as ← and →
+// do before they pass it (the page's `left`/`right`): chosen, it wears
+// the accent's ring and its cell shows no caret.
 
 import { WidgetType, type EditorView } from '@codemirror/view';
 import type { PageEditor } from '../../wasm/carnet_web.js';
@@ -17,8 +20,9 @@ import { show, unshown } from '../pictures';
 
 export type Run = [number, number, number, number, number];
 /// A picture among a cell's words: the place of its letter in them, its
-/// `src` as the note has it, its alt text, the width the note gives it,
-/// and whether an Obsidian embed (`![[…]]`) names it.
+/// `src` as the note has it, its alt text, the width the note writes for
+/// it (not drawn by: the cell decides), and whether an Obsidian embed
+/// (`![[…]]`) names it.
 export type CellPic = [number, string, string, number | null, boolean];
 export type Cell = { t: string; r: Run[]; p?: CellPic[] };
 
@@ -36,7 +40,7 @@ export type TableContext = {
 /// A cell's picture: the box it is drawn in, or the one it was drawn in
 /// before, kept so a cell drawn again doesn't fetch it again.
 function pictureBox(pic: CellPic, ctx: TableContext, kept: Map<string, HTMLElement[]>): HTMLElement {
-  const [, src, alt, width, wiki] = pic;
+  const [, src, alt, , wiki] = pic;
   const key = JSON.stringify(pic.slice(1));
   const old = kept.get(key)?.shift();
   if (old) return old;
@@ -48,7 +52,6 @@ function pictureBox(pic: CellPic, ctx: TableContext, kept: Map<string, HTMLEleme
   img.className = 'cm-cellpic-img';
   img.alt = alt;
   img.draggable = false;
-  if (width) img.setAttribute('width', String(width));
   box.append(img);
   unshown(img, src);
   show(img, src, () => ctx.pictures(src, wiki));
@@ -277,6 +280,32 @@ function tell(w: TableWidget, cell: HTMLTableCellElement, range?: StaticRange | 
     h = sel.focusNode && cell.contains(sel.focusNode) ? offsetIn(cell, sel.focusNode, sel.focusOffset) : a;
   }
   w.ctx.pe.cell_select(w.line, Number(cell.dataset.r), Number(cell.dataset.c), a, h);
+  mark(w.ctx);
+}
+
+/// The picture the page has chosen in a cell (its selection that picture
+/// and nothing more) ringed, and its cell's caret hidden; any other ring
+/// taken off.
+export function mark(ctx: TableContext) {
+  const view = ctx.view();
+  if (!view) return;
+  let box: HTMLElement | undefined;
+  let cell: HTMLTableCellElement | undefined;
+  const at = ctx.pe.cell_caret();
+  if (at) {
+    const [line, r, c, a, h] = Array.from(at);
+    if (Math.abs(a - h) === 1) {
+      const wrap = Array.from(view.contentDOM.querySelectorAll<Wrap>('.cm-tablewrap')).find((w) => w.widget?.line === line);
+      cell = wrap?.querySelector('table')?.rows[r]?.cells[c] as HTMLTableCellElement | undefined;
+      box = cell ? [...cell.querySelectorAll<HTMLElement>('.cm-cellpic')].find((b) => pictureAt(cell!, b) === Math.min(a, h)) : undefined;
+    }
+  }
+  for (const b of view.contentDOM.querySelectorAll<HTMLElement>('.cm-cellpic-chosen')) if (b !== box) b.classList.remove('cm-cellpic-chosen');
+  for (const c of view.contentDOM.querySelectorAll<HTMLElement>('.cm-cell-picked')) if (!box || c !== cell) c.classList.remove('cm-cell-picked');
+  if (box && cell) {
+    box.classList.add('cm-cellpic-chosen');
+    cell.classList.add('cm-cell-picked');
+  }
 }
 
 /// After the page changed: shown, and the caret back where the page has
@@ -292,6 +321,7 @@ export function settle(ctx: TableContext) {
 export function place(ctx: TableContext) {
   const view = ctx.view();
   if (!view) return;
+  mark(ctx);
   const at = ctx.pe.cell_caret();
   if (!at) {
     view.focus();
@@ -428,6 +458,17 @@ function bind(wrap: Wrap) {
     const pe = w.ctx.pe;
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key.toLowerCase();
+    // ← or → beside a picture, or with one chosen: the page's move, which
+    // chooses it before passing it. Any other, the browser's.
+    if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !mod && !e.altKey && !e.shiftKey) {
+      tell(w, cell);
+      if (pe.cell_arrow(e.key === 'ArrowRight')) {
+        e.preventDefault();
+        place(w.ctx);
+        w.ctx.moved();
+      }
+      return;
+    }
     let f: (() => boolean) | null = null;
     if (e.key === 'Tab') f = () => pe.tab(e.shiftKey);
     else if (mod && !e.shiftKey && k === 'b') f = () => pe.style(0);

@@ -206,11 +206,16 @@ export const theme = EditorView.theme({
   '.cm-tablewrap th': { background: 'var(--sunken)', color: 'var(--muted)', font: '400 13px/18px var(--sans)', padding: '9px 14px' },
   '.cm-tablewrap tr:first-child > :first-child': { borderTopLeftRadius: 'calc(var(--radius) - 1px)' },
   '.cm-tablewrap tr:first-child > :last-child': { borderTopRightRadius: 'calc(var(--radius) - 1px)' },
-  // A picture among a cell's words (table.ts): as wide as the note gives
-  // it, or its own, and never wider than its cell, the columns being
-  // fixed shares of the table, as the desktop fits it; its place until it
-  // comes the same.
+  // A picture among a cell's words (table.ts): its own width, never wider
+  // than its cell, the columns being fixed shares of the table, as the
+  // desktop fits it (a width the note writes for it is not the cell's
+  // to keep); its place until it comes the same.
   '.cm-cellpic': { display: 'inline-block', maxWidth: '100%', verticalAlign: 'top', borderRadius: 'var(--radius)', cursor: 'default' },
+  // Chosen (the arrows, a click): the accent's ring 4px out, as the
+  // desktop draws it, and no caret in its cell nor the browser's wash.
+  '.cm-cellpic.cm-cellpic-chosen': { outline: '2px solid var(--accent)', outlineOffset: '4px' },
+  '.cm-tablewrap .cm-cell-picked': { caretColor: 'transparent' },
+  '.cm-cell-picked ::selection, .cm-cell-picked::selection': { background: 'transparent' },
   '.cm-cellpic-img': { display: 'block', maxWidth: '100%', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)' },
   '.cm-cellpic .picture-card': { width: 'min(100%, 280px)', minHeight: '72px', margin: '0' },
 });
