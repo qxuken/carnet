@@ -92,7 +92,7 @@
   const choices = $derived(
     (
       [
-        { way: 'code', icon: 'device', title: 'Add this device', line: 'A code from another of your devices, or an invite', shown: true },
+        { way: 'code', icon: 'device', title: 'Enter the code', line: 'A code from another of your devices, or an invite', shown: true },
         { way: 'passkey', icon: 'passkey', title: 'Use a passkey', line: 'Saved on this device or your phone', shown: passkeys && browserPasskeys },
         {
           way: 'password',
@@ -297,7 +297,7 @@
         <h2 tabindex="-1" use:focused>Use a passkey</h2>
         <p>A passkey added for Carnet on another of your devices, or in this browser before. The browser asks which, and for your face, fingerprint or PIN.</p>
       {:else}
-        <h2>Add this device</h2>
+        <h2>Enter the code</h2>
         {#if sentTo && lately}
           <!-- Asked again too soon: nothing new went. -->
           <p class="sent" role="status"><Icon name="clock" size={16} /> {latelyLine(sentTo, lately)}</p>

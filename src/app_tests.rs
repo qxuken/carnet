@@ -3463,7 +3463,7 @@ fn settings_sync_says_what_is_wrong_in_place() {
     app.settings_open = true;
     assert!(drawn(&mut d, &mut app, "Sync"));
     // The server first.
-    assert!(drawn(&mut d, &mut app, "Cloud sync setup") && !drawn(&mut d, &mut app, "Step 1 of 3"), "no step count on the first");
+    assert!(drawn(&mut d, &mut app, "Cloud sync setup") && drawn(&mut d, &mut app, "Step 1 of 3"));
     assert!(d.key_of("sync-code").is_none(), "no way in before the server");
     app.sync_server = "notes.example.com".into();
     app.sync_code = "47-12".into();
@@ -3478,7 +3478,7 @@ fn settings_sync_says_what_is_wrong_in_place() {
     // A server that takes passwords: a code or them, chosen; the words
     // asked for apart. One field for a code, whichever kind.
     app.connect.assume("https://notes.example.com", server_info(&["passwords"]));
-    assert!(drawn(&mut d, &mut app, "Add this device") && drawn(&mut d, &mut app, "Email and password"));
+    assert!(drawn(&mut d, &mut app, "Enter the code") && drawn(&mut d, &mut app, "Email and password"));
     assert!(drawn(&mut d, &mut app, "Use recovery words"));
     assert!(!drawn(&mut d, &mut app, "Pairing code"), "no kinds of code to choose between");
     app.on_plain(Msg::SyncHow { to: 1 });
@@ -3770,7 +3770,7 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     assert!(a.connect.checking() || a.connect.step() == crate::connect::Step::Way);
     until("checked", &mut a, &mut d, &|x| x.connect.step() == crate::connect::Step::Way);
     assert!(drawn(&mut d, &mut a, "Carnet server, up to date") && drawn(&mut d, &mut a, "Step 2 of 3"));
-    assert!(drawn(&mut d, &mut a, "Add this device"));
+    assert!(drawn(&mut d, &mut a, "Enter the code"));
     assert!(!drawn(&mut d, &mut a, "Email and password"), "this one takes no passwords");
     let open = d.key_of("sync-way-3").expect("Make an account");
     assert_eq!(d.key_named("Make an account"), Some(open), "the row is a button, by its name");
@@ -3797,7 +3797,7 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     d_frame_twice(&mut a, &mut d);
     assert!(drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here."));
     assert!(!drawn(&mut d, &mut a, "Send me an invite"), "the email field gone");
-    assert!(drawn(&mut d, &mut a, "Add this device") && drawn(&mut d, &mut a, "No invite yet?"), "the code's form, asked again if it doesn't come");
+    assert!(drawn(&mut d, &mut a, "Enter the code") && drawn(&mut d, &mut a, "No invite yet?"), "the code's form, asked again if it doesn't come");
     assert_eq!(focused(&a, &d), Some(Field::SyncCode));
     {
         let asked = asked.lock().unwrap();
@@ -3937,7 +3937,7 @@ fn a_server_that_takes_only_codes_goes_straight_to_the_code() {
     check_server(&mut a, &mut d, &origin);
     assert!(a.connect.problem.is_none());
     assert_eq!(a.connect.step(), crate::connect::Step::Form);
-    assert!(drawn(&mut d, &mut a, "Step 2 of 2") && drawn(&mut d, &mut a, "Add this device"));
+    assert!(drawn(&mut d, &mut a, "Step 2 of 2") && drawn(&mut d, &mut a, "Enter the code"));
     assert!(d.key_of("sync-code").is_some() && drawn(&mut d, &mut a, "Connect"));
     assert!(!drawn(&mut d, &mut a, "Email and password") && !drawn(&mut d, &mut a, "Make an account"));
     assert_eq!(d.core.focus().and_then(|k| a.fields.get(&k)).copied(), Some(Field::SyncCode), "the code's field has the keyboard");
@@ -3994,7 +3994,7 @@ fn a_hosted_server_offers_every_way_in() {
     assert_eq!(a.connect.step(), crate::connect::Step::Way, "{:?}", a.connect.problem);
     assert!(!a.connect.checking() && a.connect.problem.is_none());
     assert!(drawn(&mut d, &mut a, "Step 2 of 3") && drawn(&mut d, &mut a, &origin) && drawn(&mut d, &mut a, "Carnet server, up to date"));
-    for (key, name) in [("sync-way-0", "Add this device"), ("sync-way-2", "Email and password"), ("sync-way-3", "Make an account")] {
+    for (key, name) in [("sync-way-0", "Enter the code"), ("sync-way-2", "Email and password"), ("sync-way-3", "Make an account")] {
         let k = d.key_of(key).unwrap_or_else(|| panic!("{name}"));
         assert_eq!(d.key_named(name), Some(k), "{name}: a row, a button by its name");
     }

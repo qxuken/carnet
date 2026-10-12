@@ -827,21 +827,19 @@ impl Carnet {
                 },
             );
         };
-        // Where in the way in, past the first step: "Step 2 of 3". With
-        // nothing to choose between, there are two.
-        let place = match step {
-            Step::Server => None,
-            Step::Way => Some((2, 3)),
-            Step::Form if choice => Some((3, 3)),
-            Step::Form => Some((2, 2)),
+        // Where in the way in: "Step 2 of 3". With nothing to choose
+        // between, there are two.
+        let (n, of) = match step {
+            Step::Server => (1, 3),
+            Step::Way => (2, 3),
+            Step::Form if choice => (3, 3),
+            Step::Form => (2, 2),
         };
-        if let Some((n, of)) = place {
-            ui.text_in(
-                NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 14.0, b: 0.0 }),
-                &format!("Step {n} of {of}"),
-                TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
-            );
-        }
+        ui.text_in(
+            NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 14.0, b: 0.0 }),
+            &format!("Step {n} of {of}"),
+            TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
+        );
         // A row of a field and its buttons.
         let row = NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 4.0, b: 14.0 }).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap();
         match step {
@@ -894,7 +892,7 @@ impl Carnet {
                     TextStyle::new(Type::STRONG.size).color(t.fg),
                 );
                 // Only the ways this server lists.
-                let mut ways = vec![(0, Icon::Device, "Add this device", "A code from another of your devices, or an invite")];
+                let mut ways = vec![(0, Icon::Device, "Enter the code", "A code from another of your devices, or an invite")];
                 if info.takes_passwords() {
                     ways.push((2, Icon::Key, "Email and password", "The ones set on another of your devices"));
                 }
@@ -920,7 +918,7 @@ impl Carnet {
                     2 if info.password_is_signup_email() => ("Email and password", "The email you signed up with, and the password set on another of your devices."),
                     2 => ("Email and password", "The ones set on another of your devices."),
                     3 => ("Make an account", "We'll email you an invite, with a code to type here."),
-                    _ => ("Add this device", "A code from another of your devices (Settings \u{2192} Sync \u{2192} Add a device), or an invite."),
+                    _ => ("Enter the code", "A code from another of your devices (Settings \u{2192} Sync \u{2192} Add a device), or an invite."),
                 };
                 let busy = starting || self.signup.sending();
                 setting(ui, l, title, if sent.is_some() { None } else { Some(what) }, |ui| {
