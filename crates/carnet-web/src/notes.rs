@@ -231,11 +231,12 @@ pub struct Notes {
     /// in. Such a note reaches the vault (and the other devices) with its
     /// first words; left blank, it's dropped.
     fresh: HashMap<String, String>,
-    /// Pictures put in here and not yet on the server, by id: where each
-    /// goes (`attachments/…`) and its bytes. Offered once logged in, sent
-    /// if the server lacks it, then put in the vault, so no device asks
-    /// for a picture the server hasn't got.
-    uploads: HashMap<BlobId, (String, Vec<u8>)>,
+    /// Pictures put in here and not yet on the server, by id: every path
+    /// each goes at (`attachments/…`; the same picture put in twice is
+    /// sent once and named at both) and its bytes. Offered once logged
+    /// in, sent if the server lacks it, then put in the vault, so no
+    /// device asks for a picture the server hasn't got.
+    uploads: HashMap<BlobId, (Vec<String>, Vec<u8>)>,
     /// Of those, the ones offered, the server's word awaited, and the
     /// ones it wanted, being sent: not offered again meanwhile. One the
     /// server held back (the account full, or read only) is neither.
@@ -434,13 +435,17 @@ impl Notes {
                 Event::BlobStored(id) => {
                     self.offered.remove(&id);
                     self.sending.remove(&id);
-                    if let Some((path, _)) = self.uploads.remove(&id) {
+                    if let Some((paths, _)) = self.uploads.remove(&id) {
                         let vault = self.rooms.doc(vault::ROOM);
-                        let (changed, unused) = vault.put_picture(&path, &hex(&id));
+                        let (mut changed, mut unused) = (false, Vec::<BlobId>::new());
+                        for path in &paths {
+                            let (c, u) = vault.put_picture(path, &hex(&id));
+                            changed |= c;
+                            unused.extend(u.and_then(|u| unhex(&u)).and_then(|b| BlobId::try_from(b).ok()));
+                        }
                         if changed {
                             self.session.saved(vault::ROOM, &mut self.rooms, rng);
                         }
-                        let unused: Vec<BlobId> = unused.and_then(|u| unhex(&u)).and_then(|b| b.try_into().ok()).into_iter().collect();
                         self.session.drop_blobs(&unused);
                         self.said.push(Said::Uploaded(hex(&id)));
                     }
@@ -770,7 +775,7 @@ impl Notes {
     /// A name for a new picture in the attachments folder (`stem.ext`,
     /// numbered past one the vault or an upload has already).
     pub fn picture_free(&self, stem: &str, ext: &str) -> String {
-        let taken = |p: &str| self.picture_id(p).is_some() || self.uploads.values().any(|(q, _)| q == p);
+        let taken = |p: &str| self.picture_id(p).is_some() || self.uploads.values().any(|(q, _)| q.iter().any(|q| q == p));
         let mut n = 1;
         loop {
             let name = if n == 1 { format!("attachments/{stem}.{ext}") } else { format!("attachments/{stem}-{n}.{ext}") };
@@ -790,10 +795,23 @@ impl Notes {
         }
         let id = self.session.blob_id(&bytes);
         let hexed = hex(&id);
+        // Put in again at a path another picture was on its way to: that
+        // one goes there no more.
+        for (other, (paths, _)) in &mut self.uploads {
+            if *other != id {
+                paths.retain(|p| p != path);
+            }
+        }
+        self.uploads.retain(|_, (paths, _)| !paths.is_empty());
         if self.picture_id(path).as_deref() == Some(hexed.as_str()) {
             return Some(hexed);
         }
-        self.uploads.insert(id, (path.to_string(), bytes));
+        // The same picture put in under another name too: sent once,
+        // named at each.
+        let (paths, _) = self.uploads.entry(id).or_insert_with(|| (Vec::new(), bytes));
+        if !paths.iter().any(|p| p == path) {
+            paths.push(path.to_string());
+        }
         self.offer_again();
         Some(hexed)
     }

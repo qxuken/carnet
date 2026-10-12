@@ -933,6 +933,52 @@ fn a_note_deleted_forever_goes_everywhere_and_its_pictures_with_it() {
     assert!(!two.worker.blobs.is_marked(ACCOUNT, &shared_id));
 }
 
+/// One picture under two names, each shown by a note of its own: the
+/// note showing one deleted forever drops that name only. The other stays
+/// in the vault and on both devices, and the server keeps the picture.
+#[test]
+fn a_picture_under_two_names_stays_while_one_is_shown() {
+    let mut two = Two::new("twice");
+    let photo: Vec<u8> = (0..30_000u32).map(|i| (i % 229) as u8).collect();
+    let a = &mut two.sides[0].store;
+    let (first, second) = (a.save_attachment("", "png", &photo).unwrap(), a.save_attachment("", "png", &photo).unwrap());
+    let image = |src: &str| Block::new(carnet_core::doc::Kind::Image { src: src.into(), alt: String::new(), float: Default::default(), width: None, wiki: false });
+    let mut one = crate::store::Note::new("One", Doc::new(vec![image(&first)]));
+    one.touch();
+    let mut other = crate::store::Note::new("Other", Doc::new(vec![image(&second)]));
+    other.touch();
+    a.notes.push(one);
+    a.notes.push(other);
+    let n = a.notes.len();
+    a.save(n - 2, true).unwrap();
+    a.save(n - 1, true).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&photo));
+    for p in [&first, &second] {
+        assert_eq!(two.sides[1].store.replica.as_ref().unwrap().vault().pictures().get(p), Some(&id));
+        assert!(two.sides[1].dir.join(p).exists(), "{p} on the other device");
+    }
+
+    let i = two.note(0, "One").unwrap();
+    two.sides[0].store.trash(i).unwrap();
+    two.pump();
+    let t = two.sides[0].store.trashed().into_iter().find(|t| t.title == "One").unwrap();
+    two.sides[0].store.delete_forever(&t).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    for side in 0..2 {
+        let s = &two.sides[side];
+        let vault = s.store.replica.as_ref().unwrap().vault();
+        assert!(vault.dropped_pictures().contains(&first), "{side}");
+        assert_eq!(vault.pictures().get(&second), Some(&id), "{side}");
+        assert!(!s.dir.join(&first).exists() && s.dir.join(&second).exists(), "{side}");
+    }
+    assert!(!two.worker.blobs.is_marked(ACCOUNT, &unhex(&id)), "still shown: kept");
+}
+
 /// A picture an old version of another note shows stays when the note
 /// that shows it now is deleted forever: that version, restored, shows it
 /// again. And one dropped anyway comes back from the server when a note
