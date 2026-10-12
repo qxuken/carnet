@@ -7607,3 +7607,106 @@ fn a_chosen_divider_is_washed_to_the_texts_width_whichever_arrow_chose_it() {
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A library of folders and notes written out, opened: `name` its own
+/// folder under the temp dir; each note `# leaf` and its words.
+fn library(name: &str, notes: &[(&str, &str)]) -> (Carnet, Drive, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("carnet-ui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, body) in notes {
+        let file = dir.join(format!("{path}.md"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let leaf = path.rsplit('/').next().unwrap();
+        std::fs::write(file, format!("# {leaf}\n\n{body}\n")).unwrap();
+    }
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    (app, d, dir)
+}
+
+/// Where folder `f`'s row is ("" for All notes).
+fn folder_row(app: &Carnet, f: &str) -> Vec2 {
+    app.folder_rects.iter().find(|(r, _)| r == f).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("no row for {f:?}"))
+}
+
+/// A folder's row dragged onto another's, the library drawn again.
+fn drag_folder(app: &mut Carnet, d: &mut Drive, from: &str, to: &str) {
+    let (a, b) = (folder_row(app, from), folder_row(app, to));
+    d.drag(app, a, b);
+    d_frame_twice(app, d);
+}
+
+/// A folder dragged onto another goes inside it, its notes and
+/// subfolders with it; onto "All notes", to the top level. Its notes'
+/// links to pictures outside it follow it, a level deeper and back.
+#[test]
+fn a_folder_dragged_onto_another_goes_inside_it_and_onto_all_notes_to_the_top() {
+    let (mut app, mut d, dir) = library(
+        "drag-folder",
+        &[("Work/Plan", "![](../attachments/p.png)"), ("Work/Sub/Deep", "deep"), ("Home/Pantry", "rice")],
+    );
+    let png = png_file(&dir.join("attachments"), "p.png");
+    assert!(png.exists());
+    drag_folder(&mut app, &mut d, "Work", "Home");
+    assert!(dir.join("Home/Work/Plan.md").exists() && dir.join("Home/Work/Sub/Deep.md").exists(), "moved on disk");
+    assert!(!dir.join("Work").exists(), "nothing left behind");
+    assert!(app.store.folders.contains(&"Home/Work".to_string()) && app.store.folders.contains(&"Home/Work/Sub".to_string()), "{:?}", app.store.folders);
+    let plan = std::fs::read_to_string(dir.join("Home/Work/Plan.md")).unwrap();
+    assert!(plan.contains("](../../attachments/p.png)"), "its picture's link from its new place: {plan}");
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved \u{201c}Work\u{201d} to \u{201c}Home\u{201d}"));
+    // Onto All notes: the top level again, the link as it was.
+    drag_folder(&mut app, &mut d, "Home/Work", "");
+    assert!(dir.join("Work/Plan.md").exists() && dir.join("Work/Sub/Deep.md").exists() && !dir.join("Home/Work").exists());
+    let plan = std::fs::read_to_string(dir.join("Work/Plan.md")).unwrap();
+    assert!(plan.contains("](../attachments/p.png)"), "{plan}");
+    // A plain click on a folder's row still shows it.
+    let at = folder_row(&app, "Home");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.folder.as_deref(), Some("Home"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A folder never goes into itself or a folder inside it: let go there,
+/// nothing moves.
+#[test]
+fn a_folder_dragged_into_its_own_subfolder_stays() {
+    let (mut app, mut d, dir) = library("drag-folder-self", &[("Work/Plan", "q3"), ("Work/Sub/Deep", "deep")]);
+    drag_folder(&mut app, &mut d, "Work", "Work/Sub");
+    assert!(dir.join("Work/Plan.md").exists() && dir.join("Work/Sub/Deep.md").exists(), "where it was");
+    assert_eq!(app.store.folders, ["Work", "Work/Sub"]);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    // Its own row: the same.
+    let (a, b) = (folder_row(&app, "Work"), folder_row(&app, "Work"));
+    d.drag(&mut app, a, Vec2::new(b.x + 20.0, b.y));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.store.folders, ["Work", "Work/Sub"]);
+    // The store refuses it too.
+    assert!(app.store.move_folder("Work", "Work/Sub").is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Several chosen, a folder and a note: dragging the folder carries both.
+#[test]
+fn several_chosen_are_dragged_into_a_folder_together() {
+    let (mut app, mut d, dir) = library("drag-picked", &[("Home/Pantry", "rice"), ("Loose", "words"), ("Dest/Kept", "k")]);
+    let i = app.store.notes.iter().position(|n| n.title == "Loose").unwrap();
+    app.open(i);
+    d_frame_twice(&mut app, &mut d);
+    let cmd = KeyMods { shift: false, ctrl: !cfg!(target_os = "macos"), alt: false, super_key: cfg!(target_os = "macos") };
+    let home = folder_row(&app, "Home");
+    d.input(&mut app, InputEvent::Modifiers(cmd));
+    d.click(&mut app, home.x, home.y);
+    d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+    d.frame(&mut app);
+    let loose = app.store.notes[i].id;
+    assert!(app.is_picked(&Pick::Note(loose)) && app.is_picked(&Pick::Folder("Home".into())), "{:?}", app.picked);
+    drag_folder(&mut app, &mut d, "Home", "Dest");
+    assert!(dir.join("Dest/Home/Pantry.md").exists() && dir.join("Dest/Loose.md").exists(), "both moved");
+    assert!(!dir.join("Home").exists() && !dir.join("Loose.md").exists());
+    assert!(app.picked.is_empty());
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved a folder and a note to \u{201c}Dest\u{201d}"));
+    let _ = std::fs::remove_dir_all(dir);
+}

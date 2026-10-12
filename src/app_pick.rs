@@ -1,7 +1,9 @@
 //! Several notes and folders chosen at once in the library, as Finder
 //! chooses them: ⇧-click takes everything from the last one clicked to
-//! the one clicked now, ⌘-click (Ctrl elsewhere) adds or takes one. What
-//! is chosen goes to the trash together, or, notes only, to a folder.
+//! the one clicked now, ⌘-click (Ctrl elsewhere) adds or takes one; ⇧
+//! with ↑ or ↓ grows or shrinks the range from the keyboard. What is
+//! chosen goes to the trash together, or to a folder: dragged there, or,
+//! notes only, by the menu.
 
 use kui_native::KeyMods;
 
@@ -87,7 +89,7 @@ impl Carnet {
     /// What is chosen, as it still is: folders that are gone and notes
     /// that are gone left out, and what is inside a chosen folder left to
     /// go with it.
-    fn picked_now(&self) -> (Vec<String>, Vec<u64>) {
+    pub(super) fn picked_now(&self) -> (Vec<String>, Vec<u64>) {
         let mut folders: Vec<String> = self
             .picked
             .iter()
@@ -113,7 +115,7 @@ impl Carnet {
     }
 
     /// "3 notes", "2 folders and a note": what is chosen, in words.
-    fn picked_words(folders: usize, notes: usize) -> String {
+    pub(super) fn picked_words(folders: usize, notes: usize) -> String {
         let count = |n: usize, one: &str, many: &str| match n {
             1 => format!("a {one}"),
             n => format!("{n} {many}"),
@@ -180,11 +182,22 @@ impl Carnet {
         }
     }
 
-    /// The chosen notes into folder `to` ("" for the top level).
+    /// The chosen notes and folders into folder `to` ("" for the top
+    /// level), folders with all in them; none into itself or a folder
+    /// inside it.
     pub(super) fn move_picked(&mut self, to: &str) {
-        let (_, notes) = self.picked_now();
+        let (folders, notes) = self.picked_now();
         self.picked.clear();
         self.pick_anchor = None;
+        let mut moved_f = 0;
+        for f in folders {
+            if parent_of(&f) == to || to == f || to.starts_with(&format!("{f}/")) {
+                continue;
+            }
+            if self.move_folder(&f, to).is_some() {
+                moved_f += 1;
+            }
+        }
         let mut moved = 0;
         for id in notes {
             let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { continue };
@@ -196,9 +209,9 @@ impl Carnet {
                 moved += 1;
             }
         }
-        if moved > 0 {
-            let place = if to.is_empty() { "out of their folders".to_string() } else { format!("to \u{201c}{}\u{201d}", folder_name(to)) };
-            self.notify(format!("Moved {} {place}", Self::picked_words(0, moved)), None);
+        if moved_f + moved > 0 {
+            let whose = if moved_f + moved > 1 { "their" } else { "its" };
+            self.notify(format!("Moved {} {}", Self::picked_words(moved_f, moved), Self::place_words(to, whose)), None);
         }
     }
 }

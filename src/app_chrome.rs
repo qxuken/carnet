@@ -610,8 +610,8 @@ impl Carnet {
         for n in &self.store.notes {
             *counts.entry(n.folder.as_str()).or_default() += 1;
         }
-        // A note carried over a row: it lights up to take it.
-        let hover = self.note_drag.as_ref().and_then(|d| d.target.clone());
+        // A note or a folder carried over a row: it lights up to take it.
+        let hover = self.row_drag.as_ref().and_then(|d| d.target.clone());
         let mut rects: Vec<(String, Rect)> = Vec::new();
         let row = |depth: usize, selected: bool| {
             let spec = NodeSpec::row()
@@ -706,6 +706,8 @@ impl Carnet {
                         lit(row(depth.min(4), selected), f)
                             .on_layout(Value::Null)
                             .on_click(Msg::SelectFolder { index: i as u64 })
+                            // Dragged to another folder row: moved inside it.
+                            .on_drag(Msg::FolderDrag { index: i as u64 })
                             .on_context_menu(Value::str(format!("folder:{i}")))
                             .label(folder_name(f)),
                         |ui| {
