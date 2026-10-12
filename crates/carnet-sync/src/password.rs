@@ -15,7 +15,10 @@
 //! the password was right is proved by the signature that follows, as a
 //! recovery's is.
 
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
+use generic_array::{ArrayLength, GenericArray};
+use opaque_ke::errors::InternalError;
+use opaque_ke::ksf::Ksf;
 use opaque_ke::{
     CipherSuite, ClientLogin, ClientLoginFinishParameters, ClientRegistration, ClientRegistrationFinishParameters, CredentialFinalization,
     CredentialRequest, CredentialResponse, Identifiers, RegistrationRequest, RegistrationResponse, RegistrationUpload, ServerLogin,
@@ -29,6 +32,10 @@ use crate::pair::Rng;
 /// devices' own can't be (they are at most 64 bytes).
 pub const SLOT: &[u8] = &[0xff; 65];
 
+/// The fewest letters a password may have. It is what a server would
+/// guess at (§7), so more than a phone's PIN.
+pub const MIN_LEN: usize = 10;
+
 /// What the server knows itself by, in every OPAQUE exchange.
 const SERVER: &[u8] = b"carnet";
 
@@ -38,7 +45,34 @@ impl CipherSuite for Suite {
     type OprfCs = opaque_ke::Ristretto255;
     type KeGroup = opaque_ke::Ristretto255;
     type KeyExchange = opaque_ke::key_exchange::tripledh::TripleDh;
-    type Ksf = Argon2<'static>;
+    type Ksf = Stretch;
+}
+
+/// Argon2id's memory, in KiB: 64 MiB.
+pub const MEMORY_KIB: u32 = 64 * 1024;
+/// Argon2id's passes over that memory.
+pub const PASSES: u32 = 3;
+/// Argon2id's lanes: one, as a browser's wasm has one thread.
+pub const LANES: u32 = 1;
+
+/// The password's stretch, Argon2id at parameters of Carnet's own: the
+/// password is the one secret a server could guess at offline, from its
+/// record, so each guess is made to cost. Pinned here, not left to the
+/// crate's defaults, which an upgrade could change and so make every
+/// password set before sign in to nothing.
+pub struct Stretch(Argon2<'static>);
+
+impl Default for Stretch {
+    fn default() -> Self {
+        let params = Params::new(MEMORY_KIB, PASSES, LANES, None).expect("Argon2id's parameters are in range");
+        Stretch(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
+    }
+}
+
+impl Ksf for Stretch {
+    fn hash<L: ArrayLength<u8>>(&self, input: GenericArray<u8, L>) -> Result<GenericArray<u8, L>, InternalError> {
+        self.0.hash(input)
+    }
 }
 
 /// An email as it's kept and looked up: trimmed, lowercased.
@@ -171,5 +205,21 @@ mod tests {
         assert_eq!(sign_in("correct horse", "bob@example.com", None, &server, &mut rng).unwrap_err(), WRONG, "no such email: the same");
         let other = Server::generate(&mut rng);
         assert!(sign_in("correct horse", &ann, Some(&record), &other, &mut rng).is_err(), "another server's key");
+    }
+
+    /// What the stretch made of sixteen zero bytes when its parameters
+    /// were chosen.
+    const PINNED: [u8; 16] = [195, 175, 175, 68, 143, 157, 80, 240, 185, 41, 240, 153, 84, 127, 172, 48];
+
+    /// The stretch is Argon2id at the parameters pinned, not the crate's
+    /// defaults: one input always gives the output it gave when they were
+    /// chosen, so a password set once signs in after any upgrade.
+    #[test]
+    fn the_stretch_is_pinned() {
+        let Stretch(a) = Stretch::default();
+        let p = a.params();
+        assert_eq!((p.m_cost(), p.t_cost(), p.p_cost()), (65536, 3, 1));
+        let out = Stretch::default().hash(GenericArray::<u8, generic_array::typenum::U16>::default()).unwrap();
+        assert_eq!(out.as_slice(), &PINNED[..]);
     }
 }

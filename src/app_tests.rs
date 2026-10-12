@@ -3628,6 +3628,89 @@ fn a_new_device_comes_in_by_email_and_password() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A recovery code's words show once the server says it keeps them, not
+/// before; making another, when there is one, is asked first, as the
+/// words written down stop working. And keys kept in a file, not a
+/// keychain (Linux with none running), are said so in Settings.
+#[test]
+fn the_recovery_code_is_replaced_only_when_asked() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    /// Secrets as a keychain-less Linux keeps them: in a file.
+    #[derive(Default)]
+    struct InFile(crate::sync::InMemory);
+    impl crate::sync::Secrets for InFile {
+        fn get(&self, name: &str) -> Option<Vec<u8>> {
+            self.0.get(name)
+        }
+        fn set(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+            self.0.set(name, bytes)
+        }
+        fn delete(&self, name: &str) {
+            self.0.delete(name)
+        }
+        fn in_file(&self) -> bool {
+            true
+        }
+    }
+    let data = std::env::temp_dir().join(format!("carnet-app-recovery-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::invite(&mut carnet_server::Sharded::open(&data).unwrap(), false).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, server::Host::default(), async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let (mut a, mut da, dir_a) = fresh("recovery-a");
+    a.sync = crate::sync::Sync::load(dir_a.join("no-sync.txt"), std::sync::Arc::new(InFile::default()));
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut da, &|x| x.sync.status == crate::sync::Status::Online);
+    a.settings_open = true;
+    until("the devices listed", &mut a, &mut da, &|x| x.sync.devices.is_some());
+    assert!(drawn(&mut da, &mut a, crate::sync::KEYS_IN_FILE), "keys in a file, said so");
+
+    // None yet: made at once, its words shown only once the server keeps it.
+    a.on_plain(Msg::SyncRecovery);
+    assert!(!a.sync_words_armed && a.sync.words.is_none(), "not shown before the server says");
+    assert!(drawn(&mut da, &mut a, "Making one\u{2026}"));
+    until("the words", &mut a, &mut da, &|x| x.sync.words.is_some());
+    let first = a.sync.words.clone().unwrap();
+    a.on_plain(Msg::SyncRecoveryDone);
+    until("the code listed", &mut a, &mut da, &|x| x.sync.has_recovery());
+
+    // One there: asked first; Cancel makes none.
+    a.on_plain(Msg::SyncRecovery);
+    assert!(a.sync_words_armed);
+    assert!(drawn(&mut da, &mut a, "Replace the recovery code? The words you have now will stop working."));
+    assert!(drawn(&mut da, &mut a, "Yes, replace"));
+    a.on_plain(Msg::SyncRecoveryCancel);
+    assert!(!a.sync_words_armed && !a.sync.making_recovery());
+    // Yes, replace: new words, once kept.
+    a.on_plain(Msg::SyncRecovery);
+    a.on_plain(Msg::SyncRecovery);
+    assert!(!a.sync_words_armed && a.sync.making_recovery());
+    until("the new words", &mut a, &mut da, &|x| x.sync.words.is_some());
+    assert_ne!(a.sync.words.as_deref(), Some(first.as_str()));
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// On a hosted service that holds passwords to the email signed up with,
 /// Settings shows that email instead of a field, Save sets it with that
 /// one, and another (asked by hand) is refused in the service's words.
@@ -3784,10 +3867,10 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     assert_eq!(focused(&a, &d), Some(Field::SignupEmail), "the email field has the keyboard");
     type_in(&mut a, &mut d, "ann@example.com");
     assert_eq!(a.signup.email, "ann@example.com");
-    // Refused: in the server's words, under the field.
+    // Refused: in the server's words, said as its own, under the field.
     key(&mut a, &mut d, "enter");
     until("refused", &mut a, &mut d, &|x| x.signup.error.is_some());
-    assert!(drawn(&mut d, &mut a, "Mailed lately: look for it, or wait ten minutes."));
+    assert!(drawn(&mut d, &mut a, "The server says: Mailed lately: look for it, or wait ten minutes."));
     assert!(a.signup.sent_to.is_none());
     // Asked again: sent, and the code field has the keyboard.
     let send = d.key_of("signup-send").expect("Send me an invite");
@@ -5230,6 +5313,31 @@ fn a_missing_picture_is_a_small_card_that_selects_and_deletes() {
         assert_eq!(texts(&app), ["Before the picture", "After words", "More words"], "{float}");
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// A picture whose file says it is bigger than Carnet reads is a card
+/// saying so, as the app goes on; the note's other words are there.
+#[test]
+fn a_picture_too_big_to_read_says_so() {
+    let (store, dir) = temp_store("too-big");
+    drop(store);
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/huge.png"), crate::images::tests::png_saying(60_000, 60_000)).unwrap();
+    std::fs::write(dir.join("Huge.md"), "# Huge\n\nBefore\n\n![](attachments/huge.png)\n\nAfter\n").unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.frame(&mut app);
+    let i = app.store.notes.iter().position(|n| n.title == "Huge").unwrap();
+    app.open(i);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    let shown = |s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+    assert!(shown("This picture is too big to show"));
+    assert!(shown("After"));
+    remove_test_dir(dir);
 }
 
 /// With sync on, a note from another device showing that device's own

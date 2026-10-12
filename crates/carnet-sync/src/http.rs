@@ -9,7 +9,15 @@
 //! web's roots, and a self-hosted server's certificate besides). A put
 //! says its length; an answer is read by its length, in chunks, or to its
 //! end. That's all a link needs, this server's or an object store's.
+//!
+//! A link the session found fair (`link::fair`) names its host as
+//! written; a public-looking name can still be given an address on this
+//! computer or its network by the DNS. So a picture's host is looked up
+//! once, every address it has checked as `link` checks one written out,
+//! and the connection made to those same addresses: a second lookup can't
+//! answer otherwise.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -18,7 +26,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc as tmpsc;
 
 use crate::crypto::{BlobId, MAX_BLOB};
-use crate::link::Url;
+use crate::link::{Url, inner, inner_ip};
 use crate::session::Transfer;
 
 /// How long a transfer may take, all of it.
@@ -38,7 +46,7 @@ pub struct Done {
 
 /// Transfers, done on a thread of their own, several at once.
 pub struct Http {
-    jobs: tmpsc::UnboundedSender<Transfer>,
+    jobs: tmpsc::UnboundedSender<(Transfer, Option<String>)>,
     done: mpsc::Receiver<Done>,
 }
 
@@ -46,7 +54,7 @@ impl Http {
     /// The thread, trusting these certificates (DER) besides the web's
     /// roots; `wake` is called when a transfer is done.
     pub fn start(trusted: Vec<Vec<u8>>, wake: impl Fn() + Send + Sync + 'static) -> std::io::Result<Self> {
-        let (jobs, mut rx) = tmpsc::unbounded_channel::<Transfer>();
+        let (jobs, mut rx) = tmpsc::unbounded_channel::<(Transfer, Option<String>)>();
         let (tx, done) = mpsc::channel::<Done>();
         let wake = Arc::new(wake);
         std::thread::Builder::new().name("carnet-http".into()).spawn(move || {
@@ -56,11 +64,11 @@ impl Http {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async move {
-                        while let Some(t) = rx.recv().await {
+                        while let Some((t, origin)) = rx.recv().await {
                             let (config, tx, wake) = (config.clone(), tx.clone(), wake.clone());
                             tokio::task::spawn_local(async move {
                                 let (id, put) = (t.id(), matches!(t, Transfer::Put { .. }));
-                                let result = match tokio::time::timeout(TIMEOUT, transfer(config, &t)).await {
+                                let result = match tokio::time::timeout(TIMEOUT, transfer(config, &t, origin.as_deref())).await {
                                     Ok(r) => r,
                                     Err(_) => Err("timed out".into()),
                                 };
@@ -76,8 +84,17 @@ impl Http {
         Ok(Http { jobs, done })
     }
 
+    /// A transfer for the server at `origin`: its link's host may give
+    /// no address on this computer or its network unless the server's
+    /// own does.
+    pub fn send_for(&self, origin: &str, t: Transfer) {
+        let _ = self.jobs.send((t, Some(origin.to_string())));
+    }
+
+    /// A transfer to wherever its link's host is, unchecked: for a link
+    /// made, not given (a test's server on this computer).
     pub fn send(&self, t: Transfer) {
-        let _ = self.jobs.send(t);
+        let _ = self.jobs.send((t, None));
     }
 
     /// Transfers done since last asked.
@@ -86,10 +103,10 @@ impl Http {
     }
 }
 
-async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer) -> Result<Vec<u8>, String> {
+async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer, origin: Option<&str>) -> Result<Vec<u8>, String> {
     let answer = match t {
-        Transfer::Put { url, sealed, .. } => request(config, "PUT", url, Some(("application/octet-stream", sealed))).await?,
-        Transfer::Get { url, .. } => request(config, "GET", url, None).await?,
+        Transfer::Put { url, sealed, .. } => request(config, "PUT", url, Some(("application/octet-stream", sealed)), origin).await?,
+        Transfer::Get { url, .. } => request(config, "GET", url, None, origin).await?,
     };
     if !(200..300).contains(&answer.status) {
         return Err(format!("HTTP {}", answer.status));
@@ -121,7 +138,7 @@ pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static)
                 let config = crate::net::client_config(&[]);
                 let body = json.as_deref().map(|b| ("application/json", b));
                 let method = if body.is_some() { "POST" } else { "GET" };
-                match tokio::time::timeout(ASK_TIMEOUT, request(config, method, &url, body)).await {
+                match tokio::time::timeout(ASK_TIMEOUT, request(config, method, &url, body, None)).await {
                     Ok(r) => r,
                     Err(_) => Err("timed out".into()),
                 }
@@ -135,18 +152,49 @@ pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static)
     Ok(rx)
 }
 
-/// One request, with a body of its type if any, and its answer.
-async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>) -> Result<Answer, String> {
+/// One request, with a body of its type if any, and its answer. Given
+/// the server's `origin`, the link is one it gave, and is checked where
+/// it leads ([`addresses`]).
+async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>, origin: Option<&str>) -> Result<Answer, String> {
     // Read strictly (`link`): nothing in the request line but the link's
     // printable ASCII.
     let u = Url::parse(url)?;
-    let tcp = tokio::net::TcpStream::connect((u.host.as_str(), u.port)).await.map_err(|e| e.to_string())?;
+    let at = addresses(&u, origin).await?;
+    let tcp = tokio::net::TcpStream::connect(&at[..]).await.map_err(|e| e.to_string())?;
     if u.tls {
         let name = rustls::pki_types::ServerName::try_from(u.host.clone()).map_err(|e| e.to_string())?;
         let tls = tokio_rustls::TlsConnector::from(config).connect(name, tcp).await.map_err(|e| e.to_string())?;
         exchange(tls, &u, method, body).await
     } else {
         exchange(tcp, &u, method, body).await
+    }
+}
+
+/// Where `u`'s host is, looked up once. For a link the server at
+/// `origin` gave, none of its addresses may be on this computer or its
+/// network ([`inner_ip`]) unless the server is on one itself: written so,
+/// or looked up so.
+async fn addresses(u: &Url, origin: Option<&str>) -> Result<Vec<SocketAddr>, String> {
+    let at: Vec<SocketAddr> = tokio::net::lookup_host((u.host.as_str(), u.port)).await.map_err(|e| e.to_string())?.collect();
+    if at.is_empty() {
+        return Err(format!("{}: no address", u.host));
+    }
+    let Some(origin) = origin else { return Ok(at) };
+    if at.iter().any(|a| inner_ip(a.ip())) && !server_inner(origin).await {
+        return Err(format!("{}: an address on this computer or its network, from a server that isn't", u.host));
+    }
+    Ok(at)
+}
+
+/// Whether the server at `origin` is on this computer or its network.
+async fn server_inner(origin: &str) -> bool {
+    let Ok(s) = Url::parse(origin) else { return false };
+    if inner(&s.host) {
+        return true;
+    }
+    match tokio::net::lookup_host((s.host.as_str(), s.port)).await {
+        Ok(mut at) => at.any(|a| inner_ip(a.ip())),
+        Err(_) => false,
     }
 }
 
@@ -282,8 +330,34 @@ mod tests {
         rt.block_on(async {
             let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()).await;
             let url = format!("{base}/x HTTP/1.1\r\nHost: evil\r\n\r\nGET /y");
-            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url }).await.is_err());
+            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url }, Some(&base)).await.is_err());
         });
+    }
+
+    /// A link whose name the DNS gives an address on this computer is not
+    /// followed for a server elsewhere, nor one given as an address that
+    /// is; for a server here, it is. Checked on the addresses looked up,
+    /// not the name as written.
+    #[test]
+    fn a_name_that_leads_here_is_not_followed_for_a_server_elsewhere() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()).await;
+            let port = base.rsplit(':').next().unwrap();
+            let url = format!("http://localhost:{port}/x");
+            for elsewhere in ["https://notes.example.com", "https://203.0.113.9"] {
+                let got = transfer(config(), &Transfer::Get { id: [1; 32], url: url.clone() }, Some(elsewhere)).await;
+                assert!(got.unwrap_err().contains("on this computer or its network"), "{elsewhere}");
+            }
+            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url }, Some("http://localhost:8787")).await.unwrap(), b"ok");
+        });
+        // The addresses a name may be given, as checked.
+        for here in ["127.0.0.1", "10.1.2.3", "192.168.0.9", "172.20.0.1", "169.254.169.254", "100.100.0.1", "0.0.0.0", "255.255.255.255", "::1", "fe80::1", "fd12::1", "::ffff:10.0.0.1"] {
+            assert!(inner_ip(here.parse().unwrap()), "{here}");
+        }
+        for public in ["203.0.113.9", "8.8.8.8", "2606:4700::1111", "100.128.0.1"] {
+            assert!(!inner_ip(public.parse().unwrap()), "{public}");
+        }
     }
 
     #[test]
@@ -292,25 +366,25 @@ mod tests {
         rt.block_on(async {
             // A fetch, its body by length.
             let (base, server) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".to_vec()).await;
-            let got = transfer(config(), &Transfer::Get { id: [1; 32], url: format!("{base}/v1/blobs/t?q=1") }).await;
+            let got = transfer(config(), &Transfer::Get { id: [1; 32], url: format!("{base}/v1/blobs/t?q=1") }, Some(&base)).await;
             assert_eq!(got.unwrap(), b"hello");
             let asked = String::from_utf8(server.await.unwrap()).unwrap();
             assert!(asked.starts_with("GET /v1/blobs/t?q=1 HTTP/1.1\r\n"), "{asked}");
             // In chunks.
             let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n".to_vec()).await;
-            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base }).await.unwrap(), b"hello");
+            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&base)).await.unwrap(), b"hello");
             // A put says its length, and sends its bytes.
             let (base, server) = one_answer(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()).await;
             let put = Transfer::Put { id: [1; 32], url: format!("{base}/v1/blobs/p"), sealed: b"sealed bytes".to_vec() };
-            assert_eq!(transfer(config(), &put).await.unwrap(), b"");
+            assert_eq!(transfer(config(), &put, Some(&base)).await.unwrap(), b"");
             let asked = String::from_utf8(server.await.unwrap()).unwrap();
             assert!(asked.starts_with("PUT /v1/blobs/p HTTP/1.1\r\n") && asked.contains("Content-Length: 12\r\n") && asked.ends_with("\r\n\r\nsealed bytes"), "{asked}");
             // Refused: said so.
             let (base, _) = one_answer(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\nnope".to_vec()).await;
-            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base }).await, Err("HTTP 403".into()));
+            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&base)).await, Err("HTTP 403".into()));
             // Cut short.
             let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nhal".to_vec()).await;
-            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url: base }).await.is_err());
+            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&base)).await.is_err());
         });
     }
 
@@ -327,6 +401,11 @@ mod tests {
         let rx = ask(format!("{base}/v1/signup"), Some(br#"{"email":"ann@example.com"}"#.to_vec()), move || w.store(true, std::sync::atomic::Ordering::SeqCst)).unwrap();
         let got = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
         assert_eq!(got, Answer { status: 429, body: br#"{"error":"slow down"}"#.to_vec() });
+        // Woken just after the answer is sent: given a moment.
+        let by = std::time::Instant::now() + Duration::from_secs(5);
+        while !woke.load(std::sync::atomic::Ordering::SeqCst) && std::time::Instant::now() < by {
+            std::thread::yield_now();
+        }
         assert!(woke.load(std::sync::atomic::Ordering::SeqCst));
         let asked = String::from_utf8(rt.block_on(server).unwrap()).unwrap();
         assert!(asked.starts_with("POST /v1/signup HTTP/1.1\r\n"), "{asked}");

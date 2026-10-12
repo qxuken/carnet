@@ -821,6 +821,7 @@ impl Carnet {
                         Some(images::Entry::Failed(e)) if e == images::HEIC_ELSEWHERE => {
                             (Glyph::Warning, "HEIC pictures show on macOS; this one can't show here")
                         }
+                        Some(images::Entry::Failed(e)) if e == images::TOO_BIG => (Glyph::Warning, "This picture is too big to show"),
                         Some(images::Entry::Failed(e)) if e.contains("not supported") || e.contains("Unsupported") => {
                             (Glyph::Warning, "Carnet can't show this kind of picture")
                         }

@@ -243,7 +243,9 @@ fn spans(text: &str, viewer: bool) -> String {
 /// Any other scheme (`javascript:`, `data:`, `file:`, an app's) is none:
 /// a browser would run it, or hand it to whatever claims it. Read as a
 /// browser reads it: the ends' spaces and control characters, and tabs
-/// and line breaks anywhere, left out, the scheme in any case.
+/// and line breaks anywhere, left out, the scheme in any case. A mail
+/// link that asks to attach a file (`?attach=…`, `attachment=…`), which
+/// some mail apps do with a file of this computer's, is none either.
 pub fn safe_href(url: &str) -> Option<String> {
     let url: String = url.trim_matches(|c: char| c <= ' ').chars().filter(|c| !matches!(c, '\t' | '\n' | '\r')).collect();
     let scheme = url.split_once(':').map(|(s, _)| s).filter(|s| {
@@ -252,8 +254,35 @@ pub fn safe_href(url: &str) -> Option<String> {
     });
     match scheme {
         Some(s) if !["http", "https", "mailto"].iter().any(|k| s.eq_ignore_ascii_case(k)) => None,
+        Some(s) if s.eq_ignore_ascii_case("mailto") && attaches(&url) => None,
         _ => Some(url),
     }
+}
+
+/// Whether a `mailto:` link names a file to attach: a field of its query
+/// whose name, its `%xx` read as letters, has `attach` in it (`attach`,
+/// `attachment`, `Attach`, `%61ttach`).
+fn attaches(mailto: &str) -> bool {
+    let Some((_, query)) = mailto.split_once('?') else { return false };
+    query.split(['&', ';']).any(|field| {
+        let name = field.split('=').next().unwrap_or("").as_bytes();
+        let mut decoded = Vec::with_capacity(name.len());
+        let mut i = 0;
+        while i < name.len() {
+            let hex = |b: u8| (b as char).to_digit(16);
+            match (name[i], name.get(i + 1).copied().and_then(hex), name.get(i + 2).copied().and_then(hex)) {
+                (b'%', Some(h), Some(l)) => {
+                    decoded.push((h * 16 + l) as u8);
+                    i += 3;
+                }
+                (b, _, _) => {
+                    decoded.push(b);
+                    i += 1;
+                }
+            }
+        }
+        String::from_utf8_lossy(&decoded).to_ascii_lowercase().contains("attach")
+    })
 }
 
 fn escape(s: &str) -> String {
@@ -293,6 +322,14 @@ mod tests {
             assert_eq!(safe_href(good).as_deref(), Some(good), "{good:?}");
         }
         assert_eq!(safe_href(" https://x\t/a\n "), Some("https://x/a".into()));
+        // Mail that would attach a file: no link. Plain mail, with a
+        // subject or a body: a link still.
+        for bad in ["mailto:a@b?attach=/etc/passwd", "MAILTO:a@b?subject=hi&Attachment=C:\\x", "mailto:a@b?%61ttach=~/.ssh/id_ed25519", "mailto:a@b?body=x;attach=y"] {
+            assert_eq!(safe_href(bad), None, "{bad:?}");
+        }
+        for good in ["mailto:a@b?subject=Attached%20notes&body=see%20attachments", "mailto:a@b?cc=c@d"] {
+            assert_eq!(safe_href(good).as_deref(), Some(good), "{good:?}");
+        }
         let h = html("[a](https://x) [b](mailto:a@b) [c](notes/x.md) [d](#top)", |s, _| s.to_string());
         for href in ["https://x", "mailto:a@b", "notes/x.md", "#top"] {
             assert!(h.contains(&format!("href=\"{href}\"")), "{href}: {h}");

@@ -933,6 +933,7 @@ dependencies = [
  "curve25519-dalek 5.0.0",
  "ed25519-dalek",
  "futures-util",
+ "generic-array",
  "getrandom 0.3.4",
  "hkdf 0.13.0",
  "httparse",
@@ -950,6 +951,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "webpki-roots 0.26.11",
+ "zeroize",
 ]
 
 [[package]]
@@ -962,6 +964,7 @@ dependencies = [
  "js-sys",
  "qrcode",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

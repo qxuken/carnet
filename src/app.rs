@@ -231,8 +231,11 @@ pub enum Msg {
     SyncInviteCopy { at: u64 },
     /// Remove the account at this place in the owner's list (asked twice).
     SyncAccountRemove { at: u64 },
-    /// Make a recovery code, its words shown once.
+    /// Make a recovery code, its words shown once (asked first when it
+    /// would replace one).
     SyncRecovery,
+    /// Not replacing the recovery code after all.
+    SyncRecoveryCancel,
     /// The words written down: put away.
     SyncRecoveryDone,
     /// Sync off on this device.
@@ -743,6 +746,8 @@ pub struct Carnet {
     pub pw_edit: Option<(String, String)>,
     /// Taking the password away was asked once.
     pub pw_remove_armed: bool,
+    /// Replacing the recovery code was asked once.
+    pub sync_words_armed: bool,
     /// Deleting the account was asked once.
     pub delete_account_armed: bool,
     /// Turn off asked once: the second asks for real.
@@ -996,6 +1001,7 @@ impl Carnet {
             sync_show_password: false,
             pw_edit: None,
             pw_remove_armed: false,
+            sync_words_armed: false,
             delete_account_armed: false,
             sync_off_armed: false,
             sync_remove_armed: None,
@@ -3025,7 +3031,14 @@ impl Carnet {
                     self.sync_account_armed = Some(id);
                 }
             }
-            Msg::SyncRecovery => self.sync.make_recovery(),
+            // A code there already: asked first, as the words written
+            // down for it stop working.
+            Msg::SyncRecovery if !self.sync_words_armed && self.sync.has_recovery() => self.sync_words_armed = true,
+            Msg::SyncRecovery => {
+                self.sync_words_armed = false;
+                self.sync.make_recovery();
+            }
+            Msg::SyncRecoveryCancel => self.sync_words_armed = false,
             Msg::SyncRecoveryDone => self.sync.words = None,
             // Asked twice: off, this device needs a code or the words to
             // come back, and the last device off leaves only the words.

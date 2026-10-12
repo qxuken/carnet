@@ -20,6 +20,8 @@ wasm-bindgen = "=0.2.129"
 js-sys = "0.3"
 # The pairing code as a QR code, for a phone's camera.
 qrcode = { version = "0.14", default-features = false }
+# A passkey's PRF output wiped once used, as carnet-sync wipes its keys.
+zeroize = "1"
 
 [dev-dependencies]
 # tests/viewer.rs: a desktop's session and this one, through the hub.

@@ -8,6 +8,7 @@
 //! [`http::ask`](crate::http::ask)'s.
 
 use crate::http::Answer;
+use crate::session::server_says;
 
 /// A server's address as typed, as the app uses it: no slash at its end,
 /// and `https://` unless it says otherwise, or `http://` for this
@@ -25,7 +26,9 @@ pub fn origin(typed: &str) -> Option<String> {
         Some(v6) => v6.split(']').next().unwrap_or(""),
         None => o.split([':', '/']).next().unwrap_or(""),
     };
-    let here = host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.");
+    // An address read as one, not a name that only starts like one:
+    // `127.example.com` is somewhere else.
+    let here = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
     Some(format!("{}://{o}", if here { "http" } else { "https" }))
 }
 
@@ -115,13 +118,16 @@ pub fn answered(a: &Answer, page: Option<&str>) -> Result<Sent, String> {
 }
 
 /// The words in an answer: its JSON's `error` or `message`, or its plain
-/// text if it's short (not a page).
+/// text if it's short (not a page). Shown as the server's, not Carnet's
+/// ([`server_says`]).
 fn said(body: &[u8]) -> Option<String> {
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
-        return ["error", "message"].iter().find_map(|k| v.get(k)?.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    }
-    let text = std::str::from_utf8(body).ok()?.trim();
-    (!text.is_empty() && text.len() <= 300 && !text.starts_with('<')).then(|| text.to_string())
+    let words = if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+        ["error", "message"].iter().find_map(|k| v.get(k)?.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    } else {
+        let text = std::str::from_utf8(body).ok()?.trim();
+        (!text.is_empty() && text.len() <= 300 && !text.starts_with('<')).then(|| text.to_string())
+    };
+    words.map(|w| server_says(&w))
 }
 
 #[cfg(test)]
@@ -141,6 +147,11 @@ mod tests {
         assert_eq!(origin("127.0.0.1:8787/").as_deref(), Some("http://127.0.0.1:8787"));
         assert_eq!(origin("[::1]:8080").as_deref(), Some("http://[::1]:8080"));
         assert_eq!(origin("localhost.example.com").as_deref(), Some("https://localhost.example.com"));
+        assert_eq!(origin("127.0.0.2:8787").as_deref(), Some("http://127.0.0.2:8787"));
+        // A name that only starts like this computer's address isn't it.
+        assert_eq!(origin("127.example.com").as_deref(), Some("https://127.example.com"));
+        assert_eq!(origin("127.0.0.1.example.com:80").as_deref(), Some("https://127.0.0.1.example.com:80"));
+        assert_eq!(origin("[::2]:8080").as_deref(), Some("https://[::2]:8080"));
         assert_eq!(origin("https://localhost:8443").as_deref(), Some("https://localhost:8443"));
         assert_eq!(origin("  "), None);
         assert_eq!(origin("not an address"), None);
@@ -151,9 +162,13 @@ mod tests {
     #[test]
     fn an_answer_in_the_servers_words() {
         assert_eq!(answered(&answer(202, r#"{"sent":true}"#), None), Ok(Sent::Now(None)));
-        assert_eq!(answered(&answer(202, r#"{"sent":true,"message":"Mailed already: look for it."}"#), None), Ok(Sent::Now(Some("Mailed already: look for it.".into()))));
-        assert_eq!(answered(&answer(400, r#"{"error":"That doesn't look like an email address."}"#), None), Err("That doesn't look like an email address.".into()));
-        assert_eq!(answered(&answer(429, "Mailed lately: wait ten minutes.\n"), None), Err("Mailed lately: wait ten minutes.".into()));
+        assert_eq!(answered(&answer(202, r#"{"sent":true,"message":"Mailed already: look for it."}"#), None), Ok(Sent::Now(Some("The server says: Mailed already: look for it.".into()))));
+        assert_eq!(answered(&answer(400, r#"{"error":"That doesn't look like an email address."}"#), None), Err("The server says: That doesn't look like an email address.".into()));
+        assert_eq!(answered(&answer(429, "Mailed lately: wait ten minutes.\n"), None), Err("The server says: Mailed lately: wait ten minutes.".into()));
+        // At any length, on one line: no more than a sentence or two.
+        let long = format!(r#"{{"error":"{}\nline two"}}"#, "x".repeat(5000));
+        let said = answered(&answer(400, &long), None).unwrap_err();
+        assert!(said.starts_with("The server says: xxx") && said.ends_with('…') && !said.contains('\n') && said.chars().count() < 230, "{said}");
         assert_eq!(answered(&answer(429, ""), None), Err("Too many tries: wait a minute, then try again.".into()));
         assert_eq!(answered(&answer(503, "<html>oops</html>"), None), Err("Signing up isn't working just now: try again in a few minutes.".into()));
         assert_eq!(answered(&answer(404, ""), Some("https://x.co/start")), Err("This server makes accounts on its own page: https://x.co/start".into()));

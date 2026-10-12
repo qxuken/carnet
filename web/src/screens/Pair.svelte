@@ -160,16 +160,26 @@
   }
 
   /// The words in a server's answer: its JSON's `error` or `message`, or
-  /// its text if short and not a page.
+  /// its text if short and not a page. Shown as the server's, not
+  /// Carnet's: on one line, cut short, "The server says: …" (as
+  /// `session::server_says` has it).
   function said(body: string): string {
+    let s = '';
     try {
       const j = JSON.parse(body) as { error?: unknown; message?: unknown };
-      const s = typeof j?.error === 'string' ? j.error : typeof j?.message === 'string' ? j.message : '';
-      return s.trim();
+      s = typeof j?.error === 'string' ? j.error : typeof j?.message === 'string' ? j.message : '';
     } catch {
       const t = body.trim();
-      return t.length <= 300 && !t.startsWith('<') ? t : '';
+      s = t.length <= 300 && !t.startsWith('<') ? t : '';
     }
+    const line = s
+      .split(/\s+/)
+      .map((w) => w.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ''))
+      .filter(Boolean)
+      .join(' ');
+    if (!line) return '';
+    const letters = [...line];
+    return `The server says: ${letters.length > 200 ? letters.slice(0, 200).join('') + '…' : line}`;
   }
 
   /// A yes that mailed nothing: asked again within the server's mail

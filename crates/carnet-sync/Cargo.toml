@@ -25,6 +25,9 @@ ed25519-dalek = "3"
 # one is removed. The curve ed25519-dalek is already built on.
 curve25519-dalek = { version = "5", default-features = false, features = ["alloc", "precomputed-tables", "zeroize"] }
 bip39 = { version = "3", default-features = false, features = ["std"] }
+# Secrets wiped from memory as they're dropped: the recovery code, the
+# vault key, a password typed.
+zeroize = "1"
 # Pairing a device (§7): SPAKE2 over the server, keyed by a short code.
 # The stable line; it takes its randomness from us (rand_core 0.6's
 # traits, put on `Random`), so it needs no OS's either.
@@ -33,8 +36,11 @@ rand_core = { version = "0.6", default-features = false }
 # Email and password, for a hosted service (§7): OPAQUE, so the password
 # never reaches the server, not even hashed; Argon2id against guessing.
 opaque-ke = { version = "3", default-features = false, features = ["ristretto255-voprf", "argon2"] }
-# Its password hash, Argon2id with its defaults (19 MiB, two passes).
+# Its password hash, Argon2id at parameters of Carnet's own, pinned
+# (password.rs): the crate's defaults could change under an upgrade.
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+# The arrays opaque-ke's hash trait is written in, at its version.
+generic-array = "0.14"
 
 # Property tests: random notes and edits, shrunk to the smallest that fails
 # (tests/properties.rs). Failures found are kept in proptest-regressions/.

@@ -129,6 +129,15 @@
   // Back where there's a page to go back to; else to the list.
   const back = () => (history.length > 1 ? history.back() : go(''));
 
+  /// Removed with notes or pictures not sent: what they are, said plainly.
+  const unsentWords = $derived.by(() => {
+    const { notes, pictures } = sync.unsentCounts;
+    const count = (n: number, one: string) => (n === 1 ? `1 ${one}` : `${n} ${one}s`);
+    const what = [notes ? count(notes, 'note') : '', pictures ? count(pictures, 'picture') : ''].filter(Boolean).join(' and ');
+    const one = notes + pictures === 1;
+    return `${what} here ${one ? 'wasn’t' : 'weren’t'} sent before it was. Download ${one ? 'it' : 'them'} before this browser forgets ${one ? 'it' : 'them'}.`;
+  });
+
   /// The footer's line: up to date only when nothing waits to be sent;
   /// else how many changes and pictures wait, and, offline or read only,
   /// why. (The desktop's Settings says it in the same words.)
@@ -157,6 +166,17 @@
   </div>
 {:else if sync.phase === 'setup'}
   <Pair />
+{:else if sync.removed}
+  <!-- Removed, as the server says, with notes here it may not have: kept
+       until they're downloaded, or this browser is forgotten. -->
+  <div class="loading">
+    <div class="stopped">
+      <p class="error" role="alert"><Icon name="warning" size={16} /> {sync.removed}</p>
+      <p class="said">{unsentWords}</p>
+      <button onclick={() => void sync.downloadUnsent()}>Download what wasn’t sent</button>
+      <button class="quiet" onclick={() => sync.forgetRemoved()}>Forget this browser</button>
+    </div>
+  </div>
 {:else}
   <div class="shell" class:wide class:resizing={dragFrom !== null}>
     {#if wide || route.kind === 'list'}
@@ -234,6 +254,8 @@
   .stopped { display: grid; gap: 16px; justify-items: center; max-width: 360px; }
   .stopped .error { padding: 0; font-size: 15px; }
   .stopped button { padding: 10px 22px; border: 0; border-radius: var(--radius); background: var(--primary); color: var(--on-accent); font: inherit; font-weight: 600; cursor: pointer; }
+  .stopped .said { margin: 0; color: var(--ink); line-height: 1.5; }
+  .stopped button.quiet { background: none; color: var(--ink); border: 1px solid var(--border-strong); font-weight: 500; }
   /* Only if it takes a moment: a quick start shouldn't flash. */
   .wait { opacity: 0; animation: show 0.2s ease 0.4s forwards; }
   @keyframes show { to { opacity: 1; } }

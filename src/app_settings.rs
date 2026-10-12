@@ -1107,6 +1107,7 @@ impl Carnet {
                 let read_only = self.sync.read_only;
                 let update_soon = self.sync.update_soon;
                 let waiting = (self.sync.waiting(), self.sync.pictures_waiting());
+                let in_file = self.sync.keys_in_file();
                 // A line said of the account: an icon, then words.
                 let said = |ui: &mut Ui<'_>, g: Icon, ink: Color, words: &str| {
                     ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
@@ -1152,6 +1153,11 @@ impl Carnet {
                     }
                     if update_soon {
                         ui.text(crate::sync::UPDATE_SOON, TextStyle::new(Type::SMALL.size).color(t.danger));
+                    }
+                    // Linux with no keychain running: where the keys are
+                    // instead.
+                    if in_file {
+                        said(ui, Icon::Key, t.warning, crate::sync::KEYS_IN_FILE);
                     }
                 });
                 rule(ui, l);
@@ -1274,19 +1280,25 @@ impl Carnet {
                 }
                 rule(ui, l);
                 let words = self.sync.words.clone();
-                setting(
-                    ui,
-                    l,
-                    "Recovery code",
-                    Some("Twelve words that let a new device in when none of yours is left."),
-                    |ui| {
-                        if words.is_some() {
-                            pill_button(ui, l, "sync-words-done", "Done", true, true, Msg::SyncRecoveryDone);
-                        } else {
-                            pill_button(ui, l, "sync-words", "Make one", false, status == Status::Online, Msg::SyncRecovery);
-                        }
-                    },
-                );
+                let armed = self.sync_words_armed;
+                let making = self.sync.making_recovery();
+                let what = if armed {
+                    "Replace the recovery code? The words you have now will stop working."
+                } else {
+                    "Twelve words that let a new device in when none of yours is left."
+                };
+                setting(ui, l, "Recovery code", Some(what), |ui| {
+                    if words.is_some() {
+                        pill_button(ui, l, "sync-words-done", "Done", true, true, Msg::SyncRecoveryDone);
+                    } else if armed {
+                        pill_button(ui, l, "sync-words-cancel", "Cancel", false, true, Msg::SyncRecoveryCancel);
+                        pill_button(ui, l, "sync-words-yes", "Yes, replace", true, status == Status::Online, Msg::SyncRecovery);
+                    } else if making {
+                        pill_button(ui, l, "sync-words", "Making one\u{2026}", false, false, Msg::SyncRecovery);
+                    } else {
+                        pill_button(ui, l, "sync-words", "Make one", false, status == Status::Online, Msg::SyncRecovery);
+                    }
+                });
                 if let Some(words) = &words {
                     ui.with(NodeSpec::column().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).gap(6.0), |ui| {
                         // Numbered, four to a row: written down by hand, a
@@ -1352,7 +1364,8 @@ impl Carnet {
                                     self.focus_req = None;
                                 }
                             }
-                            let k = field(self, ui, "pw-new", &password, "A password, 8 letters or more", Field::PasswordNew);
+                            let hint = format!("A password, {} letters or more", carnet_sync::password::MIN_LEN);
+                            let k = field(self, ui, "pw-new", &password, &hint, Field::PasswordNew);
                             if self.focus_req == Some(Field::PasswordNew) {
                                 ui.focus(k);
                                 self.focus_req = None;

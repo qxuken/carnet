@@ -19,6 +19,8 @@
 //! words: [`take_initial`] reads it off as the paragraph is read, and
 //! [`put_initial`] puts it back as it is written (`doc`).
 
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Style {
     pub bold: bool,
@@ -155,6 +157,19 @@ fn read_counting(text: &str, count: Count) -> Read {
     // Code spans: a run of backticks, closed by a run as long; and,
     // outside them, a backslash before a mark (any ASCII punctuation, as
     // CommonMark has it): the backslash a marker, the mark a letter.
+    // Every whole run is listed once, by length, so a run's closer is
+    // looked up rather than searched for along the rest of the line.
+    let mut ticks: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut j = 0;
+    while j < b.len() {
+        if b[j] == b'`' {
+            let n = run_len(b, j, b'`');
+            ticks.entry(n).or_default().push(j);
+            j += n;
+        } else {
+            j += 1;
+        }
+    }
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'\\' && b.get(i + 1).is_some_and(u8::is_ascii_punctuation) {
@@ -169,7 +184,7 @@ fn read_counting(text: &str, count: Count) -> Read {
             continue;
         }
         let n = run_len(b, i, b'`');
-        let close = (i + n..b.len()).find(|&j| b[j] == b'`' && run_len(b, j, b'`') == n && (j == 0 || b[j - 1] != b'`'));
+        let close = ticks.get(&n).and_then(|at| at.get(at.partition_point(|&j| j < i + n)).copied());
         match close {
             Some(j) => {
                 // A space inside each end, with more than spaces between,
@@ -222,18 +237,30 @@ fn read_counting(text: &str, count: Count) -> Read {
 
     // Colour: `<mark …>…</mark>` and `<span style="…">…</span>`, nested
     // as HTML nests; then `==…==`.
+    // A tag is checked against what is quiet in a count kept beside the
+    // line, and against the closing tags already taken, so a long tag
+    // that fails is not walked again for every `<` inside it.
     let mut found: Vec<Tint> = Vec::new();
+    let tags = Tags::of(text);
+    let mut was_quiet = vec![0usize; b.len() + 1];
+    for k in 0..b.len() {
+        was_quiet[k + 1] = was_quiet[k] + usize::from(quiet[k]);
+    }
+    let any_quiet = |(x, y): (usize, usize)| was_quiet[y] > was_quiet[x];
+    let mut taken: BTreeMap<usize, usize> = BTreeMap::new();
+    let any_taken = |taken: &BTreeMap<usize, usize>, (x, y): (usize, usize)| taken.range(..y).next_back().is_some_and(|(_, &e)| e > x);
     let mut i = 0;
     while i < b.len() {
         if b[i] != b'<' || quiet[i] {
             i += 1;
             continue;
         }
-        let Some((ink, mark, open_end, close)) = html_tint(text, i) else {
+        let Some((open_end, close)) = tags.closed(text, i) else {
             i += 1;
             continue;
         };
-        if (i..open_end).chain(close.0..close.1).any(|k| quiet[k]) {
+        let open = (i, open_end);
+        if any_quiet(open) || any_quiet(close) || any_taken(&taken, open) || any_taken(&taken, close) {
             i += 1;
             continue;
         }
@@ -241,7 +268,9 @@ fn read_counting(text: &str, count: Count) -> Read {
             st[k].marker = true;
             quiet[k] = true;
         }
-        found.push(Tint { ink, mark, open: (i, open_end), close });
+        taken.insert(close.0, close.1);
+        let (ink, mark) = tag_colors(&text[i..open_end]);
+        found.push(Tint { ink, mark, open, close });
         i = open_end;
     }
     let mut open: Option<usize> = None;
@@ -271,17 +300,34 @@ fn read_counting(text: &str, count: Count) -> Read {
         }
         i += len;
     }
-    // Outer runs first, so an inner one's colour wins.
+    // The run opened last wins, so an inner one's colour shows over an
+    // outer one's. Walked once along the line, the runs open at each
+    // byte kept by where they open: runs nested deep are not painted
+    // over each other, once per level.
     found.sort_by_key(|t| t.open.0);
-    for t in &found {
-        for s in &mut st[t.open.1..t.close.0] {
-            if let Some(c) = t.ink {
-                s.ink = c;
+    for (which, colour) in [(0, (|t: &Tint| t.ink) as fn(&Tint) -> Option<u32>), (1, |t: &Tint| t.mark)] {
+        let mut by_start: Vec<_> = found.iter().filter_map(|t| colour(t).map(|c| (t.open.1, t.open.0, t.close.0, c))).collect();
+        by_start.sort_unstable();
+        let mut next = by_start.into_iter().peekable();
+        let mut open: BinaryHeap<(usize, usize, u32)> = BinaryHeap::new();
+        for (k, s) in st.iter_mut().enumerate() {
+            while let Some(&(_, o, e, c)) = next.peek().filter(|t| t.0 <= k) {
+                open.push((o, e, c));
+                next.next();
             }
-            if let Some(c) = t.mark {
-                s.mark = c;
+            while open.peek().is_some_and(|&(_, e, _)| e <= k) {
+                open.pop();
+            }
+            if let Some(&(_, _, c)) = open.peek() {
+                if which == 0 {
+                    s.ink = c;
+                } else {
+                    s.mark = c;
+                }
             }
         }
+    }
+    for t in &found {
         pairs.push(Pair { kind: Kind::Tint, open: t.open, close: t.close });
     }
 
@@ -306,6 +352,7 @@ fn read_counting(text: &str, count: Count) -> Read {
     }
     let punct: Vec<bool> = (0..b.len()).map(|k| b[k].is_ascii_punctuation() || st[k].marker).collect();
     let mut stack: Vec<Run> = Vec::new();
+    let mut floor = [0usize; 18];
     let mut i = 0;
     while i < b.len() {
         let ch = b[i];
@@ -336,13 +383,23 @@ fn read_counting(text: &str, count: Count) -> Read {
             let (o, c) = if count == Count::Whole { (r.whole, len) } else { (r.len, left) };
             ch != b'~' && (r.both || both) && (o + c).is_multiple_of(3) && !(o.is_multiple_of(3) && c.is_multiple_of(3))
         };
+        let c_len = |left: usize| if count == Count::Whole { len } else { left };
         let mut left = len;
         let mut at = i;
         if can_close {
             while left > 0 {
-                let Some(pos) = stack.iter().rposition(|r| r.ch == ch && !threes(r, left)) else {
+                // Below `floor`, nothing closes a run like this one: a
+                // search that found nothing is not made again past what
+                // it read (CommonMark's `openers_bottom`).
+                let key = (ch == b'_') as usize * 6 + (ch == b'~') as usize * 12 + both as usize * 3 + c_len(left) % 3;
+                let lo = floor[key].min(stack.len());
+                let Some(pos) = stack[lo..].iter().rposition(|r| r.ch == ch && !threes(r, left)).map(|p| p + lo) else {
+                    floor[key] = stack.len();
                     break;
                 };
+                for f in &mut floor {
+                    *f = (*f).min(pos);
+                }
                 let opener = &mut stack[pos];
                 let mut used = if opener.len >= 2 && left >= 2 { 2 } else { 1 };
                 if ch == b'~' {
@@ -399,28 +456,87 @@ fn read_counting(text: &str, count: Count) -> Read {
     Read { styles: st, tints: found, pairs }
 }
 
-/// What an HTML colour tag says: the words' colour, the highlighter's,
-/// where the opening tag ends, and where the closing one is.
-type HtmlTint = (Option<u32>, Option<u32>, usize, (usize, usize));
+/// Where a line's colour tags open and close: every `<mark`, `</mark>`,
+/// `<span` and `</span>`, and every `>`, found once, so each opening tag
+/// finds the tag that closes it without reading the line again.
+struct Tags {
+    gts: Vec<usize>,
+    mark: Nesting,
+    span: Nesting,
+}
 
-/// An HTML colour tag opening at `at` — `<mark>`, `<mark style="…">` or
-/// `<span style="…">` — and the tag that closes it, nesting counted.
-/// Returns the words' colour and the highlighter's that its style gives,
-/// where the opening tag ends and where the closing one is.
-fn html_tint(text: &str, at: usize) -> Option<HtmlTint> {
-    let rest = &text[at..];
-    let name = if rest.starts_with("<mark") {
-        "mark"
-    } else if rest.starts_with("<span") {
-        "span"
-    } else {
-        return None;
-    };
-    let gt = rest.find('>')?;
-    let attrs = &rest[5..gt];
-    if !attrs.is_empty() && !attrs.starts_with(char::is_whitespace) {
-        return None;
+/// One tag name's opening and closing tags, in order, and for each place
+/// among them the first later one where more have closed than opened.
+struct Nesting {
+    /// Where each tag starts, and whether it closes.
+    at: Vec<(usize, bool)>,
+    /// `up[t]`: the first `u > t` where, of the tags before `u`, closing
+    /// ones less opening ones is more than of those before `t`.
+    up: Vec<Option<usize>>,
+}
+
+impl Nesting {
+    fn of(text: &str, name: &str) -> Nesting {
+        let (opener, closer) = (format!("<{name}"), format!("</{name}>"));
+        let mut at: Vec<(usize, bool)> = text.match_indices(&opener).map(|(k, _)| (k, false)).collect();
+        at.extend(text.match_indices(&closer).map(|(k, _)| (k, true)));
+        at.sort_unstable();
+        // Closing tags less opening ones before each place, and for each
+        // place the next that is higher: a stack walked from the end.
+        let mut level = vec![0isize; at.len() + 1];
+        for (t, &(_, closes)) in at.iter().enumerate() {
+            level[t + 1] = level[t] + if closes { 1 } else { -1 };
+        }
+        let mut up = vec![None; at.len() + 1];
+        let mut higher: Vec<usize> = Vec::new();
+        for t in (0..level.len()).rev() {
+            while higher.last().is_some_and(|&u| level[u] <= level[t]) {
+                higher.pop();
+            }
+            up[t] = higher.last().copied();
+            higher.push(t);
+        }
+        Nesting { at, up }
     }
+
+    /// The closing tag of one opened before `from`, nesting counted from
+    /// there: the first that closes more than have opened since.
+    fn close(&self, from: usize) -> Option<usize> {
+        let t = self.at.partition_point(|&(k, _)| k < from);
+        self.up[t].map(|u| self.at[u - 1].0)
+    }
+}
+
+impl Tags {
+    fn of(text: &str) -> Tags {
+        let gts = if text.contains('<') { text.match_indices('>').map(|(k, _)| k).collect() } else { Vec::new() };
+        Tags { gts, mark: Nesting::of(text, "mark"), span: Nesting::of(text, "span") }
+    }
+
+    /// An HTML colour tag opening at `at` — `<mark>`, `<mark style="…">`
+    /// or `<span style="…">` — and the tag that closes it, nesting
+    /// counted: where the opening tag ends, and where the closing one is.
+    fn closed(&self, text: &str, at: usize) -> Option<(usize, (usize, usize))> {
+        let (name, nesting) = match self.mark.at.binary_search(&(at, false)) {
+            Ok(_) => ("mark", &self.mark),
+            Err(_) if self.span.at.binary_search(&(at, false)).is_ok() => ("span", &self.span),
+            Err(_) => return None,
+        };
+        let gt = *self.gts.get(self.gts.partition_point(|&k| k < at))?;
+        // Past the name, a space or the tag's end: `<marker>` is no mark.
+        let after = at + 1 + name.len();
+        if gt != after && !text[after..].starts_with(char::is_whitespace) {
+            return None;
+        }
+        let close = nesting.close(gt + 1)?;
+        Some((gt + 1, (close, close + name.len() + 3)))
+    }
+}
+
+/// The words' colour and the highlighter's that an opening colour tag's
+/// style gives; a `<mark>` with none is the plain highlighter.
+fn tag_colors(tag: &str) -> (Option<u32>, Option<u32>) {
+    let attrs = &tag[5..tag.len() - 1];
     let (mut ink, mut mark) = (None, None);
     for (prop, value) in style_props(attrs) {
         match prop.as_str() {
@@ -429,29 +545,10 @@ fn html_tint(text: &str, at: usize) -> Option<HtmlTint> {
             _ => {}
         }
     }
-    if name == "mark" && mark.is_none() {
+    if tag.starts_with("<mark") && mark.is_none() {
         mark = Some(HIGHLIGHT);
     }
-    let (opener, closer) = (format!("<{name}"), format!("</{name}>"));
-    let mut depth = 1;
-    let mut k = at + gt + 1;
-    let close = loop {
-        let c = text[k..].find(&closer)? + k;
-        match text[k..c].find(&opener) {
-            Some(o) => {
-                depth += 1;
-                k += o + opener.len();
-            }
-            None => {
-                depth -= 1;
-                if depth == 0 {
-                    break c;
-                }
-                k = c + closer.len();
-            }
-        }
-    };
-    Some((ink, mark, at + gt + 1, (close, close + closer.len())))
+    (ink, mark)
 }
 
 /// Whether a tag's `class` attribute names `initial`.
@@ -907,6 +1004,12 @@ pub fn merge(text: &str) -> String {
     'joints: loop {
         let ps = pairs(&text);
         let look = look(&text);
+        // The pairs by where they open, so a pair finds those opening at
+        // its end without looking through every other.
+        let mut opening: HashMap<usize, Vec<&Pair>> = HashMap::new();
+        for q in &ps {
+            opening.entry(q.open.0).or_default().push(q);
+        }
         for p in &ps {
             if matches!(p.kind, Kind::Link | Kind::Code) {
                 continue;
@@ -917,7 +1020,7 @@ pub fn merge(text: &str) -> String {
                     && text[q.open.0..q.open.1] == text[p.open.0..p.open.1]
                     && text[q.close.0..q.close.1] == text[p.close.0..p.close.1]
             };
-            for q in ps.iter().filter(same) {
+            for &q in opening.get(&p.close.1).into_iter().flatten().filter(|q| same(q)) {
                 let mut t = text.clone();
                 t.replace_range(q.open.0..q.open.1, "");
                 t.replace_range(p.close.0..p.close.1, "");
@@ -1725,5 +1828,41 @@ mod tests {
         // Right after a bold run, on: it joins the run.
         let (t, _) = insert_styled("**ab** c", 6, "X", "**", "**");
         assert_eq!(t, "**abX** c");
+    }
+
+    /// A long line built to make a reader rescan it — tags nested deep,
+    /// tags never closed, backtick runs that close nothing, openers a
+    /// closer has to look past — is read in one pass, not one per mark:
+    /// 200 KB in a fraction of a second, where nested tags once took
+    /// seconds at 12 KB.
+    #[test]
+    fn a_long_pathological_line_is_read_quickly() {
+        let n = 200_000;
+        let lines = [
+            format!("{}a{}", "<mark>".repeat(n / 14), "</mark>".repeat(n / 14)),
+            format!("{}a{}", "<span style=\"color: red\">".repeat(n / 34), "</span>".repeat(n / 34)),
+            "<mark ".repeat(n / 6) + ">",
+            "<mark".repeat(n / 5),
+            format!("{}`>`", "<mark ".repeat(n / 6)),
+            (1..600).map(|k| "`".repeat(k) + " ").collect::<String>(),
+            "` ".repeat(n / 2),
+            "_a ".repeat(n / 6) + &"a* ".repeat(n / 6),
+            "*a ".repeat(n / 6) + &"a_ ".repeat(n / 6),
+            " **a".repeat(n / 8) + &"a*b".repeat(n / 6),
+            "[".repeat(n / 2) + &"](".repeat(n / 4),
+            "== a".repeat(n / 4),
+            "**a ".repeat(n / 4),
+            "~~a ".repeat(n / 4),
+        ];
+        for line in &lines {
+            // An unoptimised build, the whole way a note's line goes: read,
+            // drawn, made a note, written and its marks joined.
+            let t0 = std::time::Instant::now();
+            let _ = (read(line), Visible::of(line), merge(line));
+            let (_, d) = crate::doc::from_markdown(line);
+            let _ = crate::doc::to_markdown(None, &d);
+            let took = t0.elapsed();
+            assert!(took.as_millis() < 800, "{took:?} for {}…", &line[..40]);
+        }
     }
 }
