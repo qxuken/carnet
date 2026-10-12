@@ -273,8 +273,12 @@ impl Carnet {
             return;
         }
         self.reveal_wait = 0;
-        let byte = self.drawn_byte(slot, self.caret.head.byte.min(page::text(self.doc(), slot).len()));
-        let (Some(g), Some(r)) = (ui.scroll_geometry(page_key), ui.caret_rect(k, byte)) else {
+        let head = self.caret.head.byte.min(page::text(self.doc(), slot).len());
+        let r = match self.cell_pieces.contains_key(&slot) {
+            true => self.rect_at(ui.core(), slot, head),
+            false => ui.caret_rect(k, self.drawn_byte(slot, head)),
+        };
+        let (Some(g), Some(r)) = (ui.scroll_geometry(page_key), r) else {
             ui.reveal(k);
             return;
         };
@@ -453,6 +457,7 @@ impl Carnet {
         let prev: HashMap<u64, Rect> = self.row_rects.iter().copied().collect();
         self.row_rects.clear();
         self.cell_rects.clear();
+        self.cell_pieces.clear();
         self.slot_keys.clear();
         self.shown.clear();
         // Pointers, not text: the blocks stay shared with the note.
@@ -814,26 +819,7 @@ impl Carnet {
                     // another device's own picture, below). No text in
                     // it to select: a press selects it as it would the
                     // picture, to be moved or deleted.
-                    let (glyph, why) = match &entry {
-                        // The user's own picture, not here: with sync on,
-                        // it's on the device the note was written on, and
-                        // pictures outside Carnet's attachments don't sync
-                        // (docs/SYNC.md §4). Said as the web says it.
-                        Some(images::Entry::Failed(e)) if e == "not found" && theirs && self.sync.is_on() => (Glyph::CloudOff, ELSEWHERE),
-                        Some(images::Entry::Failed(e)) if e == "not found" => (Glyph::Warning, "Picture not found"),
-                        Some(images::Entry::Failed(e)) if e == images::HEIC_ELSEWHERE => {
-                            (Glyph::Warning, "HEIC pictures show on macOS; this one can't show here")
-                        }
-                        Some(images::Entry::Failed(e)) if e == images::TOO_BIG => (Glyph::Warning, "This picture is too big to show"),
-                        Some(images::Entry::Failed(e)) if e.contains("not supported") || e.contains("Unsupported") => {
-                            (Glyph::Warning, "Carnet can't show this kind of picture")
-                        }
-                        Some(images::Entry::Failed(_)) => (Glyph::Warning, "This picture couldn't be opened"),
-                        Some(_) => (Glyph::Picture, "Opening the picture\u{2026}"),
-                        // A file on another computer, never looked at.
-                        None if !wiki && !store::is_web(src) => (Glyph::Warning, "Picture not found"),
-                        None => (Glyph::Picture, "A picture on the web, not loaded"),
-                    };
+                    let (glyph, why) = self.unshown_why(entry.as_ref(), theirs, src, wiki);
                     let path = store::decode_src(src);
                     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
                     // Another device's own picture stands in the box the
@@ -950,6 +936,28 @@ impl Carnet {
                 });
             },
         );
+    }
+
+    /// Why a picture isn't shown, by what reading it said (`None`: it was
+    /// never looked for), and the glyph that goes with it: a block's card
+    /// and a cell's say the same.
+    fn unshown_why(&self, entry: Option<&images::Entry>, theirs: bool, src: &str, wiki: bool) -> (Glyph, &'static str) {
+        match entry {
+            // The user's own picture, not here: with sync on, it's on the
+            // device the note was written on, and pictures outside
+            // Carnet's attachments don't sync (docs/SYNC.md §4). Said as
+            // the web says it.
+            Some(images::Entry::Failed(e)) if e == "not found" && theirs && self.sync.is_on() => (Glyph::CloudOff, ELSEWHERE),
+            Some(images::Entry::Failed(e)) if e == "not found" => (Glyph::Warning, "Picture not found"),
+            Some(images::Entry::Failed(e)) if e == images::HEIC_ELSEWHERE => (Glyph::Warning, "HEIC pictures show on macOS; this one can't show here"),
+            Some(images::Entry::Failed(e)) if e == images::TOO_BIG => (Glyph::Warning, "This picture is too big to show"),
+            Some(images::Entry::Failed(e)) if e.contains("not supported") || e.contains("Unsupported") => (Glyph::Warning, "Carnet can't show this kind of picture"),
+            Some(images::Entry::Failed(_)) => (Glyph::Warning, "This picture couldn't be opened"),
+            Some(_) => (Glyph::Picture, "Opening the picture\u{2026}"),
+            // A file on another computer, never looked at.
+            None if !wiki && !store::is_web(src) => (Glyph::Warning, "Picture not found"),
+            None => (Glyph::Picture, "A picture on the web, not loaded"),
+        }
     }
 
     /// On a picture that's the user's own file, not Carnet's: a mark in
@@ -1175,6 +1183,13 @@ impl Carnet {
             true => table.rows[0].cells.iter().map(|c| c.trim().to_string()).collect(),
             false => Vec::new(),
         };
+        // A cell's share of the table's width, its padding left out: as
+        // wide as a picture among its words is drawn at most. From the
+        // table's own row, as the last frame laid it out (its inset and
+        // frame left out), which no cell's words move.
+        let pad = l.px(14.0);
+        let table_w = self.row_rects.iter().rev().find(|(b, _)| *b == id).map_or(self.text_w, |(_, r)| r.w - 16.0) - 4.0;
+        let room = (table_w / table.width().max(1) as f32 - 2.0 * pad).floor().max(page::PICTURE_MIN);
         ui.with(NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0)), |ui| {
             ui.with(
                 // One warm hairline for the frame and the rules, and the
@@ -1222,12 +1237,12 @@ impl Carnet {
                                     NodeSpec::column()
                                         .width(Sizing::Grow(1.0))
                                         .min_width(48.0)
-                                        .pad_xy(l.px(14.0), l.px(if is_head { 9.0 } else { 8.0 }))
+                                        .pad_xy(pad, l.px(if is_head { 9.0 } else { 8.0 }))
                                         .on_layout(Value::Null)
                                         .label(name),
                                     |ui| {
                                         let style = if is_head { head } else { body };
-                                        self.slot_line(ui, l, slot, &row.cells[c], style, None, false, cov);
+                                        self.cell_line(ui, l, slot, &row.cells[c], style, cov, room);
                                     },
                                 );
                             }
@@ -1236,6 +1251,171 @@ impl Carnet {
                 },
             );
         });
+    }
+
+    /// A table cell's text: as any slot's, but where pictures stand among
+    /// its words, one under another with the stretches of words around
+    /// them, each picture as wide as the note gives it or its own, `room`
+    /// at most. A picture is one letter to the caret, which stands beside
+    /// it where no words are; chosen, it wears the accent's ring.
+    #[allow(clippy::too_many_arguments)]
+    fn cell_line(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, style: TextStyle, cov: &Coverage, room: f32) {
+        let pictures = carnet_core::inline::cell_pictures(text);
+        if pictures.is_empty() {
+            self.cell_pieces.remove(&slot);
+            self.slot_line(ui, l, slot, text, style, None, false, cov);
+            return;
+        }
+        // Its pieces in order: words, a picture, words…
+        let mut parts: Vec<(usize, usize, Option<&carnet_core::doc::CellPicture>)> = Vec::new();
+        let mut last = 0;
+        for p in &pictures {
+            if p.at.0 > last {
+                parts.push((last, p.at.0, None));
+            }
+            parts.push((p.at.0, p.at.1, Some(p)));
+            last = p.at.1;
+        }
+        if last < text.len() {
+            parts.push((last, text.len(), None));
+        }
+        // The caret: in the words that hold it, else beside its picture.
+        let here = self.editing && self.caret.head.slot == slot;
+        let byte = self.caret.head.byte.min(text.len());
+        let caret_in = here
+            .then(|| {
+                let words = parts.iter().position(|&(a, b, p)| p.is_none() && a <= byte && byte <= b);
+                words.or_else(|| parts.iter().position(|&(a, b, _)| a == byte || b == byte))
+            })
+            .flatten();
+        let editing = self.editing;
+        let chosen = |a: usize, b: usize| {
+            cov.whole.contains(&slot.block) || cov.parts.get(&slot).is_some_and(|&(f, to)| editing && f <= a && b <= to && f < to)
+        };
+        let mut pieces = Vec::new();
+        let column = ui.with(NodeSpec::column().grow_width().gap(l.px(6.0)), |ui| {
+            for (k, &(a, b, pic)) in parts.iter().enumerate() {
+                let at_caret = caret_in == Some(k);
+                ui.with_indexed(k as u64, NodeSpec::column().grow_width(), |ui| match pic {
+                    None => {
+                        if let Some(key) = self.line_part(ui, l, slot, text, (a, b), style, None, false, cov, at_caret) {
+                            pieces.push(Piece { from: a, to: b, key, picture: false });
+                        }
+                    }
+                    Some(p) => {
+                        let side = at_caret.then_some(byte >= b);
+                        let key = self.cell_picture(ui, l, p, room, chosen(a, b), side);
+                        pieces.push(Piece { from: a, to: b, key, picture: true });
+                    }
+                });
+            }
+        });
+        // What was drawn, as a line's text says it (`line_part`).
+        let _cell = page::reading(slot);
+        let hidden: Vec<(usize, usize)> = inline::runs(text).iter().filter(|r| r.2.marker).map(|r| (r.0, r.1)).collect();
+        self.drawn.insert(slot, hash(&format!("{hidden:?}{text}")));
+        self.cell_pieces.insert(slot, pieces);
+        // A cell of pictures alone has no words' node: its pieces' is
+        // what stands for it.
+        self.slot_keys.entry(slot).or_insert(column);
+    }
+
+    /// A picture among a cell's words: as wide as the note gives it, or
+    /// its own, `room` at most, its shape kept; one not shown a small card
+    /// saying why, as a picture on its own line has. `chosen`, the
+    /// accent's ring round it; the caret beside it on the left or the
+    /// right (`side`, `true` the right). Returns its box's node.
+    fn cell_picture(&mut self, ui: &mut Ui<'_>, l: &Look, p: &carnet_core::doc::CellPicture, room: f32, chosen: bool, side: Option<bool>) -> Key {
+        let t = l.t;
+        let folder = self.page_folder();
+        let file = self.store.picture_file(&folder, &p.src, p.wiki);
+        let entry = file.as_ref().map(|f| self.images.get(f));
+        let theirs = file.as_deref().is_some_and(|f| !self.store.owns(f));
+        let ring = if chosen { t.accent } else { Color::TRANSPARENT };
+        let natural = match &entry {
+            Some(images::Entry::Ready { w, h, .. }) | Some(images::Entry::Loading { w, h }) if *w > 0 && *h > 0 => Some((*w as f32, *h as f32)),
+            _ => None,
+        };
+        let label = if p.alt.is_empty() { "Picture".to_string() } else { format!("Picture: {}", p.alt) };
+        let key = ui.child_key("picture");
+        let blink = ui.caret_visible();
+        // The caret beside it, `right` or left: its height, outside its edge.
+        let caret = |h: f32, right: bool| {
+            NodeSpec::row()
+                .size(2.0, h.max(8.0))
+                .radius(1.0)
+                .bg(t.accent)
+                .opacity(if blink { 1.0 } else { 0.0 })
+                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0))
+                .role(Role::None)
+        };
+        let Some((nw, nh)) = natural else {
+            let (glyph, why) = self.unshown_why(entry.as_ref(), theirs, &p.src, p.wiki);
+            let path = store::decode_src(&p.src);
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            let w = p.width.map_or(room, |w| (w as f32).min(room));
+            let words_w = (w - 54.0).max(40.0);
+            ui.with_keyed(
+                "picture",
+                NodeSpec::row()
+                    .width(Sizing::Fit)
+                    .max_width(w.max(page::PICTURE_MIN))
+                    .cross_align(Align::Center)
+                    .pad_xy(10.0, 8.0)
+                    .gap(8.0)
+                    .radius(radius::CARD)
+                    .bg(t.sunken)
+                    .border(2.0, ring)
+                    .on_layout(Value::Null)
+                    .role(Role::Image)
+                    .label(format!("{why}: {name}")),
+                |ui| {
+                    icons::icon(ui, glyph, t.muted, 16.0, false);
+                    ui.with(NodeSpec::column().gap(2.0).max_width(words_w), |ui| {
+                        ui.text_in(NodeSpec::row().max_width(words_w), why, TextStyle::new(Type::SMALL.size).color(t.fg));
+                        ui.text_in(NodeSpec::row().max_width(words_w), &name, TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis());
+                    });
+                    if let Some(right) = side {
+                        ui.leaf_keyed("caret", caret(36.0, right));
+                    }
+                },
+            );
+            if side.is_some() {
+                self.caret_fresh = true;
+            }
+            return key;
+        };
+        let (dw, _) = page::picture_width(nw, p.width, room, room, false);
+        let dh = dw * nh / nw;
+        ui.with_keyed("picture", NodeSpec::row().size(dw, dh).on_layout(Value::Null).role(Role::Image).label(label), |ui| {
+            match &entry {
+                Some(images::Entry::Ready { id: img, .. }) => {
+                    ui.image(*img, NodeSpec::row().size(dw, dh).radius(7.0).opacity(if theirs { THEIRS_OPACITY } else { 1.0 }));
+                }
+                // Decoding: the well it will fill.
+                _ => {
+                    ui.with(NodeSpec::row().size(dw, dh).radius(7.0).bg(t.sunken).center(), |ui| {
+                        icons::icon(ui, Glyph::Picture, t.faint, 24.0_f32.min(dh * 0.5), false)
+                    });
+                }
+            }
+            // The ring an overlay 4px out, so choosing it moves nothing.
+            ui.leaf(
+                NodeSpec::row()
+                    .size(dw + 8.0, dh + 8.0)
+                    .radius(radius::CARD)
+                    .border(2.0, ring)
+                    .role(Role::None)
+                    .float(FloatConfig::parent().offset(-4.0, -4.0).clipped()),
+            );
+            if let Some(right) = side {
+                ui.leaf_keyed("caret", caret(dh, right));
+            }
+        });
+        if side.is_some() {
+            self.caret_fresh = true;
+        }
+        key
     }
 
     /// One slot's text: a `line` row holding the wrapped text — its inline
@@ -1254,11 +1434,34 @@ impl Carnet {
         strike: bool,
         cov: &Coverage,
     ) {
-        let t = &l.t;
         let here = self.editing && self.caret.head.slot == slot;
+        self.line_part(ui, l, slot, text, (0, text.len()), style, hint, strike, cov, here);
+    }
+
+    /// The words of `slot` from `lo` to `hi` as [`slot_line`](Self::slot_line)
+    /// draws a slot's — all of them, or a stretch of a cell's between its
+    /// pictures — with the caret if it is drawn here (`here`). Returns
+    /// the text's node.
+    #[allow(clippy::too_many_arguments)]
+    fn line_part(
+        &mut self,
+        ui: &mut Ui<'_>,
+        l: &Look,
+        slot: Slot,
+        text: &str,
+        (lo, hi): (usize, usize),
+        style: TextStyle,
+        hint: Option<&str>,
+        strike: bool,
+        cov: &Coverage,
+        here: bool,
+    ) -> Option<Key> {
+        let t = &l.t;
         let byte = self.caret.head.byte.min(text.len());
         // Code blocks are code: no inline styles in them.
         let code_block = matches!(self.doc().get(slot.block).map(|b| &b.kind), Some(Kind::Raw(_)));
+        // A cell's text as a cell's: its pictures among its words.
+        let _cell = page::reading(slot);
         let runs = if code_block {
             vec![(0, text.len(), inline::Style::default())]
         } else {
@@ -1275,17 +1478,23 @@ impl Carnet {
             // What is drawn: what a press's byte is read back through.
             self.shown.insert(slot, inline::Visible::of(text));
         }
+        // Bytes of the drawn text from where this part starts.
+        let d0 = self.drawn_byte(slot, lo);
         let mut row = NodeSpec::row().grow_width().role(Role::Line);
         if here {
-            row = row.caret(self.drawn_byte(slot, byte) as u32);
+            row = row.caret(self.drawn_byte(slot, byte).saturating_sub(d0) as u32);
             if self.caret.anchor.slot == slot && !self.caret.is_empty() {
-                row = row.selection_anchor(self.drawn_byte(slot, self.caret.anchor.byte) as u32);
+                row = row.selection_anchor((self.drawn_byte(slot, self.caret.anchor.byte.clamp(lo, hi)) - d0) as u32);
             }
         }
+        // A stretch of a cell's words: its cell says what was drawn, once
+        // all of it is (`cell_line`).
         let drawn = hash(&format!("{hidden:?}{text}"));
         let fresh = self.drawn.get(&slot) == Some(&drawn);
-        self.drawn.insert(slot, drawn);
-        let (drawn_byte, drawn_0) = (self.drawn_byte(slot, byte), self.drawn_byte(slot, 0));
+        if (lo, hi) == (0, text.len()) {
+            self.drawn.insert(slot, drawn);
+        }
+        let (drawn_byte, drawn_0) = (self.drawn_byte(slot, byte).saturating_sub(d0), 0);
         let preedit = if here { self.preedit.clone() } else { None };
         // A selection shows only while the page has the keyboard: one
         // selection in the window at a time. A block covered whole wears
@@ -1295,6 +1504,7 @@ impl Carnet {
             .get(&slot)
             .copied()
             .filter(|_| self.editing && !cov.whole.contains(&slot.block))
+            .map(|(f, to)| (f.max(lo), to.min(hi)))
             .filter(|(f, to)| f < to);
         if here {
             self.caret_fresh = fresh;
@@ -1309,21 +1519,23 @@ impl Carnet {
             .filter(|&(f, _)| !(preedit.is_some() && byte <= f));
         let (dark, page_bg) = (l.c.dark, t.bg);
         let (cap_lines, cap_accent, text_w) = (self.settings.initial_lines, self.settings.initial_accent, self.text_w);
+        let mut text_key = None;
         ui.with(row, |ui| {
             let key = ui.child_key_indexed(0);
+            text_key = Some(key);
             let mut spans: Vec<Span<'_>> = Vec::new();
             // The span holding the first letter, if it may drop, and
             // whether the letter has a colour of its own.
             let mut letter: Option<usize> = None;
             let mut letter_own = false;
-            if text.is_empty() && preedit.is_none() {
+            if lo == hi && preedit.is_none() {
                 // An empty line still has a line's height, and a place for
                 // the caret; its placeholder floats over it, easing in.
                 spans.push(Span::new("\u{200B}"));
             } else {
                 // Cut points: the styles' runs, the selection's ends and
                 // the composition.
-                let mut cuts = vec![0, text.len()];
+                let mut cuts = vec![lo, hi];
                 cuts.extend(runs.iter().map(|r| r.0));
                 cuts.extend(hidden.iter().flat_map(|&(f, to)| [f, to]));
                 if let Some((f, to)) = part {
@@ -1335,6 +1547,7 @@ impl Carnet {
                 if let Some((f, to)) = cap {
                     cuts.extend([f, to]);
                 }
+                cuts.retain(|&c| lo <= c && c <= hi);
                 cuts.sort_unstable();
                 cuts.dedup();
                 for w in cuts.windows(2) {
@@ -1406,7 +1619,7 @@ impl Carnet {
                     }
                     spans.push(sp);
                 }
-                if preedit.is_some() && byte == text.len() {
+                if preedit.is_some() && byte == hi {
                     spans.push(Span::new(preedit.as_deref().unwrap_or("")).underline());
                 }
                 if spans.is_empty() {
@@ -1467,7 +1680,7 @@ impl Carnet {
             };
             // On an empty line the caret is the line's start: nothing to
             // measure, so nothing to wait for.
-            if text.is_empty() {
+            if lo == hi {
                 ui.leaf_keyed("caret", bar(style.line_height, (0.0, 0.0), blink));
                 return;
             }
@@ -1485,6 +1698,7 @@ impl Carnet {
                 }
             }
         });
+        text_key
     }
 
     /// Where the drawn text has source byte `b` of `slot`: past the marks
@@ -1499,16 +1713,64 @@ impl Carnet {
         self.shown.get(&slot).map_or(r, |v| v.at(r))
     }
 
-    /// Where the last layout put source byte `b` of `slot`.
+    /// Where the last layout put source byte `b` of `slot`. In a cell with
+    /// pictures, in the stretch of words that holds it, else at the edge
+    /// of the picture beside it.
     pub(super) fn rect_at(&self, core: &Core, slot: Slot, b: usize) -> Option<Rect> {
+        if let Some(pieces) = self.cell_pieces.get(&slot) {
+            let words = pieces.iter().find(|p| !p.picture && p.from <= b && b <= p.to);
+            let p = words.or_else(|| pieces.iter().find(|p| p.from <= b && b <= p.to))?;
+            if p.picture {
+                let r = core.layout_of(p.key)?;
+                let x = if b <= p.from { r.x } else { r.x + r.w };
+                return Some(Rect { x, w: 0.0, ..r });
+            }
+            return core.caret_rect(p.key, self.drawn_byte(slot, b) - self.drawn_byte(slot, p.from));
+        }
         let k = *self.slot_keys.get(&slot)?;
         core.caret_rect(k, self.drawn_byte(slot, b))
     }
 
-    /// The source byte of `slot` under a point, by the last layout.
+    /// The source byte of `slot` under a point, by the last layout. In a
+    /// cell with pictures, of the piece nearest it up or down: a byte of
+    /// its words, or before or after its picture, by the picture's half.
     fn byte_under(&self, core: &Core, slot: Slot, at: Vec2) -> Option<usize> {
+        if let Some(pieces) = self.cell_pieces.get(&slot) {
+            let span = |p: &Piece| -> Option<(f32, f32)> {
+                if p.picture {
+                    let r = core.layout_of(p.key)?;
+                    return Some((r.y, r.y + r.h));
+                }
+                let n = self.drawn_byte(slot, p.to) - self.drawn_byte(slot, p.from);
+                let (a, e) = (core.caret_rect(p.key, 0)?, core.caret_rect(p.key, n)?);
+                Some((a.y, e.y + e.h))
+            };
+            let off = |(top, bottom): (f32, f32)| (top - at.y).max(0.0).max(at.y - bottom);
+            let (p, _) = pieces.iter().filter_map(|p| Some((p, off(span(p)?)))).min_by(|a, b| a.1.total_cmp(&b.1))?;
+            if p.picture {
+                let r = core.layout_of(p.key)?;
+                return Some(if at.x < r.x + r.w / 2.0 { p.from } else { p.to });
+            }
+            return core.text_hit(p.key, at).map(|h| self.source_byte(slot, self.drawn_byte(slot, p.from) + h.byte));
+        }
         let k = *self.slot_keys.get(&slot)?;
         core.text_hit(k, at).map(|h| self.source_byte(slot, h.byte))
+    }
+
+    /// The table cell under a point, by the last layout.
+    pub(super) fn cell_at(&self, x: f32, y: f32) -> Option<Slot> {
+        self.cell_rects.iter().find(|(_, r)| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h).map(|(s, _)| *s)
+    }
+
+    /// The picture among a cell's words under a point, by the last
+    /// layout: its cell and where it is in the cell's text.
+    fn cell_picture_under(&self, core: &Core, x: f32, y: f32) -> Option<(Slot, usize, usize)> {
+        self.cell_pieces.iter().find_map(|(slot, pieces)| {
+            pieces.iter().filter(|p| p.picture).find_map(|p| {
+                let r = core.layout_of(p.key)?;
+                (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h).then_some((*slot, p.from, p.to))
+            })
+        })
     }
 
     // ------------------------------------------------------------ input
@@ -2428,6 +2690,17 @@ impl Carnet {
     fn insert_pictures(&mut self, srcs: Vec<String>, at: Option<usize>) {
         self.editing = true;
         self.focus_page = true;
+        // The caret in a table's cell: among its words, one after another.
+        if at.is_none() && self.caret.head.slot.cell.is_some() {
+            self.edit(Step::Other, |d, c| {
+                let mut changed = false;
+                for src in &srcs {
+                    changed |= page::insert_cell_picture(d, c, src);
+                }
+                changed
+            });
+            return;
+        }
         let kinds: Vec<Kind> = srcs
             .into_iter()
             .map(|src| Kind::Image { src, alt: String::new(), width: None, float: carnet_core::doc::Float::None, wiki: false })
@@ -2601,6 +2874,17 @@ impl Carnet {
                 {
                     self.drag = None;
                     self.open_url(&url);
+                    return;
+                }
+                // A press on a picture among a cell's words chooses it, whole.
+                if clicks == 1
+                    && !core.modifiers().shift
+                    && let Some((slot, a, b)) = self.cell_picture_under(core, x, y)
+                {
+                    self.caret = Caret { anchor: Pos { slot, byte: a }, head: Pos { slot, byte: b } };
+                    self.drag = Some(Drag::Text { unit: None });
+                    self.drag_at = Some((Vec2::new(x, y), Vec2::new(x, y), core.now()));
+                    self.reveal = false;
                     return;
                 }
                 match self.hit(core, x, y).filter(|_| !self.in_margin(x, y)) {

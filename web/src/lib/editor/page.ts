@@ -460,6 +460,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
 
   const tables: TableContext = {
     pe,
+    pictures: o.pictures,
     view: () => view,
     push: () => view?.dispatch({ ...pageSpec(pe, view.state.doc.toString()), scrollIntoView: false }),
     edited: () => o.edited(),

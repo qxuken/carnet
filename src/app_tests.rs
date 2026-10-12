@@ -6941,3 +6941,61 @@ fn the_waiting_line_waits_a_moment_and_says_all_sent() {
     assert_eq!(w.said(2.6, false).0, Some(Waited::Sent));
     assert_eq!(w.said(2.0 + SENT_SHOWN_FOR, false).0, None);
 }
+
+/// A picture among a table cell's words: drawn in the cell, as wide as
+/// the cell's room (it is wider), its shape kept, the words under it; one
+/// letter to the caret, chosen by a press and taken whole by Backspace;
+/// one pasted with the caret in a cell goes into the cell.
+#[test]
+fn a_picture_in_a_cell_is_drawn_in_it_and_taken_whole() {
+    let (mut app, mut d, dir) = body("cell-picture");
+    let rgba: Vec<u8> = (0..800 * 400).flat_map(|_| [30u8, 90, 160, 255]).collect();
+    let png = crate::images::encode_png(800, 400, &rgba).unwrap();
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 800, h: 400, rgba });
+    let pic = "![|left|9000](attachments/wide.png)";
+    let table = Table::from_cells(vec![vec!["img1".into(), "img2".into()], vec![format!("{pic}Words"), String::new()]]);
+    app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
+    app.caret = Caret::at(page::first(app.doc()));
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let Kind::Table(t) = &blocks(&app)[0].kind else { panic!() };
+    let slot = Slot { block: blocks(&app)[0].id, cell: Some((t.rows[1].id, t.cols[0])) };
+    let pieces = app.cell_pieces.get(&slot).expect("a cell of pieces").clone();
+    assert_eq!(pieces.iter().map(|p| p.picture).collect::<Vec<_>>(), [true, false], "the picture, then its words");
+    let r = d.core.layout_of(pieces[0].key).expect("the picture's box");
+    let cell = *app.cell_rects.get(&slot).unwrap();
+    assert!((r.w - (cell.w - 28.0)).abs() <= 2.0, "as wide as the cell's room: {r:?} in {cell:?}");
+    assert!((r.w - 2.0 * r.h).abs() <= 1.0, "its shape: {r:?}");
+    let image = d.core.nodes().iter().any(|n| n.role == Some(Role::Image) && (n.rect.w - r.w).abs() < 0.5);
+    assert!(image, "an image node of the cell's width");
+    // Its words below it.
+    let words = app.rect_at(&d.core, slot, pic.len() + 2).unwrap();
+    assert!(words.y > r.y + r.h - 1.0, "{words:?} under {r:?}");
+    // A press on it chooses it whole; Backspace takes it whole.
+    d.click(&mut app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d.frame(&mut app);
+    assert_eq!((app.caret.anchor, app.caret.head), (Pos { slot, byte: 0 }, Pos { slot, byte: pic.len() }));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(page::text(app.doc(), slot), "Words");
+    // → steps over a picture whole.
+    if let Some(Kind::Table(t)) = app.store.notes[app.current].doc.get_mut(slot.block).map(|b| &mut b.kind) {
+        t.rows[1].cells[0] = format!("a{pic}b");
+    }
+    app.caret = Caret::at(Pos { slot, byte: 1 });
+    d.frame(&mut app);
+    key(&mut app, &mut d, "right");
+    assert_eq!(app.caret.head, Pos { slot, byte: 1 + pic.len() });
+    // Pasted with the caret in a cell: into the cell, after the caret.
+    let small: Vec<u8> = (0..12).flat_map(|_| [10u8, 20, 30, 255]).collect();
+    app.paste_picture(4, 3, &small);
+    d.frame(&mut app);
+    let now = page::text(app.doc(), slot).to_string();
+    assert!(now.starts_with(&format!("a{pic}![](attachments/pasted-")) && now.ends_with(".png)b"), "{now}");
+    assert_eq!(blocks(&app).len(), 2, "no block of its own");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}

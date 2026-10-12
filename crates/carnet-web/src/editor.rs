@@ -447,11 +447,16 @@ impl Editor {
     }
 
     /// A picture (`src` as the note links it) on its own line below the
-    /// caret's block (in place of an empty paragraph), the caret past it.
+    /// caret's block (in place of an empty paragraph), the caret past it;
+    /// in a table's cell, among its words at the caret.
     pub fn insert_picture(&mut self, src: &str) -> bool {
         if !matches!(self.focus, Focus::Body) {
             self.focus = Focus::Body;
             self.caret = Caret::at(page::first(&self.doc));
+        }
+        // In a table's cell: among its words.
+        if self.caret.head.slot.cell.is_some() {
+            return self.edit(Step::Other, |d, c| page::insert_cell_picture(d, c, src));
         }
         let kind = Kind::Image { src: src.to_string(), alt: String::new(), width: None, float: doc::Float::None, wiki: false };
         self.edit(Step::Other, |d, c| page::insert_block(d, c, kind))
@@ -733,9 +738,16 @@ impl Editor {
                             .iter()
                             .map(|&col| {
                                 let slot = Slot { block: b.id, cell: Some((r.id, col)) };
-                                let words = page::visible(&self.doc, slot).text(page::text(&self.doc, slot));
+                                let v = page::visible(&self.doc, slot);
+                                let t = page::text(&self.doc, slot);
+                                let words = v.text(t);
                                 let line = Line { block: Some(i), slot: Some(slot), start: 0, text: words.clone(), first: true };
-                                (words, self.runs(slot, &line))
+                                // Each picture where its one letter is in the words.
+                                let pictures = inline::cell_pictures(t)
+                                    .into_iter()
+                                    .map(|p| CellPicture { at: byte_to_u16(&words, v.drawn(p.at.0)), src: p.src, alt: p.alt, width: p.width, wiki: p.wiki })
+                                    .collect();
+                                Cell { words, runs: self.runs(slot, &line), pictures }
                             })
                             .collect()
                     })
@@ -776,6 +788,7 @@ impl Editor {
     /// A line's words in runs of one style: `(from, to)` in UTF-16 with
     /// the style, plain runs left out.
     fn runs(&self, slot: Slot, l: &Line) -> Runs {
+        let _r = page::reading(slot);
         let t = page::text(&self.doc, slot);
         let v = page::visible(&self.doc, slot);
         let styles = inline::styles(t);
@@ -811,6 +824,27 @@ impl Editor {
 /// Words in runs of one style: `(from, to)` in UTF-16 with the style.
 pub type Runs = Vec<(usize, usize, Style)>;
 
+/// A table's cell, as it is drawn: its words, their styles, and its
+/// pictures, each one letter of the words (a run with `picture`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cell {
+    pub words: String,
+    pub runs: Runs,
+    pub pictures: Vec<CellPicture>,
+}
+
+/// A picture among a cell's words: where its letter is (UTF-16), its
+/// `src` as the note has it (an Obsidian embed's, with `wiki`), its alt
+/// text and the width the note gives it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CellPicture {
+    pub at: usize,
+    pub src: String,
+    pub alt: String,
+    pub width: Option<u32>,
+    pub wiki: bool,
+}
+
 /// How a line is drawn.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Look {
@@ -827,8 +861,8 @@ pub struct Look {
     pub width: Option<u32>,
     /// A picture's place: on its own line, or at an edge.
     pub float: doc::Float,
-    /// A table's cells, row by row: each one's words and their styles.
-    pub cells: Vec<Vec<(String, Runs)>>,
+    /// A table's cells, row by row.
+    pub cells: Vec<Vec<Cell>>,
     /// The table's first row is its header.
     pub head: bool,
     /// A paragraph's first line whose first letter drops: 1, or 2 when
@@ -1110,8 +1144,8 @@ mod tests {
         assert_eq!(e.lines()[1].text, OBJECT.to_string());
         let look = e.look(1);
         assert_eq!(look.kind, "table");
-        assert_eq!(look.cells[1][1].0, "Beach");
-        assert!(look.cells[1][1].1.iter().any(|r| r.2.bold));
+        assert_eq!(look.cells[1][1].words, "Beach");
+        assert!(look.cells[1][1].runs.iter().any(|r| r.2.bold));
         // Typing in a cell: bold carries on, as in the text.
         assert!(e.cell_select(1, 1, 1, 5, 5));
         e.input("s");
@@ -1136,10 +1170,10 @@ mod tests {
         e.cell_select(1, 1, 0, 0, 0);
         e.sort_table();
         assert_eq!(e.sorted(), Some(false), "A to Z (already so: nothing moved)");
-        assert_eq!(e.look(1).cells[1][0].0, "Sat");
+        assert_eq!(e.look(1).cells[1][0].words, "Sat");
         assert!(e.sort_table());
         assert_eq!(e.sorted(), Some(true));
-        assert_eq!(e.look(1).cells[1][0].0, "Sun");
+        assert_eq!(e.look(1).cells[1][0].words, "Sun");
         assert!(e.markdown().contains("| Sun |"), "{}", e.markdown());
         // A new table in an empty paragraph.
         let mut e = Editor::open("# T\n\n");
@@ -1148,6 +1182,30 @@ mod tests {
         assert_eq!(e.cell_caret().map(|c| (c.1, c.2)), Some((0, 0)));
         e.input("a");
         assert!(e.markdown().contains("| a |"), "{}", e.markdown());
+    }
+
+    /// A picture in a cell: drawn as one letter of the cell's words, with
+    /// what it shows; the caret steps over it, Backspace takes it whole,
+    /// and one put in from the toolbar goes into the cell.
+    #[test]
+    fn a_picture_in_a_cell_is_one_letter() {
+        let mut e = Editor::open("# T\n\n| img1 | img2 |\n|---|---|\n| ![|left|260](../attachments/aerial.jpg) é | |\n");
+        let look = e.look(1);
+        let cell = &look.cells[1][0];
+        assert_eq!(cell.words, "! é");
+        assert_eq!(cell.pictures, [CellPicture { at: 0, src: "../attachments/aerial.jpg".into(), alt: String::new(), width: Some(260), wiki: false }]);
+        assert!(cell.runs.iter().any(|r| (r.0, r.1) == (0, 1) && r.2.picture), "{:?}", cell.runs);
+        // After the picture, then Backspace: gone whole.
+        assert!(e.cell_select(1, 1, 0, 1, 1));
+        assert_eq!(e.cell_caret(), Some((1, 1, 0, 1, 1)));
+        assert!(e.backspace(false));
+        assert!(e.markdown().contains("|  é |  |"), "{}", e.markdown());
+        // One put in from the toolbar while the caret is in a cell.
+        assert!(e.cell_select(1, 1, 1, 0, 0));
+        assert!(e.insert_picture("../attachments/b c.png"));
+        assert!(e.markdown().contains("| ![](<../attachments/b c.png>) |"), "{}", e.markdown());
+        assert_eq!(e.cell_caret(), Some((1, 1, 1, 1, 1)), "after it");
+        assert_eq!(e.look(1).cells[1][1].pictures.len(), 1);
     }
 
     #[test]

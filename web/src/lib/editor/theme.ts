@@ -169,4 +169,12 @@ export const theme = EditorView.theme({
   '.cm-tablewrap th': { background: 'var(--sunken)', color: 'var(--muted)', font: '400 12.5px/18px var(--sans)', padding: '9px 14px' },
   '.cm-tablewrap tr:first-child > :first-child': { borderTopLeftRadius: 'calc(var(--radius) - 1px)' },
   '.cm-tablewrap tr:first-child > :last-child': { borderTopRightRadius: 'calc(var(--radius) - 1px)' },
+  // A picture among a cell's words (table.ts): as wide as the note gives
+  // it, or its own, under half the text's when it has no width given, as
+  // the reader has it; its place until it comes the same. (A cell is as
+  // wide as what it holds: a share of it would be a share of nothing.)
+  '.cm-cellpic': { display: 'inline-block', verticalAlign: 'top', borderRadius: 'var(--radius)', cursor: 'default' },
+  '.cm-cellpic-img': { display: 'block', maxWidth: '45cqi', height: 'auto', borderRadius: 'var(--radius)', background: 'var(--sunken)' },
+  '.cm-cellpic-img[width]': { maxWidth: '100cqi' },
+  '.cm-cellpic .picture-card': { width: 'min(45cqi, 280px)', minHeight: '72px', margin: '0' },
 });

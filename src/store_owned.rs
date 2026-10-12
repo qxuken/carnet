@@ -70,6 +70,33 @@ pub fn set_srcs(doc: &mut Doc, edits: &[(u64, String)]) -> bool {
     changed
 }
 
+/// The pictures among a doc's table cells' words that `edits` names (the
+/// `src` it has, whether an Obsidian embed names it, the `src` it gets)
+/// given those `src`s. True if any changed.
+pub fn set_cell_srcs(doc: &mut Doc, edits: &[(String, bool, String)]) -> bool {
+    if edits.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+    for i in 0..doc.len() {
+        let Kind::Table(t) = &doc.blocks()[i].kind else { continue };
+        let mut cells = t.clone();
+        let mut here = false;
+        for cell in cells.rows.iter_mut().flat_map(|r| r.cells.iter_mut()) {
+            let to = |p: &carnet_core::doc::CellPicture| edits.iter().find(|(src, wiki, _)| *src == p.src && *wiki == p.wiki).map(|(_, _, new)| new.clone());
+            if let Some(new) = carnet_core::doc::relink_cell(cell, to) {
+                *cell = new;
+                here = true;
+            }
+        }
+        if here {
+            doc.block_mut(i).kind = Kind::Table(cells);
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// What Move into Carnet did: enough to undo it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Moved {
@@ -118,6 +145,26 @@ impl Store {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Note `i`'s pictures among its table cells' words that show the file
+    /// at `file`: each one's `src`, whether an Obsidian embed names it,
+    /// and the `src` that shows `to` instead ([`set_cell_srcs`]).
+    pub fn cell_relinks(&self, i: usize, file: &Path, to: &Path) -> Vec<(String, bool, String)> {
+        let n = &self.notes[i];
+        let mut out: Vec<(String, bool, String)> = Vec::new();
+        for b in n.doc.blocks() {
+            let Kind::Table(t) = &b.kind else { continue };
+            for cell in t.rows.iter().flat_map(|r| &r.cells) {
+                for p in carnet_core::inline::cell_pictures(cell) {
+                    if self.picture_file(&n.folder, &p.src, p.wiki).is_some_and(|f| same_file(&f, file)) && !out.iter().any(|(s, w, _)| *s == p.src && *w == p.wiki) {
+                        let new = self.src_for(&n.folder, to, p.wiki);
+                        out.push((p.src, p.wiki, new));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Note `i`'s pictures that show the file at `file`, each with the
@@ -193,7 +240,9 @@ impl Store {
             let Some(i) = self.notes.iter().position(|n| n.id == *id) else { continue };
             let still: Vec<u64> = self.showing(i, &m.to).into_iter().map(|(b, ..)| b).collect();
             let back: Vec<(u64, String)> = srcs.iter().filter(|(b, _)| still.contains(b)).cloned().collect();
-            if set_srcs(&mut self.notes[i].doc, &back) {
+            // A cell's: shown where it was again, by its path from there.
+            let cells = self.cell_relinks(i, &m.to, &m.from);
+            if set_srcs(&mut self.notes[i].doc, &back) | set_cell_srcs(&mut self.notes[i].doc, &cells) {
                 self.notes[i].touch();
                 self.save(i, false)?;
             }
@@ -215,11 +264,13 @@ impl Store {
     fn show_elsewhere(&mut self, from: &Path, to: &Path, moved: &mut Moved) -> io::Result<()> {
         for i in 0..self.notes.len() {
             let before = self.showing(i, from);
-            if before.is_empty() {
+            let cells = self.cell_relinks(i, from, to);
+            if before.is_empty() && cells.is_empty() {
                 continue;
             }
             let edits = self.relinks(i, from, to);
             set_srcs(&mut self.notes[i].doc, &edits);
+            set_cell_srcs(&mut self.notes[i].doc, &cells);
             self.notes[i].touch();
             self.save(i, false)?;
             moved.notes.push((self.notes[i].id, before.into_iter().map(|(b, src, _)| (b, src)).collect()));
@@ -657,6 +708,43 @@ mod tests {
         // Shown again (a paste's undo undone, a version restored): back.
         edit(&mut s, i, "![](../attachments/pasted.png)");
         assert!(dir.join("attachments/pasted.png").exists());
+    }
+
+    /// Pictures among a table's cells' words are pictures as any other:
+    /// shown, so in use and never swept (nor dropped on another device's
+    /// word); a note moved to another folder has their paths rewritten
+    /// from there, and the user's own one moved into Carnet is shown from
+    /// the attachments folder, and from where it was again when that is
+    /// undone.
+    #[test]
+    fn pictures_in_a_tables_cells_are_pictures_too() {
+        let dir = temp_dir("cells");
+        let mut s = Store::open(dir.clone()).unwrap();
+        fs::create_dir_all(dir.join(ATTACHMENTS)).unwrap();
+        fs::create_dir_all(dir.join("Home")).unwrap();
+        fs::write(dir.join("attachments/cell.png"), b"c").unwrap();
+        fs::write(dir.join("Home/mine.png"), b"m").unwrap();
+        let i = note(&mut s, "Home", "Walk", "| a | b |\n| --- | --- |\n| ![|left|260](../attachments/cell.png) and words | ![](mine.png) |");
+        assert!(s.pictures_in_use().contains("attachments/cell.png"));
+        let key = s.notes[i].key.unwrap();
+        assert!(s.shown_by(&[key]).contains("attachments/cell.png"), "what sync asks back");
+        let t0 = SystemTime::now();
+        let none = BTreeSet::new();
+        for d in [0, 8, 30] {
+            assert!(s.sweep_pictures(&none, t0 + d * DAY).unwrap().is_empty(), "day {d}");
+        }
+        assert!(dir.join("attachments/cell.png").exists());
+        // Moved to the top: each path from there.
+        s.move_note(i, "").unwrap();
+        let read = || fs::read_to_string(dir.join("Walk.md")).unwrap();
+        assert!(read().contains("| ![|left|260](attachments/cell.png) and words | ![](Home/mine.png) |"), "{}", read());
+        // The user's own, moved into Carnet: shown from there; back.
+        let m = s.move_picture(&dir.join("Home/mine.png")).unwrap();
+        assert!(read().contains("| ![](attachments/mine.png) |"), "{}", read());
+        s.unmove_picture(&m).unwrap();
+        assert!(read().contains("| ![](Home/mine.png) |"), "{}", read());
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A picture taken out of its note by an edit stays while the note's

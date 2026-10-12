@@ -771,10 +771,13 @@ impl PageEditor {
     /// How each line is drawn, as JSON: `[{k: kind, f: first of its block,
     /// i: indent, d: done, n: number, r: [[from, to, flags, mark, ink]],
     /// src, wk: the src an Obsidian embed's, alt, w, fl: a picture's place
-    /// (0 its own line, 1 left, 2 right), cells, hd: a table's first row
-    /// its header, ini: a paragraph's first line whose first letter drops,
-    /// 1, or 2 when the letter has a colour of its own}]`. Flags: 1 bold, 2 italic, 4 struck, 8 code,
-    /// 16 link; colours 0xRRGGBBAA, a mark of 1 the plain highlighter.
+    /// (0 its own line, 1 left, 2 right), cells: [[{t: words, r: runs, p:
+    /// [[at, src, alt, width, wk]] its pictures, each the letter at `at`
+    /// of its words}]], hd: a table's first row its header, ini: a
+    /// paragraph's first line whose first letter drops, 1, or 2 when the
+    /// letter has a colour of its own}]`. Flags: 1 bold, 2 italic, 4
+    /// struck, 8 code, 16 link, 32 a cell's picture; colours 0xRRGGBBAA,
+    /// a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
         let n = self.e.lines().len();
         let items: Vec<String> = (0..n)
@@ -794,15 +797,26 @@ impl PageEditor {
                     .map(|row| {
                         let cells: Vec<String> = row
                             .iter()
-                            .map(|(text, runs)| {
-                                let runs: Vec<String> = runs
+                            .map(|cell| {
+                                let runs: Vec<String> = cell
+                                    .runs
                                     .iter()
                                     .map(|(a, b, s)| {
-                                        let flags = u8::from(s.bold) | u8::from(s.italic) << 1 | u8::from(s.strike) << 2 | u8::from(s.code) << 3 | u8::from(s.link) << 4;
+                                        let flags = u8::from(s.bold)
+                                            | u8::from(s.italic) << 1
+                                            | u8::from(s.strike) << 2
+                                            | u8::from(s.code) << 3
+                                            | u8::from(s.link) << 4
+                                            | u8::from(s.picture) << 5;
                                         format!("[{a},{b},{flags},{},{}]", s.mark, s.ink)
                                     })
                                     .collect();
-                                format!(r#"{{"t":{},"r":[{}]}}"#, json(text), runs.join(","))
+                                let pictures: Vec<String> = cell
+                                    .pictures
+                                    .iter()
+                                    .map(|p| format!("[{},{},{},{},{}]", p.at, json(&p.src), json(&p.alt), p.width.map_or("null".into(), |w| w.to_string()), p.wiki))
+                                    .collect();
+                                format!(r#"{{"t":{},"r":[{}],"p":[{}]}}"#, json(&cell.words), runs.join(","), pictures.join(","))
                             })
                             .collect();
                         format!("[{}]", cells.join(","))

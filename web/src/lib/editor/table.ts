@@ -4,16 +4,28 @@
 // on to the next cell, a style carries on as in the text). What's typed in
 // a cell goes to the page, which draws the cell again; an input method
 // composing in a cell is let be, and its words go in when it's done.
+//
+// A picture among a cell's words (`![|260](a.png)`) is one letter of
+// them to the page: drawn here as the picture, fetched as a picture on a
+// line of its own is, in a box the caret can't go into, which Backspace
+// and Delete take whole and a press selects.
 
 import { WidgetType, type EditorView } from '@codemirror/view';
 import type { PageEditor } from '../../wasm/carnet_web.js';
 import { inkCss, washCss } from '../colors';
+import { show, unshown } from '../pictures';
 
 export type Run = [number, number, number, number, number];
-export type Cell = { t: string; r: Run[] };
+/// A picture among a cell's words: the place of its letter in them, its
+/// `src` as the note has it, its alt text, the width the note gives it,
+/// and whether an Obsidian embed (`![[…]]`) names it.
+export type CellPic = [number, string, string, number | null, boolean];
+export type Cell = { t: string; r: Run[]; p?: CellPic[] };
 
 export type TableContext = {
   pe: PageEditor;
+  /// A picture's `src` (an Obsidian embed's, with `wiki`) as a URL to show.
+  pictures: (src: string, wiki: boolean) => Promise<string>;
   view: () => EditorView | null;
   /// The page's change shown (CodeMirror's text and how it's drawn).
   push: () => void;
@@ -21,8 +33,38 @@ export type TableContext = {
   moved: () => void;
 };
 
-/// `text` drawn into `el` in its runs' styles.
-function paint(el: HTMLElement, text: string, runs: Run[]) {
+/// A cell's picture: the box it is drawn in, or the one it was drawn in
+/// before, kept so a cell drawn again doesn't fetch it again.
+function pictureBox(pic: CellPic, ctx: TableContext, kept: Map<string, HTMLElement[]>): HTMLElement {
+  const [, src, alt, width, wiki] = pic;
+  const key = JSON.stringify(pic.slice(1));
+  const old = kept.get(key)?.shift();
+  if (old) return old;
+  const box = document.createElement('span');
+  box.className = 'cm-cellpic';
+  box.contentEditable = 'false';
+  box.dataset.key = key;
+  const img = document.createElement('img');
+  img.className = 'cm-cellpic-img';
+  img.alt = alt;
+  img.draggable = false;
+  if (width) img.setAttribute('width', String(width));
+  box.append(img);
+  unshown(img, src);
+  show(img, src, () => ctx.pictures(src, wiki));
+  return box;
+}
+
+/// Whether `n` is a cell's picture's box.
+const isPicture = (n: Node): n is HTMLElement => n instanceof HTMLElement && n.classList.contains('cm-cellpic');
+
+/// `text` drawn into `el` in its runs' styles, its pictures as pictures.
+function paint(el: HTMLElement, text: string, runs: Run[], pics: CellPic[], ctx: TableContext) {
+  const kept = new Map<string, HTMLElement[]>();
+  for (const box of el.querySelectorAll<HTMLElement>('.cm-cellpic')) {
+    const k = box.dataset.key ?? '';
+    kept.set(k, [...(kept.get(k) ?? []), box]);
+  }
   el.textContent = '';
   let at = 0;
   const plain = (to: number) => {
@@ -30,6 +72,15 @@ function paint(el: HTMLElement, text: string, runs: Run[]) {
   };
   for (const [a, b, flags, mark, ink] of runs) {
     plain(a);
+    if (flags & 32) {
+      // Each letter of the run a picture (two side by side are one run).
+      for (let k = a; k < b; k++) {
+        const pic = pics.find((p) => p[0] === k);
+        if (pic) el.append(pictureBox(pic, ctx, kept));
+      }
+      at = b;
+      continue;
+    }
     const s = document.createElement('span');
     const c: string[] = [];
     if (flags & 1) c.push('cm-b');
@@ -50,7 +101,17 @@ function paint(el: HTMLElement, text: string, runs: Run[]) {
   if (!text) el.append(document.createElement('br'));
 }
 
-/// UTF-16 offset of DOM point (`node`, `offset`) in `cell`'s words.
+/// How long `n` is in a cell's words: its text, a picture one letter.
+function wordsLength(n: Node): number {
+  if (isPicture(n)) return 1;
+  if (n.nodeType === Node.TEXT_NODE) return n.textContent?.length ?? 0;
+  let len = 0;
+  for (const c of n.childNodes) len += wordsLength(c);
+  return len;
+}
+
+/// UTF-16 offset of DOM point (`node`, `offset`) in `cell`'s words: a
+/// point in a picture's box is after it.
 function offsetIn(cell: HTMLElement, node: Node, offset: number): number {
   const r = document.createRange();
   r.setStart(cell, 0);
@@ -59,21 +120,34 @@ function offsetIn(cell: HTMLElement, node: Node, offset: number): number {
   } catch {
     return 0;
   }
-  return r.toString().length;
+  return wordsLength(r.cloneContents());
 }
 
-/// The DOM point for UTF-16 offset `n` in `cell`'s words.
+/// The DOM point for UTF-16 offset `n` in `cell`'s words: never inside a
+/// picture's box, but before or after it.
 function pointIn(cell: HTMLElement, n: number): [Node, number] {
-  const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
   let left = n;
   let last: [Node, number] = [cell, 0];
-  for (let t = walker.nextNode(); t; t = walker.nextNode()) {
-    const len = t.textContent?.length ?? 0;
-    if (left <= len) return [t, left];
-    left -= len;
-    last = [t, len];
-  }
-  return last;
+  const walk = (el: Node): [Node, number] | null => {
+    for (const [i, c] of [...el.childNodes].entries()) {
+      if (isPicture(c)) {
+        if (left === 0) return [el, i];
+        left -= 1;
+        last = [el, i + 1];
+        if (left === 0) return last;
+      } else if (c.nodeType === Node.TEXT_NODE) {
+        const len = c.textContent?.length ?? 0;
+        if (left <= len) return [c, left];
+        left -= len;
+        last = [c, len];
+      } else {
+        const found = walk(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return walk(cell) ?? last;
 }
 
 type Wrap = HTMLElement & { widget?: TableWidget };
@@ -131,7 +205,7 @@ export class TableWidget extends WidgetType {
         const drawn = JSON.stringify(cell);
         // A cell an input method is composing in is left as it is.
         if (el.dataset.drawn !== drawn && el.dataset.composing !== '1') {
-          paint(el, cell.t, cell.r);
+          paint(el, cell.t, cell.r, cell.p ?? [], this.ctx);
           el.dataset.drawn = drawn;
           el.dataset.text = cell.t;
         }
@@ -221,6 +295,20 @@ function bind(wrap: Wrap) {
   };
   wrap.addEventListener('mouseup', follow);
   wrap.addEventListener('keyup', follow);
+
+  // A press on a cell's picture selects it, whole.
+  wrap.addEventListener('mousedown', (e) => {
+    const box = e.button === 0 ? (e.target as Element).closest?.('.cm-cellpic') : null;
+    const w = widget();
+    const cell = cellOf(box ?? null);
+    if (!box || !w || !cell || !box.parentNode) return;
+    e.preventDefault();
+    if (document.activeElement !== cell) cell.focus({ preventScroll: true });
+    const i = [...box.parentNode.childNodes].indexOf(box);
+    getSelection()?.setBaseAndExtent(box.parentNode, i, box.parentNode, i + 1);
+    tell(w, cell);
+    w.ctx.moved();
+  });
 
   wrap.addEventListener('compositionstart', (e) => {
     const cell = cellOf(e.target);

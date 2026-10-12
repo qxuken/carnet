@@ -310,8 +310,16 @@ fn styled(doc: &Doc, slot: Slot) -> bool {
     !is_atomic(doc, slot) && !matches!(kind_at(doc, slot), Some(Kind::Raw(_)))
 }
 
-/// A slot's words as the page draws them: its marks hidden, code whole.
+/// A slot's text read as its own: a cell's with its pictures among the
+/// words ([`inline::CellText`]), any other as text. Until it is dropped.
+pub fn reading(slot: Slot) -> inline::CellText {
+    inline::cell_text(slot.cell.is_some())
+}
+
+/// A slot's words as the page draws them: its marks hidden, code whole;
+/// a picture in a cell one word, stepped over whole.
 pub fn visible(doc: &Doc, slot: Slot) -> Visible {
+    let _r = reading(slot);
     let t = text(doc, slot);
     if styled(doc, slot) { Visible::of(t) } else { Visible::all(t) }
 }
@@ -347,6 +355,7 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
         return Caret::at(ordered(doc, c).0);
     }
     let p = c.head;
+    let _r = reading(p.slot);
     let t = text(doc, p.slot);
     // By the words: marks are not there to step over.
     let v = visible(doc, p.slot);
@@ -375,6 +384,7 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
         return Caret::at(ordered(doc, c).1);
     }
     let p = c.head;
+    let _r = reading(p.slot);
     let t = text(doc, p.slot);
     let v = visible(doc, p.slot);
     let d = v.drawn(p.byte);
@@ -399,6 +409,7 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
 
 /// The word under a position (a double click).
 pub fn word_at(doc: &Doc, p: Pos) -> Caret {
+    let _r = reading(p.slot);
     let v = visible(doc, p.slot);
     let t = v.text(text(doc, p.slot));
     let mut a = floor_char(&t, v.drawn(p.byte));
@@ -532,6 +543,7 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
     let (a, b) = ordered(doc, *c);
     let all = slots(doc);
     let (ia, ib) = (index(&all, a.slot), index(&all, b.slot));
+    let read_a = reading(a.slot);
     // Within one slot: its text.
     if ia == ib {
         if is_atomic(doc, a.slot) {
@@ -582,16 +594,21 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
     let tail = if cov.whole.contains(&b.slot.block) {
         None
     } else {
+        let _r = reading(b.slot);
         Some(split_text(text(doc, b.slot), b.byte, b_marks).1)
     };
     // Cells of a partly covered table are cleared where covered.
     for (s, &(f, t)) in &cov.parts {
+        let _r = reading(*s);
         if s.cell.is_some() && !cov.whole.contains(&s.block)
             && let Some(text) = text_mut(doc, *s)
         {
             *text = inline::delete(text, f, t).0;
         }
     }
+    // What is cut and joined from here is the text of blocks, not cells.
+    drop(read_a);
+    let _r = inline::cell_text(false);
     let first_textual_kind = a.slot.cell.is_none() && !is_atomic(doc, a.slot);
     let first_kept = !cov.whole.contains(&a.slot.block) || (keep_first && first_textual_kind);
     let last_kept = !cov.whole.contains(&b.slot.block) && bb != ba;
@@ -787,6 +804,7 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
         return true;
     }
     let p = c.head;
+    let _r = reading(p.slot);
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     if is_atomic(doc, p.slot) {
         doc.remove(i);
@@ -943,6 +961,7 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
         return true;
     }
     let p = c.head;
+    let _r = reading(p.slot);
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     if is_atomic(doc, p.slot) {
         doc.remove(i);
@@ -1020,6 +1039,7 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
 pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
     replace_selection(doc, c);
     let p = c.head;
+    let _r = reading(p.slot);
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     let kind = doc.blocks()[i].kind.clone();
     let t = text(doc, p.slot).to_string();
@@ -1562,6 +1582,17 @@ pub fn set_image_float(doc: &mut Doc, id: u64, to: doc::Float) -> bool {
     false
 }
 
+/// A picture (`src` as the note links it) put among a table cell's
+/// words at the caret, over what is selected there, the caret after it.
+/// False when the caret isn't in a cell.
+pub fn insert_cell_picture(doc: &mut Doc, c: &mut Caret, src: &str) -> bool {
+    if c.head.slot.cell.is_none() || c.anchor.slot != c.head.slot {
+        return false;
+    }
+    replace_selection(doc, c);
+    insert(doc, c, &doc::image_markdown("", src, None, doc::Float::None))
+}
+
 /// The one picture a caret is on, or selects: its block's index. Not
 /// when the caret takes in anything else too.
 pub fn picture_at(doc: &Doc, c: Caret) -> Option<usize> {
@@ -1838,6 +1869,7 @@ fn edit_ranges(
         if from >= to || !styled(doc, s) {
             continue;
         }
+        let _r = reading(s);
         let Some((t, x, y)) = f(text(doc, s), from, to) else { continue };
         if s == a.slot {
             na.byte = x;
@@ -1867,6 +1899,7 @@ pub fn style_at(doc: &Doc, c: Caret) -> inline::Style {
     if !styled(doc, a.slot) {
         return inline::Style::default();
     }
+    let _r = reading(a.slot);
     let t = text(doc, a.slot);
     let v = Visible::of(t);
     let d = v.drawn(a.byte);
@@ -1896,12 +1929,14 @@ pub fn link_at(doc: &Doc, c: Caret) -> Option<(Slot, usize, String)> {
     if !styled(doc, p.slot) {
         return None;
     }
+    let _r = reading(p.slot);
     inline::link_at(text(doc, p.slot), p.byte).map(|(_, url)| (p.slot, p.byte, url))
 }
 
 /// The link at `at` in `slot` given address `url`, or taken off its words
 /// when `url` is `None`.
 pub fn set_link(doc: &mut Doc, slot: Slot, at: usize, url: Option<&str>) -> bool {
+    let _r = reading(slot);
     let t = text(doc, slot);
     let new = match url {
         Some(u) => inline::set_link(t, at, u),
@@ -1924,6 +1959,7 @@ pub fn make_link(doc: &mut Doc, c: &mut Caret, url: &str) -> bool {
             return false;
         }
         let p = c.head;
+        let _r = reading(p.slot);
         let link = format!("[{}]({})", url.trim(), inline::with_scheme(url).replace(' ', "%20"));
         if let Some(t) = text_mut(doc, p.slot) {
             t.insert_str(p.byte, &link);
@@ -1943,6 +1979,7 @@ pub fn insert_styled(doc: &mut Doc, c: &mut Caret, s: &str, pre: &str, post: &st
         return insert(doc, c, s);
     }
     let p = c.head;
+    let _r = reading(p.slot);
     let Some(t) = text_mut(doc, p.slot) else { return false };
     let (n, caret) = inline::insert_styled(t, p.byte, s, pre, post);
     *t = n;
@@ -2098,6 +2135,7 @@ impl Typing {
         if !c.is_empty() || c.head != (Pos { slot: k.slot, byte: k.end }) {
             return None;
         }
+        let _r = reading(k.slot);
         let t = text(doc, k.slot);
         let spaces = t.get(k.close.1..k.end)?;
         (closings(t, k.close.0) == Some(k.close.1) && spaces.chars().all(spacing)).then_some(k)
@@ -2122,6 +2160,7 @@ impl Typing {
     /// a run of it ([`inline::switch_at`]), for [`Typing::pend`].
     pub fn switch(&self, doc: &Doc, c: Caret, kind: inline::Kind) -> (String, String) {
         let p = self.styled_at(doc, c).head;
+        let _r = reading(p.slot);
         inline::switch_at(text(doc, p.slot), p.byte, kind)
     }
 
@@ -2172,6 +2211,7 @@ impl Typing {
     /// run's other colour, if it has one, which the words typed keep.
     pub fn tint_off(&self, doc: &Doc, c: Caret, ink: bool) -> Option<(String, String, Option<u32>)> {
         let p = self.styled_at(doc, c).head;
+        let _r = reading(p.slot);
         let t = text(doc, p.slot);
         let run = inline::tints(t)
             .into_iter()
@@ -2212,6 +2252,7 @@ impl Typing {
     fn spaces(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
         let pending = self.pending.take().filter(|q| q.caret == *c);
         let p = c.head;
+        let _r = reading(p.slot);
         if !styled(doc, p.slot) {
             self.carry = None;
             return insert(doc, c, s);
@@ -2255,6 +2296,7 @@ impl Typing {
 
     /// Letters alone (no space among them), at the caret.
     fn letters(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
+        let _r = reading(c.head.slot);
         let pending = self.pending.take().filter(|q| q.caret == *c);
         let Some(k) = self.carry_at(doc, *c) else {
             self.carry = None;
@@ -2320,6 +2362,7 @@ pub fn copy(doc: &Doc, c: Caret) -> Option<String> {
     }
     let (a, b) = ordered(doc, c);
     if a.slot == b.slot && !is_atomic(doc, a.slot) {
+        let _r = reading(a.slot);
         let t = text(doc, a.slot);
         let item = a.slot.cell.is_none() && matches!(kind_at(doc, a.slot), Some(Kind::Item { .. }));
         let v = visible(doc, a.slot);
@@ -2834,6 +2877,70 @@ mod tests {
         assert_eq!(up.len(), 2);
         let down = vertical(&d, up[0], false);
         assert_eq!(down, [Slot::block(d.blocks()[2].id)]);
+    }
+
+    /// A picture in a cell is one letter to the caret: the arrows step
+    /// over it, Backspace and Delete take it whole, a word typed beside it
+    /// goes beside it, and a style put on it goes round it. The same text
+    /// in a paragraph is the `!` and link it looks like.
+    #[test]
+    fn a_picture_in_a_cell_is_taken_whole() {
+        let pic = "![|left|260](../attachments/aerial.jpg)";
+        let cell = format!("a{pic}b");
+        let mut t = Table::new(2, 1);
+        t.rows[0].cells[0] = cell.clone();
+        let mut d = doc(vec![Block::new(Kind::Table(t)), Block::text(cell.clone())]);
+        let s = block_slots(&d.blocks()[0])[0];
+        let p = |byte| Caret::at(Pos { slot: s, byte });
+        let end = 1 + pic.len();
+        // →: over `a`, then over the picture whole, then over `b`.
+        let mut c = p(0);
+        c = right(&d, c, false, false);
+        assert_eq!(c.head.byte, 1);
+        c = right(&d, c, false, false);
+        assert_eq!(c.head.byte, end, "past the picture");
+        c = left(&d, c, false, false);
+        assert_eq!(c.head.byte, 1, "back before it");
+        assert_eq!(visible(&d, s).text(text(&d, s)), "a!b", "one letter in the words");
+        // A double click on it chooses no word in it.
+        let w = word_at(&d, Pos { slot: s, byte: 1 });
+        assert!(w.is_empty() || ordered(&d, w).1.byte <= 1 || ordered(&d, w).0.byte >= end, "{w:?}");
+        // In the paragraph: `!`, then its alt and link, letter by letter.
+        let para = Slot::block(d.blocks()[1].id);
+        let mut c = Caret::at(Pos { slot: para, byte: 1 });
+        c = right(&d, c, false, false);
+        assert!(c.head.byte < end, "a paragraph's is the link it looks like");
+        // Typed after it: after it.
+        let mut c = p(end);
+        insert(&mut d, &mut c, "x");
+        assert_eq!(text(&d, s), format!("a{pic}xb"));
+        // Backspace after `x`, then after the picture: gone whole.
+        backspace(&mut d, &mut c, false);
+        assert_eq!(c.head.byte, end);
+        backspace(&mut d, &mut c, false);
+        assert_eq!(text(&d, s), "ab");
+        assert_eq!(c.head.byte, 1);
+        // Delete before it: gone whole.
+        if let Some(t) = text_mut(&mut d, s) {
+            *t = cell.clone();
+        }
+        let mut c = p(1);
+        delete(&mut d, &mut c, false);
+        assert_eq!(text(&d, s), "ab");
+        // Chosen and made bold: the picture whole inside the marks.
+        if let Some(t) = text_mut(&mut d, s) {
+            *t = format!("a {pic} b");
+        }
+        let mut c = Caret { anchor: Pos { slot: s, byte: 2 }, head: Pos { slot: s, byte: end + 1 } };
+        style(&mut d, &mut c, inline::Kind::Bold);
+        assert_eq!(text(&d, s), format!("a **{pic}** b"));
+        // Copied: whole, marks and all.
+        let c = Caret { anchor: Pos { slot: s, byte: 0 }, head: Pos { slot: s, byte: text(&d, s).len() } };
+        assert_eq!(copy(&d, c).as_deref(), Some(text(&d, s)));
+        // Chosen and deleted with words round it.
+        let mut c = Caret { anchor: Pos { slot: s, byte: 0 }, head: Pos { slot: s, byte: text(&d, s).len() - 1 } };
+        delete_selection(&mut d, &mut c);
+        assert_eq!(text(&d, s), "b");
     }
 
     #[test]
