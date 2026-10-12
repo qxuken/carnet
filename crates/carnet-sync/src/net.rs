@@ -52,7 +52,7 @@ pub struct Link {
 }
 
 /// The socket's URL for a server's origin, with this build's protocol
-/// and which app it is: `https://x` → `wss://x/v1/sync?protocol=1&app=…`.
+/// and which app it is: `https://x` → `wss://x/v1/sync?protocol=2&app=…`.
 pub fn sync_url(origin: &str, app: &str, version: &str) -> Option<String> {
     let origin = origin.trim_end_matches('/');
     let rest = origin.strip_prefix("https://").map(|r| ("wss", r)).or_else(|| origin.strip_prefix("http://").map(|r| ("ws", r)))?;

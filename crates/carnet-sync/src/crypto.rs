@@ -8,8 +8,9 @@
 //!   device in the clear.
 //!
 //! Removing a device makes a new vault key (the next **epoch**), sent to
-//! each device kept in a **sealed box** only it opens (X25519), so the one
-//! removed reads nothing written after. A device keeps every epoch's key,
+//! each device kept in a **sealed box** only it opens (X25519), signed by
+//! the device that made it (`rekey.rs`), so the one removed reads nothing
+//! written after. A device keeps every epoch's key,
 //! its [`Ring`], so what was written before still reads. Each device's
 //! **card** (its name and keys) is sealed under the vault key: the server
 //! keeps it and cannot read it, nor make one up.
@@ -156,8 +157,16 @@ impl Ring {
         Ring(BTreeMap::from([(0, vault)]))
     }
 
-    pub fn insert(&mut self, epoch: u32, key: VaultKey) {
-        self.0.insert(epoch, key);
+    /// `epoch`'s key, added. An epoch it has keeps the key it has: a key
+    /// is never replaced (false).
+    pub fn insert(&mut self, epoch: u32, key: VaultKey) -> bool {
+        match self.0.entry(epoch) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(key);
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(_) => false,
+        }
     }
 
     pub fn get(&self, epoch: u32) -> Option<&VaultKey> {
@@ -258,25 +267,6 @@ pub fn seal_to(to: &[u8; 32], label: &[u8], plain: &[u8], rng: &mut impl Random)
     out.extend(iv);
     out.extend(seal(&key, iv, label, plain));
     out
-}
-
-/// What a new epoch's key travels as, boxed: the epoch, bound in.
-const REKEY: &[u8] = b"carnet rekey v1";
-
-/// A new epoch's vault key, sealed to one device's (or the recovery
-/// code's) box key.
-pub fn seal_rekey(to: &[u8; 32], epoch: u32, key: &VaultKey, rng: &mut impl Random) -> Vec<u8> {
-    let mut plain = epoch.to_be_bytes().to_vec();
-    plain.extend(key.0);
-    seal_to(to, REKEY, &plain, rng)
-}
-
-pub fn open_rekey(secret: &BoxSecret, boxed: &[u8]) -> Result<(u32, VaultKey), Sealed> {
-    let plain = secret.open(REKEY, boxed)?;
-    if plain.len() != 36 {
-        return Err(Sealed);
-    }
-    Ok((u32::from_be_bytes(plain[..4].try_into().expect("4")), VaultKey(plain[4..].try_into().expect("32"))))
 }
 
 /// A device as the account's other devices know it: its id, its keys, and
@@ -621,18 +611,18 @@ pub(crate) mod tests {
         let mut rng = Seeded(4);
         let a = DeviceKey::generate(&mut rng).box_secret();
         let b = DeviceKey::generate(&mut rng).box_secret();
-        let key = VaultKey::generate(&mut rng);
-        let boxed = seal_rekey(&a.public(), 3, &key, &mut rng);
-        assert_eq!(open_rekey(&a, &boxed), Ok((3, key.clone())));
-        assert_eq!(open_rekey(&b, &boxed), Err(Sealed), "not for b");
+        let key = VaultKey::generate(&mut rng).to_bytes();
+        let boxed = seal_to(&a.public(), b"carnet test v1", &key, &mut rng);
+        assert_eq!(a.open(b"carnet test v1", &boxed), Ok(key.to_vec()));
+        assert_eq!(b.open(b"carnet test v1", &boxed), Err(Sealed), "not for b");
         let mut bad = boxed.clone();
         bad[40] ^= 1;
-        assert_eq!(open_rekey(&a, &bad), Err(Sealed));
-        // Another label: not a rekey.
+        assert_eq!(a.open(b"carnet test v1", &bad), Err(Sealed));
+        // Another label: not what was sealed.
         assert_eq!(a.open(b"carnet other v1", &boxed), Err(Sealed));
         // A key of small order (zero) gets a box nobody opens.
-        let lost = seal_rekey(&[0; 32], 3, &key, &mut rng);
-        assert!(open_rekey(&a, &lost).is_err());
+        let lost = seal_to(&[0; 32], b"carnet test v1", &key, &mut rng);
+        assert!(a.open(b"carnet test v1", &lost).is_err());
         // The box key comes from the signing key: the same each time.
         let d = DeviceKey::generate(&mut rng);
         assert_eq!(d.box_secret().public(), DeviceKey::from_secret(d.secret()).box_secret().public());
@@ -643,8 +633,11 @@ pub(crate) mod tests {
         let mut rng = Seeded(5);
         let (k0, k1) = (VaultKey::generate(&mut rng), VaultKey::generate(&mut rng));
         let mut ring = Ring::new(k0.clone());
-        ring.insert(1, k1.clone());
+        assert!(ring.insert(1, k1.clone()));
         assert_eq!(ring.current(), (1, &k1));
+        // A key it has is never replaced.
+        assert!(!ring.insert(1, k0.clone()));
+        assert_eq!(ring.get(1), Some(&k1));
         assert_eq!(ring.get(0), Some(&k0));
         assert_eq!(Ring::from_bytes(&ring.to_bytes()), Some(ring.clone()));
         assert_eq!(Ring::from_bytes(&[1; 35]), None);

@@ -39,7 +39,7 @@
 use rand_core::{CryptoRng, RngCore};
 use spake2::{Ed25519Group, Identity as SpakeId, Password, Spake2};
 
-use crate::crypto::{DeviceKey, Random, RecoveryCode, Ring, Sealed, VaultKey, open_rekey, recovery_message};
+use crate::crypto::{DeviceKey, Random, RecoveryCode, Ring, Sealed, VaultKey, recovery_message};
 use crate::wire::{self, Carnet, Frame};
 
 /// The code a new device types: a nameplate and six secret digits.
@@ -383,14 +383,14 @@ impl Recoverer {
                     device_public: self.key.public(),
                 })));
             }
-            Carnet::Recovered { account, wrapped, rekeys } => match Ring::unwrap(&wrapped, &self.code.wrapping_key()) {
+            Carnet::Recovered { account, wrapped, mut rekeys } => match Ring::unwrap(&wrapped, &self.code.wrapping_key()) {
                 Ok(mut ring) => {
-                    // Each epoch since the code was made: one that does not
-                    // open is left out (records under it won't read).
-                    let secret = self.code.box_secret();
-                    for (epoch, key) in rekeys.iter().filter_map(|r| open_rekey(&secret, r).ok()) {
-                        ring.insert(epoch, key);
-                    }
+                    // Each epoch since the code was made, taken as a device
+                    // takes one (`rekey.rs`): signed by a device in the
+                    // account at the epoch before, never in place of a key
+                    // the ring has. One that isn't is left out (records
+                    // under it won't read).
+                    crate::rekey::take_all(&mut ring, &account, &self.code.box_secret(), &mut rekeys);
                     self.found = Some((account, ring));
                 }
                 Err(_) => self.state = Joining::Failed("the vault key did not open with these words".into()),

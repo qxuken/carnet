@@ -99,7 +99,8 @@ pub enum Carnet {
     /// signature over the challenge and this device, which it lets in.
     Recover { public: [u8; 32], signature: [u8; 64], device: Vec<u8>, device_public: [u8; 32] },
     /// Server → new device: its account, the key ring wrapped, and each
-    /// epoch's key made since, sealed to the code's box key. A fresh
+    /// epoch's key made since, sealed to the code's box key and signed
+    /// (`rekey.rs`). A fresh
     /// challenge follows, to log in with.
     Recovered { account: Vec<u8>, wrapped: Vec<u8>, rekeys: Vec<Vec<u8>> },
 
@@ -127,10 +128,12 @@ pub enum Carnet {
     Devices { epoch: u32, devices: Vec<DeviceRow>, recovery: Vec<u8>, password: Vec<u8>, passwords: bool, passkeys: Vec<PasskeyRow>, password_email: String },
     /// Device → server: take `device` out. Another device: `epoch` is the
     /// next, and `keys` its vault key sealed to each device kept (and to
-    /// the recovery code, under an empty id), `cards` theirs sealed under
-    /// it. This device itself: it leaves, and nothing else changes.
+    /// the recovery code, under an empty id) and signed (`rekey.rs`),
+    /// `cards` theirs sealed under it. This device itself: it leaves, and nothing else changes.
     Revoke { device: Vec<u8>, epoch: u32, keys: Vec<(Vec<u8>, Vec<u8>)>, cards: Vec<(Vec<u8>, Vec<u8>)> },
-    /// Server → device: an epoch's vault key, sealed to its box key.
+    /// Server → device: an epoch's vault key, sealed to its box key and
+    /// signed by the device that made it (`rekey.rs`; protocol 2), as
+    /// `Revoke`'s keys carried it.
     Rekey { sealed: Vec<u8> },
     /// Server → device: what it asked was not done, and why. Unlike
     /// `Denied`, the socket stays open.
@@ -976,6 +979,17 @@ pub fn decode_vv(bytes: &[u8]) -> Result<Vec<(u64, u64)>, String> {
 mod tests {
     use super::*;
 
+    /// A new epoch's key as protocol 2 sends it (`rekey.rs`): the signer's
+    /// id, its card, the box, the signature, each length-prefixed.
+    fn signed(signer: &[u8], fill: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        for part in [signer, &[fill; 112], &[fill; 96], &[fill; 64]] {
+            out.extend((part.len() as u32).to_be_bytes());
+            out.extend(part);
+        }
+        out
+    }
+
     /// One of every frame, each field set: what the fixtures hold.
     fn samples() -> Vec<Frame> {
         vec![
@@ -994,7 +1008,7 @@ mod tests {
             Frame::Carnet(Carnet::SetRecovery { public: [1; 32], wrapped: vec![9; 60], card: vec![8; 90] }),
             Frame::Carnet(Carnet::RecoverySet),
             Frame::Carnet(Carnet::Recover { public: [1; 32], signature: [2; 64], device: b"n".to_vec(), device_public: [3; 32] }),
-            Frame::Carnet(Carnet::Recovered { account: b"acct".to_vec(), wrapped: vec![7; 60], rekeys: vec![vec![1; 80], vec![2; 80]] }),
+            Frame::Carnet(Carnet::Recovered { account: b"acct".to_vec(), wrapped: vec![7; 60], rekeys: vec![signed(b"a", 1), signed(b"a", 2)] }),
             Frame::Carnet(Carnet::Enroll { invite: "K7QF-2M9D-XW4H-P3TA".into(), device: b"d".to_vec(), public: [4; 32] }),
             Frame::Carnet(Carnet::Enrolled { account: b"acct".to_vec() }),
             Frame::Carnet(Carnet::SetCard { card: vec![3; 100] }),
@@ -1035,10 +1049,10 @@ mod tests {
             Frame::Carnet(Carnet::Revoke {
                 device: b"b".to_vec(),
                 epoch: 3,
-                keys: vec![(b"a".to_vec(), vec![6; 80]), (Vec::new(), vec![7; 80])],
+                keys: vec![(b"a".to_vec(), signed(b"c", 6)), (Vec::new(), signed(b"c", 7))],
                 cards: vec![(b"a".to_vec(), vec![8; 90])],
             }),
-            Frame::Carnet(Carnet::Rekey { sealed: vec![9; 80] }),
+            Frame::Carnet(Carnet::Rekey { sealed: signed(b"c", 9) }),
             Frame::Carnet(Carnet::Refused { reason: "a device came in meanwhile".into() }),
             Frame::Carnet(Carnet::Compact { room: "ab12".into() }),
             Frame::Carnet(Carnet::Checked { room: "ab12".into(), vv: encode_vv(&[(1, 4)]), ok: false }),

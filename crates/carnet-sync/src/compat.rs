@@ -13,11 +13,17 @@
 //! server too old for it by the greeting alone, before it says anything.
 
 /// The protocol this build speaks.
-pub const PROTOCOL: u32 = 1;
-/// The oldest protocol this build talks to.
-pub const OLDEST: u32 = 1;
+///
+/// - 1: the first.
+/// - 2: a new epoch's key goes signed by the device that made it
+///   (`rekey.rs`), and a device takes no other. `Rekey`, `Revoke`'s keys
+///   and `Recovered`'s are laid out as before, and hold that.
+pub const PROTOCOL: u32 = 2;
+/// The oldest protocol this build talks to. Protocol 1's keys aren't
+/// signed, and this build refuses them; and no release with sync spoke it.
+pub const OLDEST: u32 = 2;
 /// Peers older than this are still served, and told to update.
-pub const DEPRECATED: u32 = 1;
+pub const DEPRECATED: u32 = 2;
 
 /// What a server can do, by name, as its [`Greeting`] lists them. An app
 /// leaves out what its server doesn't list, rather than asking and being
