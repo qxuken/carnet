@@ -13,6 +13,11 @@ pub use loro_protocol::{BatchId, CrdtType, Permission, UpdateStatusCode};
 
 const CARNET: &[u8; 4] = b"%CRN";
 
+/// The most pictures one `BlobOffer`, `BlobFetch` or `BlobDrop` names: a
+/// device sends more in frames of this many; a server answers no more of
+/// one (docs/SYNC.md §6).
+pub const MAX_IDS: usize = 64;
+
 /// Why a device was turned away, for the app to act on whatever the
 /// words say. A later protocol's reason reads as `Other`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,8 +166,11 @@ pub enum Carnet {
     /// and from a short-lived signed URL the server gives here; the socket
     /// says only which, and when they're kept.
     /// Device → server: does it have these? Each comes back as
-    /// `BlobStored`, or a `BlobLink` to put it at.
-    BlobOffer { ids: Vec<[u8; 32]> },
+    /// `BlobStored`, or a `BlobLink` to put it at. `sizes`, one for each
+    /// id, say how long each is sealed: a link puts that many bytes and no
+    /// other number (§6). Said at the end, and only when there are any
+    /// (§14). At most [`MAX_IDS`] ids a frame.
+    BlobOffer { ids: Vec<[u8; 32]>, sizes: Vec<u64> },
     /// Device → server: links to fetch these. Each comes back as a
     /// `BlobLink`, or `BlobNone`.
     BlobFetch { ids: Vec<[u8; 32]> },
@@ -544,7 +552,7 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
                     w.push_byte(30);
                     w.push_var_string(room);
                 }
-                Carnet::BlobOffer { ids } | Carnet::BlobFetch { ids } | Carnet::BlobDrop { ids } | Carnet::BlobDropped { ids } => {
+                Carnet::BlobOffer { ids, .. } | Carnet::BlobFetch { ids } | Carnet::BlobDrop { ids } | Carnet::BlobDropped { ids } => {
                     w.push_byte(match c {
                         Carnet::BlobOffer { .. } => 42,
                         Carnet::BlobFetch { .. } => 43,
@@ -554,6 +562,14 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
                     w.push_uleb128(ids.len() as u64);
                     for id in ids {
                         w.push_bytes(id);
+                    }
+                    if let Carnet::BlobOffer { sizes, .. } = c
+                        && !sizes.is_empty()
+                    {
+                        w.push_uleb128(sizes.len() as u64);
+                        for n in sizes {
+                            w.push_uleb128(*n);
+                        }
                     }
                 }
                 Carnet::BlobLink { id, put, url, expires } => {
@@ -862,7 +878,12 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
             let n = count(&mut r, 32)?;
             let ids = (0..n).map(|_| fixed(&mut r, 32).map(|b| b.try_into().expect("32"))).collect::<Result<_, _>>()?;
             match t {
-                42 => Carnet::BlobOffer { ids },
+                // An offer from before sizes: none said.
+                42 if r.remaining() == 0 => Carnet::BlobOffer { ids, sizes: Vec::new() },
+                42 => {
+                    let n = count(&mut r, 1)?;
+                    Carnet::BlobOffer { ids, sizes: (0..n).map(|_| r.read_uleb128()).collect::<Result<_, _>>()? }
+                }
                 43 => Carnet::BlobFetch { ids },
                 46 => Carnet::BlobDrop { ids },
                 _ => Carnet::BlobDropped { ids },
@@ -1075,7 +1096,8 @@ mod tests {
             }),
             Frame::Carnet(Carnet::RollBack { room: "cd34".into() }),
             Frame::Carnet(Carnet::Repair { room: "cd34".into() }),
-            Frame::Carnet(Carnet::BlobOffer { ids: vec![[1; 32], [2; 32]] }),
+            Frame::Carnet(Carnet::BlobOffer { ids: vec![[1; 32], [2; 32]], sizes: Vec::new() }),
+            Frame::Carnet(Carnet::BlobOffer { ids: vec![[1; 32], [2; 32]], sizes: vec![5036, 33_554_468] }),
             Frame::Carnet(Carnet::BlobFetch { ids: vec![[2; 32]] }),
             Frame::Carnet(Carnet::BlobDrop { ids: vec![[7; 32], [8; 32]] }),
             Frame::Carnet(Carnet::BlobDropped { ids: vec![[7; 32]] }),

@@ -12,11 +12,24 @@
 //! ```
 //!
 //! **A put's size.** A pre-signed `PUT` can't say "at most so many bytes",
-//! only an exact length, and the link is made before the device says how
-//! long the picture is. So a picture past [`MAX`] is caught on the way
-//! back: [`S3Blobs::size`] finds it too big, deletes it, and it's never
-//! said kept, linked, or counted. The link is for one picture, one
-//! account, five minutes.
+//! only an exact length: the device says how long each picture is sealed
+//! when it offers it, and its link is signed with that `Content-Length`,
+//! so the bucket refuses a put of any other length. The link is for one
+//! picture, one account, five minutes, so a picture is never put past
+//! what it was offered as, nor past [`MAX`]. (One put from before links
+//! were signed so, past [`MAX`], is caught on the way back: [`Blobs::size`]
+//! and [`Blobs::held`] find it too big, delete it, and it's never said
+//! kept, linked, or counted.)
+//!
+//! **A put again.** Within its five minutes a link may put its picture
+//! again, over the first. That's harmless, so it isn't stopped (a
+//! conditional put, `If-None-Match`, would need every device to send the
+//! header and every bucket's CORS to let it through): only the account's
+//! own device was given the link, it can't put more bytes than it said,
+//! and a picture that isn't the one its id names doesn't open on any
+//! device (`open_blob`), as with any picture the account's device puts.
+//! Nor is a sweep needed for pictures put and never named in a note: each
+//! is counted against its account, and goes when a device drops it (§4).
 //!
 //! The bucket needs CORS for the web app: `PUT` and `GET` from the
 //! server's origin (the README says how).
@@ -307,6 +320,14 @@ impl S3Blobs {
         Ok(self.get(&self.mark_key(account, id))?.map(|b| String::from_utf8_lossy(&b).trim().parse().unwrap_or(0)))
     }
 
+    /// A device's put of `size` bytes at `key`, to be signed: with its
+    /// length, so the bucket takes no other.
+    fn put_action<'a>(&'a self, key: &'a str, size: u64) -> rusty_s3::actions::PutObject<'a> {
+        let mut put = self.bucket.put_object(Some(&self.creds), key);
+        put.headers_mut().insert("content-length", size.to_string());
+        put
+    }
+
     fn said<T>(r: Result<T, String>) -> Option<T> {
         r.map_err(|e| eprintln!("carnet-server: pictures: {e}")).ok()
     }
@@ -328,11 +349,11 @@ impl Blobs for S3Blobs {
         Some(o.size)
     }
 
-    fn link(&mut self, account: &[u8], id: &[u8; 32], put: bool, expires: u64) -> String {
+    fn link(&mut self, account: &[u8], id: &[u8; 32], put: Option<u64>, expires: u64) -> String {
         let key = self.key(account, id);
         let left = Duration::from_secs(expires.saturating_sub(now()).max(1));
-        if put {
-            self.bucket.put_object(Some(&self.creds), &key).sign(left).to_string()
+        if let Some(n) = put {
+            self.put_action(&key, n).sign(left).to_string()
         } else {
             // Kept by the device's browser no longer than the link is good,
             // and never taken for anything but bytes.
@@ -375,8 +396,14 @@ impl Blobs for S3Blobs {
         gone
     }
 
-    fn usage(&mut self, account: &[u8]) -> u64 {
-        Self::said(self.pictures(account)).map_or(0, |all| all.iter().map(|(_, o)| o.size).sum())
+    fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {
+        let all = Self::said(self.pictures(account)).unwrap_or_default();
+        let (fit, over): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, o)| o.size <= MAX);
+        // Put past what a picture may be: not one.
+        if !over.is_empty() {
+            let _ = Self::said(self.delete_all(&over.into_iter().map(|(_, o)| o.key).collect::<Vec<_>>()));
+        }
+        fit.into_iter().map(|(id, o)| (id, o.size)).collect()
     }
 }
 
@@ -396,6 +423,27 @@ mod tests {
         assert_eq!(at("https://s3.example/pics", true).as_deref(), Some("https://pics.s3.example"));
     }
 
+    /// A link to put is signed with the picture's length: the bucket
+    /// checks the `Content-Length` sent against it, and refuses another.
+    /// A link to fetch isn't.
+    #[test]
+    fn a_put_link_is_signed_with_its_length() {
+        let config = S3Config { url: "https://s3.example.com/pics".into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host: false };
+        let mut b = S3Blobs::new(&config).unwrap();
+        let put = b.link(b"\x01", &[2; 32], Some(5036), now() + 300);
+        assert!(put.contains("X-Amz-SignedHeaders=content-length%3Bhost&"), "{put}");
+        let get = b.link(b"\x01", &[2; 32], None, now() + 300);
+        assert!(get.contains("X-Amz-SignedHeaders=host&"), "{get}");
+        // The same moment, another length: another signature.
+        let at = jiff::Timestamp::from_second(1_760_000_000).unwrap();
+        let sig = |n: u64| {
+            let url = b.put_action(&b.key(b"\x01", &[2; 32]), n).sign_with_time(Duration::from_secs(300), &at);
+            url.query_pairs().find(|(k, _)| k == "X-Amz-Signature").map(|(_, v)| v.into_owned()).unwrap()
+        };
+        assert_eq!(sig(5036), sig(5036));
+        assert_ne!(sig(5036), sig(5037));
+    }
+
     #[test]
     fn base64_as_s3_reads_it() {
         assert_eq!(base64(b""), "");
@@ -413,7 +461,7 @@ mod tests {
         let b = S3Blobs::new(&config("http://127.0.0.1:9000/pics/carnet/")).unwrap();
         assert_eq!(b.key(b"\x01", &[2; 32]), format!("carnet/01/{}", "02".repeat(32)));
         assert_eq!(b.mark_key(b"\x01", &[2; 32]), format!("carnet/drop/01/{}", "02".repeat(32)));
-        let put = S3Blobs::new(&config("https://s3.example.com/pics")).unwrap().link(b"\x01", &[2; 32], true, now() + 300);
+        let put = S3Blobs::new(&config("https://s3.example.com/pics")).unwrap().link(b"\x01", &[2; 32], Some(5036), now() + 300);
         assert!(put.starts_with("https://s3.example.com/pics/01/") && put.contains("X-Amz-Signature="), "{put}");
         assert!(S3Blobs::new(&config("https://s3.example.com/")).is_err(), "no bucket");
         let debug = format!("{:?}", config("https://s3.example.com/pics"));

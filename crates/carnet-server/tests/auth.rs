@@ -152,7 +152,7 @@ fn nothing_but_a_login_before_one() {
             Frame::Carnet(Carnet::Repair { room: ROOM.into() }),
             Frame::Carnet(Carnet::SetRecovery { public: [3; 32], wrapped: vec![1], card: vec![2] }),
             Frame::Carnet(Carnet::Checked { room: ROOM.into(), vv: Vec::new(), ok: false }),
-            Frame::Carnet(Carnet::BlobOffer { ids: vec![[1; 32]] }),
+            Frame::Carnet(Carnet::BlobOffer { ids: vec![[1; 32]], sizes: vec![100] }),
             Frame::Carnet(Carnet::BlobFetch { ids: vec![[1; 32]] }),
             Frame::Carnet(Carnet::BlobDrop { ids: vec![[1; 32]] }),
             Frame::Carnet(Carnet::RoomRemove { room: ROOM.into() }),
@@ -326,7 +326,7 @@ fn an_account_never_sees_another() {
         assert_eq!(frames(&outs, b), [Frame::Carnet(Carnet::BlobNone { id: [4; 32] })]);
         // Offered by B: a link to put it in B's own account, not A's (nor
         // a word that A has it).
-        let outs = raw.send(b, &Frame::Carnet(Carnet::BlobOffer { ids: vec![[4; 32]] }));
+        let outs = raw.send(b, &Frame::Carnet(Carnet::BlobOffer { ids: vec![[4; 32]], sizes: vec![100] }));
         let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
         match &frames(&outs, b)[..] {
             [Frame::Carnet(Carnet::BlobLink { put: true, url, .. })] => assert!(url.contains(&hex(B)) && !url.contains(&hex(A)), "{url}"),

@@ -9,12 +9,21 @@
 //! storage for a hosted one (its links pre-signed there), the same to a
 //! device either way.
 //!
+//! A link to put says how many bytes, exactly: the device says how long
+//! each picture is sealed when it offers it, and a put of any other length
+//! is refused (by this server, or by the bucket, whose link is signed with
+//! the length). For an account with a limit, a link given and not yet
+//! used counts against the room left, at that length, until the picture
+//! is kept or the link runs out: an offer of many pictures, or many
+//! offers, can't get more links than there's room for, but one picture
+//! may still take the account over (docs/SYNC.md §11).
+//!
 //! A picture no note shows any more is dropped by a device's word
 //! (`BlobDrop`): marked, and gone [`KEEP`] later, unless a device offers,
 //! asks for or puts it meanwhile. The server can't read the notes to
 //! know; the wait is for the device that still has a use for it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,7 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use carnet_sync::crypto::MAX_BLOB;
+use carnet_sync::crypto::{MAX_BLOB, sealed_len};
 use carnet_sync::session::Transfer;
 use carnet_sync::wire::{self, Carnet, Frame};
 
@@ -33,13 +42,23 @@ use crate::quota::{FULL, Limit, READ_ONLY};
 /// The most a sealed picture may be: the largest picture, sealed.
 pub const MAX: u64 = (MAX_BLOB + 64) as u64;
 
+/// The most links to put an account with a limit may have out at once,
+/// not yet used: past it, a picture offered gets no answer, and the
+/// device offers it again later (docs/SYNC.md §6).
+pub const PENDING: usize = 1024;
+
+/// What a device is told of a picture it offered without saying how long
+/// it is, or past what a picture may be.
+pub const UNSIZED: &str = "A picture was offered without its size, or bigger than a picture may be, so it wasn't taken: update Carnet to send it";
+
 /// Picture work the hub has allowed, for the worker to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Job {
     /// Which of `ids` are kept (`BlobStored`), and where to put the rest
-    /// (`BlobLink`): while the account may write, and has `room` left for
-    /// pictures (`None`: no limit).
-    Offer { conn: ConnId, account: Vec<u8>, ids: Vec<[u8; 32]>, room: Option<u64>, writable: bool },
+    /// (`BlobLink`), each of the length `sizes` says for it: while the
+    /// account may write, and has `room` left for pictures (`None`: no
+    /// limit), links out not yet used counted in.
+    Offer { conn: ConnId, account: Vec<u8>, ids: Vec<[u8; 32]>, sizes: Vec<u64>, room: Option<u64>, writable: bool },
     /// What the account keeps: its `notes`' bytes, as the hub has them,
     /// and its pictures' (`UsageIs`).
     Usage { conn: ConnId, account: Vec<u8>, notes: u64, limit: Limit },
@@ -57,8 +76,9 @@ pub enum Job {
 pub trait Blobs: Send {
     /// Its size, if kept.
     fn size(&mut self, account: &[u8], id: &[u8; 32]) -> Option<u64>;
-    /// A link to `PUT` (`put`) or `GET` it, good until `expires`.
-    fn link(&mut self, account: &[u8], id: &[u8; 32], put: bool, expires: u64) -> String;
+    /// A link to `PUT` it, of exactly `put` bytes and no other number,
+    /// or (`None`) to `GET` it, good until `expires`.
+    fn link(&mut self, account: &[u8], id: &[u8; 32], put: Option<u64>, expires: u64) -> String;
     /// The account was removed: its pictures go.
     fn forget(&mut self, account: &[u8]);
     /// Marked to go, as of `now`, if kept and not marked already.
@@ -67,8 +87,12 @@ pub trait Blobs: Send {
     fn unmark(&mut self, account: &[u8], id: &[u8; 32]);
     /// Those marked before `before` gone: how many.
     fn sweep(&mut self, before: u64) -> u64;
+    /// Every picture the account keeps: its id, and its size.
+    fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)>;
     /// The bytes the account's pictures take.
-    fn usage(&mut self, account: &[u8]) -> u64;
+    fn usage(&mut self, account: &[u8]) -> u64 {
+        self.held(account).iter().map(|(_, n)| n).sum()
+    }
     /// Where its links point, if not this server: the origin the web app
     /// fetches pictures from, which its CSP allows (docs/SYNC.md §8).
     fn origin(&self) -> Option<String> {
@@ -81,8 +105,11 @@ impl<T: Blobs + ?Sized> Blobs for Box<T> {
     fn size(&mut self, account: &[u8], id: &[u8; 32]) -> Option<u64> {
         (**self).size(account, id)
     }
-    fn link(&mut self, account: &[u8], id: &[u8; 32], put: bool, expires: u64) -> String {
+    fn link(&mut self, account: &[u8], id: &[u8; 32], put: Option<u64>, expires: u64) -> String {
         (**self).link(account, id, put, expires)
+    }
+    fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {
+        (**self).held(account)
     }
     fn forget(&mut self, account: &[u8]) {
         (**self).forget(account)
@@ -228,8 +255,8 @@ impl Blobs for FileBlobs {
         fs::metadata(self.files.path(account, id)).ok().map(|m| m.len())
     }
 
-    fn link(&mut self, account: &[u8], id: &[u8; 32], put: bool, expires: u64) -> String {
-        let token = self.signer.sign(&Grant { account: account.to_vec(), id: *id, put, max: if put { MAX } else { 0 }, expires });
+    fn link(&mut self, account: &[u8], id: &[u8; 32], put: Option<u64>, expires: u64) -> String {
+        let token = self.signer.sign(&Grant { account: account.to_vec(), id: *id, put: put.is_some(), max: put.unwrap_or(0), expires });
         format!("{}/v1/blobs/{token}", self.origin)
     }
 
@@ -249,15 +276,16 @@ impl Blobs for FileBlobs {
         self.files.sweep(before)
     }
 
-    fn usage(&mut self, account: &[u8]) -> u64 {
+    fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {
         fs::read_dir(self.files.root.join(hex(account)))
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| !e.file_name().to_string_lossy().ends_with(".drop"))
-            .filter_map(|e| e.metadata().ok())
-            .map(|m| m.len())
-            .sum()
+            .filter_map(|e| {
+                let id = <[u8; 32]>::try_from(unhex(&e.file_name().to_string_lossy())?).ok()?;
+                Some((id, e.metadata().ok()?.len()))
+            })
+            .collect()
     }
 }
 
@@ -295,8 +323,10 @@ impl MemoryBlobs {
         let (Some(account), Some(id)) = (account, id.and_then(|i| <[u8; 32]>::try_from(i).ok())) else {
             return Err("not a memory link".into());
         };
+        // A put's link says its length, and takes no other.
+        let size = parts.next().and_then(|n| n.parse::<u64>().ok());
         match (way, sealed) {
-            (Some("put"), Some(sealed)) if sealed.len() as u64 <= MAX => {
+            (Some("put"), Some(sealed)) if Some(sealed.len() as u64) == size => {
                 self.put(&account, &id, sealed);
                 Ok(Vec::new())
             }
@@ -317,8 +347,11 @@ impl Blobs for MemoryBlobs {
     fn size(&mut self, account: &[u8], id: &[u8; 32]) -> Option<u64> {
         self.get(account, id).map(|b| b.len() as u64)
     }
-    fn link(&mut self, account: &[u8], id: &[u8; 32], put: bool, _expires: u64) -> String {
-        format!("{MEMORY_LINKS}{}/{}/{}", if put { "put" } else { "get" }, hex(account), hex(id))
+    fn link(&mut self, account: &[u8], id: &[u8; 32], put: Option<u64>, _expires: u64) -> String {
+        match put {
+            Some(n) => format!("{MEMORY_LINKS}put/{}/{}/{n}", hex(account), hex(id)),
+            None => format!("{MEMORY_LINKS}get/{}/{}", hex(account), hex(id)),
+        }
     }
     fn forget(&mut self, account: &[u8]) {
         self.held.retain(|(a, _), _| a != account);
@@ -345,8 +378,8 @@ impl Blobs for MemoryBlobs {
         gone.len() as u64
     }
 
-    fn usage(&mut self, account: &[u8]) -> u64 {
-        self.held.iter().filter(|((a, _), _)| a == account).map(|(_, b)| b.len() as u64).sum()
+    fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {
+        self.held.iter().filter(|((a, _), _)| a == account).map(|((_, id), b)| (*id, b.len() as u64)).collect()
     }
 }
 
@@ -359,49 +392,105 @@ pub struct Counts {
     pub swept: AtomicU64,
 }
 
+/// An account's links to put out, by picture: its length, and when its
+/// link runs out.
+type Pending = HashMap<[u8; 32], (u64, u64)>;
+
 pub struct Worker<B: Blobs> {
     pub blobs: B,
     pub counts: Arc<Counts>,
+    /// Links to put given to accounts with a limit, not yet seen used: by
+    /// account, each picture's length and when its link runs out. Counted
+    /// against the room left until the picture is kept, or the link is
+    /// past.
+    pending: HashMap<Vec<u8>, Pending>,
 }
 
 impl<B: Blobs> Worker<B> {
     pub fn new(blobs: B) -> Self {
-        Worker { blobs, counts: Arc::default() }
+        Worker { blobs, counts: Arc::default(), pending: HashMap::new() }
+    }
+
+    /// Links to put out for `account`, not yet used: how many, and the
+    /// bytes they may put.
+    pub fn pending(&self, account: &[u8]) -> (usize, u64) {
+        self.pending.get(account).map_or((0, 0), |p| (p.len(), p.values().map(|(n, _)| n).sum()))
     }
 
     /// Does `job`, saying what it sends in `out`.
     pub fn run(&mut self, job: Job, out: &mut dyn FnMut(Out)) {
-        let expires = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) + LIFETIME;
+        self.run_at(job, SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()), out);
+    }
+
+    /// Does `job` as of `now`, in seconds since 1970.
+    pub fn run_at(&mut self, job: Job, now: u64, out: &mut dyn FnMut(Out)) {
+        let expires = now + LIFETIME;
         match job {
-            Job::Offer { conn, account, ids, room, writable } => {
-                // New pictures wait while the account can't write, or is
-                // full; those kept are said kept either way.
-                let refused = match room {
-                    _ if !writable => Some(READ_ONLY),
-                    Some(left) if self.blobs.usage(&account) >= left => Some(FULL),
-                    _ => None,
-                };
-                let mut told = false;
-                for id in ids {
-                    if self.blobs.size(&account, &id).is_some() {
+            Job::Offer { conn, account, ids, sizes, room, writable } => {
+                // With a limit, what's kept is listed once (it's counted
+                // anyway); without, each picture is asked after.
+                let held: Option<HashMap<[u8; 32], u64>> = room.map(|_| self.blobs.held(&account).into_iter().collect());
+                let pending = self.pending.entry(account.clone()).or_default();
+                pending.retain(|id, (_, until)| *until > now && !held.as_ref().is_some_and(|h| h.contains_key(id)));
+                let mut used = held.as_ref().map_or(0, |h| h.values().sum::<u64>()) + pending.values().map(|(n, _)| n).sum::<u64>();
+                let mut told = HashSet::new();
+                for (i, id) in ids.into_iter().enumerate() {
+                    let kept = match &held {
+                        Some(h) => h.contains_key(&id),
+                        None => self.blobs.size(&account, &id).is_some(),
+                    };
+                    if kept {
                         self.blobs.unmark(&account, &id);
                         out(send(conn, Carnet::BlobStored { id }));
-                    } else if let Some(why) = refused {
-                        if !std::mem::replace(&mut told, true) {
+                        continue;
+                    }
+                    // New pictures wait while the account can't write, or
+                    // is full, links out counted in: one may take it over,
+                    // never two. One offered again has its link counted
+                    // once.
+                    let size = sizes.get(i).copied().filter(|n| (sealed_len(0)..=MAX).contains(n));
+                    let again = pending.remove(&id);
+                    used = used.saturating_sub(again.map_or(0, |(n, _)| n));
+                    let refused = match (room, size) {
+                        _ if !writable => Some(READ_ONLY),
+                        (_, None) => Some(UNSIZED),
+                        (Some(left), _) if used >= left => Some(FULL),
+                        _ => None,
+                    };
+                    if let Some(why) = refused {
+                        // Its link out still counts until it's past.
+                        if let Some((n, until)) = again {
+                            pending.insert(id, (n, until));
+                            used += n;
+                        }
+                        if told.insert(why) {
                             out(send(conn, Carnet::Refused { reason: why.into() }));
                         }
-                    } else {
-                        let url = self.blobs.link(&account, &id, true, expires);
-                        self.counts.links.fetch_add(1, Ordering::Relaxed);
-                        out(send(conn, Carnet::BlobLink { id, put: true, url, expires }));
+                        continue;
                     }
+                    let size = size.expect("sized");
+                    if room.is_some() {
+                        // As many as that out already: no answer now, and
+                        // the device offers it again later.
+                        if pending.len() >= PENDING {
+                            continue;
+                        }
+                        pending.insert(id, (size, expires));
+                        used += size;
+                    }
+                    let url = self.blobs.link(&account, &id, Some(size), expires);
+                    self.counts.links.fetch_add(1, Ordering::Relaxed);
+                    out(send(conn, Carnet::BlobLink { id, put: true, url, expires }));
+                }
+                if self.pending.get(&account).is_some_and(HashMap::is_empty) {
+                    self.pending.remove(&account);
                 }
             }
             Job::Fetch { conn, account, ids } => {
                 for id in ids {
                     if self.blobs.size(&account, &id).is_some() {
                         self.blobs.unmark(&account, &id);
-                        let url = self.blobs.link(&account, &id, false, expires);
+                        let url = self.blobs.link(&account, &id, None, expires);
                         self.counts.links.fetch_add(1, Ordering::Relaxed);
                         out(send(conn, Carnet::BlobLink { id, put: false, url, expires }));
                     } else {
@@ -410,7 +499,6 @@ impl<B: Blobs> Worker<B> {
                 }
             }
             Job::Drop { conn, account, ids } => {
-                let now = expires - LIFETIME;
                 for id in &ids {
                     self.blobs.mark(&account, id, now);
                 }
@@ -428,12 +516,20 @@ impl<B: Blobs> Worker<B> {
                     until: limit.until,
                 }));
             }
-            Job::Gone { account } => self.blobs.forget(&account),
+            Job::Gone { account } => {
+                self.pending.remove(&account);
+                self.blobs.forget(&account);
+            }
         }
     }
 
-    /// Pictures marked to go more than [`KEEP`] before `now`, gone.
+    /// Pictures marked to go more than [`KEEP`] before `now`, gone; links
+    /// out past their time, forgotten.
     pub fn sweep(&mut self, now: u64) -> u64 {
+        for p in self.pending.values_mut() {
+            p.retain(|_, (_, until)| *until > now);
+        }
+        self.pending.retain(|_, p| !p.is_empty());
         let n = self.blobs.sweep(now.saturating_sub(KEEP));
         self.counts.swept.fetch_add(n, Ordering::Relaxed);
         n
@@ -489,20 +585,91 @@ mod tests {
     fn links_to_put_and_to_fetch_and_kept_only_once_there() {
         let mut w = Worker::memory();
         let acct = b"acct".to_vec();
-        let said_offer = said(&mut w, Job::Offer { conn: 1, account: acct.clone(), ids: vec![[1; 32]], room: None, writable: true });
+        let sealed = vec![5u8; 40];
+        let offer = |ids: Vec<[u8; 32]>| Job::Offer { conn: 1, account: b"acct".to_vec(), sizes: vec![40; ids.len()], ids, room: None, writable: true };
+        let said_offer = said(&mut w, offer(vec![[1; 32]]));
         let [Carnet::BlobLink { id, put: true, url, .. }] = &said_offer[..] else { panic!("{said_offer:?}") };
         assert_eq!(*id, [1; 32]);
-        w.blobs.serve(&Transfer::Put { id: [1; 32], url: url.clone(), sealed: b"sealed".to_vec() }).unwrap();
-        assert_eq!(said(&mut w, Job::Offer { conn: 1, account: acct.clone(), ids: vec![[1; 32]], room: None, writable: true }), [Carnet::BlobStored { id: [1; 32] }]);
+        // Only of the length it said.
+        assert!(w.blobs.serve(&Transfer::Put { id: [1; 32], url: url.clone(), sealed: vec![5u8; 41] }).is_err());
+        w.blobs.serve(&Transfer::Put { id: [1; 32], url: url.clone(), sealed: sealed.clone() }).unwrap();
+        assert_eq!(said(&mut w, offer(vec![[1; 32]])), [Carnet::BlobStored { id: [1; 32] }]);
         let fetched = said(&mut w, Job::Fetch { conn: 1, account: acct.clone(), ids: vec![[1; 32], [2; 32]] });
         let [Carnet::BlobLink { put: false, url, .. }, Carnet::BlobNone { id: missing }] = &fetched[..] else { panic!("{fetched:?}") };
         assert_eq!(*missing, [2; 32]);
-        assert_eq!(w.blobs.serve(&Transfer::Get { id: [1; 32], url: url.clone() }).unwrap(), b"sealed");
+        assert_eq!(w.blobs.serve(&Transfer::Get { id: [1; 32], url: url.clone() }).unwrap(), sealed);
         // A get link doesn't put.
         assert!(w.blobs.serve(&Transfer::Put { id: [1; 32], url: url.clone(), sealed: b"other".to_vec() }).is_err());
         w.run(Job::Gone { account: acct.clone() }, &mut |_| {});
         assert_eq!(w.blobs.size(&acct, &[1; 32]), None);
         assert_eq!(w.counts.links.load(Ordering::Relaxed), 2, "one to put, one to fetch");
+    }
+
+    /// An offer of thousands of pictures, or many offers, gets no more
+    /// links than there's room for: each link out counts at the length
+    /// the device said, until its picture is kept or it runs out. One
+    /// picture may take the account over, never two; one offered again
+    /// is counted once; one without its size gets none.
+    #[test]
+    fn links_out_count_against_the_room_left() {
+        let mut w = Worker::memory();
+        let acct = b"acct".to_vec();
+        let id = |n: u32| -> [u8; 32] {
+            let mut id = [0; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            id
+        };
+        let offer = |ids: Vec<[u8; 32]>, size: u64, room: u64| Job::Offer { conn: 1, account: b"acct".to_vec(), sizes: vec![size; ids.len()], ids, room: Some(room), writable: true };
+        let links = |said: &[Carnet]| said.iter().filter(|c| matches!(c, Carnet::BlobLink { put: true, .. })).count();
+        let full = |said: &[Carnet]| said.iter().filter(|c| **c == Carnet::Refused { reason: FULL.into() }).count();
+        let mut out = Vec::new();
+        let mut at = |w: &mut Worker<MemoryBlobs>, job: Job, now: u64| {
+            out.clear();
+            w.run_at(job, now, &mut |o| out.push(o));
+            out.iter().filter_map(|o| if let Out::Send(_, b) = o { if let Ok(Frame::Carnet(c)) = wire::decode(b) { Some(c) } else { None } } else { None }).collect::<Vec<_>>()
+        };
+        let t = 1_000_000;
+
+        // 5,000 pictures of 1,000 bytes, 10,000 left: ten links, and the
+        // rest refused, said once.
+        let said = at(&mut w, offer((0..5000).map(id).collect(), 1000, 10_000), t);
+        assert_eq!((links(&said), full(&said)), (10, 1));
+        assert_eq!(w.pending(&acct), (10, 10_000));
+        // Offered again before any is put: nothing more.
+        let said = at(&mut w, offer((5000..5100).map(id).collect(), 1000, 10_000), t + 1);
+        assert_eq!((links(&said), full(&said)), (0, 1));
+        // One of the ten again: a new link, counted once.
+        let said = at(&mut w, offer(vec![id(3)], 1000, 10_000), t + 2);
+        assert_eq!(links(&said), 1);
+        assert_eq!(w.pending(&acct), (10, 10_000));
+        // Put: kept, its link no longer counted, the picture is; still full.
+        let Some(Carnet::BlobLink { url, .. }) = said.into_iter().next() else { panic!() };
+        w.blobs.serve(&Transfer::Put { id: id(3), url, sealed: vec![1; 1000] }).unwrap();
+        let said = at(&mut w, offer(vec![id(3), id(6000)], 1000, 10_000), t + 3);
+        assert_eq!(said[0], Carnet::BlobStored { id: id(3) });
+        assert_eq!((links(&said), full(&said)), (0, 1));
+        assert_eq!(w.pending(&acct), (9, 9000));
+        // The links run out unused: room again, for what's not kept.
+        let said = at(&mut w, offer((7000..7020).map(id).collect(), 1000, 10_000), t + 2 + LIFETIME);
+        assert_eq!((links(&said), full(&said)), (9, 1));
+        assert_eq!(w.sweep(t + 10 * LIFETIME), 0);
+        assert_eq!(w.pending(&acct), (0, 0), "forgotten once past");
+
+        // One picture may take it over, never two.
+        let mut w = Worker::memory();
+        let said = at(&mut w, offer(vec![id(1), id(2)], 50_000, 10_000), t);
+        assert_eq!((links(&said), full(&said)), (1, 1));
+        // Without a size, or past what a picture may be: no link.
+        let said = at(&mut w, Job::Offer { conn: 1, account: acct.clone(), ids: vec![id(8), id(9)], sizes: vec![MAX + 1], room: None, writable: true }, t);
+        assert_eq!(said, [Carnet::Refused { reason: UNSIZED.into() }]);
+        // Only so many links out at once, however much room.
+        let said = at(&mut w, offer((0..PENDING as u32 + 50).map(|n| id(n + 10)).collect(), 36, u64::MAX), t);
+        assert_eq!((links(&said), full(&said)), (PENDING - 1, 0), "one is out already");
+        // Without a limit, nothing is counted.
+        let mut w = Worker::memory();
+        let said = at(&mut w, Job::Offer { conn: 1, account: acct.clone(), ids: (0..3000).map(id).collect(), sizes: vec![MAX; 3000], room: None, writable: true }, t);
+        assert_eq!(links(&said), 3000);
+        assert_eq!(w.pending(&acct), (0, 0));
     }
 
     /// Files: kept once, moved in whole; links signed for this server.
@@ -518,10 +685,16 @@ mod tests {
         assert_eq!(fs::read(files.path(b"acct", &[1; 32])).unwrap(), b"sealed", "never changed under its id");
         assert_eq!(fs::read_dir(&files.spool).unwrap().count(), 0);
         assert_eq!(b.size(b"acct", &[1; 32]), Some(6));
-        let url = b.link(b"acct", &[1; 32], false, u64::MAX);
+        let url = b.link(b"acct", &[1; 32], None, u64::MAX);
         let token = url.strip_prefix("https://n.example/v1/blobs/").expect("this server's");
         let g = signer.check(token, 0).unwrap();
         assert_eq!((g.account.as_slice(), g.id, g.put), (b"acct".as_slice(), [1; 32], false));
+        // A put's link says the length the device said, and the PUT is
+        // held to it (`server.rs`).
+        let url = b.link(b"acct", &[2; 32], Some(5036), u64::MAX);
+        let g = signer.check(url.strip_prefix("https://n.example/v1/blobs/").unwrap(), 0).unwrap();
+        assert_eq!((g.put, g.max), (true, 5036));
+        assert_eq!(b.held(b"acct"), [([1; 32], 6)], "what's kept, marks aside");
         // Marked, kept a while, then gone; unmarked, it stays.
         assert!(files.keep(b"acct", &[2; 32], b"other").unwrap());
         b.mark(b"acct", &[1; 32], 1000);

@@ -4,8 +4,11 @@
 //!
 //! The hub asks before it takes a write, and the picture worker before it
 //! gives a link to put a new picture. Notes' text is small: it's counted,
-//! never refused for size, only when the account can't write at all. A
-//! picture is let in while the account is under its limit, so one picture
+//! and not refused at the account's limit, only when the account can't
+//! write at all, or past [`Quota::notes_ceiling`], far above what notes
+//! take (a ceiling against an account that never compacts, not a plan).
+//! A picture is let in while the account is under its limit, with the
+//! pictures it has links to put and hasn't yet counted in, so one picture
 //! may take it over, never two.
 
 /// What an account may keep now.
@@ -29,8 +32,20 @@ impl Default for Limit {
     }
 }
 
+/// The most an account's notes may take, sealed, history and all, unless
+/// its [`Quota`] says otherwise: past it, the hub takes no more writes
+/// to its notes (snapshots, which make them smaller, still).
+pub const NOTES_CEILING: u64 = 4 << 30;
+
 pub trait Quota: Send + Sync {
     fn limit(&self, account: &[u8]) -> Limit;
+
+    /// The most `account`'s notes may take, sealed: a ceiling, not a
+    /// plan's limit (notes still sync on an account at its limit). Asked
+    /// on the hub's thread before each write: quick, or kept.
+    fn notes_ceiling(&self, _account: &[u8]) -> u64 {
+        NOTES_CEILING
+    }
 }
 
 /// A server of one's own: no limits.
@@ -114,3 +129,11 @@ impl Admission for ByInvite {
 /// write: the apps know these words (`carnet_sync::session`), and offer
 /// what was held back once there's room.
 pub use carnet_sync::session::{FULL, READ_ONLY};
+
+/// What a device is told when a note's changes are past what the server
+/// keeps of one room until it's compacted (docs/SYNC.md §6).
+pub const ROOM_FULL: &str = "This note has more changes on the server than it keeps before tidying them up, so new ones wait on this device for now. Carnet tidies notes by itself: keep it open and connected for a few minutes.";
+
+/// What a device is told when the account's notes are past
+/// [`Quota::notes_ceiling`], or it has as many notes as a server keeps.
+pub const NOTES_FULL: &str = "This account's notes take all the room the server gives notes, so new changes wait on this device for now. Delete notes forever to make room.";

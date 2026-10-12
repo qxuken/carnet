@@ -760,7 +760,7 @@ fn a_picture_the_server_lacks_is_said_missing_then_comes() {
     assert_eq!(std::mem::take(&mut web.missing), vec![id], "said not to have come");
 
     // The desktop puts it; asked again, it comes.
-    desk.session.offer_blobs(vec![id]);
+    desk.session.offer_blobs(vec![(id, bytes.len())]);
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     for e in desk.session.take_events() {
         if e == Event::BlobWanted(id) {

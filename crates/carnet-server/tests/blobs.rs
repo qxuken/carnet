@@ -22,7 +22,7 @@ fn events(net: &mut Net, conn: carnet_server::ConnId) -> Vec<Event> {
 /// `pic` offered by `conn`, put at the link the server gives, and kept.
 fn send_picture(net: &mut Net, conn: carnet_server::ConnId, pic: &[u8]) {
     let id = net.device(conn).session.blob_id(pic);
-    net.device(conn).session.offer_blobs(vec![id]);
+    net.device(conn).session.offer_blobs(vec![(id, pic.len())]);
     net.pump();
     {
         let Net { peers, rng, .. } = &mut *net;
@@ -50,7 +50,7 @@ fn a_picture_goes_up_by_its_link_and_comes_down_whole() {
         let _ = events(&mut net, b);
 
         // Offered: the server lacks it.
-        net.device(a).session.offer_blobs(vec![id]);
+        net.device(a).session.offer_blobs(vec![(id, big.len())]);
         net.pump();
         assert_eq!(events(&mut net, a), [Event::BlobWanted(id)]);
         // Put at the link the server gave, then said: kept.
@@ -64,7 +64,7 @@ fn a_picture_goes_up_by_its_link_and_comes_down_whole() {
         let kept = net.worker.blobs.get(ACCOUNT, &id).expect("kept").clone();
         assert!(!kept.windows(64).any(|w| w == &big[1000..1064]), "sealed");
         // Offered again (or by another device): there already.
-        net.device(b).session.offer_blobs(vec![id]);
+        net.device(b).session.offer_blobs(vec![(id, big.len())]);
         net.pump();
         assert_eq!(events(&mut net, b), [Event::BlobStored(id)]);
 

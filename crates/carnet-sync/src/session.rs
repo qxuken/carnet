@@ -15,7 +15,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use loro_protocol::ProtocolMessage;
 
 use crate::compat::{Fit, Greeting};
-use crate::crypto::{BlobId, Card, DeviceKey, MAX_BLOB, Random, RecoveryCode, Ring, VaultKey, blob_id, login_message, open_blob, seal_blob};
+use crate::crypto::{BlobId, Card, DeviceKey, MAX_BLOB, Random, RecoveryCode, Ring, VaultKey, blob_id, login_message, open_blob, seal_blob, sealed_len};
 use crate::elo::{self, Header};
 use crate::note::NoteDoc;
 use crate::pair::{Opener, OpenerOut};
@@ -261,6 +261,11 @@ pub struct Session {
     /// Rooms the server lets this device read, not write (the account's
     /// plan lapsed): nothing is sent to them until the next login.
     read_only: HashSet<String>,
+    /// Rooms the server takes no more of for now (too much in them not
+    /// yet compacted, or in the account: `PayloadTooLarge`): nothing more
+    /// is sent to them until the server asks for one compacted, or the
+    /// next login, rather than joined again to be refused again.
+    full: HashSet<String>,
     /// Said [`Event::ReadOnly`], and not [`Event::Writable`] since.
     limited: bool,
     /// A password being set: the email, the password, OPAQUE's state,
@@ -315,6 +320,7 @@ impl Session {
             removing: BTreeSet::new(),
             dropping: BTreeSet::new(),
             read_only: HashSet::new(),
+            full: HashSet::new(),
             limited: false,
             setting: None,
             server: None,
@@ -434,18 +440,32 @@ impl Session {
     /// ([`Event::BlobsDropped`]).
     pub fn drop_blobs(&mut self, ids: &[BlobId]) {
         let new: Vec<BlobId> = ids.iter().copied().filter(|id| self.dropping.insert(*id)).collect();
-        if !new.is_empty() && self.state == State::Ready {
-            self.send(Frame::Carnet(Carnet::BlobDrop { ids: new }));
+        if self.state == State::Ready {
+            self.send_drops(&new);
         }
     }
 
-    /// Asks whether the server has these pictures: each comes back as
-    /// [`Event::BlobWanted`] or [`Event::BlobStored`].
-    pub fn offer_blobs(&mut self, ids: Vec<BlobId>) {
-        if self.state != State::Ready || ids.is_empty() {
+    /// `BlobDrop`s for `ids`, as many as they take.
+    fn send_drops(&mut self, ids: &[BlobId]) {
+        for chunk in ids.chunks(wire::MAX_IDS) {
+            self.send(Frame::Carnet(Carnet::BlobDrop { ids: chunk.to_vec() }));
+        }
+    }
+
+    /// Asks whether the server has these pictures, each with its length
+    /// (as it is here, not sealed): each comes back as
+    /// [`Event::BlobWanted`] or [`Event::BlobStored`]. Sent
+    /// [`wire::MAX_IDS`] to a frame, each with how long it will be
+    /// sealed: the server holds the put to that.
+    pub fn offer_blobs(&mut self, pictures: Vec<(BlobId, usize)>) {
+        if self.state != State::Ready {
             return;
         }
-        self.send(Frame::Carnet(Carnet::BlobOffer { ids }));
+        for chunk in pictures.chunks(wire::MAX_IDS) {
+            let ids = chunk.iter().map(|(id, _)| *id).collect();
+            let sizes = chunk.iter().map(|(_, n)| sealed_len(*n)).collect();
+            self.send(Frame::Carnet(Carnet::BlobOffer { ids, sizes }));
+        }
     }
 
     /// A picture the server wanted, sealed, to be put at the link it gave:
@@ -831,7 +851,7 @@ impl Session {
         if !self.kept.get(room).is_some_and(|k| covers(k, &vv)) {
             self.waiting.insert(room.to_string());
         }
-        if self.read_only.contains(room) {
+        if self.read_only.contains(room) || self.full.contains(room) {
             return;
         }
         match self.joined.get(room) {
@@ -868,6 +888,7 @@ impl Session {
             Frame::Carnet(Carnet::Welcome { .. }) if self.state == State::Waiting => {
                 self.state = State::Ready;
                 self.read_only.clear();
+                self.full.clear();
                 self.events.push(Event::LoggedIn);
                 // Who this device is, for the others' lists: its name may
                 // have changed, and a new epoch wants it sealed anew.
@@ -877,19 +898,18 @@ impl Session {
                 for room in self.removing.clone() {
                     self.send(Frame::Carnet(Carnet::RoomRemove { room }));
                 }
-                if !self.dropping.is_empty() {
-                    self.send(Frame::Carnet(Carnet::BlobDrop { ids: self.dropping.iter().copied().collect() }));
-                }
+                let dropping: Vec<BlobId> = self.dropping.iter().copied().collect();
+                self.send_drops(&dropping);
                 for room in docs.rooms() {
                     if !self.removing.contains(&room) {
                         self.join(&room, docs);
                     }
                 }
                 // Pictures asked for while logging in.
-                if !self.fetching.is_empty() {
-                    let mut ids: Vec<BlobId> = self.fetching.iter().copied().collect();
-                    ids.sort_unstable();
-                    self.send(Frame::Carnet(Carnet::BlobFetch { ids }));
+                let mut ids: Vec<BlobId> = self.fetching.iter().copied().collect();
+                ids.sort_unstable();
+                for chunk in ids.chunks(wire::MAX_IDS) {
+                    self.send(Frame::Carnet(Carnet::BlobFetch { ids: chunk.to_vec() }));
                 }
             }
             Frame::Carnet(Carnet::Denied { reason, why }) => {
@@ -996,7 +1016,14 @@ impl Session {
                 }
             }
             Frame::Carnet(Carnet::Refused { reason }) => self.events.push(Event::Refused(reason)),
-            Frame::Carnet(Carnet::Compact { room }) if self.state == State::Ready => self.send_snapshot(&room, docs, rng),
+            Frame::Carnet(Carnet::Compact { room }) if self.state == State::Ready => {
+                self.send_snapshot(&room, docs, rng);
+                // Compacted, a room the server took no more of takes more
+                // again: joined anew, to send what waited.
+                if self.full.remove(&room) {
+                    self.join(&room, docs);
+                }
+            }
             Frame::Carnet(Carnet::Inspected { rooms, log }) => self.events.push(Event::Inspected(rooms, log)),
             Frame::Carnet(Carnet::InviteList { owner, invites, accounts }) => self.events.push(Event::Invites { owner, invites, accounts }),
             // Pictures: where to put one the server wants, or fetch one
@@ -1194,8 +1221,20 @@ impl Session {
                     self.moves += 1;
                     // Kept: no longer waiting, once all of it is.
                     self.settle(room, docs);
+                    // Taken in a room the server took no more of (its
+                    // snapshot): it takes more again; what it holds asked.
+                    if self.full.remove(room) {
+                        self.join(room, docs);
+                    }
                 }
-                if status != UpdateStatusCode::Ok
+                if status == UpdateStatusCode::PayloadTooLarge
+                    && let Some(room) = &room
+                {
+                    // More than the server keeps for now: what it holds
+                    // is asked again once it takes more.
+                    self.held.remove(room);
+                    self.full.insert(room.clone());
+                } else if status != UpdateStatusCode::Ok
                     && let Some(room) = room
                     && !self.read_only.contains(&room)
                 {

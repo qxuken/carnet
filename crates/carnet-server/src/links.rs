@@ -6,12 +6,12 @@
 //! algorithm leaves nothing to negotiate or confuse. A link is, in hex:
 //!
 //! ```text
-//! version (1) · put (1) · expires (8) · max bytes (8) · picture id (32) · account (1..64)
+//! version (1) · put (1) · expires (8) · bytes (8) · picture id (32) · account (1..64)
 //! · HMAC-SHA256 of all that, under the server's key (32)
 //! ```
 //!
 //! The key is made on the first start (`data/links.key`) and never leaves
-//! the server. A link names one account's one picture, one way, up to so
+//! the server. A link names one account's one picture, one way, of so
 //! many bytes, until a time: lost, it opens that picture's sealed bytes for
 //! minutes, no more (and they open only with the account's keys).
 
@@ -32,7 +32,8 @@ pub struct Grant {
     pub account: Vec<u8>,
     pub id: [u8; 32],
     pub put: bool,
-    /// The most a put may send; for a get, 0.
+    /// What a put must send, exactly (the length the device said when it
+    /// offered the picture); for a get, 0.
     pub max: u64,
     pub expires: u64,
 }
