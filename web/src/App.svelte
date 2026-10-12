@@ -4,7 +4,7 @@
   // address (`#note/<key>`, `#note/<key>/history`, `#settings`), so Back
   // goes back. Writing in a note is `#note/<key>/edit` (`/new` for one
   // made just now).
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { sync } from './lib/sync.svelte';
   import Pair from './screens/Pair.svelte';
   import Library from './screens/Library.svelte';
@@ -138,15 +138,49 @@
     return `${what} here ${one ? 'wasn’t' : 'weren’t'} sent before it was. Download ${one ? 'it' : 'them'} before this browser forgets ${one ? 'it' : 'them'}.`;
   });
 
+  // What waits to be sent is said only once it has waited a moment: a
+  // wait a fast server ends at once says nothing. Once said, when all of
+  // it has gone, "All sent" for a moment, then the status again. (The
+  // desktop's Settings → Sync times its line alike.)
+  const WAIT_SHOWN_AFTER = 300;
+  const SENT_SHOWN_FOR = 1500;
+  let waitShown = $state(false);
+  let allSent = $state(false);
+  let waitTimer: ReturnType<typeof setTimeout> | undefined;
+  let sentTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    const waiting = sync.waiting + sync.picturesWaiting > 0;
+    untrack(() => {
+      if (waiting) {
+        if (waitShown || waitTimer !== undefined) return;
+        waitTimer = setTimeout(() => {
+          waitTimer = undefined;
+          clearTimeout(sentTimer);
+          waitShown = true;
+          allSent = false;
+        }, WAIT_SHOWN_AFTER);
+        return;
+      }
+      clearTimeout(waitTimer);
+      waitTimer = undefined;
+      if (!waitShown) return;
+      waitShown = false;
+      allSent = true;
+      clearTimeout(sentTimer);
+      sentTimer = setTimeout(() => (allSent = false), SENT_SHOWN_FOR);
+    });
+  });
+
   /// The footer's line: up to date only when nothing waits to be sent;
   /// else how many changes and pictures wait, and, offline or read only,
   /// why. (The desktop's Settings says it in the same words.)
   const status = $derived.by(() => {
     const count = (n: number, one: string) => (n === 0 ? null : n === 1 ? `1 ${one}` : `${n} ${one}s`);
-    const parts = [count(sync.waiting, 'change'), count(sync.picturesWaiting, 'picture')].filter((p) => p !== null);
+    const parts = waitShown ? [count(sync.waiting, 'change'), count(sync.picturesWaiting, 'picture')].filter((p) => p !== null) : [];
     const ok = sync.status === 'Up to date';
     // Read only: said here (and in Settings), not again as an error.
     const readOnly = sync.readOnly || (sync.usage !== null && !sync.usage.writable);
+    if (!parts.length && ok && allSent && !readOnly) return { ok: true, text: 'All sent' };
     if (!parts.length) return ok && readOnly ? { ok: false, text: 'Read only for now' } : { ok, text: sync.status };
     const changes = parts.join(' and ');
     if (ok && readOnly) return { ok: false, text: `Read only for now: ${changes} waiting` };

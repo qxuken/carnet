@@ -33,6 +33,7 @@ impl Carnet {
         match msg {
             Msg::ShowSettings => {
                 self.settings_open = !self.settings_open;
+                self.wait_line = Default::default();
                 self.font_pick = None;
                 self.list_view = false;
                 return;
@@ -1107,6 +1108,10 @@ impl Carnet {
                 let read_only = self.sync.read_only;
                 let update_soon = self.sync.update_soon;
                 let waiting = (self.sync.waiting(), self.sync.pictures_waiting());
+                let (wait_said, again) = self.wait_line.said(ui.now(), waiting != (0, 0));
+                if let Some(at) = again {
+                    ui.request_frame_at(at);
+                }
                 let in_file = self.sync.keys_in_file();
                 // A line said of the account: an icon, then words.
                 let said = |ui: &mut Ui<'_>, g: Icon, ink: Color, words: &str| {
@@ -1119,9 +1124,12 @@ impl Carnet {
                     ui.text(&word, TextStyle::new(Type::STRONG.size).color(ink));
                     ui.text(&whom, TextStyle::new(Type::SMALL.size).color(t.muted));
                     // Changes the server isn't known to keep yet: not "up
-                    // to date" while any wait.
-                    if waiting != (0, 0) {
-                        said(ui, Icon::Clock, t.muted, &waiting_words(waiting.0, waiting.1));
+                    // to date" while any wait — once they have waited a
+                    // moment, and then "All sent" a moment more.
+                    match wait_said {
+                        Some(Waited::Waiting) => said(ui, Icon::Clock, t.muted, &waiting_words(waiting.0, waiting.1)),
+                        Some(Waited::Sent) => said(ui, Icon::Check, t.muted, ALL_SENT),
+                        None => {}
                     }
                     // What the server keeps for the account, and, on a
                     // hosted plan, how much it may.
@@ -2022,6 +2030,66 @@ pub(super) fn over_limit(kept: u64, limit: u64) -> Option<String> {
     Some(format!("{what}: new pictures stay on this device until there's room. Notes still sync."))
 }
 
+/// How long something waits to be sent before the line says so: a wait
+/// a fast server ends within a frame or two shows nothing.
+pub(super) const WAIT_SHOWN_AFTER: f64 = 0.3;
+
+/// How long "All sent" stays once what the line said was waiting has gone.
+pub(super) const SENT_SHOWN_FOR: f64 = 1.5;
+
+pub(super) const ALL_SENT: &str = "All sent";
+
+/// What the waiting line says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Waited {
+    Waiting,
+    Sent,
+}
+
+/// Settings → Sync's "Waiting to send" line, kept from flashing: said
+/// only once something has waited [`WAIT_SHOWN_AFTER`], and when all of
+/// it has gone, "All sent" for [`SENT_SHOWN_FOR`], then nothing.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WaitLine {
+    /// Since when something has waited, by the frame clock.
+    since: Option<f64>,
+    /// The line has said "Waiting" for this wait.
+    shown: bool,
+    /// When all that it said was waiting went.
+    sent_at: Option<f64>,
+}
+
+impl WaitLine {
+    /// What to say at `now`, with something waiting or not; and when a
+    /// frame is wanted to say the next thing, should nothing else draw one.
+    pub(super) fn said(&mut self, now: f64, waiting: bool) -> (Option<Waited>, Option<f64>) {
+        let sent_until = self.sent_at.map(|at| at + SENT_SHOWN_FOR).filter(|&until| now < until);
+        if waiting {
+            let since = *self.since.get_or_insert(now);
+            if self.shown || now >= since + WAIT_SHOWN_AFTER {
+                self.shown = true;
+                self.sent_at = None;
+                return (Some(Waited::Waiting), None);
+            }
+            // Not yet: "All sent" stays while it has its moment.
+            let next = since + WAIT_SHOWN_AFTER;
+            return (sent_until.map(|_| Waited::Sent), Some(sent_until.map_or(next, |u| u.min(next))));
+        }
+        self.since = None;
+        if std::mem::take(&mut self.shown) {
+            self.sent_at = Some(now);
+            return (Some(Waited::Sent), Some(now + SENT_SHOWN_FOR));
+        }
+        match sent_until {
+            Some(until) => (Some(Waited::Sent), Some(until)),
+            None => {
+                self.sent_at = None;
+                (None, None)
+            }
+        }
+    }
+}
+
 /// Changes and pictures waiting to be sent, in words.
 pub(super) fn waiting_words(changes: usize, pictures: usize) -> String {
     format!("Waiting to send {}", waiting_count(changes, pictures))
@@ -2056,9 +2124,12 @@ pub(super) fn size_words(n: u64) -> String {
 }
 
 /// One of several ways to choose between: the whole row a button, its
-/// icon, its name, and a line on it.
+/// icon, its name, and a line on it. A step off the card it sits on, in
+/// a control's edge, so each reads as a thing to press; a further step
+/// under the pointer, and another pressed.
 fn choice_row(ui: &mut Ui<'_>, l: &Look, key: &str, g: Icon, name: &str, what: &str, msg: Msg) {
     let t = l.t;
+    let step = |k: f32| l.card.mix(t.fg, k);
     ui.with_keyed(
         key,
         NodeSpec::row()
@@ -2066,9 +2137,10 @@ fn choice_row(ui: &mut Ui<'_>, l: &Look, key: &str, g: Icon, name: &str, what: &
             .gap(12.0)
             .padding(Edges { l: 14.0, r: 14.0, t: 10.0, b: 10.0 })
             .radius(radius::CONTROL)
-            .border(1.0, t.border)
-            .hover_bg(t.sunken.mix(t.fg, 0.03))
-            .pressed_bg(t.sunken.mix(t.fg, 0.07))
+            .bg(step(0.03))
+            .border(1.0, t.border_strong)
+            .hover_bg(step(0.07))
+            .pressed_bg(step(0.12))
             .cross_align(Align::Center)
             .on_click(msg)
             .role(Role::Button)

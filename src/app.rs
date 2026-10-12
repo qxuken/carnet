@@ -670,6 +670,8 @@ pub struct Carnet {
     /// the library's edge, for its hint; infinite after a drag, until the
     /// pointer leaves it.
     edge_hover: Option<f64>,
+    /// Settings → Sync's "Waiting to send" line, kept from flashing.
+    wait_line: settings_view::WaitLine,
     /// A picture being carried on the page.
     pub pic_drag: Option<PicDrag>,
     /// The folder rows as last laid out, by folder ("" for All notes,
@@ -971,6 +973,7 @@ impl Carnet {
             note_drag: None,
             library_from: None,
             edge_hover: None,
+            wait_line: Default::default(),
             pic_drag: None,
             folder_rects: Vec::new(),
             overflow: Vec::new(),
