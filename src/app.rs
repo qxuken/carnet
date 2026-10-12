@@ -165,12 +165,19 @@ pub enum Msg {
     RestoreVersionCopy,
     /// Back to the note and the notes.
     CloseHistory,
-    /// Settings → Sync: which way in (0 a code: an invite or a pairing
-    /// code, 1 the recovery words, 2 an email and password).
+    /// Settings → Sync, its first step: the server typed asked what it
+    /// is (Continue); or not (Cancel).
+    SyncCheck,
+    SyncCheckCancel,
+    /// Back to the first step, the address as typed (Change).
+    SyncChange,
+    /// Back a step from a way in's form.
+    SyncBack,
+    /// Settings → Sync: which way in, its form shown (0 a code: an invite
+    /// or a pairing code, 1 the recovery words, 2 an email and password,
+    /// 3 a new account).
     SyncHow { to: u64 },
-    /// Settings → Sync: "New here?", its email field opened or closed; an
-    /// invite asked for, to the email typed.
-    SignupOpen,
+    /// Settings → Sync: an invite asked for, to the email typed.
     SignupSend,
     /// Settings → Sync: the password typed shown as it is, or as dots.
     SyncShowPassword,
@@ -719,9 +726,13 @@ pub struct Carnet {
     /// What Settings → Sync's fields hold.
     pub sync_server: String,
     pub sync_code: String,
+    /// Which way in (as [`Msg::SyncHow`]).
     pub sync_how: u64,
-    /// "New here?": an account made on the server typed, by an invite to
-    /// an email.
+    /// Settings → Sync's steps in: the server asked what it is, a way in
+    /// chosen.
+    pub connect: crate::connect::Connect,
+    /// A new account, on a server that takes signups, by an invite to an
+    /// email.
     pub signup: crate::signup::Signup,
     /// The way in by email and password: what's typed.
     pub sync_email: String,
@@ -978,6 +989,7 @@ impl Carnet {
             sync_server: String::new(),
             sync_code: String::new(),
             sync_how: 0,
+            connect: Default::default(),
             signup: Default::default(),
             sync_email: String::new(),
             sync_password: String::new(),
@@ -2876,29 +2888,66 @@ impl Carnet {
             Msg::RestoreVersion => self.restore_version(),
             Msg::RestoreVersionCopy => self.restore_version_copy(),
             Msg::CloseHistory => self.close_history(),
-            Msg::SyncHow { to } => {
-                self.sync_how = to.min(2);
+            Msg::SyncCheck => {
                 self.sync.error = None;
-            }
-            Msg::SignupOpen => {
-                self.signup.open = !self.signup.open;
-                self.signup.error = None;
-                if self.signup.open {
-                    self.focus_req = Some(Field::SignupEmail);
+                if !self.connect.checking() {
+                    self.connect.check(&self.sync_server);
                 }
             }
-            Msg::SignupSend => self.signup.send(),
+            Msg::SyncCheckCancel => self.connect.cancel(),
+            Msg::SyncChange => {
+                self.connect.change();
+                self.signup.reset();
+                self.sync.error = None;
+                self.sync_reset_fields = true;
+                self.focus_req = Some(Field::SyncServer);
+            }
+            Msg::SyncBack => {
+                self.connect.back();
+                self.sync.error = None;
+                self.signup.error = None;
+                if self.connect.step() == crate::connect::Step::Server {
+                    self.signup.reset();
+                    self.sync_reset_fields = true;
+                    self.focus_req = Some(Field::SyncServer);
+                }
+            }
+            Msg::SyncHow { to } => {
+                self.sync_how = to.min(3);
+                self.connect.choose();
+                self.sync.error = None;
+                self.signup.error = None;
+                self.sync_reset_fields = true;
+                if self.connect.step() == crate::connect::Step::Form {
+                    self.focus_req = Some(match self.sync_how {
+                        2 => Field::SyncEmail,
+                        3 => Field::SignupEmail,
+                        _ => Field::SyncCode,
+                    });
+                }
+            }
+            Msg::SignupSend => {
+                if let Some((origin, info)) = self.connect.origin().zip(self.connect.info())
+                    && info.takes_signups()
+                {
+                    let page = info.signup_page.clone();
+                    self.signup.send(origin, page.as_deref());
+                }
+            }
             Msg::SyncShowPassword => {
                 self.sync_show_password = !self.sync_show_password;
             }
             Msg::SyncStart => {
                 let code = self.sync_code.clone();
                 let how = match self.sync_how {
-                    0 => crate::sync::How::Code(code),
                     1 => crate::sync::How::Recover(code),
-                    _ => crate::sync::How::Password { email: self.sync_email.clone(), password: self.sync_password.clone() },
+                    2 => crate::sync::How::Password { email: self.sync_email.clone(), password: self.sync_password.clone() },
+                    3 => return self.on_plain(Msg::SignupSend),
+                    _ => crate::sync::How::Code(code),
                 };
-                self.sync.start(&self.sync_server, how);
+                // The server as asked (what it said it is), else as typed.
+                let origin = self.connect.origin().map_or_else(|| self.sync_server.clone(), str::to_string);
+                self.sync.start(&origin, how);
             }
             Msg::SyncPassword => {
                 // Held to the account's email (a hosted service): that one,
@@ -3413,9 +3462,13 @@ impl Carnet {
                 }
             }
             Field::Font => self.font_query = text,
+            // Another address: what was said of the last goes, and an
+            // answer still to come would be of the last.
             Field::SyncServer => {
                 if text != self.sync_server {
                     self.sync.error = None;
+                    self.connect.problem = None;
+                    self.connect.cancel();
                 }
                 self.sync_server = text;
             }
@@ -3485,7 +3538,7 @@ impl Carnet {
                 }
             }
             // Enter in the title: into the body.
-            Field::SyncServer => {}
+            Field::SyncServer => self.on_plain(Msg::SyncCheck),
             Field::SyncCode | Field::SyncEmail | Field::SyncPassword => self.on_plain(Msg::SyncStart),
             Field::PasswordEmail | Field::PasswordNew => self.on_plain(Msg::SyncPasswordSave),
             Field::DeviceName => self.on_plain(Msg::SyncRenameSave),
@@ -3608,6 +3661,8 @@ impl App for Carnet {
         self.sync.set_wake(move || wake.wake());
         let wake = waker.clone();
         self.signup.set_wake(move || wake.wake());
+        let wake = waker.clone();
+        self.connect.set_wake(move || wake.wake());
         self.images.set_waker(waker);
     }
 
@@ -3617,7 +3672,7 @@ impl App for Carnet {
             self.save_current();
         }
         self.sync_tick();
-        self.signup_tick();
+        self.connect_tick();
         // A notice lasts a while, then goes; Undo lasts as long as it shows.
         // Its while starts again as long as the pointer is on it, on its way
         // to its Undo, or the window is in the background, where it can't
@@ -3650,7 +3705,6 @@ impl App for Carnet {
         // on the server asked again; and the inspector's "Checked …" kept
         // true while it shows.
         due.extend(self.sync.due());
-        due.extend(self.signup.due());
         if self.settings_open && self.sync_inspector && self.sync.inspected_at.is_some() {
             due.push(INSPECTED_EVERY);
         }

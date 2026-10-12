@@ -4,6 +4,7 @@ mod app;
 // The page's editing lives in carnet-core, shared with the web editor.
 use carnet_core::{history, page};
 mod clip;
+mod connect;
 mod design;
 mod icons;
 mod images;
