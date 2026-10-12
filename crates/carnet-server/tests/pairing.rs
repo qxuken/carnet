@@ -363,6 +363,7 @@ fn a_card_on_another_devices_row_is_not_believed() {
             card: if id == b"tablet" { card_of(b"laptop") } else { d.card.clone() },
             seen: d.seen,
             you: id == b"first",
+            online: false,
         })
         .collect();
     let forged = wire::encode(&Frame::Carnet(Carnet::Devices { epoch: 0, devices: rows, recovery: Vec::new(), password: Vec::new(), passwords: false, passkeys: Vec::new(), password_email: String::new() }));
@@ -405,4 +406,24 @@ fn a_device_renamed_is_listed_by_its_new_name() {
         let _b = net.back(d);
         assert_eq!(name_of(&net.list(a), b"laptop").as_deref(), Some("Work laptop"), "kept through a new login");
     }
+}
+
+/// The list says which devices are logged in now, so one online isn't
+/// shown as last seen when its session began; one gone isn't.
+#[test]
+fn the_list_says_who_is_online_now() {
+    let mut net = Net::new(5, Box::new(Memory::default()));
+    let vault = VaultKey::generate(&mut net.rng);
+    let a = net.first_device(&vault);
+    let b = net.pair(a, b"laptop", 2);
+    let online = |list: &[carnet_sync::session::DeviceInfo]| {
+        let mut o: Vec<(Vec<u8>, bool)> = list.iter().map(|d| (d.id.clone(), d.online)).collect();
+        o.sort();
+        o
+    };
+    assert_eq!(online(&net.list(a)), [(b"first".to_vec(), true), (b"laptop".to_vec(), true)]);
+    let d = net.take(b);
+    assert_eq!(online(&net.list(a)), [(b"first".to_vec(), true), (b"laptop".to_vec(), false)], "gone: last seen");
+    let _b = net.back(d);
+    assert_eq!(online(&net.list(a)), [(b"first".to_vec(), true), (b"laptop".to_vec(), true)], "back");
 }

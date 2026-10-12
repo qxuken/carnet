@@ -255,6 +255,12 @@ impl Vault {
         self.notes.session.is_ready()
     }
 
+    /// How many changes (a note's, or the library's) the server isn't
+    /// known to keep yet: offline, read only, or on their way.
+    pub fn waiting(&self) -> u32 {
+        self.notes.session.waiting() as u32
+    }
+
     pub fn receive(&mut self, frame: &[u8]) {
         self.notes.receive(frame, &mut WebRandom);
     }
@@ -452,7 +458,7 @@ impl Vault {
     }
 
     /// What else happened since last asked, as JSON: `[{"devices":
-    /// [{id, name, seen, you}]} | {"code": "47-381095"} | {"paired":
+    /// [{id, name, seen, you, online}]} | {"code": "47-381095"} | {"paired":
     /// id} | {"pairFailed": why} | {"recoverySet": true} | {"rekeyed":
     /// true} | {"removed": true, "account": bool} | {"invites": {owner,
     /// waiting: [{hash, until, code}], accounts: [{id, owner, made, seen,
@@ -467,11 +473,12 @@ impl Vault {
                         .iter()
                         .map(|d| {
                             format!(
-                                r#"{{"id":{},"name":{},"seen":{},"you":{}}}"#,
+                                r#"{{"id":{},"name":{},"seen":{},"you":{},"online":{}}}"#,
                                 json(&hex(&d.id)),
                                 d.name.as_deref().map_or("null".into(), json),
                                 d.seen,
-                                d.you
+                                d.you,
+                                d.online
                             )
                         })
                         .collect();

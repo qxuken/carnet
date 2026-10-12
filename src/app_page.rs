@@ -95,6 +95,18 @@ impl Carnet {
         });
         // A narrow window keeps less margin, so the text keeps its width.
         let pad = if main_w < 640.0 { 18.0 } else { 48.0 };
+        // A notice is one line: one too long for the room beside the meta
+        // line (and its Undo) is cut after a word, "…" after it, its whole
+        // words its tooltip and its name.
+        let notice = notice.map(|(text, can_undo)| {
+            let small = TextStyle::new(Type::SMALL.size);
+            let mut room = main_w.min(l.page_w) - 2.0 * pad - 16.0 - 6.0 - ui.measure_text(&meta, &small, None).width - 10.0;
+            if can_undo {
+                room -= ui.measure_text("Undo", &small, None).width + 16.0 + 10.0;
+            }
+            let cut = fit_words(&text, room, |s| ui.measure_text(s, &small, None).width);
+            (text, can_undo, cut)
+        });
         // The text's own width: the page's, less its padding, a block's
         // inset and the scrollbar. Pictures are sized to it.
         self.text_w = (main_w.min(l.page_w) - 2.0 * pad - 16.0 - 6.0).max(80.0);
@@ -168,15 +180,17 @@ impl Carnet {
                                         e,
                                         TextStyle::new(Type::SMALL.size).color(t.danger).nowrap(),
                                     );
-                                } else if let Some((text, can_undo)) = &notice {
+                                } else if let Some((text, can_undo, cut)) = &notice {
                                     // Pointed at, it stays (see `view`).
+                                    let spec = NodeSpec::row()
+                                        .enter(kui_native::Enter::from(-6.0, 0.0).opacity(0.0))
+                                        .transition(220.0)
+                                        .hoverable();
+                                    let spec = if cut.is_some() { spec.role(Role::StaticText).label(text.as_str()).tooltip(text) } else { spec };
                                     notice_keys.push(ui.text_in_keyed(
                                         "notice",
-                                        NodeSpec::row()
-                                            .enter(kui_native::Enter::from(-6.0, 0.0).opacity(0.0))
-                                            .transition(220.0)
-                                            .hoverable(),
-                                        text,
+                                        spec,
+                                        cut.as_deref().unwrap_or(text),
                                         TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
                                     ));
                                     if *can_undo {
@@ -2362,8 +2376,8 @@ impl Carnet {
         }
         if skipped > 0 {
             self.notify(
-                if skipped == 1 { "That file isn't a picture — only pictures go into a note".to_string() }
-                else { format!("{skipped} files aren't pictures — only pictures go into a note") },
+                if skipped == 1 { "Left out a file that isn't a picture".to_string() }
+                else { format!("Left out {skipped} files that aren't pictures") },
                 None,
             );
         }
@@ -2836,6 +2850,34 @@ pub(super) fn words_ink(own: Option<Color>, plain: Color, wash: Option<Color>, p
 /// Focus: a part of the page steps back while another block is written,
 /// eased — down slowly enough not to be seen as a change, up at once.
 /// Nothing at all when focus is off.
+/// `text` cut after a whole word, "…" after it, to fit `room` as `width`
+/// measures it; `None` when it fits whole (or is one word: nothing to cut
+/// at). Its first word always stays.
+pub(super) fn fit_words(text: &str, room: f32, mut width: impl FnMut(&str) -> f32) -> Option<String> {
+    let ends: Vec<usize> = text.char_indices().filter(|(_, c)| *c == ' ').map(|(i, _)| i).collect();
+    if ends.is_empty() || width(text) <= room {
+        return None;
+    }
+    // Up to a word's end, without the stop or dash that led to the next.
+    let cut = |end: usize| {
+        let kept = text[..end].trim_end_matches(|c: char| c.is_whitespace() || matches!(c, ':' | ';' | ',' | '\u{b7}' | '\u{2014}' | '('));
+        format!("{kept}\u{2026}")
+    };
+    // The longest that fits, by halving: more words are never narrower.
+    let (mut lo, mut hi, mut best) = (1, ends.len(), cut(ends[0]));
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        let s = cut(ends[mid]);
+        if width(&s) <= room {
+            best = s;
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Some(best)
+}
+
 fn step_back(spec: NodeSpec, focus: bool, dim: bool) -> NodeSpec {
     if !focus {
         return spec;

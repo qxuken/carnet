@@ -320,6 +320,9 @@ pub struct DeviceRow {
     pub seen: u64,
     /// The device asking.
     pub you: bool,
+    /// Logged in now (on another socket, or this one). Said at the end of
+    /// the list (§14): from a server from before, false.
+    pub online: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -456,9 +459,18 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
                         w.push_uleb128(p.made);
                     }
                     // Added at the end (§14), and only when there's one: a
-                    // list without it is written as before it was.
-                    if !password_email.is_empty() {
+                    // list without it is written as before it was. The
+                    // devices online now after it, likewise (by their place
+                    // in the list), the email written, if empty, before them.
+                    let online: Vec<u64> = devices.iter().enumerate().filter(|(_, d)| d.online).map(|(i, _)| i as u64).collect();
+                    if !password_email.is_empty() || !online.is_empty() {
                         w.push_var_string(password_email);
+                    }
+                    if !online.is_empty() {
+                        w.push_uleb128(online.len() as u64);
+                        for i in online {
+                            w.push_uleb128(i);
+                        }
                     }
                 }
                 Carnet::Revoke { device, epoch, keys, cards } => {
@@ -742,6 +754,7 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
                     card: r.read_var_bytes()?.to_vec(),
                     seen: r.read_uleb128()?,
                     you: r.read_byte()? != 0,
+                    online: false,
                 });
             }
             let recovery = r.read_var_bytes()?.to_vec();
@@ -758,6 +771,16 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
             }
             // A server from before password emails: any.
             let password_email = if r.remaining() > 0 { r.read_var_string()? } else { String::new() };
+            // A server from before it said who's online: nobody said.
+            if r.remaining() > 0 {
+                let k = count(&mut r, 1)?;
+                for _ in 0..k {
+                    let i = r.read_uleb128()?;
+                    if let Some(d) = usize::try_from(i).ok().and_then(|i| devices.get_mut(i)) {
+                        d.online = true;
+                    }
+                }
+            }
             Carnet::Devices { epoch, devices, recovery, password, passwords, passkeys, password_email }
         }
         22 => {
@@ -979,13 +1002,28 @@ mod tests {
             Frame::Carnet(Carnet::Devices {
                 epoch: 2,
                 devices: vec![
-                    DeviceRow { id: b"a".to_vec(), public: [1; 32], card: vec![4; 90], seen: 1_760_000_000, you: true },
-                    DeviceRow { id: b"b".to_vec(), public: [2; 32], card: Vec::new(), seen: 0, you: false },
+                    DeviceRow { id: b"a".to_vec(), public: [1; 32], card: vec![4; 90], seen: 1_760_000_000, you: true, online: false },
+                    DeviceRow { id: b"b".to_vec(), public: [2; 32], card: Vec::new(), seen: 0, you: false, online: false },
                 ],
                 recovery: vec![5; 90],
                 password: vec![6; 90],
                 passwords: true,
                 passkeys: vec![PasskeyRow { public: [7; 32], card: vec![8; 120], made: 1_760_000_000 }, PasskeyRow { public: [9; 32], card: vec![1; 120], made: 0 }],
+                password_email: String::new(),
+            }),
+            // Two devices online now (this one, and another), with no
+            // password's email: written empty before them.
+            Frame::Carnet(Carnet::Devices {
+                epoch: 2,
+                devices: vec![
+                    DeviceRow { id: b"a".to_vec(), public: [1; 32], card: vec![4; 90], seen: 1_760_000_000, you: true, online: true },
+                    DeviceRow { id: b"b".to_vec(), public: [2; 32], card: Vec::new(), seen: 1_760_000_100, you: false, online: false },
+                    DeviceRow { id: b"c".to_vec(), public: [3; 32], card: vec![5; 90], seen: 1_760_000_200, you: false, online: true },
+                ],
+                recovery: Vec::new(),
+                password: Vec::new(),
+                passwords: false,
+                passkeys: Vec::new(),
                 password_email: String::new(),
             }),
             // On a server holding passwords to the account's email.
@@ -1077,6 +1115,22 @@ mod tests {
         let old = encode(&Frame::Carnet(Carnet::Devices { epoch: 1, devices: Vec::new(), recovery: Vec::new(), password: Vec::new(), passwords: true, passkeys: Vec::new(), password_email: String::new() }));
         let old = &old[..old.len() - 1];
         assert!(matches!(decode(old), Ok(Frame::Carnet(Carnet::Devices { epoch: 1, passwords: true, passkeys, password_email, .. })) if passkeys.is_empty() && password_email.is_empty()));
+        // A server from before it said who's online: the same list, nobody
+        // said online (the email and the places, 1 + 3 bytes, cut).
+        let row = |id: &[u8], online| DeviceRow { id: id.to_vec(), public: [1; 32], card: Vec::new(), seen: 9, you: false, online };
+        let now = encode(&Frame::Carnet(Carnet::Devices {
+            epoch: 1,
+            devices: vec![row(b"a", true), row(b"b", false), row(b"c", true)],
+            recovery: Vec::new(),
+            password: Vec::new(),
+            passwords: false,
+            passkeys: Vec::new(),
+            password_email: String::new(),
+        }));
+        let Ok(Frame::Carnet(Carnet::Devices { devices, .. })) = decode(&now[..now.len() - 4]) else { panic!() };
+        assert_eq!(devices, vec![row(b"a", false), row(b"b", false), row(b"c", false)]);
+        let Ok(Frame::Carnet(Carnet::Devices { devices, .. })) = decode(&now) else { panic!() };
+        assert_eq!(devices.iter().map(|d| d.online).collect::<Vec<_>>(), [true, false, true]);
         // A DocUpdate claiming billions of updates in a few bytes: refused
         // before anything is made room for.
         let mut m = b"%ELO\x01r\x03".to_vec();

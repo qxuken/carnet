@@ -34,8 +34,9 @@ pub struct Signup {
     sending: Option<(String, Asked)>,
     /// The invite was sent to this email.
     pub sent_to: Option<String>,
-    /// What more the server said as it sent it.
-    pub said: Option<String>,
+    /// What the server answered: sent now (with whatever more it said),
+    /// or mailed lately and not again.
+    pub sent: Option<signup::Sent>,
     /// Why no invite was sent.
     pub error: Option<String>,
 }
@@ -56,7 +57,7 @@ impl Signup {
         self.wanted = origin.map(|o| (o, Instant::now()));
         self.open = false;
         self.sent_to = None;
-        self.said = None;
+        self.sent = None;
         self.error = None;
         self.sending = None;
     }
@@ -85,9 +86,9 @@ impl Signup {
         self.sending = None;
         let page = self.offered().map(str::to_string);
         match answer.map_err(|why| format!("Couldn't reach the server: {why}")).and_then(|a| signup::answered(&a, page.as_deref())) {
-            Ok(said) => {
+            Ok(sent) => {
                 self.sent_to = Some(to);
-                self.said = said;
+                self.sent = Some(sent);
                 self.open = false;
                 true
             }

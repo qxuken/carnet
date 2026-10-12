@@ -128,6 +128,7 @@ fn a_limit_changed_is_told_to_the_devices_online() {
         let refused = net.hub.stats().batches_refused;
         net.write(a, "while suspended. ");
         assert_eq!(net.hub.store().usage(&account), before, "nothing taken");
+        assert_eq!(net.device(a).session.waiting(), 1, "a change waits to be sent");
         assert_eq!(net.hub.stats().batches_refused, refused, "nor even sent to be refused");
         assert!(!net.device(b).notes.doc(ROOM).text().contains("while suspended"));
 
@@ -143,9 +144,30 @@ fn a_limit_changed_is_told_to_the_devices_online() {
         assert!(net.hub.store().usage(&account) > before, "what waited went");
         assert!(net.device(b).notes.doc(ROOM).text().contains("while suspended"));
         assert!(events(&mut net, b).contains(&Event::Writable));
+        assert_eq!(net.device(a).session.waiting(), 0, "sent, and kept");
         net.write(a, "after.");
         assert!(net.device(b).notes.doc(ROOM).text().contains("after."));
         // Another account's sockets aren't told anything.
         assert!(net.hub.limit_changed(b"someone else").is_empty());
     }
+}
+
+/// What a device says waits to be sent: a change made offline, until the
+/// server keeps it; a save that changes nothing waits for nothing.
+#[test]
+fn a_change_made_offline_waits_until_the_server_keeps_it() {
+    let mut net = Net::new(82, Box::new(carnet_server::Memory::default()));
+    let vault = VaultKey::generate(&mut net.rng);
+    let a = net.first_device(&vault);
+    net.write(a, "online. ");
+    assert_eq!(net.device(a).session.waiting(), 0, "sent and kept at once");
+    let mut d = net.take(a);
+    // Saved again with nothing new: nothing waits.
+    d.session.saved(ROOM, &mut d.notes, &mut net.rng);
+    assert_eq!(d.session.waiting(), 0);
+    d.notes.doc(ROOM).record("online. offline.", Origin::Save);
+    d.session.saved(ROOM, &mut d.notes, &mut net.rng);
+    assert_eq!(d.session.waiting(), 1, "written offline: waits");
+    let a = net.back(d);
+    assert_eq!(net.device(a).session.waiting(), 0, "back online: sent, and kept");
 }

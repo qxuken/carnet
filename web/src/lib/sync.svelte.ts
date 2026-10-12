@@ -20,7 +20,7 @@ export type Note = {
   modified: number;
 };
 
-export type Device = { id: string; name: string | null; seen: number; you: boolean };
+export type Device = { id: string; name: string | null; seen: number; you: boolean; online: boolean };
 
 /// A passkey of the account: `id` names its slot, `credential` is its id
 /// in the passkey manager (hex), `made` when it was added.
@@ -106,6 +106,9 @@ class Sync {
   phase = $state<'loading' | 'setup' | 'ready'>('loading');
   /// In plain words, for the page to say.
   status = $state('');
+  /// Changes (a note's, or the library's) the server isn't known to keep
+  /// yet: offline, read only, or on their way.
+  waiting = $state(0);
   error = $state<string | null>(null);
   joining = $state(false);
   // Replaced whole, never changed in place: raw, so ten thousand notes
@@ -294,6 +297,9 @@ class Sync {
   private flush() {
     const out = this.join ? this.join.take_out() : this.vault?.take_out();
     for (const f of out ?? []) this.ws?.send(f);
+    // After every edit and every frame: what the server isn't known to
+    // keep yet.
+    this.waiting = this.vault?.waiting() ?? 0;
   }
 
   private frame(bytes: Uint8Array) {

@@ -1010,12 +1010,15 @@ impl<S: Storage> Hub<S> {
 
     /// The account's devices not removed, for `me` to read.
     fn devices_frame(&self, conn: ConnId, account: &[u8], me: &[u8]) -> Out {
+        // Who's logged in now: said with each, so a device online isn't
+        // shown as last seen when its session began.
+        let online = self.online(account);
         let devices = self
             .store
             .devices(account)
             .into_iter()
             .filter(|(_, d)| !d.revoked)
-            .map(|(id, d)| DeviceRow { you: id == me, id, public: d.public, card: d.card, seen: d.seen })
+            .map(|(id, d)| DeviceRow { you: id == me, online: online.contains(&id), id, public: d.public, card: d.card, seen: d.seen })
             .collect();
         carnet(conn, Carnet::Devices {
             epoch: self.store.epoch(account),

@@ -128,6 +128,18 @@
   }
   // Back where there's a page to go back to; else to the list.
   const back = () => (history.length > 1 ? history.back() : go(''));
+
+  /// The footer's line: up to date only when nothing waits to be sent;
+  /// else how many changes wait, and, offline or read only, why.
+  const status = $derived.by(() => {
+    const n = sync.waiting;
+    const ok = sync.status === 'Up to date';
+    if (!n) return { ok, text: sync.status };
+    const changes = n === 1 ? '1 change' : `${n} changes`;
+    if (ok && sync.usage && !sync.usage.writable) return { ok: false, text: `Read only for now: ${changes} waiting` };
+    if (ok) return { ok: false, text: `Waiting to send ${changes}` };
+    return { ok: false, text: `${sync.status} · ${changes} waiting` };
+  });
 </script>
 
 {#if sync.phase === 'loading'}
@@ -147,8 +159,8 @@
       <div class="side" style:--side-w={wide ? `${sideW}px` : null}>
         <Library open={(key) => go(`note/${key}`)} {current} {create} />
         <footer>
-          <span class="status" class:ok={sync.status === 'Up to date'}>
-            <Icon name={sync.status === 'Up to date' ? 'check' : 'clock'} size={14} /> {sync.status}
+          <span class="status" class:ok={status.ok} role="status">
+            <Icon name={status.ok ? 'check' : 'clock'} size={14} /> {status.text}
           </span>
           <button class:on={route.kind === 'settings'} onclick={() => go('settings')} aria-label="Settings" title="Settings"><Icon name="settings" size={18} /></button>
         </footer>

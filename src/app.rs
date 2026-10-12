@@ -999,14 +999,9 @@ impl Carnet {
             app.store.notes.push(blank_note());
         }
         if !app.store.skipped.is_empty() {
-            app.notify(
-                format!(
-                    "Left {} file(s) alone that aren't UTF-8: {}",
-                    app.store.skipped.len(),
-                    app.store.skipped.join(", ")
-                ),
-                None,
-            );
+            let n = app.store.skipped.len();
+            let what = if n == 1 { "1 file that isn't".to_string() } else { format!("{n} files that aren't") };
+            app.notify(format!("Left out {what} plain text: {}", app.store.skipped.join(", ")), None);
         }
         app.trash = app.store.trashed();
         app.reorder();
@@ -1039,7 +1034,7 @@ impl Carnet {
             (0, f) => n(f, "file", "files"),
             (p, f) => format!("{} and {}", n(p, "picture", "pictures"), n(f, "other file", "other files")),
         };
-        self.notify(format!("Moved {what} to the attachments folder, links and all"), None);
+        self.notify(format!("Moved {what} to the attachments folder"), None);
     }
 
     /// The sweep (store_owned.rs): the pictures of Carnet's no note has
@@ -1100,7 +1095,7 @@ impl Carnet {
             self.store.index_files();
             self.sync.poke();
             let undo = Undo::Copied { note: self.store.notes[self.current].id, copy: to, srcs };
-            self.notify(format!("Copied \u{201c}{name}\u{201d} into Carnet: this note shows the copy, which syncs"), Some(undo));
+            self.notify(format!("Copied \u{201c}{name}\u{201d} into Carnet"), Some(undo));
             return;
         }
         // Edits not saved yet go first: every note is written from what
@@ -1118,9 +1113,9 @@ impl Carnet {
                 self.sync.poke();
                 let notes = m.notes.len() + m.trashed.len();
                 let said = match (m.left, notes) {
-                    (true, _) => format!("Copied \u{201c}{name}\u{201d} into Carnet; your file couldn't be moved, so it stays too"),
-                    (false, 0 | 1) => format!("Moved \u{201c}{name}\u{201d} into Carnet: it syncs now"),
-                    (false, n) => format!("Moved \u{201c}{name}\u{201d} into Carnet; {n} notes show it there"),
+                    (true, _) => format!("Copied \u{201c}{name}\u{201d} into Carnet (yours couldn't be moved)"),
+                    (false, 0 | 1) => format!("Moved \u{201c}{name}\u{201d} into Carnet"),
+                    (false, n) => format!("Moved \u{201c}{name}\u{201d} into Carnet \u{b7} {n} notes"),
                 };
                 self.notify(said, Some(Undo::Picture(Box::new(m))));
             }
@@ -1434,7 +1429,7 @@ impl Carnet {
         match self.store.save(i, rename) {
             Ok(Saved::Merged) => {
                 self.error = None;
-                self.notify("Changed in another app too — the two are merged", None);
+                self.notify("Changed in another app too: merged", None);
                 // The page is the merged note now: its undo history
                 // describes one that is gone.
                 let id = self.store.notes[self.current].id;
@@ -1446,7 +1441,7 @@ impl Carnet {
                 self.error = None;
                 let name = self.store.notes[copy].display_title().to_string();
                 self.notify(
-                    format!("Changed in another app too — your version is kept as \u{201c}{name}\u{201d}"),
+                    format!("Changed in another app too: yours is kept as \u{201c}{name}\u{201d}"),
                     None,
                 );
                 let id = self.store.notes[self.current].id;
@@ -1942,7 +1937,7 @@ impl Carnet {
         let remote = self.sync.tick(&mut self.store);
         if std::mem::take(&mut self.sync.password_set) {
             let said = match self.pw_edit.take() {
-                Some((email, _)) => format!("Password set: a new device can come in with {}", carnet_sync::password::id(&email)),
+                Some((email, _)) => format!("Password set for {}", carnet_sync::password::id(&email)),
                 None => "Password taken away".to_string(),
             };
             self.notify(said, None);
@@ -1976,7 +1971,7 @@ impl Carnet {
                     self.histories.remove(&open);
                     self.caret = page::fix(self.doc(), self.caret);
                     if matches!(r, store::Remote::Merged(_)) {
-                        self.notify("Changed on another device too — the two are merged", None);
+                        self.notify("Changed on another device too: merged", None);
                     }
                 }
                 _ => {}
