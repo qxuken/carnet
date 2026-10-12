@@ -231,8 +231,16 @@ impl Editor {
     }
 
     /// The selection CodeMirror has. One across the title and the note is
-    /// taken as the note's part.
+    /// taken as the note's part. Where the caret is at that place in the
+    /// words already, it stays as the page put it: past the marks that
+    /// just closed a style, say, which the place read afresh would put it
+    /// back inside ([`inline::Visible::at`]), so the words after them
+    /// would carry the style on.
     pub fn select(&mut self, a_line: usize, a_col: usize, h_line: usize, h_col: usize) {
+        let in_text = self.caret.anchor.slot.cell.is_none() && self.caret.head.slot.cell.is_none();
+        if matches!(self.focus, Focus::Body) && in_text && a_line > 0 && h_line > 0 && self.caret_lc() == (a_line, a_col, h_line, h_col) {
+            return;
+        }
         if a_line == 0 && h_line == 0 {
             self.focus = Focus::Title {
                 anchor: u16_to_byte(&self.title, a_col),
@@ -447,7 +455,8 @@ impl Editor {
     }
 
     /// A picture (`src` as the note links it) on its own line below the
-    /// caret's block (in place of an empty paragraph), the caret past it;
+    /// caret's block (in place of an empty paragraph), the caret past it,
+    /// no empty line made before the block after (`page::insert_block`);
     /// in a table's cell, among its words at the caret.
     pub fn insert_picture(&mut self, src: &str) -> bool {
         if !matches!(self.focus, Focus::Body) {
@@ -1201,6 +1210,67 @@ mod tests {
         assert_eq!(e.markdown().lines().nth(2), Some("**going on**"));
     }
 
+    /// Marks typed by hand that close a style leave the caret past them,
+    /// though CodeMirror tells the same place back after each key: the
+    /// words after are plain.
+    #[test]
+    fn a_style_closed_by_typed_marks_ends_there() {
+        for m in ["**", "*", "~~", "==", "`"] {
+            let mut e = Editor::open("# T\n\n\n");
+            e.select(1, 0, 1, 0);
+            for ch in format!("{m}tb{m} after").chars() {
+                let (a, b, c, d) = e.caret_lc();
+                e.select(a, b, c, d);
+                e.input(&ch.to_string());
+            }
+            assert_eq!(e.markdown().lines().nth(2), Some(format!("{m}tb{m} after").as_str()));
+            assert_eq!(e.style_here(), Style::default(), "{m}");
+        }
+    }
+
+    /// Typed at the end of a link's words, words go past the link: made a
+    /// link of their own, the first keeps its address.
+    #[test]
+    fn typing_at_a_links_end_goes_past_it() {
+        let mut e = Editor::open("# T\n\nsee [docs](http://a)\n");
+        e.select(1, 8, 1, 8);
+        keys(&mut e, " now");
+        assert_eq!(e.markdown().lines().nth(2), Some("see [docs](http://a) now"));
+        assert_eq!(e.caret_lc(), (1, 12, 1, 12));
+        e.select(1, 9, 1, 12);
+        assert!(e.set_link(Some("http://b")));
+        assert_eq!(e.markdown().lines().nth(2), Some("see [docs](http://a) [now](http://b)"));
+        e.select(1, 6, 1, 6);
+        assert_eq!(e.link_here().as_deref(), Some("http://a"));
+    }
+
+    /// `` ``` `` and Enter, as CodeMirror sends them, open a code block
+    /// with the caret on its first line; a language typed after the marks
+    /// stays on the fence.
+    #[test]
+    fn a_code_block_opens_on_enter_at_its_first_line() {
+        for (typed, fence) in [("```", "```"), ("```rust", "```rust")] {
+            let mut e = Editor::open("# T\n\n\n");
+            e.select(1, 0, 1, 0);
+            keys(&mut e, typed);
+            assert!(e.enter(false));
+            keys(&mut e, "let x = 1;");
+            assert_eq!(e.markdown(), format!("# T\n\n{fence}\nlet x = 1;\n```\n"));
+            assert_eq!(e.lines()[2].text, "let x = 1;");
+        }
+    }
+
+    /// A picture put in at the end of the words before a table: no empty
+    /// line between, the caret on in the table's first cell.
+    #[test]
+    fn a_picture_before_a_table_leaves_no_empty_line() {
+        let mut e = Editor::open("# T\n\nIntro\n\n| a |\n| --- |\n");
+        e.select(1, 5, 1, 5);
+        assert!(e.insert_picture("attachments/a.png"));
+        assert_eq!(e.markdown(), "# T\n\nIntro\n\n![](attachments/a.png)\n\n| a |\n| --- |\n");
+        assert_eq!(e.cell_caret().map(|c| (c.1, c.2)), Some((0, 0)));
+    }
+
     #[test]
     fn links_made_changed_and_taken_off() {
         let mut e = Editor::open("# T\n\nsee the site\n");
@@ -1267,8 +1337,9 @@ mod tests {
         assert!(!e.move_picture(3, PicTo::Line(0)));
     }
 
-    /// The header row taken away and put back, as the desktop does; the
-    /// page is told which row, if any, is the header.
+    /// The header row turned off and on, as the desktop does: its words
+    /// stay, a plain row under an empty header line; the page is told
+    /// which row, if any, is the header.
     #[test]
     fn a_tables_header_goes_and_comes_back() {
         let mut e = Editor::open("# T\n\n| Day | Miles |\n| --- | --- |\n| Fri | 30 |\n");
@@ -1277,11 +1348,12 @@ mod tests {
         assert!(e.table_header());
         assert!(e.table_op(4));
         assert!(!e.look(1).head && !e.table_header());
-        assert_eq!(e.look(1).cells.len(), 1);
-        assert!(e.markdown().contains("| | |\n| --- | --- |\n| Fri | 30 |"), "{}", e.markdown());
+        assert_eq!(e.look(1).cells.len(), 2, "no row goes");
+        assert!(e.markdown().contains("| | |\n| --- | --- |\n| Day | Miles |\n| Fri | 30 |"), "{}", e.markdown());
         assert!(e.table_op(4));
         assert!(e.look(1).head);
         assert_eq!(e.look(1).cells.len(), 2);
+        assert!(e.markdown().contains("| Day | Miles |\n| --- | --- |\n| Fri | 30 |"), "{}", e.markdown());
     }
 
     /// The toolbar's divider, as the desktop's: between two paragraphs it

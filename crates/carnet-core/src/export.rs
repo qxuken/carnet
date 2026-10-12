@@ -237,11 +237,9 @@ fn spans(text: &str, viewer: bool, image: Option<&Where<'_>>) -> String {
             piece = format!("<mark style=\"--mark:#{:08x}\">{piece}</mark>", s.mark);
         }
         if s.link {
-            // `[text](url)`: the url is what follows `](`.
-            let url = text[b..]
-                .strip_prefix("](")
-                .and_then(|r| r.split_once(')'))
-                .map(|(u, _)| u.to_string());
+            // `[text](url)`: the address of the link these words are in,
+            // as the page reads it, brackets in it and all.
+            let url = inline::link_at(text, a).map(|(_, u)| u);
             // One the page mustn't follow (`javascript:` and the like):
             // its words, with no link.
             if let Some(href) = url.as_deref().and_then(safe_href) {
@@ -350,6 +348,18 @@ mod tests {
         for href in ["https://x", "mailto:a@b", "notes/x.md", "#top"] {
             assert!(h.contains(&format!("href=\"{href}\"")), "{href}: {h}");
         }
+    }
+
+    /// A link's address is all of it, brackets in pairs too: one that
+    /// runs (`javascript:alert(1)`) is its words alone, nothing left over;
+    /// one to follow is followed whole, and so are its words in a style.
+    #[test]
+    fn a_links_address_holds_brackets_in_pairs() {
+        let h = html("[x](javascript:alert(1)) after", |s, _| s.to_string());
+        assert!(h.contains("<p>x after</p>"), "{h}");
+        let h = html("[Mercury](https://x.org/Mercury_(planet)) [a **b**](https://y)", |s, _| s.to_string());
+        assert!(h.contains("<a href=\"https://x.org/Mercury_(planet)\">Mercury</a> "), "{h}");
+        assert!(h.contains("<a href=\"https://y\">a </a><a href=\"https://y\"><b>b</b></a>"), "{h}");
     }
 
     /// A picture in a table's cell is a picture there, in the reader and

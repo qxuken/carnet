@@ -99,23 +99,14 @@ impl Table {
         self.header && r == 0
     }
 
-    /// The header put back, an empty row on top (its id returned), or
-    /// taken away, its row with it: never the table's last row, nor a
-    /// header it has already, or hasn't.
-    pub fn set_header(&mut self, on: bool) -> Option<u64> {
-        match (on, self.header) {
-            (true, false) => {
-                let id = self.insert_row(0);
-                self.header = true;
-                Some(id)
-            }
-            (false, true) if self.rows.len() > 1 => {
-                let id = self.rows.remove(0).id;
-                self.header = false;
-                Some(id)
-            }
-            _ => None,
-        }
+    /// The header taken away or put back, no words lost either way: off,
+    /// the header row is the first plain row, under the empty header line
+    /// the file has then; on, the first plain row is the header again.
+    /// True when it changed.
+    pub fn set_header(&mut self, on: bool) -> bool {
+        let changed = self.header != on;
+        self.header = on;
+        changed
     }
 
     pub fn width(&self) -> usize {
@@ -584,9 +575,25 @@ pub fn shortcut(text: &str) -> Option<Kind> {
     match text {
         "---" | "***" | "___" => Some(Kind::Divider),
         "/table" | "/table " => Some(Kind::Table(Table::new(3, 3))),
-        "```" | "/code" | "/code " => Some(Kind::Raw("```\n\n```".to_string())),
         _ => None,
     }
+}
+
+/// What a line opens when Enter is pressed at its end: a code block for
+/// `` ``` `` (a language after it kept on the fence, `` ```rust ``) or
+/// `/code`. Not as it is typed, as other shortcuts are: the language
+/// comes after the marks, and the Enter that follows them would be an
+/// empty first line in the code.
+pub fn fence(line: &str) -> Option<Kind> {
+    let lang = match line.trim_end() {
+        "/code" => "",
+        l => l.strip_prefix("```")?.trim(),
+    };
+    // Backticks in a fence's language would end it: no fence.
+    if lang.contains('`') {
+        return None;
+    }
+    Some(Kind::Raw(format!("```{lang}\n\n```")))
 }
 
 /// `"12. rest"` → `(12, "rest")`.
@@ -1568,7 +1575,7 @@ fn parse(src: &str, whole_note: bool) -> (Option<String>, Vec<Block>) {
             }
             // An empty header row over others: a table without a header.
             if table.rows.len() > 1 && table.is_blank_row(0) {
-                table.set_header(false);
+                table.remove_row(0);
             }
             blocks.push(Block::new(Kind::Table(table)));
             continue;
@@ -2020,7 +2027,12 @@ Second line of the same paragraph.
         assert!(matches!(shortcut("## "), Some(Kind::Heading { level: 2, .. })));
         assert!(matches!(shortcut("---"), Some(Kind::Divider)));
         assert!(matches!(shortcut("/table"), Some(Kind::Table(_))));
-        assert!(matches!(shortcut("```"), Some(Kind::Raw(_))));
+        assert!(shortcut("```").is_none() && shortcut("/code").is_none(), "code opens on Enter");
+        assert_eq!(fence("```"), Some(Kind::Raw("```\n\n```".into())));
+        assert_eq!(fence("```rust "), Some(Kind::Raw("```rust\n\n```".into())));
+        assert_eq!(fence("/code"), Some(Kind::Raw("```\n\n```".into())));
+        assert_eq!(fence("```a`b"), None);
+        assert_eq!(fence("``"), None);
         assert!(shortcut("-x").is_none());
         assert!(shortcut("- a\nb").is_none());
     }
@@ -2066,23 +2078,32 @@ Second line of the same paragraph.
         assert!(t.header && t.rows.len() == 1, "its only row stays");
     }
 
-    /// The header taken away (by removing its row too) and put back; a
-    /// table without one sorts every row.
+    /// The header taken away keeps its words, as the first plain row
+    /// under an empty header line; put back, the first row is the header
+    /// again. A table without one sorts every row; one of a single row can
+    /// lose its header too. Removing the header's row takes the header.
     #[test]
     fn a_header_comes_and_goes() {
         let mut t = Table::from_cells(vec![vec!["name".into()], vec!["b".into()], vec!["a".into()]]);
-        assert!(t.set_header(true).is_none(), "it has one");
-        assert!(t.set_header(false).is_some());
-        assert_eq!((t.header, t.rows.len()), (false, 2));
-        assert!(t.set_header(false).is_none(), "it has none");
+        assert!(!t.set_header(true), "it has one");
+        assert!(t.set_header(false));
+        assert_eq!((t.header, t.rows.len()), (false, 3), "no row goes");
+        assert!(!t.set_header(false), "it has none");
+        let md = to_markdown(None, &Doc::new(vec![Block::new(Kind::Table(t.clone()))]));
+        assert_eq!(md, "| |\n| --- |\n| name |\n| b |\n| a |\n", "its words kept, under an empty header line");
+        let (_, back) = from_markdown(&md);
+        let Kind::Table(b) = &back.blocks()[0].kind else { panic!() };
+        assert!(!b.header && b.rows.iter().map(|r| &r.cells).eq(t.rows.iter().map(|r| &r.cells)), "and read back so");
         assert!(t.sort_by(0, false), "every row sorts");
-        assert_eq!(t.rows.iter().map(|r| r.cells[0].as_str()).collect::<Vec<_>>(), ["a", "b"]);
-        let id = t.set_header(true).unwrap();
-        assert_eq!((t.header, t.rows[0].id, t.rows[0].cells[0].as_str()), (true, id, ""));
+        assert_eq!(t.rows.iter().map(|r| r.cells[0].as_str()).collect::<Vec<_>>(), ["a", "b", "name"]);
+        assert!(t.set_header(true));
+        assert_eq!((t.header, t.rows.len(), t.rows[0].cells[0].as_str()), (true, 3, "a"), "the first row is the header again");
         assert!(t.remove_row(0));
         assert!(!t.header, "its row removed, no header");
-        let mut one = Table::new(2, 1);
-        assert!(one.set_header(false).is_none(), "never the last row");
+        let mut one = Table::from_cells(vec![vec!["only".into()]]);
+        assert!(one.set_header(false), "a table of one row too");
+        let md = to_markdown(None, &Doc::new(vec![Block::new(Kind::Table(one))]));
+        assert_eq!(md, "| |\n| --- |\n| only |\n");
     }
 
     #[test]
