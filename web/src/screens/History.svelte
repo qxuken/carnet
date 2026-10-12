@@ -7,6 +7,7 @@
   import Icon from '../lib/Icon.svelte';
   import { pictures } from '../lib/pictures';
   import { tints } from '../lib/colors';
+  import { dropLetters } from '../lib/initial';
   import { onDestroy, onMount } from 'svelte';
 
   let { key, back, wide }: { key: string; back: () => void; wide: boolean } = $props();
@@ -36,6 +37,7 @@
     if (!box) return;
     pictures(box);
     tints(box);
+    dropLetters(box.querySelectorAll<HTMLElement>('p.initial'));
     // A version is for reading: its boxes don't tick.
     for (const i of box.querySelectorAll('input')) i.disabled = true;
   });

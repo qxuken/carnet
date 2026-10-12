@@ -7,6 +7,7 @@
   import Icon from '../lib/Icon.svelte';
   import { pictures } from '../lib/pictures';
   import { tints } from '../lib/colors';
+  import { dropLetters } from '../lib/initial';
 
   type Props = {
     key: string;
@@ -38,14 +39,28 @@
   $effect(() => {
     if (!box) return;
     const el = box;
+    const drop = () => dropLetters(el.querySelectorAll<HTMLElement>('p.initial'));
     const touch = () => {
       pictures(el);
       tints(el);
+      drop();
     };
     touch();
     const drawn = new MutationObserver(touch);
     drawn.observe(el, { childList: true });
-    return () => drawn.disconnect();
+    // A narrower or wider page: paragraphs take more lines, or fewer.
+    let width = el.clientWidth;
+    const resized = new ResizeObserver(() => {
+      if (el.clientWidth !== width) {
+        width = el.clientWidth;
+        drop();
+      }
+    });
+    resized.observe(el);
+    return () => {
+      drawn.disconnect();
+      resized.disconnect();
+    };
   });
 
   let sure = $state(false);

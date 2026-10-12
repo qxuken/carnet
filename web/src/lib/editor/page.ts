@@ -10,6 +10,7 @@
 // While the input method composes, nothing is changed under it.
 
 import { Annotation, EditorSelection, EditorState, StateEffect, StateField, type Extension, type Range, type Transaction, type TransactionSpec } from '@codemirror/state';
+import { dropFor, linesOf } from '../initial';
 import { Decoration, EditorView, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import type { PageEditor } from '../../wasm/carnet_web.js';
 import { HIGHLIGHT, inkCss, washCss } from '../colors';
@@ -368,6 +369,60 @@ function chosenRules(state: EditorState): DecorationSet {
   return Decoration.set(out);
 }
 
+/// Dropped first letters as deep as their paragraphs (lib/initial.ts),
+/// given as line decorations, never classes set on CodeMirror's own
+/// lines, which it would redraw away. Measured after each change is drawn,
+/// the letter as it then drops (a line or so of difference at most, and
+/// none for a paragraph of one line, which is what matters).
+const initialsMeasured = StateEffect.define<null>();
+const initials = ViewPlugin.fromClass(
+  class {
+    drops = new Map<number, string>();
+    deco: DecorationSet = Decoration.none;
+    constructor(readonly view: EditorView) {
+      this.measure();
+    }
+    update(u: ViewUpdate) {
+      if (u.docChanged) {
+        const moved = new Map<number, string>();
+        for (const [at, cls] of this.drops) moved.set(u.changes.mapPos(at), cls);
+        this.drops = moved;
+        this.deco = this.decorate(u.state);
+      }
+      if (u.transactions.some((t) => t.effects.some((e) => e.is(initialsMeasured)))) this.deco = this.decorate(u.state);
+      else if (u.docChanged || u.viewportChanged || u.geometryChanged || u.transactions.some((t) => t.effects.some((e) => e.is(setLooks)))) this.measure();
+    }
+    decorate(state: EditorState): DecorationSet {
+      const out: Range<Decoration>[] = [];
+      for (const [at, cls] of [...this.drops].sort((a, b) => a[0] - b[0])) {
+        if (at > state.doc.length) continue;
+        out.push(Decoration.line({ class: cls }).range(state.doc.lineAt(at).from));
+      }
+      return Decoration.set(out, true);
+    }
+    measure() {
+      this.view.requestMeasure({
+        key: this,
+        read: (view) => {
+          const out = new Map<number, string>();
+          for (const el of view.contentDOM.querySelectorAll<HTMLElement>('.cm-initial')) {
+            const at = view.state.doc.lineAt(view.posAtDOM(el)).from;
+            out.set(at, dropFor(linesOf(el)));
+          }
+          return out;
+        },
+        write: (out, view) => {
+          const same = out.size === this.drops.size && [...out].every(([k, v]) => this.drops.get(k) === v);
+          if (same) return;
+          this.drops = out;
+          queueMicrotask(() => view.dispatch({ effects: initialsMeasured.of(null) }));
+        },
+      });
+    }
+  },
+  { decorations: (v) => v.deco },
+);
+
 const ruleChosen = ViewPlugin.fromClass(
   class {
     deco: DecorationSet;
@@ -533,6 +588,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     pictureField,
     plugin,
     ruleChosen,
+    initials,
     pictureTools(pe, run),
     pictureRoom,
     EditorState.transactionFilter.of((tr) => {

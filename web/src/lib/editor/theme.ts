@@ -5,7 +5,8 @@
 import { EditorView } from '@codemirror/view';
 
 export const theme = EditorView.theme({
-  '&': { color: 'var(--ink)', backgroundColor: 'transparent', font: '400 17px/1.65 var(--sans)' },
+  // The desktop's type (design.rs `Type`), as the reader has it.
+  '&': { color: 'var(--ink)', backgroundColor: 'transparent', font: '400 16px/27px var(--sans)' },
   '&.cm-focused': { outline: 'none' },
   '.cm-scroller': { fontFamily: 'inherit', lineHeight: 'inherit', overflow: 'visible' },
   '.cm-content': { padding: '0', caretColor: 'var(--accent)' },
@@ -17,12 +18,12 @@ export const theme = EditorView.theme({
   // A block's space above, as the reader spaces them; items close.
   '.cm-block': { paddingTop: '12px !important' },
   '.cm-bullet.cm-block, .cm-number.cm-block, .cm-todo.cm-block': { paddingTop: '4px !important' },
-  '.cm-title': { font: '600 32px/1.25 var(--serif)', paddingBottom: '6px !important' },
+  '.cm-title': { font: '400 36px/46px var(--serif)', paddingBottom: '6px !important' },
   // A heading's space above, the desktop's: its own and the block's
   // before it.
-  '.cm-h1': { font: '600 26px/1.3 var(--serif)', paddingTop: '34px !important' },
-  '.cm-h2': { font: '600 24px/1.3 var(--serif)', paddingTop: '28px !important' },
-  '.cm-h3': { font: '600 19px/1.35 var(--serif)', paddingTop: '22px !important' },
+  '.cm-h1': { font: '400 30px/40px var(--serif)', paddingTop: '34px !important' },
+  '.cm-h2': { font: '400 24px/32px var(--serif)', paddingTop: '28px !important' },
+  '.cm-h3': { font: '400 19px/28px var(--serif)', paddingTop: '22px !important' },
   '.cm-ph': { color: 'var(--faint)', pointerEvents: 'none' },
   // A list item: its mark in the gutter, its words after it, indented.
   '.cm-bullet, .cm-number, .cm-todo': { paddingLeft: 'calc(30px + var(--indent, 0) * 24px) !important', textIndent: '-30px' },
@@ -51,6 +52,10 @@ export const theme = EditorView.theme({
     margin: '0.02em 0.06em 0 0', color: 'var(--accent-ink)',
   },
   '.cm-initial.cm-own::first-letter': { color: 'inherit' },
+  // As many lines as the paragraph has, three at most (lib/initial.ts);
+  // one line, or being measured, as the rest of its words.
+  '.cm-initial.drop2::first-letter': { fontSize: '3.6em' },
+  '.cm-initial.drop-none::first-letter, .cm-initial.drop-measure::first-letter': { float: 'none', font: 'inherit', margin: '0', color: 'inherit' },
   '.cm-code, .cm-front': { font: '14px/1.6 ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', paddingLeft: '12px !important', paddingRight: '12px !important' },
   '.cm-front': { color: 'var(--muted)' },
   '.cm-b': { fontWeight: '700' },
