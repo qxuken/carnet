@@ -106,6 +106,8 @@ pub enum Msg {
     AddCol,
     DelRow,
     DelCol,
+    /// The table's header row taken away, or put back.
+    TableHeader,
     Sort,
     Undo,
     ClearSearch,
@@ -2750,6 +2752,7 @@ impl Carnet {
                 | Msg::AddCol
                 | Msg::DelRow
                 | Msg::DelCol
+                | Msg::TableHeader
                 | Msg::Sort
                 | Msg::Tint { .. }
                 | Msg::TintMenu { .. }
@@ -2824,6 +2827,9 @@ impl Carnet {
             }
             Msg::DelCol => {
                 self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::DelCol, false));
+            }
+            Msg::TableHeader => {
+                self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::Header, false));
             }
             Msg::Sort => {
                 let Some((_, col)) = self.caret.head.slot.cell else { return };

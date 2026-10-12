@@ -884,13 +884,9 @@ impl Carnet {
                 // An invite just asked for here: said where its code goes
                 // (unless another is being asked for).
                 let sent = if how == 0 && !self.signup.open { self.signup.sent_to.clone() } else { None };
-                setting(ui, l, title, if sent.is_some() { None } else { Some(what) }, |ui| {
-                    for (to, word) in [(0, "Use a code"), (1, "Use recovery words"), (2, "Use email and password")] {
-                        if to != how {
-                            pill_button(ui, l, &format!("sync-how-{to}"), word, false, !starting, Msg::SyncHow { to });
-                        }
-                    }
-                });
+                // Making an account: only that, the code and the other ways
+                // in out of the way until it's done or put aside.
+                let signing_up = how == 0 && self.signup.open && self.signup.offered().is_some();
                 // A line said of signing up: an icon, then words.
                 let said = |ui: &mut Ui<'_>, key: &str, g: Icon, ink: Color, words: &str| {
                     ui.with_keyed(
@@ -902,84 +898,89 @@ impl Carnet {
                         },
                     );
                 };
-                if let Some(to) = &sent
-                    && let Some(answer) = self.signup.sent.clone()
-                {
-                    // Asked again too soon: nothing new went, so not "sent".
-                    let g = if answer.lately() { Icon::Clock } else { Icon::Check };
-                    said(ui, "signup-sent", g, t.fg, &answer.line(to));
-                    if let Some(more) = answer.more() {
-                        said(ui, "signup-said", Icon::Clock, t.muted, more);
-                    }
-                }
-                let (hint, button) = match how {
-                    1 => ("twelve words, spaces between", "Recover"),
-                    2 => ("you@example.com", "Sign in"),
-                    _ => ("Type or paste the code", "Connect"),
-                };
-                ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
-                    let reset = std::mem::take(&mut self.sync_reset_fields);
-                    if how == 2 {
-                        let email = self.sync_email.clone();
-                        let k = field(self, ui, "sync-email", &email, hint, Field::SyncEmail);
-                        if reset {
-                            ui.set_edit_text(k, &email);
-                        }
-                        let password = self.sync_password.clone();
-                        let k = field(self, ui, "sync-password", &password, "Password", Field::SyncPassword);
-                        if reset {
-                            ui.set_edit_text(k, &password);
-                        }
-                    } else {
-                        let code = self.sync_code.clone();
-                        let k = field(self, ui, "sync-code", &code, hint, Field::SyncCode);
-                        if reset {
-                            ui.set_edit_text(k, &code);
-                        }
-                        self.apply_focus(ui, k, Field::SyncCode);
-                    }
-                    if starting {
-                        ui.text("Connecting\u{2026}", TextStyle::new(Type::UI.size).color(t.muted).nowrap());
-                        pill_button(ui, l, "sync-cancel", "Cancel", false, true, Msg::SyncCancel);
-                    } else {
-                        let typed = if how == 2 { !self.sync_email.trim().is_empty() && !self.sync_password.is_empty() } else { !self.sync_code.trim().is_empty() };
-                        let ready = !self.sync_server.trim().is_empty() && typed;
-                        pill_button(ui, l, "sync-start", button, true, ready, Msg::SyncStart);
-                    }
-                });
-                // New here, on a server that takes signups (a hosted one):
-                // an invite asked for by email, in place.
-                if how == 0 && self.signup.offered().is_some() {
-                    rule(ui, l);
-                    let open = self.signup.open;
-                    let (name, note, button) = match (open, &sent) {
-                        (true, _) => ("New here? Make an account", "Your email: the server sends an invite there, and its code goes in the field above.", ""),
-                        (false, Some(_)) => ("No invite yet?", "It can take a minute. Look in spam too, or ask again.", "Ask again"),
-                        (false, None) => ("New here?", "Make an account on this server: it sends an invite to your email.", "Make an account"),
-                    };
-                    setting(ui, l, name, Some(note), |ui| {
-                        if open {
-                            pill_button(ui, l, "signup-cancel", "Cancel", false, true, Msg::SignupOpen);
-                        } else {
-                            pill_button(ui, l, "signup-open", button, false, !starting, Msg::SignupOpen);
+                if !signing_up {
+                    setting(ui, l, title, if sent.is_some() { None } else { Some(what) }, |ui| {
+                        for (to, word) in [(0, "Use a code"), (1, "Use recovery words"), (2, "Use email and password")] {
+                            if to != how {
+                                pill_button(ui, l, &format!("sync-how-{to}"), word, false, !starting, Msg::SyncHow { to });
+                            }
                         }
                     });
-                    if open {
-                        ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
-                            let email = self.signup.email.clone();
-                            let k = field(self, ui, "signup-email", &email, "you@example.com", Field::SignupEmail);
-                            self.apply_focus(ui, k, Field::SignupEmail);
-                            if self.signup.sending() {
-                                ui.text("Sending\u{2026}", TextStyle::new(Type::UI.size).color(t.muted).nowrap());
-                            } else {
-                                pill_button(ui, l, "signup-send", "Send me an invite", true, !self.signup.email.trim().is_empty(), Msg::SignupSend);
-                            }
-                        });
-                        if let Some(why) = self.signup.error.clone() {
-                            said(ui, "signup-error", Icon::Warning, t.danger, &why);
-                            ui.leaf(NodeSpec::row().height(12.0).role(Role::None));
+                    if let Some(to) = &sent
+                        && let Some(answer) = self.signup.sent.clone()
+                    {
+                        // Asked again too soon: nothing new went, so not "sent".
+                        let g = if answer.lately() { Icon::Clock } else { Icon::Check };
+                        said(ui, "signup-sent", g, t.fg, &answer.line(to));
+                        if let Some(more) = answer.more() {
+                            said(ui, "signup-said", Icon::Clock, t.muted, more);
                         }
                     }
+                    let (hint, button) = match how {
+                        1 => ("twelve words, spaces between", "Recover"),
+                        2 => ("you@example.com", "Sign in"),
+                        _ => ("Type or paste the code", "Connect"),
+                    };
+                    ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
+                        let reset = std::mem::take(&mut self.sync_reset_fields);
+                        if how == 2 {
+                            let email = self.sync_email.clone();
+                            let k = field(self, ui, "sync-email", &email, hint, Field::SyncEmail);
+                            if reset {
+                                ui.set_edit_text(k, &email);
+                            }
+                            let password = self.sync_password.clone();
+                            let k = field(self, ui, "sync-password", &password, "Password", Field::SyncPassword);
+                            if reset {
+                                ui.set_edit_text(k, &password);
+                            }
+                        } else {
+                            let code = self.sync_code.clone();
+                            let k = field(self, ui, "sync-code", &code, hint, Field::SyncCode);
+                            if reset {
+                                ui.set_edit_text(k, &code);
+                            }
+                            self.apply_focus(ui, k, Field::SyncCode);
+                        }
+                        if starting {
+                            ui.text("Connecting\u{2026}", TextStyle::new(Type::UI.size).color(t.muted).nowrap());
+                            pill_button(ui, l, "sync-cancel", "Cancel", false, true, Msg::SyncCancel);
+                        } else {
+                            let typed = if how == 2 { !self.sync_email.trim().is_empty() && !self.sync_password.is_empty() } else { !self.sync_code.trim().is_empty() };
+                            let ready = !self.sync_server.trim().is_empty() && typed;
+                            pill_button(ui, l, "sync-start", button, true, ready, Msg::SyncStart);
+                        }
+                    });
+                }
+                // New here, on a server that takes signups (a hosted one):
+                // an invite asked for by email, in place.
+                if signing_up {
+                    setting(ui, l, "Make an account", Some("Your email: the server sends an invite there, with a code to type here."), |ui| {
+                        pill_button(ui, l, "signup-cancel", "I already have an account", false, true, Msg::SignupOpen);
+                    });
+                    ui.with(NodeSpec::row().grow_width().pad_xy(18.0, 12.0).gap(10.0).cross_gap(10.0).cross_align(Align::Center).wrap(), |ui| {
+                        let email = self.signup.email.clone();
+                        let k = field(self, ui, "signup-email", &email, "you@example.com", Field::SignupEmail);
+                        self.apply_focus(ui, k, Field::SignupEmail);
+                        if self.signup.sending() {
+                            ui.text("Sending\u{2026}", TextStyle::new(Type::UI.size).color(t.muted).nowrap());
+                        } else {
+                            pill_button(ui, l, "signup-send", "Send me an invite", true, !self.signup.email.trim().is_empty(), Msg::SignupSend);
+                        }
+                    });
+                    if let Some(why) = self.signup.error.clone() {
+                        said(ui, "signup-error", Icon::Warning, t.danger, &why);
+                        ui.leaf(NodeSpec::row().height(12.0).role(Role::None));
+                    }
+                } else if how == 0 && self.signup.offered().is_some() {
+                    rule(ui, l);
+                    let (name, note, button) = match &sent {
+                        Some(_) => ("No invite yet?", "It can take a minute. Look in spam too, or ask again.", "Ask again"),
+                        None => ("New here?", "Make an account on this server: it sends an invite to your email.", "Make an account"),
+                    };
+                    setting(ui, l, name, Some(note), |ui| {
+                        pill_button(ui, l, "signup-open", button, false, !starting, Msg::SignupOpen);
+                    });
                 }
             } else {
                 let (word, ink) = match &status {

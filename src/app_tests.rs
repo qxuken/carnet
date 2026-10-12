@@ -3755,7 +3755,10 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     let r = d.rect_of(open).unwrap();
     d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
     d_frame_twice(&mut a, &mut d);
-    assert!(drawn(&mut d, &mut a, "New here? Make an account"));
+    assert!(drawn(&mut d, &mut a, "Make an account"));
+    // Only that: the code and the other ways in are out of the way.
+    assert!(d.key_of("sync-code").is_none() && d.key_of("sync-how-1").is_none(), "no code field, no other ways in");
+    assert!(drawn(&mut d, &mut a, "I already have an account"));
     assert_eq!(focused(&a, &d), Some(Field::SignupEmail), "the email field has the keyboard");
     type_in(&mut a, &mut d, "ann@example.com");
     assert_eq!(a.signup.email, "ann@example.com");
@@ -5049,8 +5052,7 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
     d.frame(&mut app);
     let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
-    // (The inspector keeps a long text's first 60 characters.)
-    let says_elsewhere = |d: &Drive| d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with(&super::page_view::ELSEWHERE[..50])));
+    let says_elsewhere = |d: &Drive| d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t == super::page_view::ELSEWHERE));
     let i = app.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
     app.open(i);
     for _ in 0..6 {
@@ -5080,7 +5082,7 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     assert!(shown(&d, "Picture not found"), "Carnet's own, missing, as before");
     // In the box the picture takes (as the web has it): the text's width,
     // a picture's height at least. "Picture not found" stays a small card.
-    let words = d.core.nodes().iter().find(|n| n.text.as_deref().is_some_and(|t| t.starts_with(&super::page_view::ELSEWHERE[..50]))).unwrap().rect;
+    let words = d.core.nodes().iter().find(|n| n.text.as_deref().is_some_and(|t| t == super::page_view::ELSEWHERE)).unwrap().rect;
     let card = d
         .core
         .nodes()

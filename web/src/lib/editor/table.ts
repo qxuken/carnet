@@ -81,6 +81,8 @@ type Wrap = HTMLElement & { widget?: TableWidget };
 export class TableWidget extends WidgetType {
   constructor(
     readonly cells: Cell[][],
+    /// Its first row is its header.
+    readonly head: boolean,
     readonly line: number,
     readonly ctx: TableContext,
   ) {
@@ -88,7 +90,7 @@ export class TableWidget extends WidgetType {
   }
 
   eq(o: TableWidget) {
-    return o.line === this.line && JSON.stringify(o.cells) === JSON.stringify(this.cells);
+    return o.line === this.line && o.head === this.head && JSON.stringify(o.cells) === JSON.stringify(this.cells);
   }
 
   toDOM() {
@@ -115,7 +117,7 @@ export class TableWidget extends WidgetType {
       while (tr.cells.length > row.length) tr.deleteCell(-1);
       row.forEach((cell, c) => {
         let el = tr.cells[c] as HTMLTableCellElement | undefined;
-        const tag = r === 0 ? 'TH' : 'TD';
+        const tag = r === 0 && this.head ? 'TH' : 'TD';
         if (!el || el.tagName !== tag) {
           const fresh = document.createElement(tag.toLowerCase()) as HTMLTableCellElement;
           fresh.contentEditable = 'true';

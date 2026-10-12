@@ -2426,6 +2426,10 @@ pub fn table_op(doc: &mut Doc, c: &mut Caret, op: TableOp, desc: bool) -> bool {
             let moved = t.sort_by(k, desc);
             return moved;
         }
+        // Put back: the caret into it, in its column. Taken away: from
+        // it, to the row below, which is on top now.
+        TableOp::Header if !t.header => t.set_header(true).map(|id| cell(id, col)),
+        TableOp::Header => t.set_header(false).map(|gone| cell(if gone == row { t.rows[0].id } else { row }, col)),
     };
     match to {
         Some(s) => {
@@ -2443,6 +2447,8 @@ pub enum TableOp {
     DelRow,
     DelCol,
     Sort,
+    /// The header row taken away, or put back.
+    Header,
 }
 
 /// The table the caret is in, whole: what the toolbar's "remove table"
@@ -2665,6 +2671,34 @@ mod tests {
         let mut c = at(&d, 0, 0);
         backspace(&mut d, &mut c, false);
         assert_eq!(texts(&d), ["Text:Top"]);
+    }
+
+    /// The header row taken away from inside it: the caret goes to the
+    /// row now on top, in its column; put back, into it. Removing the
+    /// header's row takes the header too.
+    #[test]
+    fn the_header_row_goes_and_comes_back() {
+        let t = Table::from_cells(vec![vec!["Day".into(), "Miles".into()], vec!["Fri".into(), "30".into()]]);
+        let (top, col) = (t.rows[0].id, t.cols[1]);
+        let fri = t.rows[1].id;
+        let mut d = doc(vec![Block::new(Kind::Table(t))]);
+        let block = d.blocks()[0].id;
+        let mut c = Caret::at(start(Slot { block, cell: Some((top, col)) }));
+        let table = |d: &Doc| match &d.blocks()[0].kind {
+            Kind::Table(t) => t.clone(),
+            _ => panic!(),
+        };
+        assert!(table_op(&mut d, &mut c, TableOp::Header, false));
+        let t = table(&d);
+        assert_eq!((t.header, t.rows.len()), (false, 1));
+        assert_eq!(c.head.slot.cell, Some((fri, col)));
+        assert!(!table_op(&mut d, &mut c, TableOp::DelRow, false), "never the last row");
+        assert!(table_op(&mut d, &mut c, TableOp::Header, false));
+        let t = table(&d);
+        assert!(t.header && t.rows.len() == 2);
+        assert_eq!(c.head.slot.cell, Some((t.rows[0].id, col)), "into the new header");
+        assert!(table_op(&mut d, &mut c, TableOp::DelRow, false));
+        assert!(!table(&d).header, "its row gone, the header with it");
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub enum Glyph {
     AddCol,
     DelRow,
     DelCol,
+    /// A table's header row, there or not: the frame with its top band
+    /// filled.
+    TableHeader,
     Sort,
     SortUp,
     SortDown,
@@ -109,7 +112,9 @@ const FRAME_TABLE: &str = "M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v10a1.5 1.5 0 0 1-1.5 
 const FRAME_PICTURE: &str = "M5 4.5h14a1.5 1.5 0 0 1 1.5 1.5v12a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V6A1.5 1.5 0 0 1 5 4.5z ";
 const FRAME_ROW: &str = "M5 4h14a1.5 1.5 0 0 1 1.5 1.5v6.5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5.5A1.5 1.5 0 0 1 5 4z ";
 const CLOUD: &str = "M7.5 18.5h9.5a3 3 0 1 0-.23-5.99a5 5 0 1 0-9.74-.98A3.5 3.5 0 0 0 7.5 18.5z";
-const CLOUD_OFF: &str = "M7.5 18.5h9.5a3 3 0 1 0-.23-5.99a5 5 0 1 0-9.74-.98A3.5 3.5 0 0 0 7.5 18.5z M4.5 4.5l15 15";
+/// The cloud, struck through its middle: the stroke the same length past
+/// each side, the outline parted where it crosses.
+const CLOUD_OFF: &str = "M15.81 18.5H7.5A3.5 3.5 0 0 1 7.03 11.53A5 5 0 0 1 7.14 9.83M8.83 7.14A5 5 0 0 1 16.77 12.51A3 3 0 0 1 19.16 17.46M5.5 6L20 20.5";
 const FRAME_COL: &str ="M5 3.5h6a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5z ";
 
 impl Glyph {
@@ -122,7 +127,7 @@ impl Glyph {
 
     fn frame(self) -> &'static str {
         match self {
-            Glyph::Table => FRAME_TABLE,
+            Glyph::Table | Glyph::TableHeader => FRAME_TABLE,
             Glyph::Picture => FRAME_PICTURE,
             Glyph::AddRow | Glyph::DelRow => FRAME_ROW,
             Glyph::AddCol | Glyph::DelCol => FRAME_COL,
@@ -177,6 +182,7 @@ impl Glyph {
             DelRow => ("M3.5 8.8h17 M9.5 18h5", ""),
             AddCol => ("M8 3.5v17 M18 9.5v5 M15.5 12h5", ""),
             DelCol => ("M8 3.5v17 M15.5 12h5", ""),
+            TableHeader => ("M3.5 10.5h17 M9.5 10.5v8", "M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v3.5h-17V7A1.5 1.5 0 0 1 5 5.5z"),
             Sort => ("M8 5v14 M4.5 15.5L8 19l3.5-3.5 M16 19V5 M12.5 8.5L16 5l3.5 3.5", ""),
             SortUp => ("M4 7h5 M4 12h8 M4 17h11 M18.5 19V5 M15.5 8l3-3 3 3", ""),
             SortDown => ("M4 7h11 M4 12h8 M4 17h5 M18.5 5v14 M15.5 16l3 3 3-3", ""),
@@ -283,7 +289,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 64] = [
+    pub const ALL: [Glyph; 65] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -293,6 +299,7 @@ impl Glyph {
         Glyph::FloatRight, Glyph::Inline, Glyph::Sidebar, Glyph::Zen, Glyph::Check, Glyph::Undo, Glyph::Upload,
         Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
         Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
+        Glyph::TableHeader,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.

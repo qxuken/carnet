@@ -555,7 +555,8 @@ impl Editor {
             0 => TableOp::AddRow,
             1 => TableOp::AddCol,
             2 => TableOp::DelRow,
-            _ => TableOp::DelCol,
+            3 => TableOp::DelCol,
+            _ => TableOp::Header,
         };
         self.edit(Step::Other, |d, c| page::table_op(d, c, op, false))
     }
@@ -574,6 +575,12 @@ impl Editor {
     pub fn sorted(&self) -> Option<bool> {
         let (_, col) = self.caret.head.slot.cell?;
         self.last_sort.filter(|(k, _)| *k == col).map(|(_, d)| d)
+    }
+
+    /// Whether the table the caret is in has a header row.
+    pub fn table_header(&self) -> bool {
+        let Some(i) = self.caret.head.slot.cell.and_then(|_| self.doc.index_of(self.caret.head.slot.block)) else { return false };
+        matches!(&self.doc.blocks()[i].kind, Kind::Table(t) if t.header)
     }
 
     /// The table the caret is in, taken out whole.
@@ -700,6 +707,7 @@ impl Editor {
             }
             Kind::Table(t) => {
                 look.kind = "table";
+                look.head = t.header;
                 look.cells = t
                     .rows
                     .iter()
@@ -804,6 +812,8 @@ pub struct Look {
     pub float: doc::Float,
     /// A table's cells, row by row: each one's words and their styles.
     pub cells: Vec<Vec<(String, Runs)>>,
+    /// The table's first row is its header.
+    pub head: bool,
 }
 
 fn prev_char(s: &str, b: usize) -> usize {
@@ -1032,6 +1042,23 @@ mod tests {
         assert!(e.set_link(None));
         assert!(e.markdown().contains("see the site"));
         assert_eq!(e.link_here(), None);
+    }
+
+    /// The header row taken away and put back, as the desktop does; the
+    /// page is told which row, if any, is the header.
+    #[test]
+    fn a_tables_header_goes_and_comes_back() {
+        let mut e = Editor::open("# T\n\n| Day | Miles |\n| --- | --- |\n| Fri | 30 |\n");
+        assert!(e.look(1).head);
+        e.cell_select(1, 0, 0, 0, 0);
+        assert!(e.table_header());
+        assert!(e.table_op(4));
+        assert!(!e.look(1).head && !e.table_header());
+        assert_eq!(e.look(1).cells.len(), 1);
+        assert!(e.markdown().contains("| | |\n| --- | --- |\n| Fri | 30 |"), "{}", e.markdown());
+        assert!(e.table_op(4));
+        assert!(e.look(1).head);
+        assert_eq!(e.look(1).cells.len(), 2);
     }
 
     #[test]

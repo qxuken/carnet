@@ -31,7 +31,7 @@ const BESIDE_MIN: f32 = 180.0;
 const THEIRS_OPACITY: f32 = 0.45;
 /// What the card in place of the user's own picture says when it isn't on
 /// this device (another device's file, which doesn't sync): the web's words.
-pub(super) const ELSEWHERE: &str = "This picture is only on the device that has it. Move it into Carnet there to sync it.";
+pub(super) const ELSEWHERE: &str = "Not on this device";
 /// How long the writing pauses, in seconds, before an empty line says
 /// what can go on it.
 const HINT_AFTER: f64 = 1.2;
@@ -1159,9 +1159,13 @@ impl Carnet {
     /// typing can wrap a cell but never move the grid.
     fn table(&mut self, ui: &mut Ui<'_>, l: &Look, id: u64, table: &Table, body: TextStyle, cov: &Coverage) {
         let t = l.t;
-        // The header is small and quiet: a label for its column.
+        // The header, if it has one, is small and quiet: a label for its
+        // column.
         let head = l.page_type(Type::LABEL).family(l.body).color(t.muted);
-        let names: Vec<String> = table.rows[0].cells.iter().map(|c| c.trim().to_string()).collect();
+        let names: Vec<String> = match table.header {
+            true => table.rows[0].cells.iter().map(|c| c.trim().to_string()).collect(),
+            false => Vec::new(),
+        };
         ui.with(NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0)), |ui| {
             ui.with(
                 // One warm hairline for the frame and the rules, and the
@@ -1178,8 +1182,11 @@ impl Carnet {
                     .label(format!("Table, {} rows, {} columns", table.rows.len(), table.width())),
                 |ui| {
                     for (r, row) in table.rows.iter().enumerate() {
+                        let is_head = table.is_header(r);
+                        // Counted from 1 among the plain rows.
+                        let n = r + 1 - table.body();
                         let mut spec = NodeSpec::row().grow_width();
-                        if r == 0 {
+                        if is_head {
                             spec = spec.bg(t.sunken);
                         }
                         ui.with_indexed(row.id, spec, |ui| {
@@ -1191,9 +1198,9 @@ impl Carnet {
                                 // A cell is named for its column, so a reader
                                 // hears "Price, row 3", not coordinates.
                                 let name = match names.get(c) {
-                                    Some(h) if r > 0 && !h.is_empty() => format!("{h}, row {r}"),
-                                    _ if r == 0 => format!("Column {} header", c + 1),
-                                    _ => format!("Column {}, row {r}", c + 1),
+                                    _ if is_head => format!("Column {} header", c + 1),
+                                    Some(h) if !h.is_empty() => format!("{h}, row {n}"),
+                                    _ => format!("Column {}, row {n}", c + 1),
                                 };
                                 // Where the cell was laid out: what a click
                                 // is matched against, by x as well as y.
@@ -1206,11 +1213,11 @@ impl Carnet {
                                     NodeSpec::column()
                                         .width(Sizing::Grow(1.0))
                                         .min_width(48.0)
-                                        .pad_xy(l.px(14.0), l.px(if r == 0 { 9.0 } else { 8.0 }))
+                                        .pad_xy(l.px(14.0), l.px(if is_head { 9.0 } else { 8.0 }))
                                         .on_layout(Value::Null)
                                         .label(name),
                                     |ui| {
-                                        let style = if r == 0 { head } else { body };
+                                        let style = if is_head { head } else { body };
                                         self.slot_line(ui, l, slot, &row.cells[c], style, None, false, cov);
                                     },
                                 );
@@ -1645,6 +1652,7 @@ impl Carnet {
                 item("Add column right", "addcol"),
                 item("Remove row", "delrow"),
                 item("Remove column", "delcol"),
+                item("Header row", "header").checked(self.table_here().is_some_and(|t| t.header)),
                 MenuItem::separator(),
                 item("Remove table", "remove"),
             ]);
@@ -1762,6 +1770,7 @@ impl Carnet {
             "addcol" => self.on_plain(Msg::AddCol),
             "delrow" => self.on_plain(Msg::DelRow),
             "delcol" => self.on_plain(Msg::DelCol),
+            "header" => self.on_plain(Msg::TableHeader),
             "remove" => self.on_plain(Msg::DeleteBlock),
             "table" => self.on_plain(Msg::InsertTable),
             "rule" => self.on_plain(Msg::InsertDivider),
@@ -2264,6 +2273,16 @@ impl Carnet {
         if let Some(k) = field {
             self.fields.insert(k, Field::Link);
             self.apply_focus(ui, k, Field::Link);
+        }
+    }
+
+    /// The table the caret is in.
+    pub(super) fn table_here(&self) -> Option<&Table> {
+        let doc = self.doc();
+        self.caret.head.slot.cell?;
+        match &doc.blocks()[doc.index_of(self.caret.head.slot.block)?].kind {
+            Kind::Table(t) => Some(t),
+            _ => None,
         }
     }
 

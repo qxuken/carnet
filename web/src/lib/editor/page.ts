@@ -33,6 +33,8 @@ export type Look = {
   /// A picture's place: 0 its own line, 1 left of the text, 2 right.
   fl: number;
   cells: Cell[][];
+  /// A table's first row is its header.
+  hd: boolean;
 };
 
 export const TURN = { text: 0, h1: 1, h2: 2, h3: 3, bullet: 4, number: 5, todo: 6, quote: 7 } as const;
@@ -366,7 +368,7 @@ function build(view: EditorView, toggle: (line: number) => void, tables: TableCo
       if (look.k === 'bullet') out.push(Decoration.widget({ widget: new Marker(['•', '◦', '▪'][look.i % 3], 'cm-dot'), side: -1 }).range(line.from));
       if (look.k === 'number') out.push(Decoration.widget({ widget: new Marker(`${look.n}.`, 'cm-num'), side: -1 }).range(line.from));
       if (look.k === 'divider' || look.k === 'table') {
-        const w = look.k === 'divider' ? new Rule() : new TableWidget(look.cells, n - 1, tables);
+        const w = look.k === 'divider' ? new Rule() : new TableWidget(look.cells, look.hd, n - 1, tables);
         const d = Decoration.replace({ widget: w });
         out.push(d.range(line.from, line.to));
         atomic.push(d.range(line.from, line.to));

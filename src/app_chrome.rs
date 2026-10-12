@@ -959,6 +959,10 @@ impl Carnet {
             slot.push(def("t-addcol", Icon::AddCol, "Add column", "Add a column to the right".into(), Msg::AddCol));
             slot.push(def("t-delrow", Icon::DelRow, "Remove row", "Remove this row".into(), Msg::DelRow));
             slot.push(def("t-delcol", Icon::DelCol, "Remove column", "Remove this column".into(), Msg::DelCol));
+            let header = self.table_here().is_some_and(|t| t.header);
+            let mut d = def("t-header", Icon::TableHeader, "Header row", if header { "Remove the header row" } else { "Add a header row" }.into(), Msg::TableHeader);
+            d.toggle = Some(header);
+            slot.push(d);
             let (glyph, name) = match sorted {
                 Some(false) => (Icon::SortUp, "Sort Z to A"),
                 Some(true) => (Icon::SortDown, "Sort A to Z"),

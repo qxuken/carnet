@@ -728,7 +728,8 @@ impl PageEditor {
     /// How each line is drawn, as JSON: `[{k: kind, f: first of its block,
     /// i: indent, d: done, n: number, r: [[from, to, flags, mark, ink]],
     /// src, wk: the src an Obsidian embed's, alt, w, fl: a picture's place
-    /// (0 its own line, 1 left, 2 right), cells}]`. Flags: 1 bold, 2 italic, 4 struck, 8 code,
+    /// (0 its own line, 1 left, 2 right), cells, hd: a table's first row
+    /// its header}]`. Flags: 1 bold, 2 italic, 4 struck, 8 code,
     /// 16 link; colours 0xRRGGBBAA, a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
         let n = self.e.lines().len();
@@ -764,7 +765,7 @@ impl PageEditor {
                     })
                     .collect();
                 format!(
-                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}]}}"#,
+                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}],"hd":{}}}"#,
                     l.kind,
                     l.first,
                     l.indent,
@@ -776,7 +777,8 @@ impl PageEditor {
                     json(&l.alt),
                     l.width.map_or("null".into(), |w| w.to_string()),
                     float_number(l.float),
-                    cells.join(",")
+                    cells.join(","),
+                    l.head
                 )
             })
             .collect();
@@ -862,9 +864,15 @@ impl PageEditor {
         self.e.cell_caret().map(|(l, r, c, a, h)| vec![l as u32, r as u32, c as u32, a as u32, h as u32])
     }
 
-    /// 0 a row below, 1 a column after, 2 the row out, 3 the column out.
+    /// 0 a row below, 1 a column after, 2 the row out, 3 the column out,
+    /// 4 the header row out, or back.
     pub fn table_op(&mut self, op: u8) -> bool {
         self.e.table_op(op)
+    }
+
+    /// Whether the caret's table has a header row.
+    pub fn table_header(&self) -> bool {
+        self.e.table_header()
     }
 
     pub fn remove_table(&mut self) -> bool {

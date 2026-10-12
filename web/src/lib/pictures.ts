@@ -56,7 +56,7 @@ function why(e: unknown, path: string): [string, string] {
   // A path from the notes folder (the reader's), or as the note writes it
   // (the editor's: `../attachments/…` from a folder).
   if (/^(\.\.\/)*attachments\//i.test(path)) return ['This picture hasn’t reached the server yet', cloud];
-  return ['This picture is only on the device that has it. Move it into Carnet there to sync it.', cloudOff];
+  return ['Not on this device', cloudOff];
 }
 
 /// Pictures not found, still on the page, and how to ask for each again.

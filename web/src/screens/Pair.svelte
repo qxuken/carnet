@@ -212,7 +212,18 @@
 <main>
   <div class="card">
     <img src="/icon.svg" alt="" width="56" height="56" />
-    <h1>Your notes, here</h1>
+    <h1>{newHere ? 'Make an account' : 'Your notes, here'}</h1>
+    {#if newHere}
+      <!-- New here: only the asking, nothing about devices or other ways
+           in; the invite's code then goes in the code field. -->
+      <form class="signup" onsubmit={sendInvite}>
+        <p>Your email: the server sends an invite there, with a code to type here.</p>
+        <input bind:value={signupAddress} use:focused type="email" placeholder="you@example.com" autocomplete="email" aria-label="Email" oninput={() => (signupError = '')} />
+        <button class="main" disabled={sending || !signupAddress.trim()}>{sending ? 'Sending…' : 'Send me an invite'}</button>
+        {#if signupError}<p class="error" role="alert">{signupError}</p>{/if}
+      </form>
+      <button type="button" class="link" onclick={() => { newHere = false; signupError = ''; }}>I already have an account</button>
+    {:else}
     {#if words}
       <p>Type the twelve recovery words made on one of your devices, for when none is left.</p>
     {:else if way === 'password'}
@@ -258,23 +269,12 @@
     </form>
     {#if outdated}<p class="error" role="alert">{outdated}</p>{:else if sync.error}<p class="error" role="alert">{sync.error}</p>{/if}
     {#if signup && way === 'code'}
-      {#if newHere}
-        <!-- New here: an invite asked for in place, its code typed above. -->
-        <form class="signup" onsubmit={sendInvite}>
-          <h2>New here? Make an account</h2>
-          <p>Your email: the server sends an invite there, and its code goes in the field above.</p>
-          <input bind:value={signupAddress} use:focused type="email" placeholder="you@example.com" autocomplete="email" aria-label="Email" oninput={() => (signupError = '')} />
-          <button class="main" disabled={sending || !signupAddress.trim()}>{sending ? 'Sending…' : 'Send me an invite'}</button>
-          {#if signupError}<p class="error" role="alert">{signupError}</p>{/if}
-          <button type="button" class="link" onclick={() => { newHere = false; signupError = ''; }}>Cancel</button>
-        </form>
-      {:else}
-        <button class="link" disabled={sync.joining} onclick={() => { newHere = true; signupError = ''; }}>{sentTo ? 'No invite yet? Ask again' : 'New here? Make an account'}</button>
-      {/if}
+      <button class="link" disabled={sync.joining} onclick={() => { newHere = true; signupError = ''; }}>{sentTo ? 'No invite yet? Ask again' : 'New here? Make an account'}</button>
     {/if}
     {#each ways as [w, label] (w)}
       <button class="link" disabled={sync.joining} onclick={() => choose(w)}>{label}</button>
     {/each}
+    {/if}
     {#if scanning}<Scan found={scanned} close={() => (scanning = false)} />{/if}
     <p class="note">End-to-end encrypted: the server keeps your notes sealed, and never sees a word of them. This browser keeps its keys sealed too.</p>
   </div>
@@ -316,10 +316,7 @@
   .sent { color: var(--ink); }
   .sent :global(.icon) { vertical-align: -3px; margin-right: 2px; color: var(--success); }
   .said { font-size: 14px; }
-  .signup { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--border); }
-  .signup h2 { font: 600 17px/1.3 var(--sans); margin: 0; }
-  .signup p { margin: 0 0 4px; }
+  .signup p { margin: 0 0 8px; }
   .signup .error { margin: 2px 0 0; }
-  .signup .link { margin: 4px auto 0; }
   .note { font-size: 13px; color: var(--faint); margin-top: 18px; }
 </style>

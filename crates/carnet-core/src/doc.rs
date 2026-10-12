@@ -43,8 +43,13 @@ pub struct Table {
     /// Each column's separator cell as written (`---`, `:--:`, `--:`), so
     /// alignment survives a save.
     pub aligns: Vec<String>,
-    /// Row 0 is the header.
+    /// Row 0 is the header, if it has one.
     pub rows: Vec<Row>,
+    /// Whether row 0 is a header. Without one, every row is a plain one,
+    /// and the table is written under an empty header row (`| | |`), as
+    /// Markdown has no table without; an empty header row reads back as
+    /// none.
+    pub header: bool,
 }
 
 const PLAIN_ALIGN: &str = "---";
@@ -61,6 +66,7 @@ impl Table {
                     cells: vec![String::new(); cols],
                 })
                 .collect(),
+            header: true,
         }
     }
 
@@ -79,6 +85,36 @@ impl Table {
                 .into_iter()
                 .map(|cells| Row { id: new_id(), cells })
                 .collect(),
+            header: true,
+        }
+    }
+
+    /// The first row that isn't the header.
+    pub fn body(&self) -> usize {
+        usize::from(self.header)
+    }
+
+    /// Whether row `r` is the header.
+    pub fn is_header(&self, r: usize) -> bool {
+        self.header && r == 0
+    }
+
+    /// The header put back, an empty row on top (its id returned), or
+    /// taken away, its row with it: never the table's last row, nor a
+    /// header it has already, or hasn't.
+    pub fn set_header(&mut self, on: bool) -> Option<u64> {
+        match (on, self.header) {
+            (true, false) => {
+                let id = self.insert_row(0);
+                self.header = true;
+                Some(id)
+            }
+            (false, true) if self.rows.len() > 1 => {
+                let id = self.rows.remove(0).id;
+                self.header = false;
+                Some(id)
+            }
+            _ => None,
         }
     }
 
@@ -119,11 +155,15 @@ impl Table {
     }
 
     /// Never removes the last row or column: a table always has a cell.
+    /// The header removed, the table has none.
     pub fn remove_row(&mut self, at: usize) -> bool {
         if self.rows.len() <= 1 || at >= self.rows.len() {
             return false;
         }
         self.rows.remove(at);
+        if at == 0 {
+            self.header = false;
+        }
         true
     }
 
@@ -142,11 +182,12 @@ impl Table {
     /// Sorts the body rows (never the header) by column `col`, numbers
     /// numerically, empty cells last. Returns whether anything moved.
     pub fn sort_by(&mut self, col: usize, descending: bool) -> bool {
-        if self.rows.len() < 3 || col >= self.width() {
+        let from = self.body();
+        if self.rows.len() < from + 2 || col >= self.width() {
             return false;
         }
         let before: Vec<u64> = self.rows.iter().map(|r| r.id).collect();
-        let body = &mut self.rows[1..];
+        let body = &mut self.rows[from..];
         body.sort_by(|a, b| {
             let (x, y) = (a.cells[col].trim(), b.cells[col].trim());
             match (x.is_empty(), y.is_empty()) {
@@ -630,6 +671,23 @@ pub fn to_markdown(title: Option<&str>, doc: &Doc) -> String {
                 }
             }
             Kind::Table(t) => {
+                let separator = |out: &mut String| {
+                    out.push('|');
+                    for c in 0..t.width() {
+                        let a = t.aligns.get(c).map_or(PLAIN_ALIGN, String::as_str);
+                        out.push(' ');
+                        out.push_str(a);
+                        out.push_str(" |");
+                    }
+                    out.push('\n');
+                };
+                // No header: an empty one, which reads back as none.
+                if !t.header {
+                    out.push('|');
+                    out.push_str(&" |".repeat(t.width()));
+                    out.push('\n');
+                    separator(&mut out);
+                }
                 for (r, row) in t.rows.iter().enumerate() {
                     out.push('|');
                     for cell in &row.cells {
@@ -638,15 +696,8 @@ pub fn to_markdown(title: Option<&str>, doc: &Doc) -> String {
                         out.push_str(" |");
                     }
                     out.push('\n');
-                    if r == 0 {
-                        out.push('|');
-                        for c in 0..t.width() {
-                            let a = t.aligns.get(c).map_or(PLAIN_ALIGN, String::as_str);
-                            out.push(' ');
-                            out.push_str(a);
-                            out.push_str(" |");
-                        }
-                        out.push('\n');
+                    if t.is_header(r) {
+                        separator(&mut out);
                     }
                 }
                 out.push('\n');
@@ -1335,6 +1386,10 @@ fn parse(src: &str, whole_note: bool) -> (Option<String>, Vec<Block>) {
                     table.aligns[c] = a;
                 }
             }
+            // An empty header row over others: a table without a header.
+            if table.rows.len() > 1 && table.is_blank_row(0) {
+                table.set_header(false);
+            }
             blocks.push(Block::new(Kind::Table(table)));
             continue;
         }
@@ -1599,6 +1654,7 @@ mod tests {
             .iter()
             .map(|b| match &b.kind {
                 Kind::Table(t) => Kind::Table(Table {
+                    header: t.header,
                     cols: vec![],
                     aligns: t.aligns.clone(),
                     rows: t
@@ -1793,6 +1849,50 @@ Second line of the same paragraph.
         assert!(t.sort_by(0, true));
         let names: Vec<_> = t.rows.iter().map(|r| r.cells[0].as_str()).collect();
         assert_eq!(names, ["name", "c", "b", "a"]);
+    }
+
+    /// A table without a header is written under an empty one, which
+    /// GitHub and the others draw as a thin empty row, and reads back as
+    /// none; one with only an empty header row keeps it (it has no other).
+    #[test]
+    fn a_table_without_a_header_round_trips() {
+        let mut t = Table::from_cells(vec![vec!["Fri".into(), "30".into()], vec!["Sat".into(), "45".into()]]);
+        assert!(t.header);
+        t.header = false;
+        let md = to_markdown(None, &Doc::new(vec![Block::new(Kind::Table(t))]));
+        assert_eq!(md, "| | |\n| --- | --- |\n| Fri | 30 |\n| Sat | 45 |\n");
+        let (_, doc) = from_markdown(&md);
+        let Kind::Table(t) = &doc.blocks()[0].kind else { panic!() };
+        assert!(!t.header);
+        assert_eq!(t.rows.iter().map(|r| r.cells[0].as_str()).collect::<Vec<_>>(), ["Fri", "Sat"]);
+        assert_eq!(to_markdown(None, &doc), md, "as it was");
+        // As others write one: spaces of any count, still empty.
+        let (_, doc) = from_markdown("|   |  |\n|:--|--:|\n| a | b |\n");
+        let Kind::Table(t) = &doc.blocks()[0].kind else { panic!() };
+        assert!(!t.header);
+        assert_eq!((t.rows.len(), t.aligns.as_slice()), (1, [":--".to_string(), "--:".to_string()].as_slice()));
+        let (_, doc) = from_markdown("| | |\n|---|---|\n");
+        let Kind::Table(t) = &doc.blocks()[0].kind else { panic!() };
+        assert!(t.header && t.rows.len() == 1, "its only row stays");
+    }
+
+    /// The header taken away (by removing its row too) and put back; a
+    /// table without one sorts every row.
+    #[test]
+    fn a_header_comes_and_goes() {
+        let mut t = Table::from_cells(vec![vec!["name".into()], vec!["b".into()], vec!["a".into()]]);
+        assert!(t.set_header(true).is_none(), "it has one");
+        assert!(t.set_header(false).is_some());
+        assert_eq!((t.header, t.rows.len()), (false, 2));
+        assert!(t.set_header(false).is_none(), "it has none");
+        assert!(t.sort_by(0, false), "every row sorts");
+        assert_eq!(t.rows.iter().map(|r| r.cells[0].as_str()).collect::<Vec<_>>(), ["a", "b"]);
+        let id = t.set_header(true).unwrap();
+        assert_eq!((t.header, t.rows[0].id, t.rows[0].cells[0].as_str()), (true, id, ""));
+        assert!(t.remove_row(0));
+        assert!(!t.header, "its row removed, no header");
+        let mut one = Table::new(2, 1);
+        assert!(one.set_header(false).is_none(), "never the last row");
     }
 
     #[test]

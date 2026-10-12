@@ -60,6 +60,8 @@
   let inTable = $state(false);
   /// How the caret's column was last sorted: 0 not, 1 A to Z, 2 Z to A.
   let sortedHow = $state(0);
+  /// The caret's table has a header row.
+  let tableHeader = $state(true);
   /// Colours used lately, newest first (this browser's, as the desktop
   /// keeps its own).
   let recent = $state<number[]>(readRecent());
@@ -144,6 +146,7 @@
     focused = view.hasFocus || !!document.activeElement?.closest('.cm-tablewrap');
     inTable = !!pe.cell_caret();
     sortedHow = pe.sorted();
+    tableHeader = pe.table_header();
     turned = Object.fromEntries(Object.entries(TURN).map(([k, v]) => [k, pe!.turned_to(v)]));
     flags = pe.style_here();
     const t = pe.tint_here();
@@ -189,6 +192,7 @@
     { icon: () => 'add-col', label: 'Add a column after', f: (pe) => pe.table_op(1) },
     { icon: () => 'del-row', label: 'Remove the row', f: (pe) => pe.table_op(2) },
     { icon: () => 'del-col', label: 'Remove the column', f: (pe) => pe.table_op(3) },
+    { icon: () => 'table-header', label: 'Header row', f: (pe) => pe.table_op(4), on: () => tableHeader },
     {
       icon: () => ['sort', 'sort-up', 'sort-down'][sortedHow],
       label: 'Sort by this column',

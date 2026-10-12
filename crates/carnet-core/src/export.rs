@@ -135,7 +135,7 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                 out.push_str("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">");
                 for (r, row) in t.rows.iter().enumerate() {
                     out.push_str("<tr>");
-                    let cell = if r == 0 { "th" } else { "td" };
+                    let cell = if t.is_header(r) { "th" } else { "td" };
                     for c in &row.cells {
                         out.push_str(&format!("<{cell}>{}</{cell}>", spans(c)));
                     }
