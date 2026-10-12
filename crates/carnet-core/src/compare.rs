@@ -405,6 +405,120 @@ fn tokens(s: &str) -> Vec<&str> {
     out
 }
 
+
+// ------------------------------------------------------------ carrying a caret
+
+/// A caret in `old` put where it stands in `new`: the same note, changed
+/// elsewhere meanwhile (another device's edit taken in, a merge). Blocks
+/// are matched as a comparison matches them, so the caret stays in its
+/// block wherever that block now is; in a block whose words changed, it
+/// keeps its place among the words around it ([`carry_byte`]). A block
+/// gone: the caret goes to the one put in its place, else the start of
+/// the next. Nothing here checks `new` itself: [`crate::page::fix`] after.
+pub fn carry(old: &Doc, new: &Doc, c: crate::page::Caret) -> crate::page::Caret {
+    let (ob, nb) = (old.blocks(), new.blocks());
+    let eq = |i: usize, j: usize| same(&ob[i].kind, &nb[j].kind);
+    let pair = |i: usize, j: usize| std::mem::discriminant(&ob[i].kind) == std::mem::discriminant(&nb[j].kind);
+    let steps = align(ob.len(), nb.len(), eq, pair);
+    let pos = |p: crate::page::Pos| carry_pos(old, new, &steps, p);
+    crate::page::Caret { head: pos(c.head), anchor: pos(c.anchor) }
+}
+
+fn carry_pos(old: &Doc, new: &Doc, steps: &[Step], p: crate::page::Pos) -> crate::page::Pos {
+    use crate::page::{self, Pos, Slot};
+    let Some(i) = old.index_of(p.slot.block) else { return p };
+    let nb = new.blocks();
+    let at = |j: usize, end: bool| {
+        let slots = page::block_slots(&nb[j]);
+        match (end, slots.first(), slots.last()) {
+            (false, Some(&s), _) => page::start(s),
+            (true, _, Some(&s)) => page::end(new, s),
+            _ => page::first(new),
+        }
+    };
+    let k = steps.iter().position(|s| matches!(*s, Step::Same(x, _) | Step::Changed(x, _) | Step::Removed(x) if x == i));
+    let j = match k.map(|k| (k, &steps[k])) {
+        Some((_, Step::Same(_, j) | Step::Changed(_, j))) => *j,
+        // Gone: the block that came in its place, if one did (a line
+        // turned into another kind), else the next one's start, else the
+        // last one's end.
+        Some((k, _)) => {
+            // The run of blocks gone and come between two kept ones: the
+            // n-th gone is taken to be replaced by the n-th come.
+            let gap = |s: &Step| matches!(s, Step::Removed(_) | Step::Added(_));
+            let from = steps[..k].iter().rposition(|s| !gap(s)).map_or(0, |x| x + 1);
+            let to = steps[k..].iter().position(|s| !gap(s)).map_or(steps.len(), |x| k + x);
+            let nth = steps[from..k].iter().filter(|s| matches!(s, Step::Removed(_))).count();
+            let came: Vec<usize> = steps[from..to].iter().filter_map(|s| if let Step::Added(j) = s { Some(*j) } else { None }).collect();
+            let rest = &steps[k + 1..];
+            match came.get(nth).or(came.last()) {
+                Some(&j) => j,
+                None => {
+                    if let Some(j) = rest.iter().find_map(|s| match s {
+                        Step::Same(_, j) | Step::Changed(_, j) | Step::Added(j) => Some(*j),
+                        Step::Removed(_) => None,
+                    }) {
+                        return at(j, false);
+                    }
+                    return match steps[..k].iter().rev().find_map(|s| match s {
+                        Step::Same(_, j) | Step::Changed(_, j) | Step::Added(j) => Some(*j),
+                        Step::Removed(_) => None,
+                    }) {
+                        Some(j) => at(j, true),
+                        None => page::first(new),
+                    };
+                }
+            }
+        }
+        None => return page::first(new),
+    };
+    let to = &nb[j];
+    // The cell at the same row and column, in a table still.
+    let slot = match (p.slot.cell, &old.blocks()[i].kind, &to.kind) {
+        (Some((row, col)), Kind::Table(a), Kind::Table(b)) => {
+            let (r, c) = (a.row_index(row).unwrap_or(0), a.col_index(col).unwrap_or(0));
+            match (b.rows.get(r.min(b.rows.len().saturating_sub(1))), b.cols.get(c.min(b.cols.len().saturating_sub(1)))) {
+                (Some(r), Some(&c)) => Slot { block: to.id, cell: Some((r.id, c)) },
+                _ => return at(j, false),
+            }
+        }
+        (None, _, Kind::Table(_)) | (Some(_), _, _) => return at(j, false),
+        (None, _, _) => Slot::block(to.id),
+    };
+    if page::is_atomic(old, p.slot) || page::is_atomic(new, slot) {
+        return Pos { slot, byte: p.byte.min(page::len(new, slot)) };
+    }
+    Pos { slot, byte: carry_byte(page::text(old, p.slot), page::text(new, slot), p.byte) }
+}
+
+/// A place in `old` put where it stands in `new`, the same text changed
+/// in one run: before the change it stays, after it it moves with the
+/// words after it, inside it it goes to the nearest edge of what replaced
+/// it. Always on a character boundary of `new`.
+pub fn carry_byte(old: &str, new: &str, b: usize) -> usize {
+    let b = b.min(old.len());
+    let mut pre = old.bytes().zip(new.bytes()).take_while(|(x, y)| x == y).count();
+    while !old.is_char_boundary(pre) || !new.is_char_boundary(pre) {
+        pre -= 1;
+    }
+    let most = old.len().min(new.len()) - pre;
+    let mut suf = old.bytes().rev().zip(new.bytes().rev()).take(most).take_while(|(x, y)| x == y).count();
+    while !old.is_char_boundary(old.len() - suf) || !new.is_char_boundary(new.len() - suf) {
+        suf -= 1;
+    }
+    let mut out = if b <= pre {
+        b
+    } else if b >= old.len() - suf {
+        new.len() - (old.len() - b)
+    } else {
+        b.clamp(pre, new.len() - suf)
+    };
+    while !new.is_char_boundary(out) {
+        out -= 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +594,100 @@ mod tests {
         assert_eq!(marked_blocks, 1);
         let (_, same) = marked(&md, &md);
         assert!(same.blocks().iter().all(|b| !text_of(&b.kind).is_some_and(|t| t.contains('<') || t.contains("=="))));
+    }
+}
+
+#[cfg(test)]
+mod carry_tests {
+    use super::{carry, carry_byte};
+    use crate::doc::{self, Doc, Kind};
+    use crate::page::{self, Caret, Pos, Slot};
+
+    fn parsed(md: &str) -> Doc {
+        doc::from_markdown(md).1
+    }
+
+    /// The caret at `byte` of block `i`.
+    fn at(d: &Doc, i: usize, byte: usize) -> Caret {
+        Caret::at(Pos { slot: Slot::block(d.blocks()[i].id), byte })
+    }
+
+    /// Where a caret is, as (block index, byte).
+    fn place(d: &Doc, c: Caret) -> (usize, usize) {
+        (d.index_of(c.head.slot.block).unwrap(), c.head.byte)
+    }
+
+    #[test]
+    fn a_byte_keeps_its_place_among_the_words() {
+        assert_eq!(carry_byte("bread", "bread WEB", 5), 5, "an insertion at the place: before it");
+        assert_eq!(carry_byte("milk bread", "fresh milk bread", 10), 16, "after an insertion: moved by it");
+        assert_eq!(carry_byte("milk bread", "fresh milk bread", 0), 0);
+        assert_eq!(carry_byte("milk and bread", "milk bread", 12), 8, "after a deletion");
+        assert_eq!(carry_byte("milk and bread", "milk bread", 6), 5, "inside a deletion: to its edge");
+        assert_eq!(carry_byte("café crème", "café, crème", 10), 11, "on a character boundary");
+        assert_eq!(carry_byte("", "new words", 0), 0);
+    }
+
+    /// The finding: the caret at the end of the second item, " WEB" put at
+    /// the end of the first on another device: the caret stays where it
+    /// was, not on the first item.
+    #[test]
+    fn an_edit_in_another_block_leaves_the_caret_where_it_was() {
+        let old = parsed("- milk1\n- bread1\n");
+        let new = parsed("- milk1 WEB\n- bread1\n");
+        let c = carry(&old, &new, at(&old, 1, 6));
+        assert_eq!(place(&new, c), (1, 6));
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn an_edit_before_the_caret_moves_it_with_its_words() {
+        // A block put in before it.
+        let old = parsed("First\n\nSecond line\n");
+        let new = parsed("New one\n\nFirst\n\nSecond line\n");
+        assert_eq!(place(&new, carry(&old, &new, at(&old, 1, 6))), (2, 6));
+        // Words put in before it, in its own block.
+        let new = parsed("First\n\nThe Second line\n");
+        assert_eq!(place(&new, carry(&old, &new, at(&old, 1, 6))), (1, 10));
+        // Words put in after it, in its own block: it stays.
+        let new = parsed("First\n\nSecond line too\n");
+        assert_eq!(place(&new, carry(&old, &new, at(&old, 1, 6))), (1, 6));
+        // A block before it taken away.
+        let new = parsed("Second line\n");
+        assert_eq!(place(&new, carry(&old, &new, at(&old, 1, 6))), (0, 6));
+    }
+
+    #[test]
+    fn a_selection_is_carried_end_by_end() {
+        let old = parsed("One\n\nTwo words here\n");
+        let new = parsed("Zero\n\nOne\n\nSo two words here\n");
+        let c = Caret { anchor: Pos { slot: Slot::block(old.blocks()[1].id), byte: 4 }, head: Pos { slot: Slot::block(old.blocks()[1].id), byte: 9 } };
+        let c = carry(&old, &new, c);
+        let slot = Slot::block(new.blocks()[2].id);
+        assert_eq!((c.anchor, c.head), (Pos { slot, byte: 7 }, Pos { slot, byte: 12 }));
+        assert_eq!(&page::text(&new, slot)[7..12], "words");
+    }
+
+    #[test]
+    fn a_block_gone_or_turned_takes_the_caret_to_its_place() {
+        // Turned into a heading: the caret in the heading, by its words.
+        let old = parsed("Intro\n\nPlans\n\nEnd\n");
+        let new = parsed("Intro\n\n## Plans\n\nEnd\n");
+        assert_eq!(place(&new, carry(&old, &new, at(&old, 1, 3))), (1, 3));
+        assert!(matches!(new.blocks()[1].kind, Kind::Heading { .. }));
+        // Taken away: the next one's start.
+        let new = parsed("Intro\n\nEnd\n");
+        assert_eq!(place(&new, carry(&old, &new, at(&old, 1, 3))), (1, 0));
+    }
+
+    #[test]
+    fn a_cell_keeps_its_row_and_column() {
+        let old = parsed("| A | B |\n| --- | --- |\n| one | two |\n");
+        let new = parsed("Above\n\n| A | B |\n| --- | --- |\n| one | the two |\n");
+        let Kind::Table(t) = &old.blocks()[0].kind else { panic!() };
+        let c = Caret::at(Pos { slot: Slot { block: old.blocks()[0].id, cell: Some((t.rows[1].id, t.cols[1])) }, byte: 3 });
+        let c = carry(&old, &new, c);
+        let Kind::Table(t) = &new.blocks()[1].kind else { panic!() };
+        assert_eq!(c.head, Pos { slot: Slot { block: new.blocks()[1].id, cell: Some((t.rows[1].id, t.cols[1])) }, byte: 7 });
     }
 }

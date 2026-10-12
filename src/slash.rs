@@ -43,13 +43,13 @@ pub const COMMANDS: [Command; 11] = [
 ];
 
 /// The word being typed after a `/`, when the caret ends a line of text
-/// that holds only that: its block and the word.
+/// or a quote that holds only that: its block and the word.
 pub fn query(doc: &Doc, c: Caret) -> Option<(u64, String)> {
     if !c.is_empty() || c.head.slot.cell.is_some() {
         return None;
     }
     let b = doc.get(c.head.slot.block)?;
-    let Kind::Text(t) = &b.kind else { return None };
+    let (Kind::Text(t) | Kind::Quote(t)) = &b.kind else { return None };
     let word = t.strip_prefix('/')?;
     if c.head.byte != t.len() || word.chars().any(char::is_whitespace) || word.len() > 24 {
         return None;
@@ -88,6 +88,11 @@ pub fn apply(doc: &mut Doc, c: &mut Caret, i: usize) -> bool {
     let Some(at) = doc.index_of(block) else { return false };
     if let Some(t) = doc.block_mut(at).text_mut() {
         t.clear();
+    }
+    // A quote's line made a table, a divider, code or a picture: the
+    // block takes the quote's place, as it would a paragraph's.
+    if matches!(doc.blocks()[at].kind, Kind::Quote(_)) && !matches!(cmd.action, Action::Turn(_)) {
+        doc.block_mut(at).kind = Kind::Text(String::new());
     }
     *c = Caret::at(page::start(c.head.slot));
     match cmd.action {
@@ -144,5 +149,24 @@ mod tests {
         assert!(apply(&mut d, &mut c, 7));
         assert!(matches!(d.blocks()[0].kind, Kind::Table(_)));
         assert!(c.head.slot.cell.is_some(), "the caret goes into the first cell");
+    }
+
+    #[test]
+    fn a_quote_offers_the_menu_as_a_paragraph_does() {
+        let quote = |t: &str| {
+            let d = Doc::new(vec![Block::new(Kind::Quote(t.into()))]);
+            let slot = Slot::block(d.blocks()[0].id);
+            (d, Caret::at(Pos { slot, byte: t.len() }))
+        };
+        let (d, c) = quote("/code");
+        assert_eq!(query(&d, c), Some((d.blocks()[0].id, "code".into())));
+        let code = matches("code")[0];
+        let (mut d, mut c) = quote("/code");
+        assert!(apply(&mut d, &mut c, code));
+        assert!(matches!(&d.blocks()[0].kind, Kind::Raw(r) if r.starts_with("```")), "{:?}", d.blocks()[0].kind);
+        assert!(!d.blocks().iter().any(|b| matches!(b.kind, Kind::Quote(_))), "no empty quote left behind");
+        let (mut d, mut c) = quote("/h1");
+        assert!(apply(&mut d, &mut c, 0));
+        assert!(matches!(&d.blocks()[0].kind, Kind::Heading { level: 1, text } if text.is_empty()));
     }
 }

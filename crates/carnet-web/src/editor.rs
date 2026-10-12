@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+use carnet_core::compare;
 use carnet_core::doc::{self, Doc, Kind, ListStyle, Table};
 use carnet_core::history::{History, State, Step};
 use carnet_core::inline::{self, Style};
@@ -125,20 +126,27 @@ impl Editor {
     }
 
     /// The note became `md` (an edit from elsewhere merged in): the caret
-    /// kept at its line and column.
+    /// and the selection kept where they were in the words, carried
+    /// through the change (`compare::carry`) — in the same block after the
+    /// same letters, wherever the change moved them; in the title, the
+    /// same.
     pub fn reload(&mut self, md: &str) {
-        let at = self.caret_lc();
-        let (title, doc) = doc::from_markdown(md);
-        self.title = title.unwrap_or_default();
-        self.doc = doc;
-        if self.doc.is_empty() {
-            self.doc.push(doc::Block::text(""));
+        let (title, mut doc) = doc::from_markdown(md);
+        let title = title.unwrap_or_default();
+        if doc.is_empty() {
+            doc.push(doc::Block::text(""));
         }
-        self.doc.ensure_tail();
+        doc.ensure_tail();
+        self.caret = page::fix(&doc, compare::carry(&self.doc, &doc, self.caret));
+        if let Focus::Title { anchor, head } = self.focus {
+            let carry = |b: usize| compare::carry_byte(&self.title, &title, b);
+            self.focus = Focus::Title { anchor: carry(anchor), head: carry(head) };
+        }
+        self.title = title;
+        self.doc = doc;
         self.history = History::default();
         self.typing = Typing::default();
         self.relay();
-        self.select(at.0, at.1, at.2, at.3);
     }
 
     // ------------------------------------------------------------ lines
@@ -1007,6 +1015,35 @@ mod tests {
     fn type_at(e: &mut Editor, l: usize, c: usize, s: &str) {
         e.select(l, c, l, c);
         e.input(s);
+    }
+
+    /// An edit from elsewhere leaves the caret where it was in the words:
+    /// after the same letters of the same line, wherever the change moved
+    /// them, so the next letter typed lands there.
+    #[test]
+    fn a_reload_keeps_the_caret_in_its_words() {
+        let mut e = Editor::open("# Shop\n\n- milk1\n- bread1\n");
+        e.select(2, 6, 2, 6);
+        // In another line.
+        e.reload("# Shop\n\n- milk1 WEB\n- bread1\n");
+        assert_eq!(e.caret_lc(), (2, 6, 2, 6));
+        e.input("x");
+        assert!(e.markdown().contains("- milk1 WEB\n- bread1x\n"), "{}", e.markdown());
+        // Before it, in its own line: it moves with its words.
+        e.reload("# Shop\n\n- milk1 WEB\n- fresh bread1x\n");
+        assert_eq!(e.caret_lc(), (2, 13, 2, 13));
+        // A line put in above: the same line, one down.
+        e.reload("# Shop\n\nAt noon\n\n- milk1 WEB\n- fresh bread1x\n");
+        assert_eq!(e.caret_lc(), (3, 13, 3, 13));
+        e.input("y");
+        assert!(e.markdown().contains("- fresh bread1xy\n"), "{}", e.markdown());
+        // A selection, end by end; in the title, too.
+        e.select(3, 6, 3, 11);
+        e.reload("# Shop\n\nAt noon\n\n- milk1 WEB\n- so fresh bread1xy\n");
+        assert_eq!(e.caret_lc(), (3, 9, 3, 14));
+        e.select(0, 4, 0, 4);
+        e.reload("# My Shop\n\nAt noon\n\n- milk1 WEB\n- so fresh bread1xy\n");
+        assert_eq!(e.caret_lc(), (0, 7, 0, 7));
     }
 
     #[test]

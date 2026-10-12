@@ -353,6 +353,21 @@ pub enum Status {
 
 type Waker = Arc<dyn Fn() + Send + std::marker::Sync>;
 
+/// What the link says when asked to connect again (net.rs).
+const RECONNECTING: &str = "reconnecting";
+
+/// A dropped connection in plain words: what the network said (a refused
+/// connection, a name not found, a timeout) is no business of the line
+/// that says sync is offline. A certificate that isn't trusted is said,
+/// since trying again won't mend it.
+pub fn offline_words(why: &str) -> &'static str {
+    if why.to_lowercase().contains("certificate") {
+        "The server's certificate isn't trusted, so Carnet won't connect."
+    } else {
+        "Can't reach the server. Trying again\u{2026}"
+    }
+}
+
 /// The socket's URL for `origin`, saying which app this is: the desktop,
 /// on which system, and this build's version, for the server's counts.
 fn socket_url(origin: &str) -> Option<String> {
@@ -377,6 +392,9 @@ pub struct Sync {
     /// at load): it looks here when it's done.
     wake_later: Arc<std::sync::Mutex<Option<Waker>>>,
     pub status: Status,
+    /// Offline because the connection dropped: what the network said, in
+    /// its own terms — for a tooltip, never the line itself.
+    pub offline_detail: Option<String>,
     /// The last thing that went wrong, for the settings to say.
     pub error: Option<String>,
     /// A pairing code being shown.
@@ -496,6 +514,7 @@ impl Sync {
             wake: None,
             wake_later: Arc::default(),
             status: Status::Off,
+            offline_detail: None,
             error: None,
             code: None,
             words: None,
@@ -1114,7 +1133,10 @@ impl Sync {
                             NetEvent::Frame(b) => session.receive(&b, replica, &mut OsRandom),
                             NetEvent::Disconnected(why) => {
                                 session.disconnected();
-                                self.status = Status::Offline(why);
+                                // Asked to connect again (a new server
+                                // address, a wake): connecting, not out.
+                                self.status = if why == RECONNECTING { Status::Connecting } else { Status::Offline(offline_words(&why).into()) };
+                                self.offline_detail = Some(why);
                                 // Words the server may or may not have
                                 // kept: never shown, and said so.
                                 if self.words_waiting.take().is_some() {
@@ -1156,6 +1178,7 @@ impl Sync {
                                 p.retry();
                             }
                             self.status = Status::Online;
+                            self.offline_detail = None;
                             self.devices = None;
                             self.asked_devices = false;
                             self.usage = None;
@@ -1171,13 +1194,15 @@ impl Sync {
                         Event::Outdated(fit) => match fit.refusal() {
                             Some(why) => {
                                 self.error = Some(why.into());
-                                self.status = Status::Offline(if fit == Fit::AppTooOld { "this version of Carnet is too old".into() } else { "the server is too old".into() });
+                                self.status = Status::Offline(if fit == Fit::AppTooOld { "This version of Carnet is too old for the server.".into() } else { "The server is too old for this version of Carnet.".into() });
+                                self.offline_detail = None;
                             }
                             None => self.update_soon = true,
                         },
                         Event::Denied(why) => {
                             self.error = Some(format!("The server turned this device away: {why}"));
-                            self.status = Status::Offline(why);
+                            self.status = Status::Offline("The server turned this device away.".into());
+                            self.offline_detail = Some(why);
                         }
                         Event::Devices(mut list) => {
                             // This one first, then by name.
@@ -1460,7 +1485,7 @@ impl Sync {
             let _ = std::fs::write(p, config.text());
         }
         if joining && let Err(e) = store.drop_welcome() {
-            self.error = Some(format!("Couldn't move this device's welcome note to the trash: {e}"));
+            self.error = Some(format!("Couldn't remove this device's welcome note: {e}"));
         }
         let name = self.name();
         let mut session = Session::new(identity(&config, keys, name), 0);
