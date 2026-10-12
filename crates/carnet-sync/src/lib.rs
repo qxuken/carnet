@@ -17,6 +17,8 @@ pub mod invite;
 #[cfg(all(feature = "net", not(target_arch = "wasm32")))]
 pub mod http;
 #[cfg(all(feature = "net", not(target_arch = "wasm32")))]
+pub mod info;
+#[cfg(all(feature = "net", not(target_arch = "wasm32")))]
 pub mod net;
 pub mod pair;
 pub mod passkey;

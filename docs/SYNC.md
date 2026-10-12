@@ -554,7 +554,7 @@ fuzz/                   cargo-fuzz targets (§12)
 | `routes` | none | merge its own axum routes beside the API. A `/` among them replaces the web app's page there (a landing page); the web app is still served everywhere else, and unknown `/v1/` paths stay 404. The web app's service worker answers only `/` from its cache, so a host's pages (a signup at `/start`) reach the server even once the app is installed. |
 | `quota: Arc<dyn Quota>` | `Unlimited` | per account, a byte limit (notes and pictures, as sealed), whether it may write, a plan name and an end date (`quota::Limit`) |
 | `admission: Arc<dyn Admission>` | `ByInvite` | be told which invite made which account (`admitted`), and when an account is deleted or removed (`removed`); say the email an account came in by (`email_of`) |
-| `signup: Option<String>` | none | a URL where newcomers make an account: `/v1/info` returns it, and the web app's first screen links to it |
+| `signup: Option<String>` | none | a URL where newcomers make an account. Set, the server lists the `signup` feature (in `/v1/info` and every greeting) and `/v1/info` returns the URL; the apps then offer "Make an account" in their connect steps, which asks `POST /v1/signup` (a route the host adds) to mail an invite |
 | `passwords` | off | accept email and password sign-in (§7) |
 | `password_emails` | `Any` | which email a password may sign in as (§7): any, or `Account`, only the one `admission.email_of` says |
 | `first_invite` | on | print the owner's invite on a start with no accounts |
@@ -650,7 +650,7 @@ Apps update when their owners let them, and a self-hosted server when its owner 
 **Who says what.**
 
 - The app puts its protocol in the socket's address: `/v1/sync?protocol=1`. None means 0: builds from before protocol numbers.
-- The server's challenge carries its **greeting**: its protocol, its `OLDEST` and `DEPRECATED`, and its **features** by name (`compat::feature`: `passwords`, `passkeys`, `account-delete`, `remove`, `usage`). It's on every challenge, so a device joining by an invite, a code, the words, a password or a passkey reads it too, before it says anything.
+- The server's challenge carries its **greeting**: its protocol, its `OLDEST` and `DEPRECATED`, and its **features** by name (`compat::feature`: `passwords`, `passkeys`, `account-delete`, `remove`, `usage`, and `signup` where anyone may make an account by email). It's on every challenge, so a device joining by an invite, a code, the words, a password or a passkey reads it too, before it says anything.
 - `/v1/info` says the same, for a page to read before any socket opens.
 - **App too old:** the server sends the greeting, then `Denied` with the reason `Outdated`, and closes. The app says "Update Carnet to keep syncing" and retries now and then.
 - **Server too old:** a greeting older than the app's `OLDEST`, or none at all. The app sends nothing and says the server needs updating.

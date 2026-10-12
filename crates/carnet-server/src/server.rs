@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! GET  /              what this is
-//! GET  /v1/info       {"server", "version", "origin"}
+//! GET  /v1/info       {"server", "version", "origin", "features", …}
 //! GET  /v1/health     200 {"ok": true} while the hub answers; 503 if not
 //! GET  /v1/sync       the WebSocket: Carnet frames and Loro Protocol rooms
 //!                     (an invite is used there too: `Enroll`)
@@ -120,7 +120,7 @@ enum ToHub {
 
 /// What a host gives the hub: its limits, who's let in, and its OPAQUE
 /// key if it takes passwords.
-type Seams = (Arc<dyn Quota>, Arc<dyn Admission>, Option<carnet_sync::password::Server>, PasswordEmails);
+type Seams = (Arc<dyn Quota>, Arc<dyn Admission>, Option<carnet_sync::password::Server>, PasswordEmails, bool);
 
 /// The server's OPAQUE key, made the first time and kept in `data`
 /// (`opaque.key`, readable by the server alone): a new one would make
@@ -343,8 +343,8 @@ impl Gate {
 
 /// The hub's thread: one thing at a time, from every socket.
 fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, mut rx: mpsc::UnboundedReceiver<ToHub>, worker: std::sync::mpsc::Sender<Job>) {
-    let (quota, admission, passwords, password_emails) = seams;
-    let mut hub = Hub::new(origin, store).with_quota(quota).with_admission(admission).with_password_emails(password_emails);
+    let (quota, admission, passwords, password_emails, signup) = seams;
+    let mut hub = Hub::new(origin, store).with_quota(quota).with_admission(admission).with_password_emails(password_emails).with_signup(signup);
     if let Some(p) = passwords {
         hub = hub.with_passwords(p);
     }
@@ -438,6 +438,7 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
     let Host { routes, quota, admission, signup, passwords, password_emails, first_invite, store: hosted_store, blobs: hosted_blobs, ready } = host;
     let passwords = if passwords { Some(opaque_key(&config.data)?) } else { None };
     let takes_passwords = passwords.is_some();
+    let takes_signups = signup.is_some();
     // Pictures: files beside the databases, reached by signed links,
     // unless the host keeps them elsewhere.
     let files = BlobFiles::open(&config.data)?;
@@ -509,7 +510,7 @@ pub async fn serve_hosted(config: Config, listener: TcpListener, metrics: Option
             }
         }
     })?;
-    let hub =std::thread::Builder::new().name("carnet-hub".into()).spawn(move || hub_thread(origin, compact_after, store, (quota, admission, passwords, password_emails), rx, jobs))?;
+    let hub =std::thread::Builder::new().name("carnet-hub".into()).spawn(move || hub_thread(origin, compact_after, store, (quota, admission, passwords, password_emails, takes_signups), rx, jobs))?;
     if let Some(ready) = ready {
         ready(HubHandle { tx: tx.clone() });
     }
@@ -628,7 +629,7 @@ async fn info(State(app): State<App>) -> impl IntoResponse {
         protocol: compat::PROTOCOL,
         oldest: compat::OLDEST,
         deprecated: compat::DEPRECATED,
-        features: crate::hub::features(app.passwords),
+        features: crate::hub::features(app.passwords, app.signup.is_some()),
     })
 }
 

@@ -630,6 +630,7 @@ async fn a_host_adds_routes_and_works_on_the_hub() {
     let host = server::Host {
         routes: axum::Router::new().route("/", get(|| async { "landing" })).route("/v1/signup", get(|| async { "signup" })),
         first_invite: false,
+        signup: Some("https://notes.example/start".into()),
         admission: std::sync::Arc::new(Seen(seen.clone())),
         ready: Some(Box::new(move |h| {
             let _ = handle_tx.send(h);
@@ -649,6 +650,10 @@ async fn a_host_adds_routes_and_works_on_the_hub() {
     let info = String::from_utf8_lossy(&request(addr, "GET", "/v1/info", "", b"").await.2).into_owned();
     assert!(info.contains("\"passwords\":false"), "no passwords unless asked: {info}");
     assert!(!info.contains("password_email"), "nor which email they'd take: {info}");
+    // Signups, a capability as the others are: listed, and the page said.
+    let v: serde_json::Value = serde_json::from_str(&info).unwrap();
+    assert!(v["features"].as_array().unwrap().iter().any(|f| f == "signup"), "{info}");
+    assert_eq!(v["signup"], "https://notes.example/start");
     assert_eq!(request(addr, "GET", "/v1/health", "", b"").await.0, 200);
     // An invite made by the host, on the hub, used over the socket.
     let code = hub.run(|hub, _| server::invite(hub.store_mut(), false).unwrap()).await.unwrap();

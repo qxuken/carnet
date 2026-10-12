@@ -33,6 +33,10 @@ pub mod feature {
     pub const REMOVE: &str = "remove";
     /// What an account keeps, and may.
     pub const USAGE: &str = "usage";
+    /// Accounts made by anyone, by email: `POST /v1/signup` mails an
+    /// invite (a hosted service, docs/SYNC.md §11). Without it, accounts
+    /// come only from invites the server's owner makes.
+    pub const SIGNUP: &str = "signup";
 }
 
 /// The server's side, on each challenge: its protocol, the oldest app it

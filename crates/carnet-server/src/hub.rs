@@ -47,11 +47,15 @@ const MAX_INVITES: usize = 100;
 /// What a removed account's devices are told: "removed" in it, they
 /// forget the account, as a removed device does.
 /// What a server can do (`compat::feature`): the same on every server of
-/// this build, but for passwords, which take its OPAQUE key.
-pub fn features(passwords: bool) -> Vec<String> {
+/// this build, but for passwords, which take its OPAQUE key, and signups,
+/// which take a host that mails invites.
+pub fn features(passwords: bool, signup: bool) -> Vec<String> {
     let mut f = vec![feature::PASSKEYS, feature::ACCOUNT_DELETE, feature::REMOVE, feature::USAGE];
     if passwords {
         f.push(feature::PASSWORDS);
+    }
+    if signup {
+        f.push(feature::SIGNUP);
     }
     f.into_iter().map(str::to_string).collect()
 }
@@ -195,6 +199,8 @@ pub struct Hub<S: Storage> {
     /// Its OPAQUE key, if it takes passwords (§7); a server of one's own
     /// doesn't, unless asked.
     passwords: Option<password::Server>,
+    /// Its host takes signups by email.
+    signup: bool,
     /// Which email a password may sign in as.
     password_emails: PasswordEmails,
 }
@@ -219,6 +225,7 @@ impl<S: Storage> Hub<S> {
             quota: std::sync::Arc::new(Unlimited),
             admission: std::sync::Arc::new(ByInvite),
             passwords: None,
+            signup: false,
             password_emails: PasswordEmails::Any,
         }
     }
@@ -235,6 +242,12 @@ impl<S: Storage> Hub<S> {
     }
 
     /// Holding passwords to `emails` (any, unless said).
+    /// Its host takes signups by email (`feature::SIGNUP`).
+    pub fn with_signup(mut self, signup: bool) -> Self {
+        self.signup = signup;
+        self
+    }
+
     pub fn with_password_emails(mut self, emails: PasswordEmails) -> Self {
         self.password_emails = emails;
         self
@@ -392,7 +405,7 @@ impl<S: Storage> Hub<S> {
 
     /// What this server can do, as its greeting lists it.
     pub fn features(&self) -> Vec<String> {
-        features(self.passwords.is_some())
+        features(self.passwords.is_some(), self.signup)
     }
 
     fn challenge(&self, conn: ConnId, nonce: [u8; 32]) -> Out {

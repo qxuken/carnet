@@ -82,6 +82,7 @@ async fn apps_of_other_builds_are_told_where_they_stand() {
     for want in [format!("\"protocol\":{}", compat::PROTOCOL), format!("\"oldest\":{}", compat::OLDEST), "\"features\":[\"passkeys\"".into()] {
         assert!(info.contains(&want), "{want} in {info}");
     }
+    assert!(!info.contains("\"signup\""), "a server of one's own takes no signups: {info}");
 
     let _ = stop.send(());
     tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();

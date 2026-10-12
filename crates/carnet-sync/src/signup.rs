@@ -34,13 +34,12 @@ pub fn body(email: &str) -> Vec<u8> {
     serde_json::json!({ "email": email.trim() }).to_string().into_bytes()
 }
 
-/// The server's signup page, if its `/v1/info` says it takes signups.
+/// Whether a server's `/v1/info` says it takes signups
+/// ([`crate::info::ServerInfo::takes_signups`]), and its signup page if
+/// it has one (empty if not).
 pub fn takes_signups(info: &Answer) -> Option<String> {
-    if !(200..300).contains(&info.status) {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_slice(&info.body).ok()?;
-    v.get("signup")?.as_str().filter(|s| !s.trim().is_empty()).map(str::to_string)
+    let info = crate::info::read(info).ok().filter(crate::info::ServerInfo::takes_signups)?;
+    Some(info.signup_page.unwrap_or_default())
 }
 
 /// An invite asked for, and answered yes.
@@ -148,8 +147,13 @@ mod tests {
 
     #[test]
     fn a_server_says_whether_it_takes_signups() {
-        assert_eq!(takes_signups(&answer(200, r#"{"server":"carnet-server","signup":"https://x.co/start"}"#)).as_deref(), Some("https://x.co/start"));
-        assert_eq!(takes_signups(&answer(200, r#"{"server":"carnet-server","passwords":false}"#)), None, "a server of one's own");
+        let v = r#""protocol":1,"oldest":1,"deprecated":1"#;
+        let page = format!(r#"{{"server":"carnet-server","signup":"https://x.co/start",{v},"features":["signup"]}}"#);
+        assert_eq!(takes_signups(&answer(200, &page)).as_deref(), Some("https://x.co/start"));
+        let listed = format!(r#"{{"server":"carnet-server",{v},"features":["signup"]}}"#);
+        assert_eq!(takes_signups(&answer(200, &listed)).as_deref(), Some(""), "listed, with no page of its own");
+        let own = format!(r#"{{"server":"carnet-server","passwords":false,{v},"features":["passkeys"]}}"#);
+        assert_eq!(takes_signups(&answer(200, &own)), None, "a server of one's own");
         assert_eq!(takes_signups(&answer(404, r#"{"signup":"https://x.co/start"}"#)), None);
         assert_eq!(takes_signups(&answer(200, "<html>")), None);
     }
