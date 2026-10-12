@@ -691,6 +691,12 @@ impl Vault {
         self.notes.session.has_recovery() != Some(false)
     }
 
+    /// Whether the account has a recovery code, by the last list of
+    /// devices: `undefined` until a list has come.
+    pub fn recovery(&self) -> Option<bool> {
+        self.notes.session.has_recovery()
+    }
+
     /// A new recovery code: its twelve words, to show once the server says
     /// it keeps it (`recoverySet`).
     pub fn make_recovery(&mut self) -> Option<String> {
@@ -1155,6 +1161,20 @@ pub fn invite_from(text: &str) -> Option<String> {
     InviteCode::parse(code.trim()).map(|c| c.text())
 }
 
+/// What's wrong with a password about to be set for `email`, said
+/// plainly, before anything is sent (the session refuses the same:
+/// `Session::set_password`); `None` when it may be set.
+#[wasm_bindgen]
+pub fn password_fault(email: &str, password: &str) -> Option<String> {
+    let id = carnet_sync::password::id(email);
+    if !id.contains('@') || id.len() > 254 {
+        return Some("That doesn’t look like an email address.".into());
+    }
+    let min = carnet_sync::password::MIN_LEN;
+    let n = password.chars().count();
+    (n < min).then(|| format!("A password needs {min} letters at least: this one has {n}."))
+}
+
 /// `text` as a QR code: an SVG drawn in `currentColor`, its quiet zone
 /// included.
 #[wasm_bindgen]
@@ -1193,7 +1213,16 @@ fn json(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::json;
+    use super::{json, password_fault};
+
+    #[test]
+    fn a_short_password_is_said_before_it_is_sent() {
+        assert_eq!(password_fault("me@example.com", "ninechars").as_deref(), Some("A password needs 10 letters at least: this one has 9."));
+        assert_eq!(password_fault("me@example.com", "tenletters"), None);
+        // Letters, not bytes.
+        assert_eq!(password_fault("me@example.com", "ééééééééé").as_deref(), Some("A password needs 10 letters at least: this one has 9."));
+        assert_eq!(password_fault("not an email", "tenletters").as_deref(), Some("That doesn’t look like an email address."));
+    }
 
     #[test]
     fn strings_are_json() {

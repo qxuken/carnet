@@ -17,6 +17,8 @@ import { HIGHLIGHT, inkCss, washCss } from '../colors';
 import { show, unshown } from '../pictures';
 import { TableWidget, mark, place, type Cell, type TableContext } from './table';
 import { pictureCarry, pictureRoom, pictureTools } from './picture';
+import * as arrows from './arrows';
+import type { Lines } from './arrows';
 
 /// How a line is drawn (`PageEditor.looks`).
 export type Look = {
@@ -564,55 +566,62 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     provide: (f) => [EditorView.decorations.from(f), EditorView.atomicRanges.of((v) => v.state.field(f))],
   });
 
-  /// Up or down onto a picture, which CodeMirror's own motion passes
-  /// over when it is at an edge (measured as nothing, the words beside
-  /// it); and off one, to the line above or below.
-  const vertical = (down: boolean) => (v: EditorView) => {
-    const sel = v.state.selection.main;
-    if (!sel.empty) return false;
-    const all = v.state.field(looks);
-    const doc = v.state.doc;
-    const n = doc.lineAt(sel.head).number;
-    const next = down ? n + 1 : n - 1;
-    if (next < 1 || next > doc.lines) return false;
-    const picture = (k: number) => all[k - 1]?.k === 'image';
-    const to = doc.line(next);
-    if (!picture(n)) {
-      // Still within the line's own rows: CodeMirror's.
-      if (!picture(next) || doc.lineAt(v.moveVertically(sel, down).head).number === n) return false;
-    }
-    v.dispatch({ selection: { anchor: down || picture(next) ? to.from : to.to }, scrollIntoView: true, userEvent: 'select' });
-    return true;
+  /// The editor's lines, as the arrows see them (arrows.ts).
+  const linesOf = (state: EditorState): Lines => {
+    const all = state.field(looks);
+    const doc = state.doc;
+    return {
+      count: doc.lines,
+      line: (n) => doc.line(n),
+      kind: (n) => all[n - 1]?.k,
+      lineAt: (pos) => doc.lineAt(pos).number,
+    };
   };
 
-  /// ← and → over a divider, as the page's arrows go (page.rs `left`,
-  /// `right`): it's one thing to the eye, so an arrow onto it chooses it
-  /// whole, and the next is past it. Not a place before it and one after.
-  const across = (right: boolean) => (v: EditorView) => {
+  /// ↑ and ↓ a row at a time: off a line once the caret is on its first
+  /// row (or last), onto the next line's nearest row, at the caret's
+  /// column. CodeMirror's own motion goes by height, and a heading's
+  /// space above it sends it lines too far; and it passes over a picture
+  /// at an edge, measured as nothing (the words beside it). Within a
+  /// line's own rows, CodeMirror's.
+  const vertical = (down: boolean, extend: boolean) => (v: EditorView) => {
     const sel = v.state.selection.main;
-    const all = v.state.field(looks);
     const doc = v.state.doc;
-    const rule = (k: number) => all[k - 1]?.k === 'divider';
-    const caret = (at: number) => {
-      v.dispatch({ selection: { anchor: at }, scrollIntoView: true, userEvent: 'select' });
+    const plan = arrows.vertical(linesOf(v.state), { anchor: sel.anchor, head: sel.head }, down, extend);
+    if (!plan) return false;
+    const go = (head: number, goal?: number) => {
+      const range = extend ? EditorSelection.range(sel.anchor, head, goal) : EditorSelection.cursor(head, 0, undefined, goal);
+      v.dispatch({ selection: EditorSelection.create([range]), scrollIntoView: true, userEvent: 'select' });
       return true;
     };
-    if (!sel.empty) {
-      const line = doc.lineAt(sel.from);
-      if (!rule(line.number) || sel.from !== line.from || sel.to !== line.to) return false;
-      const k = right ? line.number + 1 : line.number - 1;
-      if (k < 1 || k > doc.lines) return caret(right ? line.to : line.from);
-      return caret(right ? doc.line(k).from : doc.line(k).to);
+    const here = doc.lineAt(sel.head);
+    const caret = v.coordsAtPos(sel.head, sel.assoc || -1);
+    const box = v.contentDOM.getBoundingClientRect();
+    // The column kept across a picture, a divider or a short line.
+    const goal = sel.goalColumn ?? (caret ? caret.left - box.left : undefined);
+    if ('at' in plan) return go(plan.at, goal);
+    if (plan.leaving) {
+      // Still within the line's own rows: CodeMirror's.
+      const edge = down ? v.coordsAtPos(here.to, -1) : v.coordsAtPos(Math.min(here.from + 1, here.to), here.length > 1 ? 1 : -1);
+      if (!caret || !edge) return false;
+      if (!arrows.onRow(caret, edge)) return false;
     }
-    const line = doc.lineAt(sel.head);
-    let k = line.number;
-    if (!rule(k)) {
-      if (sel.head !== (right ? line.to : line.from)) return false;
-      k = right ? k + 1 : k - 1;
-      if (k < 1 || k > doc.lines || !rule(k)) return false;
-    }
-    const to = doc.line(k);
-    v.dispatch({ selection: right ? { anchor: to.from, head: to.to } : { anchor: to.to, head: to.from }, scrollIntoView: true, userEvent: 'select' });
+    const to = doc.line(plan.line);
+    // The next line's nearest row: its first going down, its last going
+    // up (a dropped first letter's line measured by its second letter).
+    const row = down ? v.coordsAtPos(Math.min(to.from + 1, to.to), to.length > 1 ? 1 : -1) : v.coordsAtPos(to.to, -1);
+    if (!row) return go(down ? to.from : to.to, goal);
+    const at = v.posAtCoords({ x: box.left + (goal ?? 0), y: (row.top + row.bottom) / 2 }, false);
+    return go(Math.max(to.from, Math.min(to.to, at)), goal);
+  };
+
+  /// ← and → over a divider or a picture (arrows.ts `across`): an arrow
+  /// onto it chooses it whole, and the next is past it.
+  const across = (right: boolean) => (v: EditorView) => {
+    const sel = v.state.selection.main;
+    const to = arrows.across(linesOf(v.state), { anchor: sel.anchor, head: sel.head }, right);
+    if (!to) return false;
+    v.dispatch({ selection: to, scrollIntoView: true, userEvent: 'select' });
     return true;
   };
 
@@ -651,8 +660,10 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     keymap.of([
       { key: 'ArrowRight', run: across(true) },
       { key: 'ArrowLeft', run: across(false) },
-      { key: 'ArrowDown', run: vertical(true) },
-      { key: 'ArrowUp', run: vertical(false) },
+      { key: 'ArrowDown', run: vertical(true, false) },
+      { key: 'ArrowUp', run: vertical(false, false) },
+      { key: 'Shift-ArrowDown', run: vertical(true, true) },
+      { key: 'Shift-ArrowUp', run: vertical(false, true) },
       { key: 'Enter', run: run(() => pe.enter(false)) },
       { key: 'Shift-Enter', run: run(() => pe.enter(true)) },
       { key: 'Backspace', run: run(() => pe.backspace(false)) },

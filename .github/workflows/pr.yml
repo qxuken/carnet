@@ -61,4 +61,5 @@ jobs:
           npm ci
           npm run wasm
           npm run check
+          npm test
           npx vite build

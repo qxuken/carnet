@@ -7,6 +7,7 @@ import * as sealed from './sealed';
 import * as db from './db';
 import * as passkey from './passkey';
 import { Shown } from './shown';
+import { linkAction, numbered } from './words';
 
 export type Note = {
   key: string;
@@ -75,6 +76,8 @@ export const NOT_ON_SERVER = 'not on the server';
 /// What the server says of pictures offered while the account is full
 /// (`carnet_sync::session::FULL`): taken back once there's room.
 const FULL = 'This account is full, so new pictures stay on this device for now. Delete some, or move to a bigger plan.';
+/// A pairing or invite link opened in a browser that's in an account.
+const ALREADY_IN = 'This browser is already in an account, so the link wasn’t used.';
 /// Whether the server takes a new picture now (`Usage::has_room`).
 const hasRoom = (u: Usage) => u.writable && (u.limit === null || u.notes + u.pictures < u.limit);
 /// Pictures put in here and not yet on the server: `[path, id]`s, sealed
@@ -167,6 +170,9 @@ class Sync {
   /// Recovery words made, the server not yet saying it keeps them: never
   /// shown before, so words it didn't take aren't written down.
   wordsWaiting = $state<string | null>(null);
+  /// Whether the account has a recovery code, by the last list of
+  /// devices; `null` until one has come.
+  recovery = $state<boolean | null>(null);
   /// Whether this account is the server's owner's, and its invites and
   /// accounts, once asked for; `null` until they come.
   invites = $state<Invites | null>(null);
@@ -191,6 +197,7 @@ class Sync {
   private join: Join | null = null;
   private ws: WebSocket | null = null;
   private wait = 1000;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private pictures = new Shown();
   private wanted = new Map<string, { path: string; done: (url: string) => void; fail: (e: Error) => void }[]>();
@@ -210,22 +217,43 @@ class Sync {
       return;
     }
     void passkey.support().then((s) => (this.passkeySupport = s));
-    // Opened by a pairing link (a QR code from another device): its code,
-    // taken off the address so it isn't kept in the history.
-    if (location.hash.startsWith('#pair=')) {
-      this.linked = code_from_link(location.href) ?? null;
-      history.replaceState(null, '', location.pathname + location.search);
-    } else if (location.hash.startsWith('#invite=')) {
-      // A new account's link, from a signup's email.
-      this.linked = invite_from(location.href) ?? null;
-      history.replaceState(null, '', location.pathname + location.search);
-    }
+    // Opened by a pairing or invite link; or one opened in this tab later.
+    const linked = this.takeLink();
+    addEventListener('hashchange', () => this.takeLink());
+    // Back online: connected again at once, not when the wait is up.
+    addEventListener('online', () => this.reconnect());
     try {
       await this.open();
     } catch (e) {
       if (e instanceof db.Newer) this.halt(e.message);
       else this.error = "Carnet couldn't open the notes kept in this browser. Reload the page to try again.";
     }
+    if (linked && this.phase === 'ready') this.say(ALREADY_IN);
+  }
+
+  /// A pairing link (a QR code from another device), or a new account's
+  /// (from a signup's email): its code taken off the address, so it isn't
+  /// kept in the history, and filled in to connect with a click; never
+  /// connected unasked. In an account already, said so. Whether it was one.
+  private takeLink(): boolean {
+    const act = linkAction(location.hash, this.phase);
+    if (!act) return false;
+    const href = location.href;
+    const pairing = location.hash.startsWith('#pair=');
+    history.replaceState(null, '', location.pathname + location.search);
+    if (act === 'already') this.say(ALREADY_IN);
+    else this.linked = (pairing ? code_from_link(href) : invite_from(href)) ?? null;
+    return true;
+  }
+
+  /// Connected again now, the wait between tries begun afresh: the
+  /// network is back.
+  private reconnect() {
+    this.wait = 1000;
+    if (!this.vault || this.join) return;
+    if (this.ws?.readyState === WebSocket.OPEN) return;
+    clearTimeout(this.retryTimer);
+    this.connect();
   }
 
   /// What this browser keeps, opened, and the socket.
@@ -323,7 +351,8 @@ class Sync {
         return;
       }
       this.status = navigator.onLine ? 'Offline: trying again' : 'Offline';
-      setTimeout(() => this.connect(), this.wait);
+      clearTimeout(this.retryTimer);
+      this.retryTimer = setTimeout(() => this.connect(), this.wait);
       this.wait = Math.min(this.wait * 2, 60_000);
     };
   }
@@ -409,6 +438,7 @@ class Sync {
     }
     for (const said of JSON.parse(v.take_said()) as Said[]) this.said(said);
     if (!this.vault) return;
+    this.recovery = v.recovery() ?? null;
     const features = ['passkeys', 'account-delete', 'passwords'].filter((f) => v.server_has(f));
     if (features.join() !== this.features.join()) this.features = features;
     for (const [id, data] of v.take_pictures() as [string, Uint8Array<ArrayBuffer>][]) {
@@ -487,6 +517,8 @@ class Sync {
     } else if ('recoverySet' in s) {
       this.words = this.wordsWaiting;
       this.wordsWaiting = null;
+      // The list says the account has one now.
+      this.listDevices();
     } else if ('rekeyed' in s) {
       // A device was removed: the new key kept at once, or a reload
       // would lose what it opens.
@@ -596,7 +628,7 @@ class Sync {
       const have = (this.passkeys ?? []).map((p) => passkey.fromHex(p.credential)).filter((c) => c.length);
       const made = await passkey.make(new Uint8Array(this.vault.account_id()), `Carnet notes (${this.account})`, have);
       try {
-        this.vault.add_passkey(`Passkey from ${deviceName()}`, made.credential, made.prf);
+        this.vault.add_passkey(numbered(`Passkey from ${deviceName()}`, (this.passkeys ?? []).map((p) => p.name)), made.credential, made.prf);
       } finally {
         made.prf.fill(0);
       }
@@ -1015,6 +1047,7 @@ class Sync {
     const ws = this.ws;
     this.ws = null;
     ws?.close();
+    clearTimeout(this.retryTimer);
     clearTimeout(this.saveTimer);
     clearTimeout(this.pruneTimer);
     this.dropVault();
@@ -1045,6 +1078,7 @@ class Sync {
     this.code = null;
     this.words = null;
     this.wordsWaiting = null;
+    this.recovery = null;
     this.usage = null;
     this.readOnly = false;
     this.status = '';

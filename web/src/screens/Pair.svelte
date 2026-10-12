@@ -116,6 +116,19 @@
   /// else, to the code.
   const backTo = $derived<Step | null>(step === 'choose' || step === null ? null : stepped ? 'choose' : step === 'words' ? 'code' : null);
 
+  // A link opened in this tab while it's open here: its code, in its
+  // form, as one it was opened by.
+  let linkSeen = sync.linked;
+  $effect(() => {
+    const l = sync.linked;
+    if (!l || l === linkSeen) return;
+    linkSeen = l;
+    left = step;
+    code = fromLink = l;
+    step = 'code';
+    sync.error = null;
+  });
+
   /// To another step: what's typed for a code goes, and so does any error.
   /// A passkey's begins at once, the browser asking which.
   function to(s: Step) {

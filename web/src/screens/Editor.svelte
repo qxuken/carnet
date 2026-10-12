@@ -13,6 +13,7 @@
   import { pageEditor, HIGHLIGHT, TURN } from '../lib/editor/page';
   import { theme } from '../lib/editor/theme';
   import Icon from '../lib/Icon.svelte';
+  import { overflow } from '../lib/words';
   import { ON_THE_WEB } from '../lib/pictures';
   import { HUES, inkOf, inkCss, washCss } from '../lib/colors';
   import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
@@ -294,6 +295,32 @@
     }
   };
 
+  /// Which ends of the tools have more past them, at any width: a fade
+  /// and an arrow there say so, and the arrow scrolls to them.
+  let more = $state({ start: false, end: false });
+  function ends(el: HTMLElement) {
+    const look = () => {
+      const m = overflow(el.scrollLeft, el.clientWidth, el.scrollWidth);
+      if (m.start !== more.start || m.end !== more.end) more = m;
+    };
+    const resized = new ResizeObserver(look);
+    resized.observe(el);
+    // Other tools (in a table, on a picture): another width.
+    const changed = new MutationObserver(look);
+    changed.observe(el, { childList: true });
+    el.addEventListener('scroll', look, { passive: true });
+    look();
+    return {
+      destroy() {
+        resized.disconnect();
+        changed.disconnect();
+        el.removeEventListener('scroll', look);
+      },
+    };
+  }
+  let toolsEl: HTMLElement | undefined = $state();
+  const scrollTools = (forward: boolean) => toolsEl?.scrollBy({ left: (forward ? 1 : -1) * toolsEl.clientWidth * 0.7, behavior: 'smooth' });
+
   onMount(() => {
     key = props.key;
     fresh = props.fresh;
@@ -439,13 +466,21 @@
       </div>
     {/if}
     <div class="strip">
-      <div class="tools">
+      <div class="tools-wrap" class:more-start={more.start} class:more-end={more.end}>
+      {#if more.start}
+        <button class="more start" tabindex="-1" aria-hidden="true" title="More tools" onclick={() => scrollTools(false)}><Icon name="chevron-right" size={18} /></button>
+      {/if}
+      <div class="tools" bind:this={toolsEl} use:ends>
         {#each inTable ? [...tableTools, ...tools.slice(7)] : pic ? pictureTools : tools as t (t.label)}
           {#if t.gap}<span class="gap"></span>{/if}
           <button class:on={t.on?.()} aria-label={t.label} aria-pressed={t.on ? t.on() : undefined} title={t.label} onclick={() => act(t.f)}>
             <Icon name={t.icon()} size={20} />
           </button>
         {/each}
+      </div>
+      {#if more.end}
+        <button class="more end" tabindex="-1" aria-hidden="true" title="More tools" onclick={() => scrollTools(true)}><Icon name="chevron-right" size={18} /></button>
+      {/if}
       </div>
       {#if small}
         <button class="away" aria-label="Hide the keyboard" title="Hide the keyboard" onclick={() => { sheet = null; view?.contentDOM.blur(); }}>
@@ -484,6 +519,18 @@
   .strip { display: flex; align-items: center; height: 48px; }
   .tools { display: flex; align-items: center; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; padding: 0 6px; }
   .tools::-webkit-scrollbar { display: none; }
+  /* More tools past an end: they fade out there, under an arrow that
+     scrolls to them. */
+  .tools-wrap { position: relative; display: flex; flex: 1; min-width: 0; }
+  .tools-wrap.more-end .tools { mask-image: linear-gradient(to right, #000 calc(100% - 64px), transparent calc(100% - 16px)); }
+  .tools-wrap.more-start .tools { mask-image: linear-gradient(to left, #000 calc(100% - 64px), transparent calc(100% - 16px)); }
+  .tools-wrap.more-start.more-end .tools {
+    mask-image: linear-gradient(to right, transparent 16px, #000 64px, #000 calc(100% - 64px), transparent calc(100% - 16px));
+  }
+  .more { position: absolute; top: 5px; z-index: 1; width: 32px; color: var(--muted); }
+  .more:hover { color: var(--ink); }
+  .more.end { right: 0; }
+  .more.start { left: 0; transform: scaleX(-1); }
   button {
     flex: none; display: inline-flex; align-items: center; justify-content: center; width: 42px; height: 38px;
     border: 0; border-radius: var(--radius); background: none; color: var(--ink); cursor: pointer;

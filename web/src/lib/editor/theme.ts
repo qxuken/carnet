@@ -54,10 +54,11 @@ export const theme = EditorView.theme({
   // headings' serif, in the accent unless it has a colour of its own.
   // Floated, sized to reach from the first line's capitals to the third's
   // baseline: `initial-letter` sinks it only two lines where the spaces
-  // are kept as written, as an editor keeps them.
+  // are kept as written, as an editor keeps them. No space after it but
+  // the letter's own: the words start as near it as the reader's do.
   '.cm-initial::first-letter': {
     float: 'left', fontFamily: 'var(--serif)', fontWeight: '400', fontSize: '6em', lineHeight: '0.78',
-    margin: '0.02em 0.06em 0 0', color: 'var(--accent-ink)',
+    margin: '0.02em 0 0 0', color: 'var(--accent-ink)',
   },
   '.cm-initial.cm-own::first-letter': { color: 'inherit' },
   // As many lines as the paragraph has, three at most (lib/initial.ts);

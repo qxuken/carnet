@@ -12,6 +12,7 @@
   import History from './screens/History.svelte';
   import Settings from './screens/Settings.svelte';
   import Icon from './lib/Icon.svelte';
+  import { footer } from './lib/words';
 
   type Route =
     | { kind: 'list' }
@@ -171,21 +172,28 @@
     });
   });
 
-  /// The footer's line: up to date only when nothing waits to be sent;
-  /// else how many changes and pictures wait, and, offline or read only,
-  /// why. (The desktop's Settings says it in the same words.)
-  const status = $derived.by(() => {
-    const count = (n: number, one: string) => (n === 0 ? null : n === 1 ? `1 ${one}` : `${n} ${one}s`);
-    const parts = waitShown ? [count(sync.waiting, 'change'), count(sync.picturesWaiting, 'picture')].filter((p) => p !== null) : [];
-    const ok = sync.status === 'Up to date';
-    // Read only: said here (and in Settings), not again as an error.
-    const readOnly = sync.readOnly || (sync.usage !== null && !sync.usage.writable);
-    if (!parts.length && ok && allSent && !readOnly) return { ok: true, text: 'All sent' };
-    if (!parts.length) return ok && readOnly ? { ok: false, text: 'Read only for now' } : { ok, text: sync.status };
-    const changes = parts.join(' and ');
-    if (ok && readOnly) return { ok: false, text: `Read only for now: ${changes} waiting` };
-    if (ok) return { ok: false, text: `Waiting to send ${changes}` };
-    return { ok: false, text: `${sync.status} · ${changes} waiting` };
+  /// The footer's line (words.ts `footer`).
+  const status = $derived(
+    footer({
+      status: sync.status,
+      changes: sync.waiting,
+      pictures: sync.picturesWaiting,
+      waitShown,
+      allSent,
+      // Read only: said here (and in Settings), not again as an error.
+      readOnly: sync.readOnly || (sync.usage !== null && !sync.usage.writable),
+    }),
+  );
+
+  // Back at the start (this browser forgotten, or turned away): no page
+  // of the account's left in the address, so the next account starts at
+  // its notes.
+  $effect(() => {
+    if (sync.phase !== 'setup') return;
+    untrack(() => {
+      if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+      route = { kind: 'list' };
+    });
   });
 </script>
 
