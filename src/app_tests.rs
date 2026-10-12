@@ -1979,6 +1979,57 @@ fn a_divider_after_pictures_at_the_edge_has_no_gap_under_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The note the three renderings were compared on: a picture at the left
+/// edge, a heading and a checklist beside it, then a table. The words run
+/// beside the picture; the table starts below its foot, as wide as the
+/// text, its columns sharing the width — not squeezed in beside it, its
+/// cells wrapping.
+#[test]
+fn a_table_after_a_picture_at_the_edge_starts_below_it_at_full_width() {
+    let (store, dir) = temp_store("table-below-float");
+    drop(store);
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::create_dir_all(dir.join("Trips")).unwrap();
+    let rgba: Vec<u8> = (0..356 * 356).flat_map(|_| [120u8, 150, 170, 255]).collect();
+    std::fs::write(dir.join("attachments/coast.png"), crate::images::encode_png(356, 356, &rgba).unwrap()).unwrap();
+    let md = "# Big Sur\n\n<span class=\"initial\">T</span>he coast road runs for ninety miles between the mountains and the sea.\n\n\
+              ![|left|330](../attachments/coast.png)\n\n## Plan\n\n- [x] Book the cabin in Big Sur\n- [x] Fill the tank in Carmel\n\
+              - [ ] Pfeiffer Beach at sunset\n- [ ] McWay Falls\n\n| Day | Where | Miles |\n|---|---|---|\n| Fri | Carmel → Big Sur | 30 |\n\
+              | Sat | Big Sur → Ragged Point | 45 |\n| Sun | Ragged Point → Cambria | 25 |\n\n---\n\n> Bring a jacket.\n";
+    std::fs::write(dir.join("Trips/Big Sur.md"), md).unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1280.0, 900.0).framing();
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    let i = app.store.notes.iter().position(|n| n.title == "Big Sur").unwrap();
+    app.open(i);
+    for _ in 0..8 {
+        d.frame(&mut app);
+    }
+    let rect = |kind: fn(&Kind) -> bool| {
+        let id = blocks(&app).iter().find(|b| kind(&b.kind)).unwrap().id;
+        app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).unwrap()
+    };
+    let words = rect(|k| matches!(k, Kind::Text(_)));
+    let pic = rect(|k| matches!(k, Kind::Image { .. }));
+    let heading = rect(|k| matches!(k, Kind::Heading { .. }));
+    let table = rect(|k| matches!(k, Kind::Table(_)));
+    let img = d.core.nodes().iter().find(|n| n.role == Some(Role::Image) && n.rect.w > 100.0 && n.rect.w < 400.0).map(|n| n.rect).unwrap();
+    assert!((img.w - 330.0).abs() < 0.5, "the width the note gives it: {img:?}");
+    // The heading beside the picture; the table below its foot.
+    assert!(heading.x > pic.x + pic.w - 1.0 && heading.y < pic.y + pic.h, "beside: {pic:?} {heading:?}");
+    assert!(table.y >= pic.y + pic.h - 1.0, "below the picture: {pic:?} {table:?}");
+    assert!((table.x - words.x).abs() < 1.0 && (table.w - words.w).abs() < 1.0, "the text's width: {words:?} {table:?}");
+    // Its columns share it alike, a third each.
+    let cell = |s: &str| d.core.nodes().iter().find(|n| n.text.as_deref() == Some(s)).map(|n| n.rect).unwrap();
+    let (day, place, miles) = (cell("Day"), cell("Where"), cell("Miles"));
+    let third = (table.w - 16.0) / 3.0;
+    assert!(((place.x - day.x) - third).abs() < 3.0 && ((miles.x - place.x) - third).abs() < 3.0, "{table:?} {day:?} {place:?} {miles:?}");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Lets what eases get where it is going: the frame clock moved on.
 fn settle(app: &mut Carnet, d: &mut Drive) {
     d.advance(1.0);

@@ -77,7 +77,7 @@ export const pictureRoom = ViewPlugin.fromClass(
           return [...v.contentDOM.querySelectorAll<HTMLElement>('.cm-pics.cm-float')].map((row) => {
             const boxes = [...row.querySelectorAll<HTMLElement>('.cm-picture-box')];
             const wide = boxes.reduce((a, b) => a + b.getBoundingClientRect().width, 0) + 16 * (boxes.length - 1);
-            return [row, text - wide - 24 < BESIDE_MIN] as const;
+            return [row, text - wide - 20 < BESIDE_MIN] as const;
           });
         },
         write: (rows, v) => {

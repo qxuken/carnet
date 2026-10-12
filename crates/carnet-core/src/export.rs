@@ -132,7 +132,10 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                 out.push_str(&format!("<h{n}>{}</h{n}>", spans(text)));
             }
             Kind::Table(t) => {
-                out.push_str("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">");
+                // The viewer's in a box of its own (styles.css `.table`):
+                // below any picture at an edge, scrolled when too wide, its
+                // lines the page's to draw. A copy's draws its own, for a mail.
+                out.push_str(if viewer { "<div class=\"table\"><table>" } else { "<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\">" });
                 for (r, row) in t.rows.iter().enumerate() {
                     out.push_str("<tr>");
                     let cell = if t.is_header(r) { "th" } else { "td" };
@@ -141,7 +144,7 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                     }
                     out.push_str("</tr>");
                 }
-                out.push_str("</table>");
+                out.push_str(if viewer { "</table></div>" } else { "</table>" });
             }
             Kind::Divider => out.push_str("<hr>"),
             // The viewer's: pictures at an edge, one after another, in a
@@ -378,5 +381,20 @@ mod tests {
         assert!(!fetched.contains("src="), "{fetched}");
         // The copy for mail stays as it was.
         assert!(html(md, |s, _| s.to_string()).contains("\u{2610} milk"));
+    }
+
+    /// The viewer's table is in a box of its own, the page's styles to
+    /// frame and to put below pictures at an edge; its divider an `<hr>`
+    /// they draw as the desktop's dots. A copy's table draws its own lines.
+    #[test]
+    fn the_viewers_table_is_boxed_and_its_divider_plain() {
+        let md = "# T\n\n![|left|330](a.png)\n\n## Plan\n\n| Day | Miles |\n|---|---|\n| Fri | 30 |\n\n---\n\n> A quote.\n";
+        let v = viewer(md, |s, _| Picture::Url(s.into()));
+        assert!(
+            v.contains("<div class=\"pictures left\" style=\"--n:1\"><img src=\"a.png\" alt=\"\" width=\"330\"></div><h2>Plan</h2><div class=\"table\"><table><tr><th>Day</th><th>Miles</th></tr><tr><td>Fri</td><td>30</td></tr></table></div><hr><blockquote>"),
+            "{v}"
+        );
+        let h = html(md, |s, _| s.to_string());
+        assert!(h.contains("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\"><tr><th>Day</th>") && !h.contains("class=\"table\""), "{h}");
     }
 }
