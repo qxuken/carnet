@@ -455,6 +455,14 @@ Only what must behave identically on every device is shared, compiled to wasm:
 
 It's a static single-page app, served by `carnet-server` at `/` (`--web DIR`, with the `.br` and `.gz` copies the build writes), so self-hosters get it from the same binary. Any other path gets `index.html`, except under `/v1/`.
 
+### What the page may do
+
+The app's files (not a host's own pages, not the API) carry a Content-Security-Policy: its own scripts and the wasm (`'wasm-unsafe-eval'`), inline styles (Svelte's, and the notes' colours), pictures only as the page draws them (`blob:`, `data:`), connections only to this server (its `ws(s)://` named too) and to the bucket pictures are in, if elsewhere; no plugins, frames, `<base>` or other form targets. With it, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` on the page and the service worker, so a new build is taken at once. Every response is `X-Content-Type-Options: nosniff`; a picture's bytes, served from the app's origin, are also `Content-Disposition: attachment` and `Content-Security-Policy: sandbox`.
+
+A note's link is a link only to `http:`, `https:`, `mailto:`, a relative path or `#…` (`export::safe_href`, read as a browser reads it: case aside, tabs and line breaks dropped); any other (`javascript:`, `data:`, `file:`) is its words alone, in the reader, a copy as HTML and the editor's Open. Links open in a new tab with `noopener noreferrer`. A picture on the web isn't loaded, as on the desktop (it would tell its server who reads the note): its card says so.
+
+A pairing or invite link (`#pair=`, `#invite=`) only fills in the code: Connect is a click, so a link someone else made can't sign a browser into their account unasked.
+
 ### Writing in the browser
 
 A note opens in CodeMirror 6, but CodeMirror shows only the words: no Markdown mark is ever in its text, so none can be seen, half-typed or half-deleted. Every edit is applied by the desktop's own page model (`carnet_core::page`, in wasm) on the note's document, with the desktop's rules (typing carries the style of the letter before it, Enter continues a list, `- ` and `[] ` make lists, undo takes back a run of typing), and the note is written back by the desktop's own serialiser. So Carnet's dialect is never read or written by a second implementation. How each line looks (heading size, checkbox, bullet, quote, code, colour) also comes from the page model.

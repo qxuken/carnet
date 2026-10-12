@@ -277,6 +277,7 @@ async fn the_web_viewer_is_served_beside_the_socket() {
     std::fs::write(web.join("index.html"), "<!doctype html>viewer").unwrap();
     std::fs::write(web.join("assets/app.js"), "plain").unwrap();
     std::fs::write(web.join("assets/app.js.br"), "squeezed").unwrap();
+    std::fs::write(web.join("sw.js"), "worker").unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -287,11 +288,25 @@ async fn the_web_viewer_is_served_beside_the_socket() {
     }));
     let running = Running { addr, stop, done };
 
-    let (status, _, body) = get(addr, "/", "").await;
+    let (status, head, body) = get(addr, "/", "").await;
     assert_eq!((status, body.as_slice()), (200, b"<!doctype html>viewer".as_slice()));
+    // The app's headers: its CSP (its socket named), no referrer, nothing
+    // sniffed, and its page asked for afresh each time.
+    let csp = format!(
+        "content-security-policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ws://{addr}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; worker-src 'self'; manifest-src 'self'\r\n"
+    );
+    for want in [csp.as_str(), "referrer-policy: no-referrer\r\n", "x-content-type-options: nosniff\r\n", "cache-control: no-cache\r\n"] {
+        assert!(head.contains(want), "{want}: {head}");
+    }
     // A note's address is the app's to read: the page, not a 404.
-    let (status, _, body) = get(addr, "/note/abc", "").await;
+    let (status, head, body) = get(addr, "/note/abc", "").await;
     assert_eq!((status, body.as_slice()), (200, b"<!doctype html>viewer".as_slice()));
+    assert!(head.contains(&csp) && head.contains("cache-control: no-cache"), "{head}");
+    // The service worker afresh too; the build's files as they are.
+    let (_, head, _) = get(addr, "/sw.js", "").await;
+    assert!(head.contains(&csp) && head.contains("cache-control: no-cache"), "{head}");
+    let (_, head, _) = get(addr, "/assets/app.js", "").await;
+    assert!(head.contains(&csp) && head.contains("x-content-type-options: nosniff") && !head.contains("cache-control"), "{head}");
     // The Brotli copy goes to a browser that takes it, the file to one that doesn't.
     let (_, head, body) = get(addr, "/assets/app.js", "Accept-Encoding: br, gzip\r\n").await;
     assert!(head.contains("content-encoding: br"), "{head}");
@@ -300,8 +315,9 @@ async fn the_web_viewer_is_served_beside_the_socket() {
     assert!(!head.contains("content-encoding"), "{head}");
     assert_eq!(body, b"plain");
     // The API is still the API, and an address it doesn't have isn't the page.
-    let (status, _, body) = get(addr, "/v1/info", "").await;
+    let (status, head, body) = get(addr, "/v1/info", "").await;
     assert_eq!(status, 200);
+    assert!(head.contains("x-content-type-options: nosniff") && !head.contains("content-security-policy"), "{head}");
     let info = String::from_utf8_lossy(&body);
     assert!(info.contains("carnet-server") && !info.contains("accounts"), "how many use it isn't public: {info}");
     // An invite is used over the socket only.
@@ -549,6 +565,10 @@ async fn a_picture_goes_by_its_links_over_http() {
     let (status, head, body) = request(srv.addr, "GET", &get_path, "", b"").await;
     assert_eq!(status, 200);
     assert!(head.contains("cache-control: private, max-age="), "{head}");
+    // Bytes from the app's own origin: never sniffed, shown or run.
+    for want in ["content-type: application/octet-stream\r\n", "x-content-type-options: nosniff\r\n", "content-disposition: attachment\r\n", "content-security-policy: sandbox\r\n"] {
+        assert!(head.contains(want), "{want}: {head}");
+    }
     let (status, _, part) = request(srv.addr, "GET", &get_path, "Range: bytes=10-19\r\n", b"").await;
     assert_eq!((status, part.as_slice()), (206, &sealed[10..20]));
     a.session.transferred(id, false, Ok(body));
@@ -667,4 +687,39 @@ async fn a_host_adds_routes_and_works_on_the_hub() {
     let _ = stop.send(());
     tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A host's pages beside the web app: its own headers, not the app's CSP;
+/// the app's files and any other address, the app's; and the CSP lets
+/// the page fetch pictures where the host keeps them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hosts_pages_keep_their_headers_beside_the_app() {
+    use axum::routing::get;
+    let dir = temp("hosted-web");
+    let web = dir.join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html>viewer").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let host = server::Host {
+        routes: axum::Router::new().route("/start", get(|| async { axum::response::Html("<form method=post>start</form>") })),
+        first_invite: false,
+        ..server::Host::default()
+    };
+    let (stop, rx) = oneshot::channel::<()>();
+    let config = Config { data: dir.join("data"), origin: "https://notes.example".into(), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new() };
+    let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
+        let _ = rx.await;
+    }));
+    let (status, head, body) = request(addr, "GET", "/start", "", b"").await;
+    assert_eq!((status, body.as_slice()), (200, b"<form method=post>start</form>".as_slice()));
+    assert!(!head.contains("content-security-policy") && head.contains("x-content-type-options: nosniff"), "{head}");
+    let (status, head, _) = request(addr, "GET", "/", "", b"").await;
+    assert_eq!(status, 200);
+    assert!(head.contains("connect-src 'self' wss://notes.example;"), "{head}");
+    // Pictures elsewhere (a bucket): its origin allowed too.
+    assert!(server::web_csp("https://notes.example/", Some("https://pics.s3.example")).contains("connect-src 'self' wss://notes.example https://pics.s3.example;"));
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }

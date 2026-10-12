@@ -536,11 +536,13 @@ impl Notes {
         let files = self.picture_files();
         carnet_core::export::viewer(md, |src, wiki| match find(&folder, src, wiki, &files) {
             Some(path) => Picture::Fetch(path),
-            // On the web: as it is.
-            None if ["http://", "https://", "data:"].iter().any(|p| src.starts_with(p)) => Picture::Url(src.to_string()),
-            // A file outside the notes folder: only on the device that has
-            // it, which the page says (pictures.ts), as it does of one the
-            // vault doesn't name.
+            // In the note itself: as it is.
+            None if src.starts_with("data:") => Picture::Url(src.to_string()),
+            // On the web: not loaded, as the desktop doesn't (a picture
+            // there can tell its server who reads the note); the page says
+            // so in its place (pictures.ts). A file outside the notes
+            // folder: only on the device that has it, which the page says
+            // too, as it does of one the vault doesn't name.
             None => Picture::Fetch(src.to_string()),
         })
     }

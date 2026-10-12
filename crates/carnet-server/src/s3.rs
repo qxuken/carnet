@@ -313,6 +313,10 @@ impl S3Blobs {
 }
 
 impl Blobs for S3Blobs {
+    fn origin(&self) -> Option<String> {
+        self.bucket.object_url("x").ok().map(|u| u.origin().ascii_serialization())
+    }
+
     fn size(&mut self, account: &[u8], id: &[u8; 32]) -> Option<u64> {
         let key = self.key(account, id);
         let o = Self::said(self.head(&key))??;
@@ -379,6 +383,18 @@ impl Blobs for S3Blobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where the web app fetches pictures from: the bucket's origin, its
+    /// own host when it's the host's first name.
+    #[test]
+    fn the_origin_is_where_links_point() {
+        let at = |url: &str, virtual_host: bool| {
+            let config = S3Config { url: url.into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host };
+            S3Blobs::new(&config).unwrap().origin()
+        };
+        assert_eq!(at("https://s3.example:9000/pics/carnet", false).as_deref(), Some("https://s3.example:9000"));
+        assert_eq!(at("https://s3.example/pics", true).as_deref(), Some("https://pics.s3.example"));
+    }
 
     #[test]
     fn base64_as_s3_reads_it() {

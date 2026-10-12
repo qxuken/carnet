@@ -13,6 +13,7 @@
   import { pageEditor, HIGHLIGHT, TURN } from '../lib/editor/page';
   import { theme } from '../lib/editor/theme';
   import Icon from '../lib/Icon.svelte';
+  import { ON_THE_WEB } from '../lib/pictures';
   import { HUES, inkOf, inkCss, washCss } from '../lib/colors';
   import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
   import { drawnPicture, picked as pictureHere, textWidth, type Picked } from '../lib/editor/picture';
@@ -54,6 +55,9 @@
   let inkTab = $state(true);
   let url = $state('');
   let linked = $state<string | null>(null);
+  /// Where Open takes it: none for a link a page mustn't follow
+  /// (`javascript:` and the like), which is still there to change.
+  let opens = $state<string | null>(null);
   /// The words' colour and highlighter at the caret.
   let tint = $state<[number, number]>([0, 0]);
   /// The caret is in a table's cell.
@@ -158,6 +162,7 @@
   function openLink() {
     if (!pe || !view) return;
     linked = pe.link_here() ?? null;
+    opens = pe.link_to_open() ?? null;
     url = linked ?? '';
     sheet = 'link';
   }
@@ -297,7 +302,9 @@
     base = src[1];
     pe = new PageEditor(src[0]);
     const pictures = (s: string, wiki: boolean) => {
-      if (/^(https?:|data:)/i.test(s)) return Promise.resolve(s);
+      if (/^data:/i.test(s)) return Promise.resolve(s);
+      // On the web: not loaded (pictures.ts).
+      if (/^https?:/i.test(s)) return Promise.reject(new Error(ON_THE_WEB));
       const path = sync.picturePath(folder, s, wiki);
       // Outside the notes folder: only on the device that has it.
       return path ? sync.picture(path) : Promise.reject(new Error('not in the vault'));
@@ -418,8 +425,10 @@
         <!-- svelte-ignore a11y_autofocus -->
         <input bind:value={url} placeholder="example.com" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Address" autofocus />
         <div class="row">
+          {#if opens}
+            <a class="pill" href={opens} target="_blank" rel="noopener noreferrer">Open</a>
+          {/if}
           {#if linked}
-            <a class="pill" href={linked} target="_blank" rel="noopener">Open</a>
             <button type="button" class="pill" onclick={() => applyLink(null)}>Remove link</button>
           {/if}
           <button type="button" class="pill" onclick={() => { sheet = null; view?.focus(); }}>Cancel</button>
