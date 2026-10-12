@@ -33,9 +33,10 @@ impl Carnet {
                 // Its edge: dragged, the library wider or narrower. Just
                 // past the column, over the page's margin, so it never
                 // sits on the lists' scrollbars at the column's right.
-                // One solid line the window's height, a hairline's colour,
-                // whatever the window shows through; a step darker under
-                // the pointer and while dragged.
+                // Not drawn at rest; under the pointer and while dragged,
+                // one solid line the window's height, whatever the window
+                // shows through (nothing laid over it: the fade under the
+                // toolbar starts past it).
                 if shown {
                     let t = l.t;
                     let h = ui.viewport().h;
@@ -46,7 +47,7 @@ impl Carnet {
                         NodeSpec::row()
                             .size(EDGE_W, h)
                             .float(FloatConfig::parent().inside(Align::End, Align::Start).offset(EDGE_W, 0.0))
-                            .bg(if self.library_from.is_some() { t.border_strong } else { t.border })
+                            .bg(if self.library_from.is_some() { t.border_strong } else { Color::TRANSPARENT })
                             .hover_bg(t.border_strong)
                             .cursor(kui_native::CursorShape::EwResize)
                             .on_drag(Msg::LibraryDrag)

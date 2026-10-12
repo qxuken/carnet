@@ -6914,9 +6914,10 @@ fn a_divider_is_selected_before_backspace_takes_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// The library's edge is one solid line the window's height, in either
-/// kind of window, light or dark: nothing of what is behind the window
-/// shows through it. A step darker under the pointer.
+/// The library's edge isn't drawn at rest; under the pointer it is one
+/// solid line the window's height, in either kind of window, light or
+/// dark: nothing of what is behind the window shows through it, and
+/// nothing is laid over it.
 #[test]
 fn the_library_edge_is_solid_its_whole_height() {
     let (mut app, mut d, dir) = fresh("library-edge-solid");
@@ -6934,7 +6935,7 @@ fn the_library_edge_is_solid_its_whole_height() {
             d_frame_twice(&mut app, &mut d);
             let n = edge(&mut d);
             let what = format!("{backdrop:?} {theme:?}");
-            assert_eq!(n.bg.a, 1.0, "solid: {what}");
+            assert_eq!(n.bg.a, 0.0, "not drawn at rest: {what}");
             assert_eq!((n.rect.y, n.rect.h), (0.0, d.viewport.h), "the window's height: {what}");
             // Nothing drawn over it: the fade under the toolbar, laid
             // across the page's first points, notched it.
@@ -6948,11 +6949,11 @@ fn the_library_edge_is_solid_its_whole_height() {
                 .map(|o| (o.label, o.rect))
                 .collect();
             assert!(over.is_empty(), "nothing over it: {what}: {over:?}");
-            let rest = n.bg;
             d.move_to(&mut app, n.rect.x + 3.0, 300.0);
             d_frame_twice(&mut app, &mut d);
-            let hovered = edge(&mut d).bg;
-            assert!(hovered.a == 1.0 && hovered != rest, "a step darker under the pointer: {what}");
+            let hovered = edge(&mut d);
+            assert_eq!(hovered.bg.a, 1.0, "solid under the pointer: {what}");
+            assert_eq!((hovered.rect.y, hovered.rect.h), (0.0, d.viewport.h), "the window's height: {what}");
         }
     }
     let _ = std::fs::remove_dir_all(dir);
