@@ -7180,11 +7180,13 @@ fn a_divider_is_selected_before_backspace_takes_it() {
     app.on_plain(Msg::InsertDivider);
     d_frame_twice(&mut app, &mut d);
     assert_eq!(texts(&app), ["Words", "---", ""]);
-    // The divider's block as drawn: the most washed of what fills its row.
+    // The divider's block as drawn: the most washed of what is in its
+    // row, the ornament's ink aside.
     let wash = |app: &Carnet, d: &Drive| {
         let id = blocks(app)[1].id;
         let r = app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).expect("the divider's row");
-        d.core.nodes().iter().filter(|n| n.rect == r).map(|n| n.bg.a).fold(0.0, f32::max)
+        let inside = |n: &Rect| n.x >= r.x && n.y >= r.y && n.x + n.w <= r.x + r.w && n.y + n.h <= r.y + r.h && n.w > r.w * 0.5;
+        d.core.nodes().iter().filter(|n| inside(&n.rect)).map(|n| n.bg.a).fold(0.0, f32::max)
     };
     assert_eq!(wash(&app, &d), 0.0, "not selected: no wash");
     key(&mut app, &mut d, "backspace");
@@ -7551,3 +7553,259 @@ fn a_click_on_a_cell_picture_draws_its_ring_at_once() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+/// A divider chosen draws one way however it was come to — by ← or by ↑:
+/// the ornament in the accent on the selection's wash, the wash as wide
+/// as the text (a table's width, no wider) and a band round the ornament,
+/// not its whole tall row.
+#[test]
+fn a_chosen_divider_is_washed_to_the_texts_width_whichever_arrow_chose_it() {
+    let (mut app, mut d, dir) = body("rule-chosen");
+    app.edit(Step::Other, |doc, c| {
+        *doc = carnet_core::doc::Doc::new(vec![
+            Block::text("Above"),
+            Block::new(Kind::Table(carnet_core::doc::Table::new(2, 2))),
+            Block::new(Kind::Divider),
+            Block::text("Below"),
+        ]);
+        *c = Caret::at(page::start(Slot::block(doc.blocks()[3].id)));
+        true
+    });
+    d.core.set_inspect(true);
+    for _ in 0..3 {
+        d.frame(&mut app);
+    }
+    let rule = blocks(&app)[2].id;
+    let row = |app: &Carnet, id: u64| app.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r).unwrap();
+    let wash = |d: &Drive| {
+        let sel = d.core.theme().selection;
+        let all: Vec<Rect> = d.core.nodes().iter().filter(|n| n.bg == sel && n.rect.w > 0.0).map(|n| n.rect).collect();
+        assert_eq!(all.len(), 1, "one wash: {all:?}");
+        all[0]
+    };
+    // ↑ from the line below: the divider chosen whole, as ← chooses it.
+    key(&mut app, &mut d, "up");
+    assert_eq!(page::chosen_atom(app.doc(), app.caret), Some(Slot::block(rule)));
+    d.frame(&mut app);
+    let by_up = wash(&d);
+    // The next ↓ is past it; ← from there chooses it again.
+    key(&mut app, &mut d, "down");
+    assert_eq!(app.caret, Caret::at(page::start(Slot::block(blocks(&app)[3].id))));
+    key(&mut app, &mut d, "left");
+    assert_eq!(page::chosen_atom(app.doc(), app.caret), Some(Slot::block(rule)));
+    d.frame(&mut app);
+    let by_left = wash(&d);
+    assert_eq!(by_up, by_left, "one way, whichever arrow");
+    // As wide as the text, and the table: the rows' own padding inside.
+    let (words, table, tall) = (row(&app, blocks(&app)[0].id), row(&app, blocks(&app)[1].id), row(&app, rule));
+    for r in [words, table] {
+        assert!(by_up.x >= r.x + 8.0 - 0.5 && by_up.x + by_up.w <= r.x + r.w - 8.0 + 0.5, "no wider than the text: {r:?} {by_up:?}");
+        assert!((by_up.w - (r.w - 16.0)).abs() < 1.0, "the text's width: {r:?} {by_up:?}");
+    }
+    assert!(by_up.h < tall.h * 0.7, "a band round the ornament, not its row: {tall:?} {by_up:?}");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A library of folders and notes written out, opened: `name` its own
+/// folder under the temp dir; each note `# leaf` and its words.
+fn library(name: &str, notes: &[(&str, &str)]) -> (Carnet, Drive, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("carnet-ui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, body) in notes {
+        let file = dir.join(format!("{path}.md"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let leaf = path.rsplit('/').next().unwrap();
+        std::fs::write(file, format!("# {leaf}\n\n{body}\n")).unwrap();
+    }
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    (app, d, dir)
+}
+
+/// Where folder `f`'s row is ("" for All notes).
+fn folder_row(app: &Carnet, f: &str) -> Vec2 {
+    app.folder_rects.iter().find(|(r, _)| r == f).map(|(_, r)| r.center()).unwrap_or_else(|| panic!("no row for {f:?}"))
+}
+
+/// A folder's row dragged onto another's, the library drawn again.
+fn drag_folder(app: &mut Carnet, d: &mut Drive, from: &str, to: &str) {
+    let (a, b) = (folder_row(app, from), folder_row(app, to));
+    d.drag(app, a, b);
+    d_frame_twice(app, d);
+}
+
+/// A folder dragged onto another goes inside it, its notes and
+/// subfolders with it; onto "All notes", to the top level. Its notes'
+/// links to pictures outside it follow it, a level deeper and back.
+#[test]
+fn a_folder_dragged_onto_another_goes_inside_it_and_onto_all_notes_to_the_top() {
+    let (mut app, mut d, dir) = library(
+        "drag-folder",
+        &[("Work/Plan", "![](../attachments/p.png)"), ("Work/Sub/Deep", "deep"), ("Home/Pantry", "rice")],
+    );
+    let png = png_file(&dir.join("attachments"), "p.png");
+    assert!(png.exists());
+    drag_folder(&mut app, &mut d, "Work", "Home");
+    assert!(dir.join("Home/Work/Plan.md").exists() && dir.join("Home/Work/Sub/Deep.md").exists(), "moved on disk");
+    assert!(!dir.join("Work").exists(), "nothing left behind");
+    assert!(app.store.folders.contains(&"Home/Work".to_string()) && app.store.folders.contains(&"Home/Work/Sub".to_string()), "{:?}", app.store.folders);
+    let plan = std::fs::read_to_string(dir.join("Home/Work/Plan.md")).unwrap();
+    assert!(plan.contains("](../../attachments/p.png)"), "its picture's link from its new place: {plan}");
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved \u{201c}Work\u{201d} to \u{201c}Home\u{201d}"));
+    // Onto All notes: the top level again, the link as it was.
+    drag_folder(&mut app, &mut d, "Home/Work", "");
+    assert!(dir.join("Work/Plan.md").exists() && dir.join("Work/Sub/Deep.md").exists() && !dir.join("Home/Work").exists());
+    let plan = std::fs::read_to_string(dir.join("Work/Plan.md")).unwrap();
+    assert!(plan.contains("](../attachments/p.png)"), "{plan}");
+    // A plain click on a folder's row still shows it.
+    let at = folder_row(&app, "Home");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.folder.as_deref(), Some("Home"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A folder never goes into itself or a folder inside it: let go there,
+/// nothing moves.
+#[test]
+fn a_folder_dragged_into_its_own_subfolder_stays() {
+    let (mut app, mut d, dir) = library("drag-folder-self", &[("Work/Plan", "q3"), ("Work/Sub/Deep", "deep")]);
+    drag_folder(&mut app, &mut d, "Work", "Work/Sub");
+    assert!(dir.join("Work/Plan.md").exists() && dir.join("Work/Sub/Deep.md").exists(), "where it was");
+    assert_eq!(app.store.folders, ["Work", "Work/Sub"]);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    // Its own row: the same.
+    let (a, b) = (folder_row(&app, "Work"), folder_row(&app, "Work"));
+    d.drag(&mut app, a, Vec2::new(b.x + 20.0, b.y));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.store.folders, ["Work", "Work/Sub"]);
+    // The store refuses it too.
+    assert!(app.store.move_folder("Work", "Work/Sub").is_err());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Several chosen, a folder and a note: dragging the folder carries both.
+#[test]
+fn several_chosen_are_dragged_into_a_folder_together() {
+    let (mut app, mut d, dir) = library("drag-picked", &[("Home/Pantry", "rice"), ("Loose", "words"), ("Dest/Kept", "k")]);
+    let i = app.store.notes.iter().position(|n| n.title == "Loose").unwrap();
+    app.open(i);
+    d_frame_twice(&mut app, &mut d);
+    let cmd = KeyMods { shift: false, ctrl: !cfg!(target_os = "macos"), alt: false, super_key: cfg!(target_os = "macos") };
+    let home = folder_row(&app, "Home");
+    d.input(&mut app, InputEvent::Modifiers(cmd));
+    d.click(&mut app, home.x, home.y);
+    d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+    d.frame(&mut app);
+    let loose = app.store.notes[i].id;
+    assert!(app.is_picked(&Pick::Note(loose)) && app.is_picked(&Pick::Folder("Home".into())), "{:?}", app.picked);
+    drag_folder(&mut app, &mut d, "Home", "Dest");
+    assert!(dir.join("Dest/Home/Pantry.md").exists() && dir.join("Dest/Loose.md").exists(), "both moved");
+    assert!(!dir.join("Home").exists() && !dir.join("Loose.md").exists());
+    assert!(app.picked.is_empty());
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved a folder and a note to \u{201c}Dest\u{201d}"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// What is chosen in the library, by name: a folder's path with a `/`
+/// after it, a note's title; in order.
+fn picked_names(app: &Carnet) -> Vec<String> {
+    let mut v: Vec<String> = app
+        .picked
+        .iter()
+        .map(|p| match p {
+            Pick::Note(id) => app.store.notes.iter().find(|n| n.id == *id).unwrap().title.clone(),
+            Pick::Folder(f) => format!("{f}/"),
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// ⇧↓ from a folder chooses it and the next, and again the one after;
+/// ⇧↑ gives the last back. A plain ↓ lets go and moves on, Esc lets go,
+/// and Delete takes what is chosen to the trash, Undo bringing it back.
+#[test]
+fn shift_with_the_arrows_chooses_folders_from_the_keyboard() {
+    let (mut app, mut d, dir) = library("shift-folders", &[("A/a", "1"), ("B/b", "2"), ("C/c", "3"), ("D/d", "4")]);
+    let at = folder_row(&app, "A");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.folder.as_deref(), Some("A"));
+    key_with(&mut app, &mut d, "down", SHIFT);
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/", "C/"]);
+    assert_eq!(app.folder.as_deref(), Some("A"), "the folder shown stays");
+    key_with(&mut app, &mut d, "up", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/"], "back toward where it began");
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/", "C/"]);
+    // Esc lets go; a plain ↓ moves on from where the keyboard is.
+    key(&mut app, &mut d, "escape");
+    assert!(app.picked.is_empty());
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["C/", "D/"], "from the row the keyboard was on");
+    key(&mut app, &mut d, "up");
+    assert!(app.picked.is_empty(), "a plain arrow lets go");
+    assert_eq!(app.folder.as_deref(), Some("C"), "and moves");
+    // From there up, then to the trash together; Undo brings them back.
+    key_with(&mut app, &mut d, "up", SHIFT);
+    key_with(&mut app, &mut d, "up", SHIFT);
+    assert_eq!(picked_names(&app), ["A/", "B/", "C/"]);
+    key(&mut app, &mut d, "delete");
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.picked.is_empty());
+    assert_eq!(app.store.folders, ["D"]);
+    assert!(!dir.join("A").exists() && !dir.join("B").exists() && !dir.join("C").exists() && dir.join("D/d.md").exists());
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 3 folders to the trash"));
+    app.on_plain(Msg::Undo);
+    d.frame(&mut app);
+    assert!(dir.join("A/a.md").exists() && dir.join("B/b.md").exists() && dir.join("C/c.md").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The same in the notes: after a click on a card, ⇧↓ chooses the notes
+/// below it, ⇧↑ gives one back, a plain ↓ opens the next; Delete takes
+/// what is chosen to the trash, and Undo brings it back.
+#[test]
+fn shift_with_the_arrows_chooses_notes_from_the_keyboard() {
+    let (mut app, mut d, dir) = library("shift-notes", &[("Alpha", "1"), ("Bravo", "2"), ("Charlie", "3"), ("Delta", "4")]);
+    app.on_settings(Msg::SetSort { to: 1 });
+    d_frame_twice(&mut app, &mut d);
+    let card = |app: &Carnet, t: &str| {
+        let i = app.store.notes.iter().position(|n| n.title == t).unwrap();
+        app.card_rects.iter().find(|(n, _)| *n == i).map(|(_, r)| r.center()).unwrap()
+    };
+    let titles: Vec<String> = app.order.iter().map(|&i| app.store.notes[i].title.clone()).collect();
+    let alpha = titles.iter().position(|t| t == "Alpha").unwrap();
+    assert_eq!(titles[alpha..alpha + 4], ["Alpha", "Bravo", "Charlie", "Delta"], "{titles:?}");
+    let at = card(&app, "Alpha");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.store.notes[app.current].title, "Alpha");
+    key_with(&mut app, &mut d, "down", SHIFT);
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["Alpha", "Bravo", "Charlie"]);
+    key_with(&mut app, &mut d, "up", SHIFT);
+    assert_eq!(picked_names(&app), ["Alpha", "Bravo"]);
+    assert_eq!(app.store.notes[app.current].title, "Alpha", "the open note stays open");
+    // A plain ↓ lets go and opens the next.
+    key(&mut app, &mut d, "down");
+    assert!(app.picked.is_empty());
+    assert_eq!(app.store.notes[app.current].title, "Bravo");
+    // From there, two chosen, and to the trash; Undo brings them back.
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(picked_names(&app), ["Bravo", "Charlie"]);
+    key(&mut app, &mut d, "backspace");
+    d_frame_twice(&mut app, &mut d);
+    assert!(!dir.join("Bravo.md").exists() && !dir.join("Charlie.md").exists() && dir.join("Delta.md").exists());
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 2 notes to the trash"));
+    app.on_plain(Msg::Undo);
+    d.frame(&mut app);
+    assert!(dir.join("Bravo.md").exists() && dir.join("Charlie.md").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}

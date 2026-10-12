@@ -82,9 +82,18 @@ export const theme = EditorView.theme({
     display: 'inline-block', width: '33px', height: '3px', verticalAlign: 'middle', color: 'var(--faint)',
     background: 'radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x',
   },
-  // A divider selected whole (page.ts `ruleChosen`): the selection's
-  // wash over its line, the dots in the accent.
-  '.cm-rule-on': { backgroundColor: 'var(--selection)', borderRadius: 'var(--radius)' },
+  // A divider selected whole (page.ts `ruleChosen`), as the desktop
+  // draws it however it was come to: the dots in the accent on the
+  // selection's wash, as wide as the text (a table's width) and a band
+  // round the dots — the line's own height, not the space above it
+  // (`.cm-divider`'s padding; none after pictures at an edge). Under the
+  // dots, inside the line.
+  '.cm-rule-on': { position: 'relative', isolation: 'isolate' },
+  '.cm-rule-on::after': {
+    content: "''", position: 'absolute', left: '0', right: '0', top: '14px', bottom: '4px', zIndex: '-1',
+    backgroundColor: 'var(--selection)', borderRadius: 'var(--radius)', pointerEvents: 'none',
+  },
+  '.cm-float + .cm-rule-on::after, .cm-pics-beside + .cm-rule-on::after': { top: '0' },
   '.cm-rule-on .cm-rule': { color: 'var(--accent)' },
   // Pictures (page.ts `PictureRow`), laid out as the reading view lays
   // them out (styles.css `.pictures`). Every space is inside what

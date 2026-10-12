@@ -351,10 +351,11 @@ function pictureBlocks(state: EditorState, pictures: Pictures): DecorationSet | 
   return Decoration.set(out, true);
 }
 
-/// A divider the selection takes in whole (Backspace on the empty line
-/// under it, a click on it): drawn chosen, as the desktop draws it — the
-/// selection's wash, the rule in the accent — so the next Backspace is
-/// seen to have a target. Native selection draws nothing on a widget.
+/// A divider the selection takes in whole (an arrow onto it, Backspace
+/// on the empty line under it, a click on it): drawn chosen, as the
+/// desktop draws it — a band of the selection's wash as wide as the text,
+/// the rule in the accent (theme.ts) — so the next Backspace is seen to
+/// have a target. Native selection draws nothing on a widget.
 const ruleOn = Decoration.line({ class: 'cm-rule-on' });
 
 function chosenRules(state: EditorState): DecorationSet {
@@ -600,6 +601,11 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     // The column kept across a picture, a divider or a short line.
     const goal = sel.goalColumn ?? (caret ? caret.left - box.left : undefined);
     if ('at' in plan) return go(plan.at, goal);
+    if ('sel' in plan) {
+      const range = EditorSelection.range(plan.sel.anchor, plan.sel.head, goal);
+      v.dispatch({ selection: EditorSelection.create([range]), scrollIntoView: true, userEvent: 'select' });
+      return true;
+    }
     if (plan.leaving) {
       // Still within the line's own rows: CodeMirror's.
       const edge = down ? v.coordsAtPos(here.to, -1) : v.coordsAtPos(Math.min(here.from + 1, here.to), here.length > 1 ? 1 : -1);

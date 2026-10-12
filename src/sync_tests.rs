@@ -478,13 +478,22 @@ fn folders_follow_too() {
     assert!(!two.sides[1].dir.join("Work").exists(), "the old one gone, empty");
     assert_eq!(two.shape(0), two.shape(1));
 
-    two.sides[0].store.trash_folder("Job").unwrap();
+    // Moved into another (dragged there): the same there.
+    two.sides[0].store.move_folder("Job", "Ideas").unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(two.sides[1].dir.join("Ideas/Job/Plan.md").exists() && two.sides[1].dir.join("Ideas/Job/Notes.md").exists(), "{:?}", two.shape(1));
+    assert!(!two.sides[1].dir.join("Job").exists(), "the old one gone, empty");
+    assert_eq!(two.shape(0), two.shape(1));
+
+    two.sides[0].store.trash_folder("Ideas/Job").unwrap();
     two.pump();
-    assert!(!two.sides[1].dir.join("Job/Plan.md").exists());
+    assert!(!two.sides[1].dir.join("Ideas/Job/Plan.md").exists());
     let mut trash = two.shape(1).2;
     trash.sort();
     assert_eq!(trash, ["Notes", "Plan"], "its notes in the trash there");
-    assert!(!two.sides[1].store.folders.contains(&"Job".to_string()));
+    assert!(!two.sides[1].store.folders.contains(&"Ideas/Job".to_string()));
 }
 
 /// A note made in a folder on one device arrives in that folder, not at

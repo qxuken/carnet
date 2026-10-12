@@ -521,12 +521,129 @@ impl Store {
         if !same_stem(&to, folder) && self.folder_dir(&to).exists() {
             return Err(io::Error::other("there is a folder of that name already"));
         }
-        let (from_dir, to_dir) = (self.inside(self.folder_dir(folder))?, self.inside(self.folder_dir(&to))?);
+        self.relocate_folder(folder, &to)?;
+        Ok(to)
+    }
+
+    /// Moves `folder` into `parent` ("" for the top level), under its own
+    /// name: the folder on disk with everything in it, then as
+    /// [`rename_folder`](Self::rename_folder) has it — its subfolders, its
+    /// notes' folders and files, the pins. Not into itself or a folder
+    /// inside it, nor where a folder of its name is. Links between files
+    /// inside it keep working as they are; when it goes deeper or less
+    /// deep, its notes' links to pictures outside it (the pictures'
+    /// folder) are rewritten from where they now are, and those notes
+    /// saved. Returns the new path and the notes rewritten. The notes'
+    /// edits must be saved first.
+    pub fn move_folder(&mut self, folder: &str, parent: &str) -> io::Result<(String, Vec<u64>)> {
+        if parent == folder || parent.starts_with(&format!("{folder}/")) {
+            return Err(io::Error::other("a folder can't go inside itself"));
+        }
+        if !parent.is_empty() && !self.folders.iter().any(|f| f == parent) {
+            return Err(io::Error::other("that folder isn't there any more"));
+        }
+        let leaf = folder.rsplit('/').next().unwrap_or(folder);
+        let to = if parent.is_empty() { leaf.to_string() } else { format!("{parent}/{leaf}") };
+        if to == folder {
+            return Ok((to, Vec::new()));
+        }
+        if self.folder_dir(&to).exists() || self.folders.iter().any(|f| same_stem(f, &to)) {
+            return Err(io::Error::other(format!("there is a folder called \u{201c}{leaf}\u{201d} there already")));
+        }
+        let depth = |f: &str| f.split('/').count();
+        let deeper = depth(&to) != depth(folder);
+        let from_dir = self.folder_dir(folder);
+        let under = format!("{folder}/");
+        // Where each embed's picture was found from, before: looked for
+        // again from the note's new folder after.
+        let was_files = self.files.clone();
+        self.relocate_folder(folder, &to)?;
+        if !deeper {
+            return Ok((to, Vec::new()));
+        }
+        self.index_files();
+        let to_under = format!("{to}/");
+        // A path from the notes folder (or the folder's own) as it is now.
+        let now = |f: &str| match f.strip_prefix(&under) {
+            Some(rest) => format!("{to}/{rest}"),
+            None if f == folder => to.clone(),
+            None => f.to_string(),
+        };
+        let mut relinked = Vec::new();
+        for i in 0..self.notes.len() {
+            let new_folder = self.notes[i].folder.clone();
+            if new_folder != to && !new_folder.starts_with(&to_under) {
+                continue;
+            }
+            let old_folder = format!("{folder}{}", &new_folder[to.len()..]);
+            let (old_dir, new_dir) = (self.folder_dir(&old_folder), self.folder_dir(&new_folder));
+            let files = &self.files;
+            let moved_src = |src: &str, wiki: bool| match wiki {
+                // An embed is looked for, not followed: one found from the
+                // note's old folder and not from its new one is named by
+                // its path from the notes folder, as it now is.
+                true => {
+                    let was = doc::find_picture(&old_folder, src, true, &was_files).map(|w| now(&w));
+                    was.filter(|w| doc::find_picture(&new_folder, src, true, files).as_ref() != Some(w))
+                }
+                false if is_relative(src) => {
+                    let at = old_dir.join(decode_src(src));
+                    // Moved with it: the link as it was still leads there.
+                    if within(&from_dir, &at) {
+                        return None;
+                    }
+                    Some(relative(&new_dir, &at))
+                }
+                false => None,
+            };
+            let note = &mut self.notes[i];
+            let mut changed = false;
+            for b in 0..note.doc.len() {
+                let new = match &note.doc.blocks()[b].kind {
+                    Kind::Image { src, wiki, .. } => moved_src(src, *wiki),
+                    Kind::Table(t) => {
+                        let mut cells = t.clone();
+                        let mut any = false;
+                        for cell in cells.rows.iter_mut().flat_map(|r| r.cells.iter_mut()) {
+                            if let Some(new) = doc::relink_cell(cell, |p| moved_src(&p.src, p.wiki)) {
+                                *cell = new;
+                                any = true;
+                            }
+                        }
+                        if any {
+                            note.doc.block_mut(b).kind = Kind::Table(cells);
+                            changed = true;
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(new) = new
+                    && let Kind::Image { src, .. } = &mut note.doc.block_mut(b).kind
+                    && *src != new
+                {
+                    *src = new;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.notes[i].touch();
+                self.save(i, false)?;
+                relinked.push(self.notes[i].id);
+            }
+        }
+        Ok((to, relinked))
+    }
+
+    /// `folder` to `to` on disk, and everything that names it here: its
+    /// subfolders, its notes' folders and files, the pins.
+    fn relocate_folder(&mut self, folder: &str, to: &str) -> io::Result<()> {
+        let (from_dir, to_dir) = (self.inside(self.folder_dir(folder))?, self.inside(self.folder_dir(to))?);
         rename_retrying(&from_dir, &to_dir)?;
         let under = format!("{folder}/");
         let moved = |f: &str| -> Option<String> {
             if f == folder {
-                Some(to.clone())
+                Some(to.to_string())
             } else {
                 f.strip_prefix(&under).map(|rest| format!("{to}/{rest}"))
             }
@@ -544,8 +661,7 @@ impl Store {
                 n.path = Some(to_dir.join(rest));
             }
         }
-        self.save_pins()?;
-        Ok(to)
+        self.save_pins()
     }
 
     /// Whether a folder has a file in it or under it, a note or not: a

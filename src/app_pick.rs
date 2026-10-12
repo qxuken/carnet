@@ -1,7 +1,9 @@
 //! Several notes and folders chosen at once in the library, as Finder
 //! chooses them: ⇧-click takes everything from the last one clicked to
-//! the one clicked now, ⌘-click (Ctrl elsewhere) adds or takes one. What
-//! is chosen goes to the trash together, or, notes only, to a folder.
+//! the one clicked now, ⌘-click (Ctrl elsewhere) adds or takes one; ⇧
+//! with ↑ or ↓ grows or shrinks the range from the keyboard. What is
+//! chosen goes to the trash together, or to a folder: dragged there, or,
+//! notes only, by the menu.
 
 use kui_native::KeyMods;
 
@@ -54,6 +56,7 @@ impl Carnet {
             let (a, b) = (a.min(b), a.max(b));
             self.picked = rows[a..=b].to_vec();
             self.pick_anchor = Some(from);
+            self.pick_head = Some(row);
             return true;
         }
         if adds(m) {
@@ -71,12 +74,39 @@ impl Carnet {
                 }
                 None => self.picked.push(row.clone()),
             }
-            self.pick_anchor = Some(row);
+            self.pick_anchor = Some(row.clone());
+            self.pick_head = Some(row);
             return true;
         }
         self.picked.clear();
         self.pick_anchor = Some(row);
+        self.pick_head = None;
         false
+    }
+
+    /// ⇧↑ or ⇧↓ in one of the library's lists, `rows` (the folders, or
+    /// the notes shown), the keyboard on `at`: the range from where it
+    /// began to its moving end goes one row further, or back toward where
+    /// it began — what a ⇧-click on that row would choose. With nothing
+    /// chosen yet, it begins at `at`. The row come to, if any.
+    pub(super) fn pick_step(&mut self, up: bool, at: Pick, rows: &[Pick]) -> Option<Pick> {
+        let pos = |p: &Pick| rows.iter().position(|r| r == p);
+        let ends = (!self.picked.is_empty())
+            .then(|| self.pick_anchor.as_ref().zip(self.pick_head.as_ref()))
+            .flatten()
+            .and_then(|(a, h)| pos(a).zip(pos(h)));
+        let (a, h) = match ends {
+            Some(ends) => ends,
+            None => {
+                let i = pos(&at)?;
+                (i, i)
+            }
+        };
+        let to = if up { h.checked_sub(1) } else { Some(h + 1) }.filter(|&i| i < rows.len()).unwrap_or(h);
+        self.picked = rows[a.min(to)..=a.max(to)].to_vec();
+        self.pick_anchor = Some(rows[a].clone());
+        self.pick_head = Some(rows[to].clone());
+        Some(rows[to].clone())
     }
 
     /// Whether a row is among those chosen.
@@ -87,7 +117,7 @@ impl Carnet {
     /// What is chosen, as it still is: folders that are gone and notes
     /// that are gone left out, and what is inside a chosen folder left to
     /// go with it.
-    fn picked_now(&self) -> (Vec<String>, Vec<u64>) {
+    pub(super) fn picked_now(&self) -> (Vec<String>, Vec<u64>) {
         let mut folders: Vec<String> = self
             .picked
             .iter()
@@ -113,7 +143,7 @@ impl Carnet {
     }
 
     /// "3 notes", "2 folders and a note": what is chosen, in words.
-    fn picked_words(folders: usize, notes: usize) -> String {
+    pub(super) fn picked_words(folders: usize, notes: usize) -> String {
         let count = |n: usize, one: &str, many: &str| match n {
             1 => format!("a {one}"),
             n => format!("{n} {many}"),
@@ -154,6 +184,7 @@ impl Carnet {
         let (folders, notes) = self.picked_now();
         self.picked.clear();
         self.pick_anchor = None;
+        self.pick_head = None;
         let mut undo = Vec::new();
         let (mut gone_f, mut gone_n) = (0, 0);
         for f in &folders {
@@ -180,11 +211,23 @@ impl Carnet {
         }
     }
 
-    /// The chosen notes into folder `to` ("" for the top level).
+    /// The chosen notes and folders into folder `to` ("" for the top
+    /// level), folders with all in them; none into itself or a folder
+    /// inside it.
     pub(super) fn move_picked(&mut self, to: &str) {
-        let (_, notes) = self.picked_now();
+        let (folders, notes) = self.picked_now();
         self.picked.clear();
         self.pick_anchor = None;
+        self.pick_head = None;
+        let mut moved_f = 0;
+        for f in folders {
+            if parent_of(&f) == to || to == f || to.starts_with(&format!("{f}/")) {
+                continue;
+            }
+            if self.move_folder(&f, to).is_some() {
+                moved_f += 1;
+            }
+        }
         let mut moved = 0;
         for id in notes {
             let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { continue };
@@ -196,9 +239,9 @@ impl Carnet {
                 moved += 1;
             }
         }
-        if moved > 0 {
-            let place = if to.is_empty() { "out of their folders".to_string() } else { format!("to \u{201c}{}\u{201d}", folder_name(to)) };
-            self.notify(format!("Moved {} {place}", Self::picked_words(0, moved)), None);
+        if moved_f + moved > 0 {
+            let whose = if moved_f + moved > 1 { "their" } else { "its" };
+            self.notify(format!("Moved {} {}", Self::picked_words(moved_f, moved), Self::place_words(to, whose)), None);
         }
     }
 }

@@ -363,7 +363,7 @@ pub fn chosen_cell_picture(doc: &Doc, c: Caret) -> Option<(usize, usize)> {
 
 /// The divider or picture block a selection covers whole, and nothing
 /// more: chosen, as the arrows choose one before stepping past it.
-fn chosen_atom(doc: &Doc, c: Caret) -> Option<Slot> {
+pub fn chosen_atom(doc: &Doc, c: Caret) -> Option<Slot> {
     let slot = c.head.slot;
     (c.anchor.slot == slot && is_atomic(doc, slot) && c.anchor.byte.min(c.head.byte) == 0 && c.anchor.byte.max(c.head.byte) == 1).then_some(slot)
 }
@@ -573,6 +573,31 @@ pub fn vertical(doc: &Doc, slot: Slot, up: bool) -> Vec<Slot> {
         }
         _ => vec![Slot::block(b.id)],
     }
+}
+
+/// Where ↑ or ↓ sets out from: a selection collapsed to the end it goes
+/// towards — a divider or a picture chosen whole too, so the next is past
+/// it. Extending, the selection as it is.
+pub fn vertical_from(doc: &Doc, c: Caret, up: bool, extend: bool) -> Caret {
+    if extend || c.is_empty() {
+        return c;
+    }
+    let (a, b) = ordered(doc, c);
+    Caret::at(if up { a } else { b })
+}
+
+/// Where ↑ or ↓ comes to: `head`, found by the view from `from` (where
+/// [`vertical_from`] set out) by the rows it laid out. Onto a divider or a
+/// picture it is chosen whole, as ← and → choose one; one it set out from
+/// at the note's edge, not passed, leaves the caret at that edge.
+pub fn vertical_to(doc: &Doc, from: Caret, head: Pos, up: bool, extend: bool) -> Caret {
+    if extend {
+        return Caret { anchor: from.anchor, head };
+    }
+    if head != from.head && head.slot.cell.is_none() && is_atomic(doc, head.slot) {
+        return whole(head.slot, !up);
+    }
+    Caret::at(head)
 }
 
 // ------------------------------------------------------------ edits
@@ -3228,6 +3253,51 @@ mod tests {
         assert_eq!(up.len(), 2);
         let down = vertical(&d, up[0], false);
         assert_eq!(down, [Slot::block(d.blocks()[2].id)]);
+    }
+
+    /// ↑ and ↓ choose a divider or a picture whole, as ← and → do, and
+    /// the next is past it. The rows are the view's to find; here a step
+    /// is the next block's start, as for one-line blocks.
+    #[test]
+    fn up_and_down_choose_a_divider_or_a_picture_whole() {
+        let pic = Kind::Image { src: "a.png".into(), alt: String::new(), width: None, float: doc::Float::None, wiki: false };
+        let d = doc(vec![Block::text("ab"), Block::new(Kind::Divider), Block::text("cd"), Block::new(pic), Block::text("ef")]);
+        let slot = |i: usize| Slot::block(d.blocks()[i].id);
+        let step = |p: Pos, up: bool| vertical(&d, p.slot, up).first().map_or(p, |&s| start(s));
+        let go = |c: Caret, up: bool| {
+            let from = vertical_from(&d, c, up, false);
+            vertical_to(&d, from, step(from.head, up), up, false)
+        };
+        // ↓ onto the divider: chosen whole, as → would have it.
+        let mut c = go(at(&d, 0, 1), false);
+        assert_eq!(c, right(&d, at(&d, 0, 2), false, false), "the divider, as → chooses it");
+        assert_eq!(chosen_atom(&d, c), Some(slot(1)));
+        // The next ↓ is past it; then onto the picture, chosen whole.
+        c = go(c, false);
+        assert_eq!(c, Caret::at(start(slot(2))), "past it");
+        c = go(c, false);
+        assert_eq!(chosen_atom(&d, c), Some(slot(3)), "the picture, whole");
+        c = go(c, false);
+        assert_eq!(c, Caret::at(start(slot(4))));
+        // ↑ the same way back, each chosen as ← chooses it.
+        c = go(c, true);
+        assert_eq!(c, left(&d, at(&d, 4, 0), false, false), "the picture, as ← chooses it");
+        c = go(c, true);
+        assert_eq!(c.head.slot, slot(2), "past it");
+        c = go(c, true);
+        assert_eq!(chosen_atom(&d, c), Some(slot(1)));
+        c = go(c, true);
+        assert_eq!(c.head.slot, slot(0), "past the divider");
+        // Shift with them extends over it, no more.
+        let from = vertical_from(&d, at(&d, 0, 1), false, true);
+        let e = vertical_to(&d, from, step(from.head, false), false, true);
+        assert_eq!((e.anchor, e.head), (at(&d, 0, 1).head, start(slot(1))));
+        // One at the note's end: the next ↓ leaves the caret at its edge.
+        let end_rule = doc(vec![Block::text("ab"), Block::new(Kind::Divider)]);
+        let rule = Slot::block(end_rule.blocks()[1].id);
+        let chosen = whole(rule, true);
+        let from = vertical_from(&end_rule, chosen, false, false);
+        assert_eq!(vertical_to(&end_rule, from, from.head, false, false), Caret::at(Pos { slot: rule, byte: 1 }));
     }
 
     /// A picture in a cell is one letter to the caret: the arrows choose

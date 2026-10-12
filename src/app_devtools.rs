@@ -94,7 +94,7 @@ impl Carnet {
         let mb = |b: u64| b as f64 / (1 << 20) as f64;
         row(&mut rows, "memory", format!("{:.0} of {:.0} MB", mb(self.images.bytes()), mb(images::BUDGET)));
         row(&mut rows, "drop", format!("{:?}", self.drop_index));
-        row(&mut rows, "dragging", self.note_drag.as_ref().map_or("no".into(), |d| format!("note {} → {:?}", d.id, d.target)));
+        row(&mut rows, "dragging", self.row_drag.as_ref().map_or("no".into(), |d| format!("{:?} → {:?}", d.what, d.target)));
 
         head(&mut rows, "Layout");
         let v = ui.viewport();

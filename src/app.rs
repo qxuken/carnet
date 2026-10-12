@@ -301,6 +301,9 @@ pub enum Msg {
     /// A press or drag on a note's card: a click opens it, a drag carries
     /// it to a folder.
     CardDrag { note: u64 },
+    /// A press or drag on a folder's row (by its index): a click shows it,
+    /// a drag carries it into another folder, or to the top level.
+    FolderDrag { index: u64 },
     /// The library's edge dragged: its width follows; a double-click puts
     /// it back.
     LibraryDrag,
@@ -582,6 +585,9 @@ pub struct Carnet {
     pub picked: Vec<Pick>,
     /// The row a ⇧-click's range runs from.
     pick_anchor: Option<Pick>,
+    /// The range's other end, the one ⇧↑ and ⇧↓ move: the row last
+    /// clicked or come to with them.
+    pick_head: Option<Pick>,
     /// A new folder being named.
     naming: Option<Naming>,
     /// How many folders have been named: each naming has a field of its
@@ -596,6 +602,9 @@ pub struct Carnet {
     /// A folder row was the last thing clicked, and the keyboard has gone
     /// nowhere since: ↑ and ↓ walk the folders from the one shown.
     folders_clicked: bool,
+    /// The same for a note's card: ↑ and ↓ walk the notes from the open
+    /// one, ⇧ with them chooses them.
+    cards_clicked: bool,
     pub settings: Settings,
     /// The settings show in place of the note.
     pub settings_open: bool,
@@ -676,8 +685,8 @@ pub struct Carnet {
     /// Each floated picture's row as last drawn: where the blocks beside
     /// it end, and how many frames running that changed.
     float_ends: HashMap<u64, (usize, u8)>,
-    /// A note being carried from its card to a folder.
-    note_drag: Option<NoteDrag>,
+    /// A note's card or a folder's row being carried to a folder.
+    row_drag: Option<RowDrag>,
     /// The library's edge being dragged: where the drag began and the
     /// width then.
     library_from: Option<(f32, u32)>,
@@ -855,10 +864,10 @@ pub enum Carried {
     Cell(Slot, usize),
 }
 
-/// A note's card being dragged.
+/// A note's card or a folder's row being dragged.
 #[derive(Clone, Debug)]
-struct NoteDrag {
-    id: u64,
+struct RowDrag {
+    what: Pick,
     from: Vec2,
     at: Vec2,
     /// Past a few pixels: a drag, not a click.
@@ -959,11 +968,13 @@ impl Carnet {
             folder: None,
             picked: Vec::new(),
             pick_anchor: None,
+            pick_head: None,
             naming: None,
             namings: 0,
             folder_rows: Vec::new(),
             focus_row: None,
             folders_clicked: false,
+            cards_clicked: false,
             settings,
             settings_open: false,
             reset_armed: false,
@@ -998,7 +1009,7 @@ impl Carnet {
             float_count: 0,
             float_room: 0.0,
             float_ends: HashMap::new(),
-            note_drag: None,
+            row_drag: None,
             library_from: None,
             edge_hover: None,
             wait_line: Default::default(),
@@ -2220,41 +2231,76 @@ impl Carnet {
         }
     }
 
-    /// A note's card pressed and maybe dragged: a press that does not
-    /// travel opens the note; one that does carries it, and a folder row
-    /// it is let go over takes it ("All notes": the top level).
-    fn card_drag(&mut self, id: u64, ev: &UiEvent) {
+    /// A note's card or a folder's row pressed and maybe dragged: a press
+    /// that does not travel is the row's click (opens the note, shows the
+    /// folder); one that does carries it, and a folder row it is let go
+    /// over takes it ("All notes": the top level) — with the rest chosen
+    /// with it, when it is one of several. A folder never goes into
+    /// itself or a folder inside it: such a row doesn't light up.
+    fn row_drag(&mut self, what: Pick, ev: &UiEvent) {
         let p = &ev.payload;
         let num = |k: &str| p.get_float(k).or_else(|| p.get_int(k).map(|v| v as f64)).unwrap_or(0.0) as f32;
         let at = Vec2::new(num("x"), num("y"));
         match p.get_str("phase") {
             Some("start") => {
-                self.note_drag = Some(NoteDrag { id, from: at, at, moved: false, target: None });
+                self.row_drag = Some(RowDrag { what, from: at, at, moved: false, target: None });
             }
             Some("move") => {
                 let target = self
                     .folder_rects
                     .iter()
                     .find(|(_, r)| at.x >= r.x && at.x <= r.x + r.w && at.y >= r.y && at.y <= r.y + r.h)
-                    .map(|(f, _)| f.clone());
-                if let Some(d) = self.note_drag.as_mut() {
+                    .map(|(f, _)| f.clone())
+                    .filter(|to| self.may_take(&what, to));
+                if let Some(d) = self.row_drag.as_mut() {
                     d.at = at;
                     d.moved = d.moved || (at.x - d.from.x).abs() + (at.y - d.from.y).abs() > 6.0;
                     d.target = if d.moved { target } else { None };
                 }
             }
             _ => {
-                let Some(d) = self.note_drag.take() else { return };
-                let Some(i) = self.store.notes.iter().position(|n| n.id == d.id) else { return };
-                match (d.moved, d.target) {
-                    // A click: the card's own (`Msg::OpenNote`).
-                    (false, _) => {}
-                    // One of several chosen: all of them go.
-                    (true, Some(folder)) if self.is_picked(&Pick::Note(d.id)) => self.move_picked(&folder),
-                    (true, Some(folder)) if self.store.notes[i].folder != folder => self.move_note(i, &folder),
-                    _ => {}
+                let Some(d) = self.row_drag.take() else { return };
+                let (true, Some(to)) = (d.moved, d.target) else { return };
+                // One of several chosen: all of them go.
+                if self.is_picked(&d.what) {
+                    return self.move_picked(&to);
+                }
+                match d.what {
+                    Pick::Note(id) => {
+                        let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { return };
+                        if self.store.notes[i].folder != to {
+                            self.move_note(i, &to);
+                        }
+                    }
+                    Pick::Folder(f) => {
+                        if parent_of(&f) != to && self.move_folder(&f, &to).is_some() {
+                            self.notify(format!("Moved \u{201c}{}\u{201d} {}", folder_name(&f), Self::place_words(&to, "its")), None);
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    /// Whether folder `to` ("" the top level) may take what is carried:
+    /// anything but a folder into itself or one inside it — of what is
+    /// chosen with it too, when it is one of several.
+    fn may_take(&self, what: &Pick, to: &str) -> bool {
+        let into_itself = |p: &Pick| matches!(p, Pick::Folder(f) if to == f || to.starts_with(&format!("{f}/")));
+        if self.is_picked(what) {
+            !self.picked.iter().any(into_itself)
+        } else {
+            !into_itself(what)
+        }
+    }
+
+    /// Where things were moved, in words: "to “Work”", or "out of its
+    /// folder" (`whose`: "its", "their") for the top level.
+    pub(super) fn place_words(to: &str, whose: &str) -> String {
+        if to.is_empty() {
+            format!("out of {whose} folder{}", if whose == "their" { "s" } else { "" })
+        } else {
+            format!("to \u{201c}{}\u{201d}", folder_name(to))
         }
     }
 
@@ -2296,8 +2342,20 @@ impl Carnet {
 
     /// The note being carried, under the pointer: its title on a card.
     fn note_ghost(&self, ui: &mut Ui<'_>, l: &Look) {
-        let Some(d) = self.note_drag.as_ref().filter(|d| d.moved) else { return };
-        let Some(note) = self.store.notes.iter().find(|n| n.id == d.id) else { return };
+        let Some(d) = self.row_drag.as_ref().filter(|d| d.moved) else { return };
+        // Several chosen: what they are, in words; else its name.
+        let name = if self.is_picked(&d.what) {
+            let (folders, notes) = self.picked_now();
+            Self::picked_words(folders.len(), notes.len())
+        } else {
+            match &d.what {
+                Pick::Note(id) => match self.store.notes.iter().find(|n| n.id == *id) {
+                    Some(n) => n.display_title().to_string(),
+                    None => return,
+                },
+                Pick::Folder(f) => folder_name(f).to_string(),
+            }
+        };
         let t = l.t;
         ui.with(
             NodeSpec::row()
@@ -2314,7 +2372,7 @@ impl Carnet {
                 .role(Role::None),
             |ui| {
                 crate::icons::icon(ui, crate::icons::Glyph::Folder, if d.target.is_some() { t.accent } else { t.muted }, 14.0, false);
-                ui.text(note.display_title(), TextStyle::new(Type::UI.size).color(t.fg).nowrap());
+                ui.text(&name, TextStyle::new(Type::UI.size).color(t.fg).nowrap());
             },
         );
     }
@@ -2371,12 +2429,7 @@ impl Carnet {
                 // longer lead anywhere.
                 let id = self.store.notes[i].id;
                 self.histories.remove(&id);
-                let place = if to.is_empty() {
-                    "out of its folder".to_string()
-                } else {
-                    format!("to \u{201c}{}\u{201d}", folder_name(to))
-                };
-                self.notify(format!("Moved \u{201c}{name}\u{201d} {place}"), None);
+                self.notify(format!("Moved \u{201c}{name}\u{201d} {}", Self::place_words(to, "its")), None);
             }
             Err(e) => self.error = Some(format!("Couldn't move the note: {e}")),
         }
@@ -2423,25 +2476,12 @@ impl Carnet {
     /// library kept on it if it was showing it or one inside it. Returns
     /// the new path.
     fn rename_folder(&mut self, folder: &str, name: &str) -> Option<String> {
-        let under = format!("{folder}/");
-        let inside = |f: &str| f == folder || f.starts_with(&under);
-        for i in 0..self.store.notes.len() {
-            let n = &self.store.notes[i];
-            if inside(&n.folder)
-                && n.dirty
-                && n.path.is_some()
-                && let Err(e) = self.store.save(i, false)
-            {
-                self.error = Some(format!("Couldn't save \u{201c}{}\u{201d}, so the folder keeps its name: {e}", self.store.notes[i].display_title()));
-                return None;
-            }
+        if !self.save_inside(folder, "keeps its name") {
+            return None;
         }
         match self.store.rename_folder(folder, name) {
             Ok(to) => {
-                if let Some(shown) = self.folder.as_deref().filter(|f| inside(f)) {
-                    self.folder = Some(format!("{to}{}", &shown[folder.len()..]));
-                }
-                self.reorder();
+                self.folder_went(folder, &to);
                 Some(to)
             }
             Err(e) => {
@@ -2451,13 +2491,83 @@ impl Carnet {
         }
     }
 
+    /// Moves `folder` into `to` ("" for the top level), its notes and
+    /// subfolders with it: their edits saved first, the library kept on
+    /// it if it was showing it or one inside it. Returns the new path.
+    /// Sync's places follow, as for a rename (the vault is compared with
+    /// where the notes now are).
+    pub(super) fn move_folder(&mut self, folder: &str, to: &str) -> Option<String> {
+        if !self.save_inside(folder, "stays where it is") {
+            return None;
+        }
+        match self.store.move_folder(folder, to) {
+            Ok((new, relinked)) => {
+                // Their picture links were rewritten from their new
+                // place: an undo from before would put back ones that no
+                // longer lead anywhere.
+                for id in relinked {
+                    self.histories.remove(&id);
+                }
+                self.folder_went(folder, &new);
+                Some(new)
+            }
+            Err(e) => {
+                self.error = Some(format!("Couldn't move the folder: {}", store::plain_error(&e)));
+                None
+            }
+        }
+    }
+
+    /// The notes in `folder` or under it with edits, saved; false (and
+    /// said so: the folder `stays` as it is) when one couldn't be.
+    fn save_inside(&mut self, folder: &str, stays: &str) -> bool {
+        let under = format!("{folder}/");
+        for i in 0..self.store.notes.len() {
+            let n = &self.store.notes[i];
+            if (n.folder == folder || n.folder.starts_with(&under))
+                && n.dirty
+                && n.path.is_some()
+                && let Err(e) = self.store.save(i, false)
+            {
+                self.error = Some(format!("Couldn't save \u{201c}{}\u{201d}, so the folder {stays}: {e}", self.store.notes[i].display_title()));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `folder` is now `to`: the library shown on it (or one inside it)
+    /// follows it.
+    fn folder_went(&mut self, folder: &str, to: &str) {
+        let under = format!("{folder}/");
+        if let Some(shown) = self.folder.as_deref().filter(|f| *f == folder || f.starts_with(&under)) {
+            self.folder = Some(format!("{to}{}", &shown[folder.len()..]));
+        }
+        self.reorder();
+    }
+
     /// A key pressed on a row of the folder list: F2 renames it, Delete
     /// or Backspace deletes it (to the trash with its notes, Undo away),
     /// ↑ and ↓ go to the row above and below and show it, as a Mac's
     /// sidebars do — so where the keyboard is shows after a click too,
-    /// which hides the focus ring. True when the key was one of those.
+    /// which hides the focus ring — letting go of what was chosen; with ⇧
+    /// they choose the folders from this one on, as a ⇧-click does. True
+    /// when the key was one of those.
     fn folder_row_key(&mut self, row: &FolderRow, k: &kui_native::KeyPress) -> bool {
         let m = k.mods;
+        // ⇧↑ and ⇧↓: the folders chosen from this one to the next, the
+        // keyboard on the row come to.
+        if m.shift
+            && !(m.alt || m.ctrl || m.super_key)
+            && matches!(k.code, KeyCode::Up | KeyCode::Down)
+            && let FolderRow::Folder(f) = row
+        {
+            let rows: Vec<Pick> = self.store.folders.iter().cloned().map(Pick::Folder).collect();
+            if let Some(Pick::Folder(head)) = self.pick_step(k.code == KeyCode::Up, Pick::Folder(f.clone()), &rows) {
+                self.focus_row = Some(FolderRow::Folder(head));
+            }
+            return true;
+        }
         if m.shift || m.alt || (m.ctrl && cfg!(target_os = "macos")) {
             return false;
         }
@@ -2487,6 +2597,13 @@ impl Carnet {
             KeyCode::Up | KeyCode::Down if !m.ctrl && !m.super_key => {
                 let next = at.and_then(|i| if k.code == KeyCode::Up { i.checked_sub(1) } else { Some(i + 1) });
                 if let Some((_, r)) = next.and_then(|i| self.folder_rows.get(i)).cloned() {
+                    // What was chosen is let go of; a range starts here.
+                    self.picked.clear();
+                    self.pick_head = None;
+                    self.pick_anchor = match &r {
+                        FolderRow::Folder(f) => Some(Pick::Folder(f.clone())),
+                        _ => None,
+                    };
                     match &r {
                         FolderRow::All => self.on_plain(Msg::SelectFolder { index: ALL }),
                         FolderRow::Folder(f) => {
@@ -2763,13 +2880,19 @@ impl Carnet {
             Msg::SettingsTitle => self.title_click(Instant::now(), core),
             Msg::ResizePicture { id, side } => self.resize_drag(id, side == 1, ev),
             Msg::PictureDrag { id } => self.picture_drag(id, ev, core),
-            Msg::CardDrag { note } => self.card_drag(note, ev),
+            Msg::CardDrag { note } => self.row_drag(Pick::Note(note), ev),
+            Msg::FolderDrag { index } => {
+                if let Some(f) = self.store.folders.get(index as usize).cloned() {
+                    self.row_drag(Pick::Folder(f), ev);
+                }
+            }
             // A click on a card or a folder with ⇧ or ⌘ held chooses it.
             Msg::OpenNote { note } => {
                 let id = self.store.notes.get(note as usize).map(|n| n.id);
                 if !id.is_some_and(|id| self.pick_click(Pick::Note(id), core.modifiers())) {
                     self.on_plain(msg);
                 }
+                self.cards_clicked = true;
             }
             Msg::SelectFolder { index } if index != ALL && self.store.folders.get(index as usize).is_some() => {
                 let f = self.store.folders[index as usize].clone();
@@ -2928,6 +3051,7 @@ impl Carnet {
             Msg::SelectFolder { index } => {
                 self.close_history();
                 self.folders_clicked = true;
+                self.cards_clicked = false;
                 self.deleted = false;
                 self.close_peek();
                 let folder = self.store.folders.get(index as usize).cloned();
@@ -3146,6 +3270,7 @@ impl Carnet {
             Msg::ShowDeleted => {
                 self.close_history();
                 self.folders_clicked = true;
+                self.cards_clicked = false;
                 self.refresh_trash();
                 self.deleted = !self.trash.is_empty();
                 self.list_view = true;
@@ -3218,7 +3343,7 @@ impl Carnet {
                 }
             }
             Msg::Slash { index } => self.run_slash(index as usize),
-            Msg::ResizePicture { .. } | Msg::CardDrag { .. } | Msg::PictureDrag { .. } | Msg::LibraryDrag => {}
+            Msg::ResizePicture { .. } | Msg::CardDrag { .. } | Msg::FolderDrag { .. } | Msg::PictureDrag { .. } | Msg::LibraryDrag => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {
                     self.pending_menu = Some((k, at, MenuFor::Tools));
@@ -3411,6 +3536,44 @@ impl Carnet {
                 return;
             }
         }
+        // ↑ and ↓ after a click on a note's card, the keyboard on nothing
+        // in particular: the next note opened, the keyboard staying on the
+        // list; with ⇧, the notes chosen from the open one to the next.
+        if matches!(k.code, KeyCode::Up | KeyCode::Down)
+            && self.cards_clicked
+            && !(m.ctrl || m.super_key || m.alt)
+            && core.focus().is_none_or(|f| f == Key::ROOT)
+        {
+            let up = k.code == KeyCode::Up;
+            if m.shift {
+                let rows: Vec<Pick> = self.order.iter().map(|&i| Pick::Note(self.store.notes[i].id)).collect();
+                let open = Pick::Note(self.store.notes[self.current].id);
+                self.pick_step(up, open, &rows);
+            } else {
+                self.picked.clear();
+                self.pick_head = None;
+                let pos = self.order.iter().position(|&i| i == self.current);
+                let next = pos.and_then(|p| if up { p.checked_sub(1) } else { Some(p + 1) });
+                if let Some(&i) = next.and_then(|p| self.order.get(p)) {
+                    self.open(i);
+                    self.pick_anchor = Some(Pick::Note(self.store.notes[i].id));
+                    self.say = Some(self.store.notes[i].display_title().to_string());
+                }
+                self.cards_clicked = true;
+            }
+            return;
+        }
+        // Delete or Backspace with notes chosen that way, or folders, the
+        // keyboard on nothing in particular: all of them to the trash.
+        if matches!(k.code, KeyCode::Backspace | KeyCode::Delete)
+            && !(m.ctrl || m.super_key || m.alt || m.shift)
+            && (self.cards_clicked || self.folders_clicked)
+            && self.picked.len() > 1
+            && core.focus().is_none_or(|f| f == Key::ROOT)
+        {
+            self.trash_picked();
+            return;
+        }
         // F2 with the keyboard on nothing in particular — after a click on
         // a folder, which shows it and leaves the keyboard on the window:
         // the folder shown is renamed, as Finder's selected one is.
@@ -3428,6 +3591,7 @@ impl Carnet {
         }
         if k.code == KeyCode::Escape && !self.picked.is_empty() {
             self.picked.clear();
+            self.pick_head = None;
             return;
         }
         if k.code == KeyCode::Escape && self.settings_open {
@@ -3663,6 +3827,11 @@ pub fn folder_name(folder: &str) -> &str {
     folder.rsplit('/').next().unwrap_or(folder)
 }
 
+/// The folder `folder` is in: "" for one at the top level.
+pub fn parent_of(folder: &str) -> &str {
+    folder.rsplit_once('/').map_or("", |(p, _)| p)
+}
+
 fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Reveal in Finder"
@@ -3858,6 +4027,7 @@ impl App for Carnet {
             // The keyboard went somewhere: no longer the folders' arrows.
             if focused.is_some_and(|f| f != Key::ROOT) {
                 self.folders_clicked = false;
+                self.cards_clicked = false;
             }
             // A folder's name let go of — a click elsewhere, Tab: the
             // folder is made, if it has a name, and where the click went

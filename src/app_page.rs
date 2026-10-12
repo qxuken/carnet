@@ -627,8 +627,9 @@ impl Carnet {
             .radius(radius::TIGHT)
             .on_layout(Value::Null);
         // A picture says it is selected with its own ring, hugging
-        // it: a wash the page's width would mostly cover nothing.
-        if whole && !matches!(b.kind, Kind::Image { .. }) {
+        // it: a wash the page's width would mostly cover nothing. A
+        // divider wears its own, round the ornament.
+        if whole && !matches!(b.kind, Kind::Image { .. } | Kind::Divider) {
             wrap = wrap.bg(t.selection);
         } else if self.focus_on() {
             // Eased with focus: no wash is the wash with no alpha.
@@ -736,20 +737,33 @@ impl Carnet {
             }
             Kind::Divider => {
                 // Drawn as the settings say (three dots, a line, stars, a
-                // flourish); in the accent when the caret is on it, so
-                // Backspace or Delete is seen to have a target.
+                // flourish). Chosen — by the arrows, a click, or the caret
+                // on it — one way: the ornament in the accent on the
+                // selection's wash, as wide as the text and a band round
+                // the ornament, not its whole tall row; so Backspace or
+                // Delete is seen to have a target.
                 let here = self.editing && self.caret.head.slot == Slot::block(id);
-                let ink = if whole || here { t.accent } else { t.faint };
+                let chosen = whole || here;
+                let ink = if chosen { t.accent } else { t.faint };
+                let band = l.px(8.0).min(l.air(20.0));
+                let mut wash = NodeSpec::row()
+                    .grow_width()
+                    .pad_xy(0.0, band)
+                    .radius(radius::CONTROL)
+                    .center()
+                    .hover_bg(t.hover);
+                if chosen {
+                    wash = wash.bg(t.selection);
+                }
                 ui.with(
                     NodeSpec::row()
                         .grow_width()
-                        .pad_xy(0.0, l.air(20.0))
-                        .radius(radius::CONTROL)
-                        .center()
-                        .hover_bg(t.hover)
+                        .pad_xy(0.0, l.air(20.0) - band)
                         .on_click(Msg::Select { id })
                         .label("Divider"),
-                    |ui| icons::ornament(ui, self.settings.divider, ink, l.k),
+                    |ui| {
+                        ui.with(wash, |ui| icons::ornament(ui, self.settings.divider, ink, l.k));
+                    },
                 );
             }
             Kind::Image { src, alt, width, float, wiki } => self.picture(ui, l, id, src, *wiki, alt, *width, *float, whole),
@@ -2235,7 +2249,11 @@ impl Carnet {
             }
             // Up from the first line, back from the very start: the title,
             // as it would be in one text.
-            KeyCode::Up | KeyCode::Left if !shift && self.caret.is_empty() && self.at_top(core, code == KeyCode::Left) => {
+            KeyCode::Up | KeyCode::Left
+                if !shift
+                    && (self.caret.is_empty() || page::chosen_atom(doc, self.caret).is_some())
+                    && self.at_top(core, code == KeyCode::Left) =>
+            {
                 // ↑ keeps the column it is in; ← comes up to the end.
                 let column = (code == KeyCode::Up)
                     .then(|| self.goal_x.or_else(|| self.rect_at(core, self.caret.head.slot, self.caret.head.byte).map(|r| r.x)))
@@ -2846,18 +2864,14 @@ impl Carnet {
     }
 
     fn vertical(&mut self, core: &Core, up: bool, extend: bool, times: usize) {
-        let mut c = self.caret;
-        if !extend && !c.is_empty() {
-            let (a, b) = page::ordered(self.doc(), c);
-            c = Caret::at(if up { a } else { b });
-        }
+        // A divider or a picture come to is chosen whole, as ← and →
+        // choose one, and the next press is past it.
+        let from = page::vertical_from(self.doc(), self.caret, up, extend);
+        let mut head = from.head;
         for _ in 0..times {
-            c.head = self.vertical_once(core, c.head, up);
+            head = self.vertical_once(core, head, up);
         }
-        if !extend {
-            c.anchor = c.head;
-        }
-        self.caret = c;
+        self.caret = page::vertical_to(self.doc(), from, head, up, extend);
         self.writing.moved();
         self.history().seal();
         self.reveal = true;
