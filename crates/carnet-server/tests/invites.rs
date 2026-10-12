@@ -146,3 +146,38 @@ fn the_owners_other_invites_go_when_the_owner_comes_in() {
         assert!(hub.enroll(&second, b"other", key, &mut rng).is_err());
     }
 }
+
+/// A host may refuse an invite before it's taken (`Admission::admit`: a
+/// hosted service lets in only those its signups sent). Refused, the
+/// device is told what it's told of an invite never made, and the invite
+/// stays as it was; one the host lets in makes its account.
+#[test]
+fn a_host_refuses_an_invite_it_never_sent_before_it_makes_an_account() {
+    use carnet_server::Hub;
+    use carnet_server::quota::Admission;
+    use carnet_sync::crypto::Random;
+    use carnet_sync::invite::InviteCode;
+    struct Only([u8; 32]);
+    impl Admission for Only {
+        fn admit(&self, invite: &[u8; 32]) -> bool {
+            *invite == self.0
+        }
+        fn admitted(&self, _: [u8; 32], _: &[u8]) {}
+    }
+    for store in common::stores() {
+        let mut rng = common::Seeded(5);
+        let (sent, stray, never) = (InviteCode::generate(&mut rng), InviteCode::generate(&mut rng), InviteCode::generate(&mut rng));
+        let mut hub = Hub::new(common::ORIGIN, store).with_admission(std::sync::Arc::new(Only(sent.hash())));
+        hub.store_mut().add_invite(sent.hash(), false, 1000).unwrap();
+        hub.store_mut().add_invite(stray.hash(), false, 1000).unwrap();
+        let key: [u8; 32] = rng.bytes();
+        let refused = hub.enroll(&stray, b"desk", key, &mut rng).unwrap_err();
+        let unknown = hub.enroll(&never, b"desk", key, &mut rng).unwrap_err();
+        assert_eq!(refused, unknown, "told as an invite never made");
+        assert_eq!(hub.store().accounts(), 0);
+        assert!(hub.store().invites().iter().any(|(h, _, _)| *h == stray.hash()), "not taken");
+        assert_eq!(hub.stats().enroll_refused, 2);
+        hub.enroll(&sent, b"desk", key, &mut rng).unwrap();
+        assert_eq!(hub.store().accounts(), 1);
+    }
+}

@@ -98,6 +98,11 @@ pub trait Blobs: Send {
     fn origin(&self) -> Option<String> {
         None
     }
+    /// Every account with pictures here, whether it's still an account
+    /// or not: what [`Worker::sweep_unowned`] asks the store about.
+    fn owners(&mut self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
 }
 
 /// Boxed, still one: the server runs files or a bucket alike.
@@ -129,6 +134,9 @@ impl<T: Blobs + ?Sized> Blobs for Box<T> {
     fn origin(&self) -> Option<String> {
         (**self).origin()
     }
+    fn owners(&mut self) -> Vec<Vec<u8>> {
+        (**self).owners()
+    }
 }
 
 fn hex(b: &[u8]) -> String {
@@ -147,8 +155,8 @@ impl BlobFiles {
     /// In `data`; the spool emptied of what a last run left.
     pub fn open(data: &Path) -> io::Result<Self> {
         let files = BlobFiles { root: data.join("blobs"), spool: data.join("spool") };
-        fs::create_dir_all(&files.root)?;
-        fs::create_dir_all(&files.spool)?;
+        crate::private::dir(&files.root)?;
+        crate::private::dir(&files.spool)?;
         for e in fs::read_dir(&files.spool)?.flatten() {
             let _ = fs::remove_file(e.path());
         }
@@ -201,7 +209,7 @@ impl BlobFiles {
     pub fn keep(&self, account: &[u8], id: &[u8; 32], sealed: &[u8]) -> io::Result<bool> {
         use std::io::Write;
         let tmp = self.spool.join(format!("{}-{}", hex(account), hex(id)));
-        let mut file = fs::File::create(&tmp)?;
+        let mut file = crate::private::create().open(&tmp)?;
         file.write_all(sealed)?;
         file.sync_all()?;
         self.keep_file(account, id, &tmp)
@@ -218,7 +226,7 @@ impl BlobFiles {
         }
         let dir = to.parent().expect("in a folder");
         if !dir.exists() {
-            fs::create_dir_all(dir)?;
+            crate::private::dir(dir)?;
             sync_dir(&self.root)?;
         }
         fs::rename(tmp, &to)?;
@@ -274,6 +282,16 @@ impl Blobs for FileBlobs {
 
     fn sweep(&mut self, before: u64) -> u64 {
         self.files.sweep(before)
+    }
+
+    fn owners(&mut self) -> Vec<Vec<u8>> {
+        fs::read_dir(&self.files.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter_map(|e| unhex(&e.file_name().to_string_lossy()).filter(|a| !a.is_empty()))
+            .collect()
     }
 
     fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {
@@ -380,6 +398,11 @@ impl Blobs for MemoryBlobs {
 
     fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {
         self.held.iter().filter(|((a, _), _)| a == account).map(|((_, id), b)| (*id, b.len() as u64)).collect()
+    }
+
+    fn owners(&mut self) -> Vec<Vec<u8>> {
+        let all: HashSet<Vec<u8>> = self.held.keys().map(|(a, _)| a.clone()).collect();
+        all.into_iter().collect()
     }
 }
 
@@ -533,6 +556,25 @@ impl<B: Blobs> Worker<B> {
         let n = self.blobs.sweep(now.saturating_sub(KEEP));
         self.counts.swept.fetch_add(n, Ordering::Relaxed);
         n
+    }
+
+    /// Pictures of accounts that are no more, gone: a put by a link given
+    /// before its account was deleted, or one the deletion missed. `gone`
+    /// says which of the accounts with pictures here aren't accounts now
+    /// (the store's to say: asked after the pictures are listed, so an
+    /// account made meanwhile isn't among them). How many accounts'
+    /// pictures went.
+    pub fn sweep_unowned(&mut self, gone: impl FnOnce(Vec<Vec<u8>>) -> Vec<Vec<u8>>) -> usize {
+        let owners = self.blobs.owners();
+        if owners.is_empty() {
+            return 0;
+        }
+        let gone = gone(owners);
+        for account in &gone {
+            self.pending.remove(account);
+            self.blobs.forget(account);
+        }
+        gone.len()
     }
 
     /// `outs` with the picture work in them done: what the hub sent and

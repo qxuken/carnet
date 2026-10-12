@@ -61,6 +61,14 @@ impl Quota for Unlimited {
 /// made (a hosted service: which signup became which account). A server
 /// of one's own needs nothing told.
 pub trait Admission: Send + Sync {
+    /// Whether an invite (by its code's hash) may make an account, asked
+    /// before it's taken: a hosted service lets in only the invites its
+    /// signups sent. No, and the device is told as of an invite that
+    /// isn't good, and the invite stays as it was. Asked on the hub's
+    /// thread: quick. Yes unless the host says.
+    fn admit(&self, _invite: &[u8; 32]) -> bool {
+        true
+    }
     fn admitted(&self, invite: [u8; 32], account: &[u8]);
     /// The account is gone: deleted from one of its devices, or removed.
     fn removed(&self, _account: &[u8]) {}

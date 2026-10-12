@@ -779,3 +779,31 @@ mod device {
         }
     }
 }
+
+/// An account copied in whose recovery key or passkey another account
+/// there has already is refused, as a device setting it is: never taken
+/// from that account, and nothing of the account copied changed.
+#[test]
+fn an_import_never_takes_a_key_from_another_account() {
+    let Some((url, _schema)) = database("conflict") else { return };
+    let data = temp("conflict");
+    fill(&data);
+    migrate::run(&plan(&data, &url), &mut |_| {}).unwrap();
+    let pg = Postgres::target(&url).unwrap();
+    let alice = pg.rows(b"alice").unwrap().unwrap();
+    let before = pg.rows(b"bob").unwrap().unwrap();
+    // Bob's rows, with alice's recovery key: refused, alice's kept.
+    let mut taking = before.clone();
+    taking.recovery = alice.recovery.clone();
+    let e = pg.put_rows(&taking).unwrap_err();
+    assert!(e.0.contains("recovery") && e.0.contains(&"alice".bytes().map(|b| format!("{b:02x}")).collect::<String>()), "{e}");
+    assert_eq!(pg.recovery(&[5; 32]).map(|(a, _)| a), Some(b"alice".to_vec()), "alice's still");
+    assert_eq!(pg.rows(b"bob").unwrap().unwrap(), before, "bob's as they were");
+    // With one of alice's passkeys: the same.
+    let mut taking = before.clone();
+    taking.passkeys = alice.passkeys[..1].to_vec();
+    assert!(pg.put_rows(&taking).unwrap_err().0.contains("passkeys"));
+    assert_eq!(pg.passkeys(b"alice").len(), 2, "alice's still");
+    assert_eq!(pg.rows(b"bob").unwrap().unwrap(), before);
+    let _ = std::fs::remove_dir_all(&data);
+}

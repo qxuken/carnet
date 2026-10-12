@@ -11,6 +11,7 @@ pub mod links;
 pub mod migrate;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod private;
 pub mod quota;
 pub mod rows;
 #[cfg(feature = "s3")]

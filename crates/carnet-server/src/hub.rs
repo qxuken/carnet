@@ -75,6 +75,11 @@ pub fn features(passwords: bool, signup: bool) -> Vec<String> {
 }
 
 const ACCOUNT_REMOVED: &str = "this account was removed from the server";
+/// A login that names an account not here, or a device not in it: the
+/// same either way, so a login tells nobody which accounts there are.
+const NOT_HERE: &str = "this account isn't on this server (removed, or never here), or this device isn't in it";
+/// An invite that can't make an account, whatever the reason.
+const BAD_INVITE: &str = "that invite is not good: used, past its week, or never made";
 const DEVICE_REMOVED: &str = "this device was removed from the account";
 
 enum State {
@@ -434,8 +439,12 @@ impl<S: Storage> Hub<S> {
         if device.is_empty() || device.len() > MAX_DEVICE_ID {
             return Err("a device id is 1 to 64 bytes".into());
         }
+        // One the host won't let in is told as one that isn't good.
+        if !self.admission.admit(&invite.hash()) {
+            return Err(BAD_INVITE.into());
+        }
         let taken = self.store.take_invite(invite.hash(), self.now);
-        let owner = self.kept(taken).map_err(|e| e.to_string())?.ok_or("that invite is not good: used, past its week, or never made")?;
+        let owner = self.kept(taken).map_err(|e| e.to_string())?.ok_or(BAD_INVITE)?;
         let account: [u8; 16] = rng.bytes();
         let added = self.store.add_account(&account, owner);
         self.kept(added).map_err(|e| e.to_string())?;
@@ -569,11 +578,16 @@ impl<S: Storage> Hub<S> {
                         out.extend(self.deny(conn, limits::TOO_MANY));
                         return out;
                     }
+                    // A device removed is told so: its app forgets the
+                    // account. An account not here and a device not in
+                    // one are told the same (an account deleted while its
+                    // device was away is one): its app forgets it too. A
+                    // device here whose signature is wrong (another
+                    // server's origin, another key) is only turned away.
                     let (reason, why) = match known {
                         Some(d) if d.revoked => (DEVICE_REMOVED, Deny::DeviceRemoved),
-                        // Every account has a device: none, and it's gone.
-                        None if self.store.devices(&account).is_empty() => (ACCOUNT_REMOVED, Deny::AccountRemoved),
-                        _ => ("not a device of this account", Deny::Other),
+                        None => (NOT_HERE, Deny::AccountRemoved),
+                        Some(_) => ("not a device of this account", Deny::Other),
                     };
                     out.extend(self.deny_as(conn, reason, why));
                     return out;
