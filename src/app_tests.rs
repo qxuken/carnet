@@ -3049,6 +3049,11 @@ fn up_and_down_after_a_click_on_a_folder_walk_from_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// What a server says of itself, listing these features.
+fn server_info(features: &[&str]) -> carnet_sync::info::ServerInfo {
+    carnet_sync::info::ServerInfo { greeting: carnet_sync::compat::Greeting::ours(features.iter().map(|f| f.to_string()).collect()), ..Default::default() }
+}
+
 /// Whether a drawn node reads `s`. (The inspector gives a long text's
 /// first 60 characters only: the access tree has it whole.)
 fn drawn(d: &mut Drive, app: &mut Carnet, s: &str) -> bool {
@@ -3457,9 +3462,9 @@ fn settings_sync_says_what_is_wrong_in_place() {
     let (mut app, mut d, dir) = fresh("sync-settings");
     app.settings_open = true;
     assert!(drawn(&mut d, &mut app, "Sync"));
-    // One field for a code, whichever kind; the words are asked for apart.
-    assert!(drawn(&mut d, &mut app, "Use recovery words"));
-    assert!(!drawn(&mut d, &mut app, "Pairing code"), "no kinds of code to choose between");
+    // The server first.
+    assert!(drawn(&mut d, &mut app, "Where are your notes?") && drawn(&mut d, &mut app, "Step 1 of 3"));
+    assert!(d.key_of("sync-code").is_none(), "no way in before the server");
     app.sync_server = "notes.example.com".into();
     app.sync_code = "47-12".into();
     app.on_plain(Msg::SyncStart);
@@ -3470,12 +3475,18 @@ fn settings_sync_says_what_is_wrong_in_place() {
     let said = app.sync.error.clone().unwrap();
     let _ = drawn(&mut d, &mut app, "");
     assert!(d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|x| x.starts_with(&said[..40]))), "said in place");
+    // A server that takes passwords: a code or them, chosen; the words
+    // asked for apart. One field for a code, whichever kind.
+    app.connect.assume("https://notes.example.com", server_info(&["passwords"]));
+    assert!(drawn(&mut d, &mut app, "Add this device") && drawn(&mut d, &mut app, "Email and password"));
+    assert!(drawn(&mut d, &mut app, "Use recovery words"));
+    assert!(!drawn(&mut d, &mut app, "Pairing code"), "no kinds of code to choose between");
     app.on_plain(Msg::SyncHow { to: 1 });
     d.frame(&mut app);
-    assert!(drawn(&mut d, &mut app, "Recover"));
-    assert!(drawn(&mut d, &mut app, "Use a code"));
+    assert!(drawn(&mut d, &mut app, "Recover") && drawn(&mut d, &mut app, "Step 3 of 3"));
+    app.on_plain(Msg::SyncBack);
     // The third way: an email and password, the password as dots.
-    assert!(drawn(&mut d, &mut app, "Use email and password"));
+    assert!(drawn(&mut d, &mut app, "Email and password"));
     app.on_plain(Msg::SyncHow { to: 2 });
     d.frame(&mut app);
     assert!(drawn(&mut d, &mut app, "Sign in"));
@@ -3504,8 +3515,9 @@ fn the_password_field_is_a_password_field_until_shown() {
     let mut app = Carnet::new(store);
     let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
     app.settings_open = true;
-    app.sync_how = 2;
+    app.connect.assume("https://notes.example.com", server_info(&["passwords"]));
     app.sync_password = "hunter22".into();
+    app.on_plain(Msg::SyncHow { to: 2 });
     d.core.set_inspect(true);
     d_frame_twice(&mut app, &mut d);
     let fields = |d: &mut Drive| d.core.access_tree().nodes.iter().filter(|n| n.role == kui_native::Role::PasswordInput).map(|n| n.name.clone()).collect::<Vec<_>>();
@@ -3747,18 +3759,28 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     // Tall enough that Settings → Sync shows whole, to click in.
     let mut d = Drive::new(Core::new(), 1100.0, 4400.0).framing();
     a.settings_open = true;
-    a.sync_server = origin.clone();
-    until("asked whether it takes signups", &mut a, &mut d, &|x| x.signup.offered().is_some());
-    assert!(drawn(&mut d, &mut a, "New here?"));
-    let open = d.key_of("signup-open").expect("Make an account");
-    assert_eq!(d.key_named("Make an account"), Some(open));
+    d_frame_twice(&mut a, &mut d);
+    // The server typed, and Enter: asked what it is.
+    let server = app_field(&a, Field::SyncServer).expect("the server's field");
+    d.click_key(&mut a, server);
+    d.frame(&mut a);
+    type_in(&mut a, &mut d, &origin);
+    assert_eq!(a.sync_server, origin);
+    key(&mut a, &mut d, "enter");
+    assert!(a.connect.checking() || a.connect.step() == crate::connect::Step::Way);
+    until("checked", &mut a, &mut d, &|x| x.connect.step() == crate::connect::Step::Way);
+    assert!(drawn(&mut d, &mut a, "Carnet server, up to date") && drawn(&mut d, &mut a, "Step 2 of 3"));
+    assert!(drawn(&mut d, &mut a, "Add this device"));
+    assert!(!drawn(&mut d, &mut a, "Email and password"), "this one takes no passwords");
+    let open = d.key_of("sync-way-3").expect("Make an account");
+    assert_eq!(d.key_named("Make an account"), Some(open), "the row is a button, by its name");
     let r = d.rect_of(open).unwrap();
     d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
     d_frame_twice(&mut a, &mut d);
-    assert!(drawn(&mut d, &mut a, "Make an account"));
+    assert!(drawn(&mut d, &mut a, "Make an account") && drawn(&mut d, &mut a, "Step 3 of 3"));
     // Only that: the code and the other ways in are out of the way.
-    assert!(d.key_of("sync-code").is_none() && d.key_of("sync-how-1").is_none(), "no code field, no other ways in");
-    assert!(drawn(&mut d, &mut a, "I already have an account"));
+    assert!(d.key_of("sync-code").is_none() && d.key_of("sync-way-1").is_none(), "no code field, no other ways in");
+    assert!(drawn(&mut d, &mut a, "Back"));
     assert_eq!(focused(&a, &d), Some(Field::SignupEmail), "the email field has the keyboard");
     type_in(&mut a, &mut d, "ann@example.com");
     assert_eq!(a.signup.email, "ann@example.com");
@@ -3775,7 +3797,7 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     d_frame_twice(&mut a, &mut d);
     assert!(drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here."));
     assert!(!drawn(&mut d, &mut a, "Send me an invite"), "the email field gone");
-    assert!(drawn(&mut d, &mut a, "No invite yet?"), "asked again if it doesn't come");
+    assert!(drawn(&mut d, &mut a, "Add this device") && drawn(&mut d, &mut a, "No invite yet?"), "the code's form, asked again if it doesn't come");
     assert_eq!(focused(&a, &d), Some(Field::SyncCode));
     {
         let asked = asked.lock().unwrap();
@@ -3786,10 +3808,11 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     }
     // Asked again within the server's mail limit: nothing went, and it
     // says when the last did, and when another can be asked for.
-    let again = d.key_of("signup-open").expect("Ask again");
+    let again = d.key_of("signup-again").expect("Ask again");
     let r = d.rect_of(again).unwrap();
     d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
     d_frame_twice(&mut a, &mut d);
+    assert_eq!(a.signup.email, "ann@example.com", "the email as typed");
     let send = d.key_of("signup-send").expect("Send me an invite");
     let r = d.rect_of(send).unwrap();
     d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
@@ -3807,6 +3830,7 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     assert_eq!(a.sync_code, invite.text());
     key(&mut a, &mut d, "enter");
     until("in", &mut a, &mut d, &|x| x.sync.status == crate::sync::Status::Online);
+    assert_eq!(a.connect.step(), crate::connect::Step::Server, "the steps start again for next time");
 
     // A server of one's own: no signups, so nothing of them.
     let own = std::env::temp_dir().join(format!("carnet-app-signup-own-{}", std::process::id()));
@@ -3820,9 +3844,11 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     let (mut b, mut db, dir_b) = fresh("signup-own");
     b.settings_open = true;
     b.sync_server = own_origin;
-    until("asked", &mut b, &mut db, &|x| x.signup.answered());
-    assert!(b.signup.offered().is_none());
-    assert!(!drawn(&mut db, &mut b, "New here?"));
+    b.on_plain(Msg::SyncCheck);
+    until("checked", &mut b, &mut db, &|x| !x.connect.checking());
+    assert!(!drawn(&mut db, &mut b, "Make an account") && !drawn(&mut db, &mut b, "No invite yet?"));
+    b.on_plain(Msg::SignupSend);
+    assert!(!b.signup.sending(), "no invite asked of a server that makes no accounts");
 
     let _ = stop.send(());
     let _ = stop_own.send(());
@@ -3833,6 +3859,177 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     }
     let _ = std::fs::remove_dir_all(&data);
     let _ = std::fs::remove_dir_all(&own);
+}
+
+/// Waits, frame by frame, for `done`.
+fn until_done(what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool) {
+    let t0 = std::time::Instant::now();
+    while !done(app) {
+        assert!(t0.elapsed() < std::time::Duration::from_secs(20), "timed out: {what}");
+        d.frame(app);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// A fresh app, tall enough that Settings → Sync shows whole, to click
+/// in; Settings open.
+fn tall(name: &str) -> (Carnet, Drive, std::path::PathBuf) {
+    let (store, dir) = temp_store(name);
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 4400.0).framing();
+    app.settings_open = true;
+    d_frame_twice(&mut app, &mut d);
+    (app, d, dir)
+}
+
+/// Settings → Sync's server typed, and Continue: asked what it is, the
+/// answer waited for.
+fn check_server(app: &mut Carnet, d: &mut Drive, typed: &str) {
+    app.sync_server = typed.into();
+    app.on_plain(Msg::SyncCheck);
+    assert!(app.connect.checking() || app.connect.problem.is_some());
+    until_done("checked", app, d, &|x| !x.connect.checking());
+    d_frame_twice(app, d);
+}
+
+/// A server of one's own, taking only codes: nothing to choose between,
+/// so straight to the code (the words still there), two steps in all;
+/// Back is to the server, as typed. An address nothing answers at, and
+/// one where something not Carnet does, are said so on the first step.
+#[test]
+fn a_server_that_takes_only_codes_goes_straight_to_the_code() {
+    use carnet_server::server::{self, Config};
+    let data = std::env::temp_dir().join(format!("carnet-app-codes-only-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    let (mut a, mut d, dir) = tall("codes-only");
+    assert!(drawn(&mut d, &mut a, "Continue"));
+
+    // Something that takes the connection and never answers: asked
+    // until Cancel.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    a.sync_server = format!("http://{}", silent.local_addr().unwrap());
+    a.on_plain(Msg::SyncCheck);
+    assert!(a.connect.checking() && drawn(&mut d, &mut a, "Checking\u{2026}"));
+    let cancel = d.key_named("Cancel").expect("Cancel");
+    d.click_key(&mut a, cancel);
+    d_frame_twice(&mut a, &mut d);
+    assert!(!a.connect.checking() && a.connect.problem.is_none() && drawn(&mut d, &mut a, "Continue"));
+    drop(silent);
+    // Nothing answers there.
+    check_server(&mut a, &mut d, "http://127.0.0.1:1");
+    assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::Unreachable));
+    assert_eq!(a.connect.step(), crate::connect::Step::Server);
+    assert!(drawn(&mut d, &mut a, carnet_sync::info::Problem::Unreachable.words()));
+    // Something answers, not Carnet (the server, under a path it hasn't).
+    check_server(&mut a, &mut d, &format!("{origin}/elsewhere"));
+    assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::NotCarnet));
+    assert!(drawn(&mut d, &mut a, carnet_sync::info::Problem::NotCarnet.words()));
+    assert!(drawn(&mut d, &mut a, "Where are your notes?"), "still on the first step");
+
+    // Codes only: the code's form, straight away.
+    check_server(&mut a, &mut d, &origin);
+    assert!(a.connect.problem.is_none());
+    assert_eq!(a.connect.step(), crate::connect::Step::Form);
+    assert!(drawn(&mut d, &mut a, "Step 2 of 2") && drawn(&mut d, &mut a, "Add this device"));
+    assert!(d.key_of("sync-code").is_some() && drawn(&mut d, &mut a, "Connect"));
+    assert!(!drawn(&mut d, &mut a, "Email and password") && !drawn(&mut d, &mut a, "Make an account"));
+    assert_eq!(d.core.focus().and_then(|k| a.fields.get(&k)).copied(), Some(Field::SyncCode), "the code's field has the keyboard");
+    // The words, from here; and back to a code.
+    let words = d.key_named("Use recovery words").expect("the words, still");
+    d.click_key(&mut a, words);
+    d_frame_twice(&mut a, &mut d);
+    assert_eq!(a.sync_how, 1);
+    assert!(drawn(&mut d, &mut a, "Recover"));
+    assert!(drawn(&mut d, &mut a, "Use a code instead"));
+    a.on_plain(Msg::SyncHow { to: 0 });
+    d_frame_twice(&mut a, &mut d);
+    // A wrong code: said on this step.
+    a.sync_code = "47-12".into();
+    a.on_plain(Msg::SyncStart);
+    d_frame_twice(&mut a, &mut d);
+    assert!(a.sync.error.as_deref().is_some_and(|e| e.starts_with("That isn't a code")));
+    assert!(drawn(&mut d, &mut a, "Connect"), "on the code's step still");
+    // Back: to the server, as typed.
+    let back = d.key_named("Back").expect("Back");
+    d.click_key(&mut a, back);
+    d_frame_twice(&mut a, &mut d);
+    assert_eq!(a.connect.step(), crate::connect::Step::Server);
+    assert!(a.sync.error.is_none());
+    assert_eq!(a.sync_server, origin);
+    let field = app_field(&a, Field::SyncServer).expect("the server's field");
+    assert_eq!(d.core.edit_text(field).as_deref(), Some(origin.as_str()), "the address kept in its field");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A hosted service that takes passwords and signups: every way in
+/// offered, each a row; Change goes back to the server, its address kept;
+/// Back from a way's form is to the ways.
+#[test]
+fn a_hosted_server_offers_every_way_in() {
+    use carnet_server::server::{self, Config};
+    let data = std::env::temp_dir().join(format!("carnet-app-every-way-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let host = server::Host { signup: Some(format!("{origin}/start")), passwords: true, first_invite: false, ..server::Host::default() };
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+        let _ = stopped.await;
+    }));
+    let (mut a, mut d, dir) = tall("every-way");
+    check_server(&mut a, &mut d, &origin);
+    assert_eq!(a.connect.step(), crate::connect::Step::Way, "{:?}", a.connect.problem);
+    assert!(!a.connect.checking() && a.connect.problem.is_none());
+    assert!(drawn(&mut d, &mut a, "Step 2 of 3") && drawn(&mut d, &mut a, &origin) && drawn(&mut d, &mut a, "Carnet server, up to date"));
+    for (key, name) in [("sync-way-0", "Add this device"), ("sync-way-2", "Email and password"), ("sync-way-3", "Make an account")] {
+        let k = d.key_of(key).unwrap_or_else(|| panic!("{name}"));
+        assert_eq!(d.key_named(name), Some(k), "{name}: a row, a button by its name");
+    }
+    assert!(drawn(&mut d, &mut a, "A code from another of your devices, or an invite"));
+    assert!(drawn(&mut d, &mut a, "The ones set on another of your devices"));
+    assert!(drawn(&mut d, &mut a, "We'll email you an invite"));
+    assert!(drawn(&mut d, &mut a, "Use recovery words"));
+    assert!(d.key_of("sync-code").is_none(), "no form before a way is chosen");
+
+    // Email and password: its form, and Back to the ways.
+    let row = d.key_of("sync-way-2").unwrap();
+    d.click_key(&mut a, row);
+    d_frame_twice(&mut a, &mut d);
+    assert!(drawn(&mut d, &mut a, "Step 3 of 3") && drawn(&mut d, &mut a, "Sign in"));
+    assert!(app_field(&a, Field::SyncEmail).is_some() && app_field(&a, Field::SyncPassword).is_some());
+    assert_eq!(d.core.focus().and_then(|k| a.fields.get(&k)).copied(), Some(Field::SyncEmail));
+    let back = d.key_named("Back").expect("Back");
+    d.click_key(&mut a, back);
+    d_frame_twice(&mut a, &mut d);
+    assert_eq!(a.connect.step(), crate::connect::Step::Way);
+    assert!(drawn(&mut d, &mut a, "Make an account"));
+
+    // Change: the server's step, its address as typed.
+    let change = d.key_named("Change").expect("Change");
+    d.click_key(&mut a, change);
+    d_frame_twice(&mut a, &mut d);
+    assert_eq!(a.connect.step(), crate::connect::Step::Server);
+    let field = app_field(&a, Field::SyncServer).expect("the server's field");
+    assert_eq!(d.core.edit_text(field).as_deref(), Some(origin.as_str()));
+    assert_eq!(d.core.focus(), Some(field), "the keyboard in it");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 /// A passkey made in a browser shows in the app's Settings → Sync by its
@@ -4284,6 +4481,9 @@ fn two_apps_sync_through_a_server() {
         d.core.edit_text(k)
     };
     b.settings_open = true;
+    // The server asked first: one of one's own, straight to the code.
+    b.on_plain(Msg::SyncCheck);
+    until("B's server asked", &mut [(&mut b, &mut db)], &|x| x[0].0.connect.step() == crate::connect::Step::Form);
     d_frame_twice(&mut b, &mut db);
     assert_eq!(code_field(&b, &db).as_deref(), Some(code.as_str()));
     // The new note fresh() opened is B's own: it stays.
@@ -4411,8 +4611,14 @@ fn two_apps_sync_through_a_server() {
         !x[1].0.sync.is_on() && x[0].0.sync.devices.as_ref().is_some_and(|l| l.len() == 2)
     });
     assert!(b.sync.error.as_deref().is_some_and(|e| e.contains("removed")), "{:?}", b.sync.error);
-    // Off again, its Settings show an empty code field, not the old code.
+    // Off again, its Settings start from the server, its address kept;
+    // then an empty code field, not the old code.
     b.settings_open = true;
+    d_frame_twice(&mut b, &mut db);
+    assert!(drawn(&mut db, &mut b, "Where are your notes?"));
+    assert_eq!(b.sync_server, origin);
+    b.on_plain(Msg::SyncCheck);
+    until("B's server asked again", &mut [(&mut b, &mut db)], &|x| x[0].0.connect.step() == crate::connect::Step::Form);
     d_frame_twice(&mut b, &mut db);
     assert!(drawn(&mut db, &mut b, "Connect"));
     assert_eq!(code_field(&b, &db).as_deref(), Some(""), "the old code left in the field");
