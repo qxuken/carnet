@@ -1353,6 +1353,36 @@ impl Carnet {
     }
 }
 
+/// Where a menu hung from a button at `at` opens so that it stays inside
+/// the window: moved left, as far as needed, from under the button. On a
+/// Mac the platform draws the menu and keeps it only on the screen, and
+/// says nothing of its width beforehand, so that is measured here, near
+/// enough: the widest row's words and shortcut at the menu's size, the
+/// tick's room before them and the panel's after.
+pub(super) fn keep_in_window(ui: &mut Ui<'_>, at: Vec2, items: &[MenuItem]) -> Vec2 {
+    let style = TextStyle::new(MENU_TEXT);
+    let (mut words, mut keys) = (0.0f32, 0.0f32);
+    for item in items {
+        words = words.max(ui.measure_text(&item.label, &style, None).width);
+        if let Some(a) = item.accel_text() {
+            keys = keys.max(ui.measure_text(a, &style, None).width);
+        }
+    }
+    let keys = if keys > 0.0 { MENU_KEYS_GAP + keys } else { 0.0 };
+    let w = (MENU_BEFORE + words + keys + MENU_AFTER).max(ui.metrics().menu_width);
+    let room = ui.viewport().w - MENU_MARGIN;
+    Vec2::new(at.x.min(room - w).max(MENU_MARGIN), at.y)
+}
+
+/// A menu's words, as the platform draws them.
+const MENU_TEXT: f32 = 13.0;
+/// A menu row's room before its words (the tick's) and after them, the
+/// gap to its shortcut, and how far a menu keeps from the window's edge.
+const MENU_BEFORE: f32 = 32.0;
+const MENU_AFTER: f32 = 24.0;
+const MENU_KEYS_GAP: f32 = 24.0;
+const MENU_MARGIN: f32 = 8.0;
+
 /// A toolbar tool as data: drawn while its group fits, an item of the More
 /// menu when it does not.
 #[derive(Clone, Debug)]
@@ -1453,11 +1483,15 @@ impl<'a> Tool<'a> {
             })
             .transition(if self.calm { 900.0 } else { 140.0 })
             .label(self.name)
-            .tooltip(&self.hint)
             // Where it is: what a menu it opens hangs from.
             .on_layout(Value::Null);
         if let Some(state) = self.toggle {
             spec = spec.role(Role::Checkbox).checked(state);
+        }
+        // Not while a menu is open: the pointer, still over the button
+        // that opened it to the window, would call one up behind it.
+        if ui.core().menu().is_none() {
+            spec = spec.tooltip(&self.hint);
         }
         let (icon, filled) = (self.icon, self.filled);
         let ink = if filled { t.accent } else { ink };

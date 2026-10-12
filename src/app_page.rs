@@ -2479,6 +2479,11 @@ impl Carnet {
     pub(super) fn link_editor(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let Some(le) = self.link_edit.clone() else { return };
         let t = l.t;
+        // Its first frame: placed now, and its field given this link's
+        // address. kui keeps a field's text while it is away, so it would
+        // show the last link's (a `javascript:` one beside this one's
+        // Open, say).
+        let fresh = le.at.is_none();
         let at = match le.at {
             Some(at) => at,
             None => {
@@ -2547,6 +2552,9 @@ impl Carnet {
             },
         );
         if let Some(k) = field {
+            if fresh {
+                ui.set_edit_text(k, &le.url);
+            }
             self.fields.insert(k, Field::Link);
             self.apply_focus(ui, k, Field::Link);
         }

@@ -1560,6 +1560,41 @@ fn a_link_is_made_and_edited_in_its_editor() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The link editor opened again, on another link or on none, shows that
+/// one's address: not what the field held when it was last put away.
+#[test]
+fn the_link_editor_shows_the_link_it_was_opened_on() {
+    let (mut app, mut d, dir) = body("link-again");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "one two");
+    let slot = app.caret.head.slot;
+    key_with(&mut app, &mut d, "k", CTRL);
+    d.frame(&mut app);
+    type_in(&mut app, &mut d, "https://x.test/two");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app)[0], "one [two](https://x.test/two)");
+    d.frame(&mut app);
+    let field = |d: &mut Drive| {
+        let k = d.key_of("link-url").expect("the link's field");
+        d.core.edit_text(k).unwrap_or_default()
+    };
+    // On a word with no link: an empty field.
+    click_drawn(&mut app, &mut d, slot, 1);
+    key_with(&mut app, &mut d, "k", CTRL);
+    d.frame(&mut app);
+    d.frame(&mut app);
+    assert_eq!(field(&mut d), "");
+    key(&mut app, &mut d, "escape");
+    d.frame(&mut app);
+    // On the link: its address.
+    click_drawn(&mut app, &mut d, slot, 5);
+    key_with(&mut app, &mut d, "k", CTRL);
+    d.frame(&mut app);
+    d.frame(&mut app);
+    assert_eq!(field(&mut d), "https://x.test/two");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_link_typed_without_a_scheme_is_given_the_webs() {
     let (mut app, mut d, dir) = body("link-scheme");
@@ -6901,6 +6936,18 @@ fn the_library_edge_is_solid_its_whole_height() {
             let what = format!("{backdrop:?} {theme:?}");
             assert_eq!(n.bg.a, 1.0, "solid: {what}");
             assert_eq!((n.rect.y, n.rect.h), (0.0, d.viewport.h), "the window's height: {what}");
+            // Nothing drawn over it: the fade under the toolbar, laid
+            // across the page's first points, notched it.
+            let over: Vec<_> = d
+                .core
+                .nodes()
+                .into_iter()
+                .filter(|o| o.key != n.key && o.float && o.layer >= n.layer && o.rect.w > 0.0 && o.rect.h > 0.0)
+                .filter(|o| o.rect.x < n.rect.x + n.rect.w && n.rect.x < o.rect.x + o.rect.w)
+                .filter(|o| o.rect.y < n.rect.y + n.rect.h && n.rect.y < o.rect.y + o.rect.h)
+                .map(|o| (o.label, o.rect))
+                .collect();
+            assert!(over.is_empty(), "nothing over it: {what}: {over:?}");
             let rest = n.bg;
             d.move_to(&mut app, n.rect.x + 3.0, 300.0);
             d_frame_twice(&mut app, &mut d);

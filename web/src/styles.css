@@ -59,7 +59,8 @@ button { font: inherit; color: inherit; }
    headings 30/40, 24/32 and 19/28, in the serif at its own weight. */
 .note { font: 400 16px/27px var(--sans); overflow-wrap: anywhere; }
 .note h1, .note h2, .note h3 { font-family: var(--serif); font-weight: 400; line-height: 1.25; }
-.note h1 { font-size: 36px; line-height: 46px; margin: 0 0 18px; }
+/* The title's space below, the desktop's: its 18 and a paragraph's 6. */
+.note h1 { font-size: 36px; line-height: 46px; margin: 0 0 24px; }
 /* A heading of the first level under the title: the editor's size. */
 /* The space round a heading, the desktop's: more above than below. */
 .note h1:not(:first-child) { font-size: 30px; line-height: 40px; margin: 34px 0 12px; }
@@ -97,13 +98,16 @@ button { font: inherit; color: inherit; }
    border's colour for the rounded frame and the rules; the header row
    small and quiet on a wash; the cells roomy, in the words' type. Never
    beside pictures at an edge (carnet_core::page::runs_beside): below
-   them. Its box (export::viewer's `div.table`) scrolls one too wide. */
-.note .table { clear: both; margin: 12px 0; padding-top: 8px; overflow-x: auto; }
+   them. Its box (export::viewer's `div.table`) scrolls one too wide.
+   The desktop's 14 above and below it: 8 of its own, and the margin
+   it shares with the block beside, a paragraph's 6. The header's 12.5
+   is 13 as the desktop rounds a page size (`Look::px`). */
+.note .table { clear: both; margin: 12px 0; padding: 8px 0; overflow-x: auto; }
 .note table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; border: 1px solid var(--border); border-radius: var(--radius); }
 .note th, .note td { border: 0; border-top: 1px solid var(--border); border-left: 1px solid var(--border); padding: 8px 14px; text-align: left; vertical-align: top; }
 .note tr:first-child > * { border-top: 0; }
 .note tr > :first-child { border-left: 0; }
-.note th { background: var(--sunken); color: var(--muted); font: 400 12.5px/18px var(--sans); padding: 9px 14px; }
+.note th { background: var(--sunken); color: var(--muted); font: 400 13px/18px var(--sans); padding: 9px 14px; }
 .note tr:first-child > :first-child { border-top-left-radius: calc(var(--radius) - 1px); }
 .note tr:first-child > :last-child { border-top-right-radius: calc(var(--radius) - 1px); }
 /* A divider as the desktop draws it by default (settings `divider =
@@ -124,11 +128,12 @@ button { font: inherit; color: inherit; }
 .note :is(td, th) .picture-card { width: min(45cqi, 280px); min-height: 72px; }
 /* Pictures at an edge, one after another (`--n` of them): a row there,
    side by side, each its share of the page's width, and one no width was
-   given at most 45% of it, as the desktop sizes them. What follows runs
+   given at most 45% of it, as the desktop sizes them; 20 below, the
+   desktop's 14 and the next block's 6. What follows runs
    beside the row, a block at a time, where 180px or more is left; else
    it goes below. A picture on a line of its own, or another row, starts
    below. Widths are of the note (Reader's `.reading`, a container). */
-.note .pictures { --share: calc((100cqi - (var(--n) - 1) * 16px) / var(--n)); display: flex; gap: 16px; align-items: flex-start; max-width: 100%; margin: 8px 0 14px; }
+.note .pictures { --share: calc((100cqi - (var(--n) - 1) * 16px) / var(--n)); display: flex; gap: 16px; align-items: flex-start; max-width: 100%; margin: 8px 0 20px; }
 .note .pictures.left { float: left; margin-right: 20px; }
 .note .pictures.right { float: right; margin-left: 20px; }
 .note .pictures img { flex: none; min-width: 48px; max-width: var(--share); }
