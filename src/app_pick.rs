@@ -155,8 +155,8 @@ impl Carnet {
         }
     }
 
-    /// The menu for what is chosen: to the trash, or (notes only) to a
-    /// folder.
+    /// The menu for what is chosen: to the trash, or to a folder (never
+    /// one of the chosen folders, or one inside them).
     pub(super) fn picked_menu(&self) -> Vec<MenuItem> {
         let (folders, notes) = self.picked_now();
         let what = Self::picked_words(folders.len(), notes.len());
@@ -168,9 +168,10 @@ impl Carnet {
             MenuItem::new(label).id(Value::map(m))
         };
         let mut items = Vec::new();
-        if folders.is_empty() && !notes.is_empty() {
-            let mut targets = vec![item("Out of their folders".into(), Some(""))];
-            targets.extend(self.store.folders.iter().map(|f| item(f.clone(), Some(f))));
+        if !folders.is_empty() || !notes.is_empty() {
+            let inside = |f: &str| folders.iter().any(|o| f == o || f.starts_with(&format!("{o}/")));
+            let mut targets = vec![item("To the top".into(), Some(""))];
+            targets.extend(self.store.folders.iter().filter(|f| !inside(f)).map(|f| item(f.clone(), Some(f))));
             items.push(MenuItem::submenu(format!("Move {what} to"), targets));
             items.push(MenuItem::separator());
         }

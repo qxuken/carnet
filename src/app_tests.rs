@@ -7711,6 +7711,32 @@ fn several_chosen_are_dragged_into_a_folder_together() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A choice with a folder in it is offered "Move … to" in its menu too,
+/// never into one of the chosen folders or one inside them; chosen, it
+/// moves them all.
+#[test]
+fn chosen_folders_and_notes_move_by_the_menu_too() {
+    let (mut app, mut d, dir) = library("menu-picked", &[("Home/Pantry", "rice"), ("Home/Deep/Low", "x"), ("Loose", "words"), ("Dest/Kept", "k")]);
+    let i = app.store.notes.iter().position(|n| n.title == "Loose").unwrap();
+    app.open(i);
+    d_frame_twice(&mut app, &mut d);
+    let cmd = KeyMods { shift: false, ctrl: !cfg!(target_os = "macos"), alt: false, super_key: cfg!(target_os = "macos") };
+    let home = folder_row(&app, "Home");
+    d.input(&mut app, InputEvent::Modifiers(cmd));
+    d.click(&mut app, home.x, home.y);
+    d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+    d.frame(&mut app);
+    let menu = app.picked_menu();
+    let to = menu.iter().find(|m| m.label == "Move a folder and a note to").expect("offered");
+    let targets: Vec<&str> = to.submenu.iter().map(|m| m.label.as_str()).collect();
+    assert!(targets.contains(&"To the top") && targets.contains(&"Dest"), "{targets:?}");
+    assert!(!targets.iter().any(|t| t.starts_with("Home")), "never into itself: {targets:?}");
+    app.move_picked("Dest");
+    d.frame(&mut app);
+    assert!(dir.join("Dest/Home/Pantry.md").exists() && dir.join("Dest/Home/Deep/Low.md").exists() && dir.join("Dest/Loose.md").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// What is chosen in the library, by name: a folder's path with a `/`
 /// after it, a note's title; in order.
 fn picked_names(app: &Carnet) -> Vec<String> {
