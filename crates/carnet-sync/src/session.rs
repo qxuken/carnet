@@ -15,13 +15,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use loro_protocol::ProtocolMessage;
 
 use crate::compat::{Fit, Greeting};
-use crate::crypto::{
-    BlobId, Card, DeviceKey, MAX_BLOB, Random, RecoveryCode, Ring, VaultKey, blob_id, login_message, open_blob, open_rekey, seal_blob,
-    seal_rekey,
-};
+use crate::crypto::{BlobId, Card, DeviceKey, MAX_BLOB, Random, RecoveryCode, Ring, VaultKey, blob_id, login_message, open_blob, seal_blob};
 use crate::elo::{self, Header};
 use crate::note::NoteDoc;
 use crate::pair::{Opener, OpenerOut};
+use crate::rekey::{self, Signer};
 use crate::wire::{self, AccountRow, BatchId, Carnet, CrdtType, Deny, DeviceRow, Frame, InviteRow, LogRow, PasskeyRow, RoomRow, UpdateStatusCode};
 
 /// Where a session's notes are: one doc per room.
@@ -270,6 +268,9 @@ pub struct Session {
     setting: Option<(String, String, crate::password::Pending)>,
     /// The server's greeting, from its last challenge: what it can do.
     server: Option<Greeting>,
+    /// New epochs' keys that follow one this device has no key for yet:
+    /// taken once it has (`rekey.rs`).
+    early: Vec<Vec<u8>>,
 }
 
 /// A picture's bytes to move over HTTP, to or from a short-lived signed
@@ -317,6 +318,7 @@ impl Session {
             limited: false,
             setting: None,
             server: None,
+            early: Vec::new(),
         }
     }
 
@@ -514,9 +516,9 @@ impl Session {
     /// Takes `device` out of the account (§7), by the last list asked for.
     /// Another device: a new vault key, the next epoch's, goes sealed to
     /// each device kept and to each slot (the recovery code, the password,
-    /// each passkey), so the one taken out
-    /// reads nothing written from now on; this device takes it in when the
-    /// server confirms. This device itself: it leaves, and nothing else
+    /// each passkey) and signed by this one (`rekey.rs`), so the one taken
+    /// out reads nothing written from now on; this device takes it in when
+    /// the server confirms. This device itself: it leaves, and nothing else
     /// changes (it is not taken to be lost or stolen).
     pub fn revoke(&mut self, device: &[u8], rng: &mut impl Random) -> Result<(), String> {
         if self.state != State::Ready {
@@ -536,8 +538,15 @@ impl Session {
         let Ok(password) = &listed.password else {
             return Err("the password's card did not open: set the password again first".into());
         };
-        let epoch = listed.epoch.max(self.id.ring.current().0) + 1;
+        // The epoch after the newest this device has (§7): the server's
+        // number is only checked against it, never added to.
+        let newest = self.id.ring.current().0;
+        if listed.epoch > newest {
+            return Err("this device hasn't the account's newest key yet: wait a moment, then try again".into());
+        }
+        let epoch = newest.checked_add(1).ok_or("this account's keys can't change any more")?;
         let new = VaultKey::generate(rng);
+        let signer = Signer::new(&self.id.account, &self.id.device, &self.id.key, &self.id.ring, rng);
         let mut next = self.id.ring.clone();
         next.insert(epoch, new.clone());
         let (mut keys, mut cards) = (Vec::new(), Vec::new());
@@ -545,22 +554,22 @@ impl Session {
             let Some(card) = card else {
                 return Err("a device has not said who it is yet: open Carnet on each of your devices once, then try again".into());
             };
-            keys.push((row.id.clone(), seal_rekey(&card.boxed, epoch, &new, rng)));
+            keys.push((row.id.clone(), signer.seal(&card.boxed, epoch, &new, rng)));
             cards.push((row.id.clone(), card.seal(&next, rng)));
         }
         if let Some(card) = recovery {
-            keys.push((Vec::new(), seal_rekey(&card.boxed, epoch, &new, rng)));
+            keys.push((Vec::new(), signer.seal(&card.boxed, epoch, &new, rng)));
             cards.push((Vec::new(), card.seal(&next, rng)));
         }
         if let Some(card) = password {
-            keys.push((card.device.clone(), seal_rekey(&card.boxed, epoch, &new, rng)));
+            keys.push((card.device.clone(), signer.seal(&card.boxed, epoch, &new, rng)));
             cards.push((card.device.clone(), card.seal(&next, rng)));
         }
         for (_, card) in &listed.passkeys {
             let Some(card) = card else {
                 return Err("a passkey's card did not open: remove that passkey, then try again".into());
             };
-            keys.push((card.device.clone(), seal_rekey(&card.boxed, epoch, &new, rng)));
+            keys.push((card.device.clone(), signer.seal(&card.boxed, epoch, &new, rng)));
             cards.push((card.device.clone(), card.seal(&next, rng)));
         }
         self.send(Frame::Carnet(Carnet::Revoke { device: device.to_vec(), epoch, keys, cards }));
@@ -965,15 +974,25 @@ impl Session {
                 self.listed = Some(listed);
                 self.events.push(Event::Devices(infos));
             }
+            // A new epoch's key: taken only from a device in the account at
+            // this one's newest epoch, for the epoch right after it, never in
+            // place of a key it has (`rekey.rs`). One that follows a key not come yet is held
+            // until it has: the server sends them in order, but a device
+            // away across two removals may be sent them otherwise.
             Frame::Carnet(Carnet::Rekey { sealed }) => {
-                let Ok((epoch, key)) = open_rekey(&self.id.key.box_secret(), &sealed) else { return };
-                if self.id.ring.get(epoch) != Some(&key) {
-                    self.id.ring.insert(epoch, key);
+                if !self.early.contains(&sealed) {
+                    self.early.push(sealed);
+                }
+                let taken = rekey::take_all(&mut self.id.ring, &self.id.account, &self.id.key.box_secret(), &mut self.early);
+                if let Some(over) = self.early.len().checked_sub(rekey::MAX_HELD) {
+                    self.early.drain(..over);
+                }
+                for &epoch in &taken {
                     self.events.push(Event::Rekeyed(epoch));
-                    if self.state == State::Ready {
-                        let card = self.card(rng);
-                        self.send(Frame::Carnet(Carnet::SetCard { card }));
-                    }
+                }
+                if !taken.is_empty() && self.state == State::Ready {
+                    let card = self.card(rng);
+                    self.send(Frame::Carnet(Carnet::SetCard { card }));
                 }
             }
             Frame::Carnet(Carnet::Refused { reason }) => self.events.push(Event::Refused(reason)),

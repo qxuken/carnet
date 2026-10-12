@@ -23,6 +23,7 @@ pub mod net;
 pub mod pair;
 pub mod passkey;
 pub mod password;
+pub mod rekey;
 mod note;
 #[cfg(not(target_arch = "wasm32"))]
 mod replica;

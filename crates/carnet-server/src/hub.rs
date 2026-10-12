@@ -1088,7 +1088,7 @@ impl<S: Storage> Hub<S> {
         if !devices.iter().any(|(id, d)| *id == device && !d.revoked) {
             return refuse("that device is not in the account");
         }
-        if epoch != self.store.epoch(account) + 1 {
+        if self.store.epoch(account).checked_add(1) != Some(epoch) {
             return refuse("the account's keys changed meanwhile: try again");
         }
         let mut want: BTreeSet<Vec<u8>> = devices.iter().filter(|(id, d)| !d.revoked && *id != device).map(|(id, _)| id.clone()).collect();

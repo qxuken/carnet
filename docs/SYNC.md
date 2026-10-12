@@ -376,7 +376,7 @@ The server checks the signature against the device's public key and that the dev
    - the new device logs in on the same socket.
 
    A nameplate is spent on the first join, right code or not, so a guesser gets one try and a second joiner racing the first finds nothing. That's why six digits are enough.
-3. **Recovery,** when every device is lost: the new device derives the code's keys from the 12 words, signs the challenge with the recovery signing key (naming the new device, so the signature admits that device and no other), and is let in. The server returns the wrapped key ring and every epoch's key sealed to the code since. Setting a new code replaces the old one, which then finds nothing.
+3. **Recovery,** when every device is lost: the new device derives the code's keys from the 12 words, signs the challenge with the recovery signing key (naming the new device, so the signature admits that device and no other), and is let in. The server returns the wrapped key ring and every epoch's key sealed to the code since, each signed by the device that made it and taken as a device takes one (below). Setting a new code replaces the old one, which then finds nothing.
 
 There's no email in self-hosting, and passwords are optional (below). Losing every device and the recovery code means the notes on the server can't be read. The local `.md` files are untouched, because they never depended on sync.
 
@@ -386,13 +386,31 @@ There's no email in self-hosting, and passwords are optional (below). Losing eve
 - **Renaming** happens on the device itself; its card is re-sent sealed, and the other devices' lists show the new name.
 - **Online now.** The list (`Devices`) says which devices are logged in at the moment it's made (their places in it, added at the end, §14), and the apps say "Online now" for them rather than when their session began. A server from before says none, and the apps show when each was last seen, as before.
 - **Kept fresh.** When a device comes online (its card, sent on every login) or goes offline (its last socket closed, which is also when it was last seen), the server sends the list again, unasked, to the account's other devices online. It's the `Devices` frame they already know, so an app from before takes it as it would an answer. The apps also ask again each time Settings opens, which is all a server from before gives them.
-- **Removing another device** (`Revoke`): the removing device makes the next epoch's vault key, seals it to each remaining device and to every slot (recovery code, password, passkeys) with a one-off X25519 key agreement then AES-GCM, and re-seals their cards under it. The server accepts only if it covers every device and slot kept, no more and no fewer; otherwise it refuses (`Refused`) and nothing changes. If it accepts, in one transaction: the device is marked removed, its sockets get `Denied` and close, and each remaining device gets its key (`Rekey`) now if online, else at its next login. The removing device takes the new key only from the server's `Rekey`, so a refused removal never leaves it sealing under a key nobody else has.
+- **Removing another device** (`Revoke`): the removing device makes the next epoch's vault key, seals it to each remaining device and to every slot (recovery code, password, passkeys) with a one-off X25519 key agreement then AES-GCM, signs each (below), and re-seals their cards under it. The server accepts only if it covers every device and slot kept, no more and no fewer; otherwise it refuses (`Refused`) and nothing changes. If it accepts, in one transaction: the device is marked removed, its sockets get `Denied` and close, and each remaining device gets its key (`Rekey`) now if online, else at its next login. The removing device takes the new key only from the server's `Rekey`, so a refused removal never leaves it sealing under a key nobody else has.
+- **Signed keys** (`rekey.rs`, protocol 2). A box alone says nothing of who sealed it, and every device that was ever in the account has every box key (they're on the cards, and never change). So a device removed, with the server's help, could seal a key of its own to each device kept at any time after, as the next epoch; each would take it, and everything written from then on, compaction's snapshots and so whole histories included, would be sealed under a key it holds. So each key goes signed by the device that made it:
+
+  ```
+  signed:  "carnet-rekey-v2" ‖ account id ‖ signer's device id ‖ the box key it's sealed to
+           ‖ the epoch it follows ‖ its epoch ‖ the box                    (each part length-prefixed)
+  sent:    signer's device id ‖ its card, sealed under the epoch it follows ‖ the box ‖ the signature
+  ```
+
+  The card is the signer's own (its id, signing key and box key; no name). The server keeps and relays what's sent as it did the box alone (`Revoke`'s keys, `Rekey`, `Recovered`), and can read none of it. A device, or a recovery from a slot, takes the key only if all of these hold, and otherwise leaves it out:
+
+  - the box opens for it, and the epoch inside is the one signed;
+  - it has no key for that epoch: **a key is never replaced** (`Ring::insert` won't either);
+  - the epoch is the one right after the epoch the card is sealed under, and that is the newest it has: epochs go up one at a time, so a key can't skip ahead;
+  - the card opens under that, its newest key, names the signer, and is a device's (an id of at most 64 bytes; a slot's is longer, the words' empty);
+  - the signature verifies under the card's signing key.
+
+  So the signer was in the account at the recipient's newest epoch. A device removed never was: it has no key for any epoch made after it went, so it can't seal a card under one, and whatever it sends is refused. A key that follows an epoch the device has no key for yet (away across two removals, the later sent first) is held, up to 64, and taken once the one before it has come; the server sends them in order anyway, and sends them all again at each login. The removing device works out the next epoch from its own newest key (`checked_add`), never from a number the server gave: if the server says the account is past it, it doesn't remove until it has caught up.
 - **Leaving** (turning sync off) takes the device out without a new key, since a device leaving isn't lost or stolen.
 - **Rings.** A device keeps every epoch's key, so what was written before still reads; new records are sealed under the newest. Pairing hands over the whole ring.
 
 **What removal doesn't cover:**
 
 - A device offline when another is removed keeps sealing under the old key until it comes back for the new one. The removed device could read those records if it ever obtained them; it can't from this server.
+- The same device, or a slot whose wrapped ring is older than the removal, can't tell the new key from one the removed device makes for that same epoch: both signers were in the account at the newest epoch it has. A server colluding with the removed device could hand it that one first, which gains them no more than keeping the real one from it, as above. Every device that has the key made after a removal refuses anything the removed device sends from then on.
 - A server colluding with the device being removed could slip in a device of its own making before the removal, with a card sealed under the old key the removed device knows. The new key would then be sealed to it too. Closing this needs devices to vouch for each other with their signing keys, or safety numbers compared by eye; neither exists yet.
 - Records already written stay under their old epoch until compaction re-seals the room's snapshot under the newest.
 
@@ -611,7 +629,7 @@ The `wire` target found that the Loro Protocol crate's decoders reserve memory f
 
 200 seeds run on every `cargo test` (more with `SIM_SEEDS=N`), alternating in-memory and SQLite storage (and Postgres when `CARNET_TEST_POSTGRES` is set). Each safety check (coverage on compaction, shutting out a removed device) has been confirmed by removing it and watching the simulation fail.
 
-**Integration tests** (`crates/carnet-server/tests/`, on memory and SQLite): logins and authorization frame by frame (`auth.rs`), accounts never seeing each other's records (`accounts_never_meet`), pairing and removal, recovery, passwords, passkeys, invites, compaction and repair, pictures, deletion, quotas, compatibility across protocol versions, and the binary end to end over real sockets (`server.rs`), including that neither the database nor its WAL holds a word of the notes.
+**Integration tests** (`crates/carnet-server/tests/`, on memory and SQLite): logins and authorization frame by frame (`auth.rs`), accounts never seeing each other's records (`accounts_never_meet`), pairing and removal, new epochs' keys signed and a removed device's refused, held until the key before them comes, and no epoch overflowing (`rekey.rs`), recovery, passwords, passkeys, invites, compaction and repair, pictures, deletion, quotas, compatibility across protocol versions, and the binary end to end over real sockets (`server.rs`), including that neither the database nor its WAL holds a word of the notes.
 
 **Whole apps** (`src/app_tests.rs`, `src/sync_tests.rs`): desktop apps against the server's own code on a real socket: enrolling by invite, pairing, live edits into an open note, moves, pins, trash and folders following across devices, pictures, deletion, removal, passwords. A randomized vault test (`VAULT_SEEDS=N`) has two devices make, move, pin, rename, trash and restore notes and folders, apart and together, then checks both end with the same vault, files and notes. `crates/carnet-web/tests/viewer.rs` does the same for the web app's Rust against a desktop-like session, including a 10,000-note state.
 
@@ -657,7 +675,7 @@ Apps update when their owners let them, and a self-hosted server when its owner 
 
 **Who says what.**
 
-- The app puts its protocol in the socket's address: `/v1/sync?protocol=1`. None means 0: builds from before protocol numbers.
+- The app puts its protocol in the socket's address: `/v1/sync?protocol=2`. None means 0: builds from before protocol numbers.
 - The server's challenge carries its **greeting**: its protocol, its `OLDEST` and `DEPRECATED`, and its **features** by name (`compat::feature`: `passwords`, `passkeys`, `account-delete`, `remove`, `usage`, and `signup` where anyone may make an account by email). It's on every challenge, so a device joining by an invite, a code, the words, a password or a passkey reads it too, before it says anything.
 - `/v1/info` says the same, for a page to read before any socket opens.
 - **App too old:** the server sends the greeting, then `Denied` with the reason `Outdated`, and closes. The app says "Update Carnet to keep syncing" and retries now and then.
@@ -681,6 +699,11 @@ Apps update when their owners let them, and a self-hosted server when its owner 
 - This protocol's frames must encode byte for byte as its fixture says. A change fails with instructions: raise `PROTOCOL`, keep the old fixture, and bless the new one (`CARNET_BLESS=1 cargo test -p carnet-sync wire`).
 - Every tag the decoder knows needs a sample, so a new frame can't skip the fixture.
 - `tests/compat.rs` in both crates covers both sides: an app reading greetings, removals and later frames, and a running server greeting an app from before protocols and skipping a later one's frames.
+
+**The protocols so far.**
+
+- **1:** the first.
+- **2:** a new epoch's key goes signed by the device that made it, and a device takes no other (§7, "Signed keys"). `Revoke`'s keys, `Rekey` and `Recovered`'s keys are laid out as before; what they hold is a signed key, not a bare box. A protocol-1 app would read none of them (and lose every new epoch), and its own unsigned keys are refused, so the two can't share an account. `OLDEST` and `DEPRECATED` are 2 as well: no release with sync ever spoke 1, so it is dropped at once rather than over two releases. A protocol-1 app is turned away with `Outdated`, and a protocol-2 app won't talk to a protocol-1 server. Keys sealed by protocol 1 and still on a server (from a build before release) are refused; a device that missed one is paired in again with a code.
 
 **Policy.**
 
