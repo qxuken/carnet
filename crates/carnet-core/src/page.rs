@@ -1658,19 +1658,37 @@ pub fn float_toggled(now: doc::Float, to: doc::Float) -> doc::Float {
 }
 
 /// Where a dragged picture is let go: before block `i` (a line of its own
-/// between blocks), or beside another picture — the two side by side.
+/// between blocks), beside another picture — the two side by side — or
+/// among a table cell's words, at byte `at` of its text (past its end,
+/// at the end).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PicDrop {
     Before(usize),
     Beside { id: u64, after: bool },
+    Cell { slot: Slot, at: usize },
 }
 
 /// Picture `id` moved to `to`, and selected. Beside a picture on its own
 /// line, both go to the left edge, side by side; beside one at an edge,
-/// it joins that edge. One step of the history either way.
+/// it joins that edge. Into a table's cell, its line goes and the cell's
+/// words hold it, its width kept and its side left behind, which means
+/// nothing among words. One step of the history either way.
 pub fn move_picture(doc: &mut Doc, c: &mut Caret, id: u64, to: PicDrop) -> bool {
     let Some(from) = doc.index_of(id) else { return false };
     match to {
+        PicDrop::Cell { slot, at } => {
+            let Kind::Image { src, alt, width, wiki, .. } = doc.blocks()[from].kind.clone() else { return false };
+            if !is_cell(doc, slot) {
+                return false;
+            }
+            let md = wiki.then(|| doc::image_wiki(&alt, &src, width, doc::Float::None)).flatten();
+            let md = md.unwrap_or_else(|| doc::image_markdown(&alt, &src, width, doc::Float::None));
+            doc.remove(from);
+            let Some((a, b)) = put_in_cell(doc, slot, at, &md) else { return false };
+            doc.ensure_tail();
+            *c = Caret { anchor: Pos { slot, byte: a }, head: Pos { slot, byte: b } };
+            return true;
+        }
         PicDrop::Before(i) => {
             if i == from || i == from + 1 {
                 return false;
@@ -1699,6 +1717,101 @@ pub fn move_picture(doc: &mut Doc, c: &mut Caret, id: u64, to: PicDrop) -> bool 
         *c = select_blocks(doc, i, i);
     }
     true
+}
+
+/// The picture among the words of cell `from` that starts at byte `at`
+/// moved to `to`, and selected: to another place in those words, or
+/// another cell's, as it is written; out of the table to a line of its
+/// own, or beside another picture (as [`move_picture`] puts one), its
+/// width kept and a side it had among words left behind. Spaces it
+/// leaves doubled in the words are made one. One step of the history.
+pub fn move_cell_picture(doc: &mut Doc, c: &mut Caret, from: Slot, at: usize, to: PicDrop) -> bool {
+    if !is_cell(doc, from) {
+        return false;
+    }
+    let Some(p) = inline::cell_pictures(text(doc, from)).into_iter().find(|p| p.at.0 == at) else { return false };
+    let written = text(doc, from)[p.at.0..p.at.1].to_string();
+    match to {
+        PicDrop::Cell { slot, at: to_at } => {
+            if !is_cell(doc, slot) {
+                return false;
+            }
+            let mut to_at = cell_gap(text(doc, slot), to_at);
+            if slot == from {
+                if (p.at.0..=p.at.1).contains(&to_at) {
+                    return false;
+                }
+                let (lo, hi) = take_from_cell(doc, from, p.at);
+                to_at = if to_at >= hi { to_at - (hi - lo) } else { to_at.min(lo) };
+            } else {
+                take_from_cell(doc, from, p.at);
+            }
+            let Some((a, b)) = put_in_cell(doc, slot, to_at, &written) else { return false };
+            *c = Caret { anchor: Pos { slot, byte: a }, head: Pos { slot, byte: b } };
+            true
+        }
+        PicDrop::Before(i) => {
+            take_from_cell(doc, from, p.at);
+            let i = i.min(doc.len());
+            doc.insert(i, Block::new(Kind::Image { src: p.src, alt: p.alt, width: p.width, float: doc::Float::None, wiki: p.wiki }));
+            doc.ensure_tail();
+            *c = select_blocks(doc, i, i);
+            true
+        }
+        PicDrop::Beside { id: t, after } => {
+            let side = match doc.get(t).map(|b| &b.kind) {
+                Some(Kind::Image { float: doc::Float::None, .. }) => doc::Float::Left,
+                Some(Kind::Image { float, .. }) => *float,
+                _ => return false,
+            };
+            take_from_cell(doc, from, p.at);
+            let Some(ti) = doc.index_of(t) else { return false };
+            let i = if after { ti + 1 } else { ti };
+            doc.insert(i, Block::new(Kind::Image { src: p.src, alt: p.alt, width: p.width, float: side, wiki: p.wiki }));
+            set_image_float(doc, t, side);
+            doc.ensure_tail();
+            *c = select_blocks(doc, i, i);
+            true
+        }
+    }
+}
+
+/// Whether `slot` is a table's cell that is there.
+fn is_cell(doc: &Doc, slot: Slot) -> bool {
+    let Some((row, col)) = slot.cell else { return false };
+    matches!(doc.get(slot.block).map(|b| &b.kind), Some(Kind::Table(t)) if t.row_index(row).is_some() && t.col_index(col).is_some())
+}
+
+/// Where byte `at` of a cell's words puts something new: on a letter's
+/// edge, the end at most, and past a picture it falls inside.
+fn cell_gap(text: &str, at: usize) -> usize {
+    let at = floor_char(text, at.min(text.len()));
+    inline::cell_pictures(text).iter().find(|p| p.at.0 < at && at < p.at.1).map_or(at, |p| p.at.1)
+}
+
+/// `md` put among cell `slot`'s words at byte `at` ([`cell_gap`]): where
+/// it is now.
+fn put_in_cell(doc: &mut Doc, slot: Slot, at: usize, md: &str) -> Option<(usize, usize)> {
+    let at = cell_gap(text(doc, slot), at);
+    text_mut(doc, slot)?.insert_str(at, md);
+    Some((at, at + md.len()))
+}
+
+/// Bytes `a..b` of cell `slot`'s words taken out, and a space beside
+/// them that is then doubled, or left at an edge: what went, as bytes of
+/// the words before.
+fn take_from_cell(doc: &mut Doc, slot: Slot, (a, b): (usize, usize)) -> (usize, usize) {
+    let Some(t) = text_mut(doc, slot) else { return (a, a) };
+    let (before, after) = (&t[..a], &t[b..]);
+    let (lo, hi) = if before.ends_with(' ') && (after.is_empty() || after.starts_with(' ')) {
+        (a - 1, b)
+    } else if before.is_empty() && after.starts_with(' ') {
+        (a, b + 1)
+    } else {
+        (a, b)
+    };
+    t.replace_range(lo..hi, "");
+    (lo, hi)
 }
 
 /// Puts a new block of `kind` below the caret's block (in place of an
@@ -3464,5 +3577,127 @@ mod tests {
         let (mut d, mut c) = para("", 0);
         keys(&mut Typing::default(), &mut d, &mut c, "- milk");
         assert!(matches!(&d.blocks()[0].kind, Kind::Item { style: ListStyle::Bullet, text, .. } if text == "milk"));
+    }
+
+    /// A note of a line of words, a picture (`![view|right|260](a.png)`)
+    /// and a table of two rows, two columns: `x` and `y z` in its second.
+    fn with_table() -> (Doc, u64, Slot, Slot) {
+        let pic = Block::new(Kind::Image { src: "a.png".into(), alt: "view".into(), width: Some(260), float: Float::Right, wiki: false });
+        let id = pic.id;
+        let t = Table::from_cells(vec![vec!["A".into(), "B".into()], vec!["x".into(), "y z".into()]]);
+        let table = Block::new(Kind::Table(t.clone()));
+        let cell = |c: usize| Slot { block: table.id, cell: Some((t.rows[1].id, t.cols[c])) };
+        let (x, yz) = (cell(0), cell(1));
+        (doc(vec![Block::text("words"), pic, table, Block::text("")]), id, x, yz)
+    }
+
+    /// `f` made as an edit is, one step of the history, then undone:
+    /// what it did, and whether the undo gave the note back as it was.
+    fn undone(d: &mut Doc, c: &mut Caret, f: impl FnOnce(&mut Doc, &mut Caret) -> bool) -> (bool, String, bool) {
+        use crate::history::{History, State, Step};
+        let was = doc::to_markdown(None, d);
+        let mut h = History::default();
+        let before = State::of(d, *c);
+        let done = f(d, c);
+        h.record(Step::Other, c.head.slot.block, before);
+        let after = doc::to_markdown(None, d);
+        let back = h.undo(State::of(d, *c)).expect("a step to undo");
+        d.restore(back.blocks);
+        let same = doc::to_markdown(None, d) == was;
+        // And again, for what follows.
+        let ahead = h.redo(State::of(d, *c)).expect("a step to redo");
+        d.restore(ahead.blocks);
+        (done, after, same)
+    }
+
+    #[test]
+    fn a_picture_moves_into_a_cell_its_width_kept_its_side_dropped() {
+        let (mut d, id, x, _) = with_table();
+        let mut c = at(&d, 0, 0);
+        let (done, md, back) = undone(&mut d, &mut c, |d, c| move_picture(d, c, id, PicDrop::Cell { slot: x, at: usize::MAX }));
+        assert!(done && back, "{md}");
+        assert!(md.contains("| x![view|260](a.png) |"), "{md}");
+        assert!(!d.blocks().iter().any(|b| matches!(b.kind, Kind::Image { .. })), "its line gone");
+        let pic = "![view|260](a.png)";
+        assert_eq!(text(&d, x), format!("x{pic}"));
+        assert_eq!((c.anchor, c.head), (Pos { slot: x, byte: 1 }, Pos { slot: x, byte: 1 + pic.len() }), "selected");
+        // Where the drop is among the words; inside another picture, past it.
+        let (mut d, id, _, yz) = with_table();
+        let mut c = at(&d, 0, 0);
+        assert!(move_picture(&mut d, &mut c, id, PicDrop::Cell { slot: yz, at: 2 }));
+        assert_eq!(text(&d, yz), format!("y {pic}z"));
+        let p2 = Block::new(Kind::Image { src: "b b.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false });
+        let id2 = p2.id;
+        d.insert(0, p2);
+        assert!(move_picture(&mut d, &mut c, id2, PicDrop::Cell { slot: yz, at: 4 }));
+        assert_eq!(text(&d, yz), format!("y {pic}![](<b b.png>)z"));
+        // An Obsidian embed stays one.
+        let (mut d, _, x, _) = with_table();
+        let w = Block::new(Kind::Image { src: "photo.png".into(), alt: String::new(), width: Some(90), float: Float::Left, wiki: true });
+        let wid = w.id;
+        d.insert(0, w);
+        assert!(move_picture(&mut d, &mut c, wid, PicDrop::Cell { slot: x, at: 0 }));
+        assert_eq!(text(&d, x), "![[photo.png|90]]x");
+        // Not into a cell that isn't there.
+        let (mut d, id, x, _) = with_table();
+        let gone = Slot { cell: Some((1, 2)), ..x };
+        assert!(!move_picture(&mut d, &mut c, id, PicDrop::Cell { slot: gone, at: 0 }));
+        assert!(d.index_of(id).is_some());
+    }
+
+    #[test]
+    fn a_cells_picture_moves_to_another_cell_or_along_its_words() {
+        let (mut d, _, x, yz) = with_table();
+        let pic = "![|left|300](p.png)";
+        set_cell(&mut d, x, &format!("a {pic} b"));
+        let mut c = at(&d, 0, 0);
+        let (done, md, back) = undone(&mut d, &mut c, |d, c| move_cell_picture(d, c, x, 2, PicDrop::Cell { slot: yz, at: 1 }));
+        assert!(done && back, "{md}");
+        assert_eq!(text(&d, x), "a b", "a space, not two");
+        assert_eq!(text(&d, yz), format!("y{pic} z"), "as it was written");
+        assert_eq!((c.anchor.byte, c.head.byte, c.head.slot), (1, 1 + pic.len(), yz));
+        // Along its own words: to the end, and back to the start.
+        set_cell(&mut d, x, &format!("{pic} ab"));
+        assert!(move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Cell { slot: x, at: usize::MAX }));
+        assert_eq!(text(&d, x), format!("ab{pic}"));
+        assert!(move_cell_picture(&mut d, &mut c, x, 2, PicDrop::Cell { slot: x, at: 0 }));
+        assert_eq!(text(&d, x), format!("{pic}ab"));
+        // Where it is already: nothing.
+        assert!(!move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Cell { slot: x, at: pic.len() }));
+        // No picture there: nothing.
+        assert!(!move_cell_picture(&mut d, &mut c, x, 1, PicDrop::Cell { slot: yz, at: 0 }));
+    }
+
+    #[test]
+    fn a_cells_picture_moves_out_to_a_line_of_its_own_or_beside_another() {
+        let (mut d, id, x, _) = with_table();
+        set_cell(&mut d, x, "![sea\\|left\\|300](p.png) after");
+        let mut c = at(&d, 0, 0);
+        let (done, md, back) = undone(&mut d, &mut c, |d, c| move_cell_picture(d, c, x, 0, PicDrop::Before(0)));
+        assert!(done && back, "{md}");
+        assert!(md.starts_with("![sea|300](p.png)\n"), "{md}");
+        assert!(matches!(&d.blocks()[0].kind, Kind::Image { src, alt, width: Some(300), float: Float::None, wiki: false } if src == "p.png" && alt == "sea"));
+        assert_eq!(text(&d, x), "after");
+        assert_eq!(c, select_blocks(&d, 0, 0), "selected");
+        // At the note's end, past the last line.
+        set_cell(&mut d, x, "x![](q.png)");
+        assert!(move_cell_picture(&mut d, &mut c, x, 1, PicDrop::Before(usize::MAX)));
+        assert!(matches!(&d.blocks()[d.len() - 2].kind, Kind::Image { src, .. } if src == "q.png"));
+        assert!(matches!(&d.blocks()[d.len() - 1].kind, Kind::Text(t) if t.is_empty()), "a line to write on after it");
+        // Beside a picture at the right: at the right with it.
+        set_cell(&mut d, x, "![|120](r.png)");
+        assert!(move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Beside { id, after: true }));
+        let i = d.index_of(id).unwrap();
+        assert!(matches!(&d.blocks()[i + 1].kind, Kind::Image { src, width: Some(120), float: Float::Right, .. } if src == "r.png"));
+        assert_eq!(text(&d, x), "");
+        // Beside what isn't a picture: nothing.
+        set_cell(&mut d, x, "![](s.png)");
+        let words = d.blocks().iter().find(|b| b.text_ref() == Some("words")).unwrap().id;
+        assert!(!move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Beside { id: words, after: false }));
+        assert_eq!(text(&d, x), "![](s.png)");
+    }
+
+    fn set_cell(d: &mut Doc, slot: Slot, to: &str) {
+        *text_mut(d, slot).unwrap() = to.to_string();
     }
 }

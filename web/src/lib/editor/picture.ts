@@ -6,10 +6,18 @@
 // when let go; let go back at its own width, no width is written. A press
 // on a picture selects it. Where it sits, and sizes from a list, are the
 // toolbar's (Editor.svelte).
+//
+// A picture pressed and dragged is carried, as on the desktop: between
+// blocks (a line in the accent shows where), beside another picture (a
+// bar beside it), or into a table's cell (the cell ringed), where it goes
+// among the words; one among a cell's words is carried the same, to
+// another cell or out of the table. Each move is the page's, one step of
+// its history (`pictureCarry`).
 
-import { EditorSelection } from '@codemirror/state';
+import { EditorSelection, type EditorState } from '@codemirror/state';
 import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
 import { dragged_width, picture_width, resized_width, type PageEditor } from '../../wasm/carnet_web.js';
+import { cellAt, offsetAt, pictureAt, type CellAt } from './table';
 
 /// The picture the caret is on: its line (from 0), where it sits (0 its
 /// own line, 1 left of the text, 2 right) and the width it is given.
@@ -271,6 +279,198 @@ export function pictureTools(pe: PageEditor, run: Run) {
           run(() => pe.set_picture_width(width))(this.view);
         }
         this.place();
+      }
+    },
+  );
+}
+
+/// What is carried: a picture on a line of its own, or one among a cell's
+/// words (the letter's place in them).
+type Carried = { line: number; cell?: undefined } | { cell: CellAt; at: number };
+
+/// Where it would land: before the block on a line, beside the picture
+/// on a line, or in a cell at a place in its words (`undefined`: the end).
+type Target =
+  | { k: 'line'; line: number; y: number }
+  | { k: 'beside'; line: number; after: boolean; box: HTMLElement }
+  | { k: 'cell'; at: CellAt; col: number | undefined };
+
+type Carry = { what: Carried; el: HTMLElement; x0: number; y0: number; moved: boolean; target: Target | null };
+
+/// `starts(n)`: whether CodeMirror's line `n` (from 0) is a block's first.
+export function pictureCarry(pe: PageEditor, run: Run, starts: (state: EditorState, n: number) => boolean) {
+  return ViewPlugin.fromClass(
+    class {
+      carry: Carry | null = null;
+      /// The picture, small, under the pointer; the line between blocks;
+      /// the bar beside a picture.
+      ghost: HTMLImageElement | null = null;
+      line: HTMLElement;
+      bar: HTMLElement;
+      ringed: HTMLElement | null = null;
+
+      constructor(readonly view: EditorView) {
+        this.line = document.createElement('div');
+        this.line.className = 'cm-drop-line';
+        this.bar = document.createElement('div');
+        this.bar.className = 'cm-drop-bar';
+        for (const el of [this.line, this.bar]) {
+          el.hidden = true;
+          el.setAttribute('aria-hidden', 'true');
+          view.dom.append(el);
+        }
+        view.contentDOM.addEventListener('pointerdown', this.down, true);
+      }
+
+      destroy() {
+        this.view.contentDOM.removeEventListener('pointerdown', this.down, true);
+        this.stop();
+        this.line.remove();
+        this.bar.remove();
+      }
+
+      /// A press on a picture: carried once it travels. Its selection is
+      /// the press's own (`pictureTools`, table.ts).
+      down = (e: PointerEvent) => {
+        if (e.button !== 0 || e.pointerType === 'touch') return;
+        const t = e.target as HTMLElement;
+        const cellPic = t.closest?.<HTMLElement>('.cm-cellpic');
+        const box = t.closest?.<HTMLElement>('.cm-picture-box');
+        let what: Carried | null = null;
+        let el: HTMLElement | null = null;
+        if (cellPic) {
+          const cell = cellAt(cellPic);
+          if (cell) what = { cell, at: pictureAt(cell.cell, cellPic) };
+          el = cellPic;
+        } else if (box && this.view.contentDOM.contains(box)) {
+          const line = boxLine(this.view, box);
+          if (line >= 0) what = { line };
+          el = box;
+        }
+        if (!what || !el) return;
+        this.carry = { what, el, x0: e.clientX, y0: e.clientY, moved: false, target: null };
+        window.addEventListener('pointermove', this.move, true);
+        window.addEventListener('pointerup', this.up, true);
+        window.addEventListener('pointercancel', this.cancel, true);
+      };
+
+      move = (e: PointerEvent) => {
+        const c = this.carry;
+        if (!c) return;
+        if (!c.moved && Math.abs(e.clientX - c.x0) + Math.abs(e.clientY - c.y0) <= 6) return;
+        e.preventDefault();
+        if (!c.moved) {
+          c.moved = true;
+          this.view.dom.classList.add('cm-carrying');
+          const img = c.el.querySelector('img');
+          if (img?.src) {
+            const g = document.createElement('img');
+            g.className = 'cm-carried';
+            g.src = img.src;
+            g.alt = '';
+            document.body.append(g);
+            this.ghost = g;
+          }
+        }
+        if (this.ghost) {
+          this.ghost.style.left = `${e.clientX + 12}px`;
+          this.ghost.style.top = `${e.clientY + 12}px`;
+        }
+        c.target = this.target(c, e.clientX, e.clientY);
+        this.show(c.target);
+      };
+
+      up = (e: PointerEvent) => {
+        const c = this.carry;
+        this.stop();
+        if (!c?.moved || !c.target) return;
+        e.preventDefault();
+        const t = c.target;
+        const w = c.what;
+        let f: () => boolean;
+        if (w.cell) {
+          const from = w.cell;
+          if (t.k === 'cell') f = () => pe.move_cell_picture_to_cell(from.line, from.r, from.c, w.at, t.at.line, t.at.r, t.at.c, t.col);
+          else if (t.k === 'beside') f = () => pe.move_cell_picture_beside(from.line, from.r, from.c, w.at, t.line, t.after);
+          else f = () => pe.move_cell_picture_out(from.line, from.r, from.c, w.at, t.line);
+        } else {
+          const from = w.line;
+          if (t.k === 'cell') f = () => pe.move_picture_into_cell(from, t.at.line, t.at.r, t.at.c, t.col);
+          else if (t.k === 'beside') f = () => pe.move_picture_beside(from, t.line, t.after);
+          else f = () => pe.move_picture_to_line(from, t.line);
+        }
+        run(f)(this.view);
+        // Out of a cell: the keys back to the page, where it now is.
+        if (!pe.cell_caret()) this.view.focus();
+      };
+
+      cancel = () => this.stop();
+
+      /// Nothing carried: what showed it put away.
+      stop() {
+        this.carry = null;
+        window.removeEventListener('pointermove', this.move, true);
+        window.removeEventListener('pointerup', this.up, true);
+        window.removeEventListener('pointercancel', this.cancel, true);
+        this.ghost?.remove();
+        this.ghost = null;
+        this.view.dom.classList.remove('cm-carrying');
+        this.show(null);
+      }
+
+      /// Where a picture let go at (`x`, `y`) would land: into the cell
+      /// under it; beside the picture under it, over that one's outer
+      /// third; else between the blocks, before the line nearest.
+      target(c: Carry, x: number, y: number): Target | null {
+        const v = this.view;
+        const r = v.dom.getBoundingClientRect();
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+        const under = document.elementFromPoint(x, y);
+        const cell = under && v.contentDOM.contains(under) ? cellAt(under) : null;
+        if (cell) return { k: 'cell', at: cell, col: offsetAt(cell.cell, x, y) };
+        const box = under?.closest<HTMLElement>('.cm-picture-box');
+        if (box && box !== c.el && v.contentDOM.contains(box)) {
+          const b = box.getBoundingClientRect();
+          const fx = (x - b.left) / Math.max(1, b.width);
+          const line = boxLine(v, box);
+          if (line >= 0 && (fx < 0.3 || fx > 0.7)) return { k: 'beside', line, after: fx > 0.7, box };
+        }
+        const doc = v.state.doc;
+        const block = v.lineBlockAtHeight(y - v.documentTop);
+        let n = doc.lineAt(block.from).number - 1;
+        if (y > v.documentTop + (block.top + block.bottom) / 2) n = doc.lineAt(block.to).number;
+        // Never above the title; between blocks, not inside one.
+        n = Math.max(1, n);
+        while (n < doc.lines && !starts(v.state, n)) n++;
+        const at = n < doc.lines ? v.lineBlockAt(doc.line(n + 1).from).top : block.bottom;
+        return { k: 'line', line: n, y: v.documentTop + at };
+      }
+
+      /// The line, the bar or the ring for `t`.
+      show(t: Target | null) {
+        const o = this.view.dom.getBoundingClientRect();
+        const content = this.view.contentDOM.getBoundingClientRect();
+        this.line.hidden = t?.k !== 'line';
+        if (t?.k === 'line') {
+          const s = this.line.style;
+          s.left = `${content.left - o.left}px`;
+          s.width = `${content.width}px`;
+          s.top = `${t.y - o.top}px`;
+        }
+        this.bar.hidden = t?.k !== 'beside';
+        if (t?.k === 'beside') {
+          const b = t.box.getBoundingClientRect();
+          const s = this.bar.style;
+          s.left = `${(t.after ? b.right + 4 : b.left - 8) - o.left}px`;
+          s.top = `${b.top + 8 - o.top}px`;
+          s.height = `${Math.max(8, b.height - 16)}px`;
+        }
+        const ring = t?.k === 'cell' ? t.at.cell : null;
+        if (ring !== this.ringed) {
+          this.ringed?.classList.remove('cm-drop-cell');
+          ring?.classList.add('cm-drop-cell');
+          this.ringed = ring;
+        }
       }
     },
   );

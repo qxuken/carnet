@@ -171,6 +171,21 @@ export const theme = EditorView.theme({
     background: 'var(--card)', color: 'var(--ink)', font: '500 12.5px/1.3 var(--sans)', whiteSpace: 'nowrap', boxShadow: '0 1px 4px #0000001f',
   },
   '.cm-picked.dragging .cm-picked-size': { display: 'block' },
+  // Where a carried picture goes (picture.ts `pictureCarry`), as the
+  // desktop shows it: a line in the accent between blocks, a ring at its
+  // start; a bar beside a picture; a cell ringed in the accent, on a wash
+  // of it. None takes room.
+  '.cm-drop-line': { position: 'absolute', height: '3px', marginTop: '-1.5px', borderRadius: '1.5px', background: 'var(--accent)', pointerEvents: 'none', zIndex: '2' },
+  '.cm-drop-line::before': {
+    content: "''", position: 'absolute', left: '-6px', top: '-3.5px', width: '10px', height: '10px', boxSizing: 'border-box',
+    borderRadius: '50%', border: '2.5px solid var(--accent)', background: 'var(--card)',
+  },
+  '.cm-drop-bar': { position: 'absolute', width: '4px', borderRadius: '2px', background: 'var(--accent)', pointerEvents: 'none', zIndex: '2' },
+  '.cm-tablewrap .cm-drop-cell': {
+    boxShadow: 'inset 0 0 0 2px var(--accent)',
+    backgroundImage: 'linear-gradient(color-mix(in srgb, var(--accent) 8%, transparent), color-mix(in srgb, var(--accent) 8%, transparent))',
+  },
+  '&.cm-carrying, &.cm-carrying *': { cursor: 'grabbing !important' },
   // A table as the desktop draws it (styles.css `.note table` the same):
   // the text's width, its columns sharing it alike; one hairline in the
   // border's colour for the rounded frame and the rules; the header row

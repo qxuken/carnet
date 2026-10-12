@@ -16,7 +16,7 @@ import type { PageEditor } from '../../wasm/carnet_web.js';
 import { HIGHLIGHT, inkCss, washCss } from '../colors';
 import { show, unshown } from '../pictures';
 import { TableWidget, place, type Cell, type TableContext } from './table';
-import { pictureRoom, pictureTools } from './picture';
+import { pictureCarry, pictureRoom, pictureTools } from './picture';
 
 /// How a line is drawn (`PageEditor.looks`).
 export type Look = {
@@ -590,6 +590,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     ruleChosen,
     initials,
     pictureTools(pe, run),
+    pictureCarry(pe, run, (s, n) => !!s.field(looks)[n]?.f),
     pictureRoom,
     EditorState.transactionFilter.of((tr) => {
       if (tr.annotation(own)) return tr;

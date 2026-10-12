@@ -19,7 +19,7 @@ use std::time::Duration;
 use carnet_core::doc::{self, Doc, Kind, ListStyle, Table};
 use carnet_core::history::{History, State, Step};
 use carnet_core::inline::{self, Style};
-use carnet_core::page::{self, Caret, Pos, Slot, TableOp, Typing};
+use carnet_core::page::{self, Caret, PicDrop, Pos, Slot, TableOp, Typing};
 
 /// What stands for a divider, a picture or a table in CodeMirror's text:
 /// one letter, drawn as the thing itself.
@@ -504,7 +504,74 @@ impl Editor {
         self.edit(Step::Other, page::remove_block)
     }
 
+    /// Where a picture carried in the editor is let go, as a [`PicDrop`]:
+    /// `None` for a place that isn't one.
+    fn drop_at(&self, to: PicTo) -> Option<PicDrop> {
+        match to {
+            // Before the block CodeMirror's line `n` is the first line of;
+            // a later line of one, after it; past the last, at the end.
+            PicTo::Line(n) => Some(PicDrop::Before(match self.lines.get(n) {
+                Some(Line { block: Some(i), first, .. }) => i + usize::from(!first),
+                Some(_) => 0,
+                None => self.doc.len(),
+            })),
+            PicTo::Beside(n, after) => {
+                let b = &self.doc.blocks()[self.lines.get(n)?.block?];
+                matches!(b.kind, Kind::Image { .. }).then_some(PicDrop::Beside { id: b.id, after })
+            }
+            PicTo::Cell(n, r, c, col) => {
+                let slot = self.cell_slot(n, r, c)?;
+                let at = match col {
+                    Some(col) => {
+                        let v = page::visible(&self.doc, slot);
+                        v.at(u16_to_byte(&v.text(page::text(&self.doc, slot)), col))
+                    }
+                    None => usize::MAX,
+                };
+                Some(PicDrop::Cell { slot, at })
+            }
+        }
+    }
+
+    /// The picture on CodeMirror's line `from` carried to `to`: between
+    /// blocks, beside another picture, or among a table cell's words (its
+    /// line gone, its width kept, its side dropped). One step of the
+    /// history; it is selected where it lands.
+    pub fn move_picture(&mut self, from: usize, to: PicTo) -> bool {
+        let Some(i) = self.lines.get(from).and_then(|l| l.block) else { return false };
+        let id = self.doc.blocks()[i].id;
+        if !matches!(self.doc.blocks()[i].kind, Kind::Image { .. }) {
+            return false;
+        }
+        let Some(to) = self.drop_at(to) else { return false };
+        self.focus = Focus::Body;
+        self.edit(Step::Other, |d, c| page::move_picture(d, c, id, to))
+    }
+
+    /// The picture among the words of a table's cell (CodeMirror's line
+    /// `line`, row `r`, column `c`) whose letter is at UTF-16 column `at`
+    /// carried to `to`: to another cell, or another place in its own; out
+    /// of the table, a picture on a line of its own (or beside another),
+    /// its width kept. One step of the history; it is selected where it
+    /// lands.
+    pub fn move_cell_picture(&mut self, line: usize, r: usize, c: usize, at: usize, to: PicTo) -> bool {
+        let Some(slot) = self.cell_slot(line, r, c) else { return false };
+        let t = page::text(&self.doc, slot);
+        let v = page::visible(&self.doc, slot);
+        let words = v.text(t);
+        let Some(p) = inline::cell_pictures(t).into_iter().find(|p| byte_to_u16(&words, v.drawn(p.at.0)) == at) else { return false };
+        let Some(to) = self.drop_at(to) else { return false };
+        self.focus = Focus::Body;
+        self.edit(Step::Other, |d, c| page::move_cell_picture(d, c, slot, p.at.0, to))
+    }
+
     // ------------------------------------------------------------ tables
+
+    /// The slot of a table's cell: CodeMirror's line, the row, the column.
+    fn cell_slot(&self, line: usize, r: usize, c: usize) -> Option<Slot> {
+        let (_, block, t) = self.table_on(line)?;
+        Some(Slot { block, cell: Some((t.rows.get(r)?.id, *t.cols.get(c)?)) })
+    }
 
     /// The table on CodeMirror's line `line`: its block's index and the table.
     fn table_on(&self, line: usize) -> Option<(usize, u64, &Table)> {
@@ -831,6 +898,18 @@ impl Editor {
     }
 }
 
+/// Where a picture carried in the editor is let go, in CodeMirror's
+/// terms: before the block on a line (past the last line, at the end);
+/// beside the picture on a line, after it or before; in a table's cell
+/// (its line, row and column) at a UTF-16 column of its words, or at
+/// their end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PicTo {
+    Line(usize),
+    Beside(usize, bool),
+    Cell(usize, usize, usize, Option<usize>),
+}
+
 /// Words in runs of one style: `(from, to)` in UTF-16 with the style.
 pub type Runs = Vec<(usize, usize, Style)>;
 
@@ -1129,6 +1208,41 @@ mod tests {
             assert!(e.link_here().is_some(), "{url}: {}", e.markdown());
             assert_eq!(e.link_to_open().as_deref(), opens, "{url}");
         }
+    }
+
+    /// A picture carried into a table's cell, along to another, and out
+    /// to a line of its own again, as the desktop carries one: its width
+    /// kept, its side dropped, each move one step of the history, and the
+    /// picture selected where it lands.
+    #[test]
+    fn a_picture_is_carried_into_a_cell_between_cells_and_out() {
+        let md = "# T\n\nWords\n\n![view|right|260](a.png)\n\n| A | B |\n| --- | --- |\n| x | y z |\n";
+        let mut e = Editor::open(md);
+        assert_eq!(e.look(2).kind, "image");
+        assert!(e.move_picture(2, PicTo::Cell(3, 1, 0, None)));
+        assert_eq!(e.markdown(), "# T\n\nWords\n\n| A | B |\n| --- | --- |\n| x![view|260](a.png) | y z |\n");
+        assert_eq!(e.cell_caret(), Some((2, 1, 0, 1, 2)), "selected in the cell");
+        assert_eq!(e.look(2).cells[1][0].pictures.len(), 1);
+        assert!(e.undo());
+        assert_eq!(e.markdown(), md, "one undo puts it back");
+        assert!(e.redo());
+        // To the next cell, between its words.
+        assert!(e.move_cell_picture(2, 1, 0, 1, PicTo::Cell(2, 1, 1, Some(2))));
+        assert!(e.markdown().contains("| x | y ![view|260](a.png)z |"), "{}", e.markdown());
+        assert_eq!(e.cell_caret(), Some((2, 1, 1, 2, 3)));
+        // Out, above the words: a line of its own.
+        assert!(e.move_cell_picture(2, 1, 1, 2, PicTo::Line(1)));
+        assert_eq!(e.markdown(), "# T\n\n![view|260](a.png)\n\nWords\n\n| A | B |\n| --- | --- |\n| x | y z |\n");
+        assert_eq!(e.picture_here().map(|p| p.0), Some(1), "selected");
+        assert!(e.undo());
+        assert!(e.markdown().contains("| x | y ![view|260](a.png)z |"), "{}", e.markdown());
+        // Beside a picture: at the left with it.
+        let mut e = Editor::open("# T\n\n![](b.png)\n\n| A |\n| --- |\n| ![|90](c.png) |\n");
+        assert!(e.move_cell_picture(2, 1, 0, 0, PicTo::Beside(1, true)));
+        assert_eq!(e.markdown(), "# T\n\n![|left](b.png)\n\n![|left|90](c.png)\n\n| A |\n| --- |\n|  |\n");
+        // Nothing there: nothing done.
+        assert!(!e.move_cell_picture(3, 1, 0, 0, PicTo::Line(0)));
+        assert!(!e.move_picture(3, PicTo::Line(0)));
     }
 
     /// The header row taken away and put back, as the desktop does; the
