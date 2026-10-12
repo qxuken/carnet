@@ -280,7 +280,23 @@ fn read_counting(text: &str, count: Count) -> Read {
         }
     }
 
-    // Links: `[text](url)`, the text to read and the rest marks.
+    // Links: `[text](url)`, the text to read and the rest marks. The
+    // address may hold brackets of its own, in pairs, as CommonMark has
+    // it (`[x](a_(b))`): each `(` is matched to its `)` in one pass along
+    // the line, and a link whose `(` has none is no link.
+    let mut paren: HashMap<usize, usize> = HashMap::new();
+    let mut opened: Vec<usize> = Vec::new();
+    for k in 0..b.len() {
+        match b[k] {
+            b'(' if !quiet[k] => opened.push(k),
+            b')' if !quiet[k] => {
+                if let Some(o) = opened.pop() {
+                    paren.insert(o, k);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut i = 0;
     while i < b.len() {
         if b[i] != b'[' || quiet[i] {
@@ -295,8 +311,9 @@ fn read_counting(text: &str, count: Count) -> Read {
             i = j + 1;
             continue;
         }
-        let Some(k) = (j + 2..b.len()).find(|&k| b[k] == b')' && !quiet[k]) else {
-            break;
+        let Some(&k) = paren.get(&(j + 1)) else {
+            i = j + 1;
+            continue;
         };
         st[i].marker = true;
         quiet[i] = true;
@@ -1437,9 +1454,33 @@ pub fn with_scheme(url: &str) -> String {
 }
 
 /// An address as a link holds it: a scheme if it was written without one,
-/// and no spaces or brackets to end it early.
-fn link_target(url: &str) -> String {
-    with_scheme(url).replace(' ', "%20").replace('(', "%28").replace(')', "%29")
+/// and no space nor bracket to end it early. Brackets in pairs are kept,
+/// as a link reads them (`wiki/Mercury_(planet)`); one without its pair
+/// is written `%28` or `%29`.
+pub fn link_target(url: &str) -> String {
+    let url = with_scheme(url).replace(' ', "%20");
+    let b = url.as_bytes();
+    let mut lone = vec![false; b.len()];
+    let mut opened = Vec::new();
+    for (k, &c) in b.iter().enumerate() {
+        match c {
+            b'(' => opened.push(k),
+            b')' => lone[k] = opened.pop().is_none(),
+            _ => {}
+        }
+    }
+    for o in opened {
+        lone[o] = true;
+    }
+    let mut out = String::with_capacity(url.len());
+    for (k, ch) in url.char_indices() {
+        match ch {
+            '(' if lone[k] => out.push_str("%28"),
+            ')' if lone[k] => out.push_str("%29"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// The link at `at` given another address.
@@ -1880,6 +1921,27 @@ mod tests {
         assert_eq!(Visible::of(t).text(t), t);
         let t = "a [](u) b";
         assert_eq!(Visible::of(t).text(t), t);
+    }
+
+    /// An address holds brackets in pairs, as CommonMark reads it: the
+    /// link ends at the `)` that closes its `(`, no stray one shown; a `(`
+    /// that nothing closes makes no link. Given an address, a link keeps
+    /// its pairs and writes a lone bracket so it can't end the link early.
+    #[test]
+    fn an_address_holds_brackets_in_pairs() {
+        let t = "[x](javascript:alert(1)) after";
+        assert_eq!(Visible::of(t).text(t), "x after");
+        assert_eq!(link_at(t, 1).map(|l| l.1).as_deref(), Some("javascript:alert(1)"));
+        let t = "(see [Mercury](https://en.wikipedia.org/wiki/Mercury_(planet)).)";
+        assert_eq!(Visible::of(t).text(t), "(see Mercury.)");
+        let t = "[x](a(b) and [y](c)";
+        assert_eq!(Visible::of(t).text(t), "[x](a(b) and y", "no link for the open one");
+        let t = "[go](u)";
+        assert_eq!(set_link(t, 1, "https://x.org/a_(b)").unwrap(), "[go](https://x.org/a_(b))");
+        assert_eq!(set_link(t, 1, "https://x.org/a)b(").unwrap(), "[go](https://x.org/a%29b%28)");
+        let (t, ..) = make_link("go here", 3, 7, "x.org/(a)").unwrap();
+        assert_eq!(t, "go [here](https://x.org/(a))");
+        assert_eq!(link_at(&t, 5).map(|l| l.1).as_deref(), Some("https://x.org/(a)"));
     }
 
     #[test]

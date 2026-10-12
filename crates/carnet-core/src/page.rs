@@ -803,20 +803,7 @@ fn shortcuts(doc: &mut Doc, c: &mut Caret, old: &str) {
             }
             let prefix = line.len() - kind_text_len(&kind).min(line.len());
             let caret_in = (p.byte - line_start).saturating_sub(prefix);
-            let before = new[..line_start].trim_end_matches('\n').to_string();
-            let after = new.get(line_end + 1..).unwrap_or("").to_string();
-            let mut blocks = Vec::new();
-            if !before.is_empty() {
-                blocks.push(Block::text(before));
-            }
-            let made = Block::new(kind);
-            let target = made.clone();
-            blocks.push(made);
-            if line_end < new.len() {
-                blocks.push(Block::text(after));
-            }
-            doc.splice(i..i + 1, blocks);
-            *c = Caret::at(entry(doc, &target, caret_in));
+            let target = make_line(doc, c, i, &new, (line_start, line_end), kind, caret_in);
             if target.kind.is_atomic() {
                 // Nothing to type on: carry on in the block below.
                 past_divider(doc, doc.index_of(target.id).unwrap_or(0) + 1, c, true);
@@ -825,6 +812,38 @@ fn shortcuts(doc: &mut Doc, c: &mut Caret, old: &str) {
         }
         _ => {}
     }
+}
+
+/// Line `start..end` of paragraph `i`, whose text is `t`, made a block
+/// of `kind`, the lines before and after it paragraphs of their own; the
+/// caret into it, at `caret_in` of its text ([`entry`]). Returns it.
+fn make_line(doc: &mut Doc, c: &mut Caret, i: usize, t: &str, (start, end): (usize, usize), kind: Kind, caret_in: usize) -> Block {
+    let before = t[..start].trim_end_matches('\n').to_string();
+    let after = t.get(end + 1..).unwrap_or("").to_string();
+    let mut blocks = Vec::new();
+    if !before.is_empty() {
+        blocks.push(Block::text(before));
+    }
+    let made = Block::new(kind);
+    let target = made.clone();
+    blocks.push(made);
+    if end < t.len() {
+        blocks.push(Block::text(after));
+    }
+    doc.splice(i..i + 1, blocks);
+    *c = Caret::at(entry(doc, &target, caret_in));
+    target
+}
+
+/// The line of `t` the caret at `byte` ends, if Enter there opens a code
+/// block ([`doc::fence`]): where the line is, and the block.
+fn fence_line(t: &str, byte: usize) -> Option<((usize, usize), Kind)> {
+    let start = t[..byte].rfind('\n').map_or(0, |n| n + 1);
+    let end = t[byte..].find('\n').map_or(t.len(), |n| byte + n);
+    if byte != end {
+        return None;
+    }
+    doc::fence(&t[start..end]).map(|k| ((start, end), k))
 }
 
 fn kind_text_len(k: &Kind) -> usize {
@@ -1094,9 +1113,10 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
 }
 
 /// Enter. A paragraph splits into two (Shift+Enter: a line break inside
-/// it). A list item continues the list, or steps out of it when empty; at
-/// its very start it opens an empty item above, leaving this one — and its
-/// tick — where it is. A heading opens a paragraph. In a table Enter goes
+/// it); at the end of a line of `` ``` `` or `/code` it opens a code
+/// block ([`doc::fence`]). A list item continues the list, or steps out
+/// of it when empty; at its very start it opens an empty item above,
+/// leaving this one — and its tick — where it is. A heading opens a paragraph. In a table Enter goes
 /// down a column, adds a row at the bottom, and in an empty last row steps
 /// out of the table. In code, it is a newline.
 pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
@@ -1112,6 +1132,7 @@ pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
     let (head, tail) = split_text(&t, byte, marks);
     let v = visible(doc, p.slot);
     let (at_start, at_end) = (v.drawn(byte) == 0, v.drawn(byte) == v.drawn_len());
+    let fence = matches!(kind, Kind::Text(_)).then(|| fence_line(&t, byte)).flatten();
     let put = |doc: &mut Doc, c: &mut Caret, at: usize, b: Block, byte: usize| {
         let slot = Slot::block(b.id);
         doc.insert(at, b);
@@ -1133,6 +1154,14 @@ pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
                 put(doc, c, i + 1, Block::text(""), 0);
             } else {
                 return insert(doc, c, "\n");
+            }
+        }
+        // Enter after `` ``` `` (and a language) or `/code`: a code
+        // block, the caret on its first line.
+        Kind::Text(_) if fence.is_some() => {
+            if let Some((line, block)) = fence {
+                make_line(doc, c, i, &t, line, block, 0);
+                doc.ensure_tail();
             }
         }
         // Enter at the start of a paragraph whose first letter drops: a
@@ -1879,7 +1908,13 @@ fn take_from_cell(doc: &mut Doc, slot: Slot, (a, b): (usize, usize)) -> (usize, 
 }
 
 /// Puts a new block of `kind` below the caret's block (in place of an
-/// empty paragraph), with the caret in it.
+/// empty paragraph), with the caret in it. A picture has nothing to type
+/// in: at the very start of a block it goes before it, as a divider does,
+/// so pictures put in one after another stay in order; and the caret
+/// carries on past it as past a divider ([`past_divider`]) — into the
+/// block that follows (a table's first cell), no empty line made between
+/// them — or, before another picture or a divider, the picture is
+/// selected.
 pub fn insert_block(doc: &mut Doc, c: &mut Caret, kind: Kind) -> bool {
     if kind == Kind::Divider {
         return insert_divider(doc, c);
@@ -1888,14 +1923,21 @@ pub fn insert_block(doc: &mut Doc, c: &mut Caret, kind: Kind) -> bool {
     let empty_text = matches!(&doc.blocks()[i].kind, Kind::Text(t) if t.is_empty());
     let b = Block::new(kind);
     let made = b.clone();
+    let at_start = c.is_empty() && !is_atomic(doc, c.head.slot) && c.head == start(block_slots(&doc.blocks()[i])[0]);
     if empty_text {
         doc.set(i, b);
+    } else if made.kind.is_atomic() && at_start {
+        doc.insert(i, b);
     } else {
         doc.insert(i + 1, b);
     }
     *c = Caret::at(entry(doc, &made, 0));
     if made.kind.is_atomic() {
-        *c = Caret::at(carry_on(doc, doc.index_of(made.id).unwrap_or(0) + 1));
+        let j = doc.index_of(made.id).unwrap_or(0) + 1;
+        match doc.blocks().get(j) {
+            Some(next) if next.kind.is_atomic() => *c = select_blocks(doc, j - 1, j - 1),
+            _ => past_divider(doc, j, c, false),
+        }
     }
     doc.ensure_tail();
     true
@@ -2137,7 +2179,7 @@ pub fn make_link(doc: &mut Doc, c: &mut Caret, url: &str) -> bool {
         }
         let p = c.head;
         let _r = reading(p.slot);
-        let link = format!("[{}]({})", url.trim(), inline::with_scheme(url).replace(' ', "%20"));
+        let link = format!("[{}]({})", url.trim(), inline::link_target(url));
         if let Some(t) = text_mut(doc, p.slot) {
             t.insert_str(p.byte, &link);
             let v = Visible::of(t);
@@ -2257,6 +2299,33 @@ fn switches_off(text: &str, at: usize, l: &(String, String, String), within: imp
     })
 }
 
+/// Where what is typed at the caret goes when it stands at the end of a
+/// link's words: just past the link, outside its `](url)`, as other
+/// editors have it, so the words typed are no part of the link. Drawn,
+/// the caret is where it was.
+fn past_link(doc: &Doc, c: Caret) -> Option<Pos> {
+    let p = c.head;
+    if !c.is_empty() || !styled(doc, p.slot) {
+        return None;
+    }
+    let _r = reading(p.slot);
+    let t = text(doc, p.slot);
+    let v = Visible::of(t);
+    let d = v.drawn(p.byte);
+    inline::pairs(t)
+        .into_iter()
+        .find(|q| q.kind == inline::Kind::Link && q.open.1 <= p.byte && p.byte <= q.close.0 && d == v.drawn(q.close.0))
+        .map(|q| Pos { byte: q.close.1, ..p })
+}
+
+/// The style a letter typed at `p` would have.
+fn typed_style(doc: &Doc, p: Pos) -> inline::Style {
+    let _r = reading(p.slot);
+    let mut t = text(doc, p.slot).to_string();
+    t.insert(p.byte, 'x');
+    inline::styles(&t)[p.byte]
+}
+
 /// A slot's text, `a..b` made `with`, the caret at `caret`.
 fn splice(doc: &mut Doc, c: &mut Caret, slot: Slot, a: usize, b: usize, with: &str, caret: usize) -> bool {
     let Some(t) = text_mut(doc, slot) else { return false };
@@ -2319,18 +2388,24 @@ impl Typing {
     }
 
     /// Where the caret counts as being for styles: inside the run its
-    /// carried spaces are past.
+    /// carried spaces are past; past a link it ends the words of, where
+    /// typing goes ([`past_link`]).
     fn styled_at(&self, doc: &Doc, c: Caret) -> Caret {
-        match self.carry_at(doc, c) {
-            Some(k) => Caret::at(Pos { slot: k.slot, byte: k.close.0 }),
-            None => c,
+        match (self.carry_at(doc, c), past_link(doc, c)) {
+            (Some(k), _) => Caret::at(Pos { slot: k.slot, byte: k.close.0 }),
+            (None, Some(p)) => Caret::at(p),
+            (None, None) => c,
         }
     }
 
     /// The style the caret is in ([`style_at`]): spaces carried past a
-    /// run's marks are the run's, still.
+    /// run's marks are the run's, still. At a link's end, the style of
+    /// what is typed past it: no link.
     pub fn style_at(&self, doc: &Doc, c: Caret) -> inline::Style {
-        style_at(doc, self.styled_at(doc, c))
+        match past_link(doc, c).filter(|_| self.carry_at(doc, c).is_none()) {
+            Some(p) => typed_style(doc, p),
+            None => style_at(doc, self.styled_at(doc, c)),
+        }
     }
 
     /// The marks that switch `kind` on at the caret, or off when it is in
@@ -2405,6 +2480,7 @@ impl Typing {
     /// run's end it goes just past its closing marks, and is carried
     /// ([`Carry`]); at its start, before its opening ones; with a style
     /// switched on, plain, the style still on for the letters after it.
+    /// At the end of a link's words, it goes past the link ([`past_link`]).
     pub fn type_text(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
         let mut changed = false;
         if !c.is_empty() {
@@ -2414,6 +2490,12 @@ impl Typing {
                 return delete_selection(doc, c);
             }
             changed = replace_selection(doc, c);
+        }
+        if let Some(p) = past_link(doc, *c).filter(|_| !s.is_empty() && self.carry_at(doc, *c).is_none()) {
+            if let Some(q) = self.pending.as_mut().filter(|q| q.caret == *c) {
+                q.caret = Caret::at(p);
+            }
+            *c = Caret::at(p);
         }
         let mut rest = s;
         while !rest.is_empty() {
@@ -2676,10 +2758,11 @@ pub fn table_op(doc: &mut Doc, c: &mut Caret, op: TableOp, desc: bool) -> bool {
             let moved = t.sort_by(k, desc);
             return moved;
         }
-        // Put back: the caret into it, in its column. Taken away: from
-        // it, to the row below, which is on top now.
-        TableOp::Header if !t.header => t.set_header(true).map(|id| cell(id, col)),
-        TableOp::Header => t.set_header(false).map(|gone| cell(if gone == row { t.rows[0].id } else { row }, col)),
+        // The top row's words stay either way, and the caret with them.
+        TableOp::Header => {
+            let on = !t.header;
+            return t.set_header(on);
+        }
     };
     match to {
         Some(s) => {
@@ -2697,7 +2780,8 @@ pub enum TableOp {
     DelRow,
     DelCol,
     Sort,
-    /// The header row taken away, or put back.
+    /// The header row made the first plain row, or the first plain row
+    /// made the header: no row comes or goes.
     Header,
 }
 
@@ -2775,6 +2859,44 @@ mod tests {
         let mut c = at(&d, 0, 15);
         insert_block(&mut d, &mut c, pic("attachments/leaf.jpg"));
         assert_eq!(md(&d).trim_end(), "A pasted photo:\n\n![](attachments/leaf.jpg)");
+    }
+
+    /// A picture put in at the end of the words before a table goes in
+    /// with no empty line between, as a divider does, and the caret on
+    /// into the table's first cell; more after it, at that cell's start,
+    /// stay in order. Before another picture, or at the note's end (a line
+    /// made to write on), the picture is selected or passed.
+    #[test]
+    fn a_picture_put_in_before_a_block_leaves_no_empty_line() {
+        let pic = |src: &str| Kind::Image { src: src.into(), alt: String::new(), width: None, float: Float::None, wiki: false };
+        let md = |d: &Doc| crate::doc::to_markdown(None, d);
+        let t = Table::from_cells(vec![vec!["a".into()]]);
+        let cell = Some((t.rows[0].id, t.cols[0]));
+        let mut d = doc(vec![Block::text("Intro"), Block::new(Kind::Table(t)), Block::text("")]);
+        let mut c = at(&d, 0, 5);
+        assert!(insert_block(&mut d, &mut c, pic("a.png")));
+        assert_eq!(md(&d), "Intro\n\n![](a.png)\n\n| a |\n| --- |\n");
+        assert_eq!((c.head.slot.block, c.head.slot.cell, c.is_empty()), (d.blocks()[2].id, cell, true), "into the table's first cell");
+        assert!(insert_block(&mut d, &mut c, pic("b.png")));
+        assert_eq!(md(&d), "Intro\n\n![](a.png)\n\n![](b.png)\n\n| a |\n| --- |\n", "in order");
+        // Before another picture: the new one selected.
+        let mut d = doc(vec![Block::text("Intro"), Block::new(pic("z.png")), Block::text("")]);
+        let mut c = at(&d, 0, 5);
+        assert!(insert_block(&mut d, &mut c, pic("a.png")));
+        assert_eq!(texts(&d), ["Text:Intro", "Imag:", "Imag:", "Text:"]);
+        assert_eq!(c, select_blocks(&d, 1, 1));
+        // On an empty line before words: in its place, the caret on in them.
+        let mut d = doc(vec![Block::text(""), Block::text("Next")]);
+        let mut c = at(&d, 0, 0);
+        assert!(insert_block(&mut d, &mut c, pic("a.png")));
+        assert_eq!(texts(&d), ["Imag:", "Text:Next"]);
+        assert_eq!(c, at(&d, 1, 0));
+        // At the end: a line to write on after it.
+        let mut d = doc(vec![Block::text("Last")]);
+        let mut c = at(&d, 0, 4);
+        assert!(insert_block(&mut d, &mut c, pic("a.png")));
+        assert_eq!(texts(&d), ["Text:Last", "Imag:", "Text:"]);
+        assert_eq!(c, at(&d, 2, 0));
     }
 
     #[test]
@@ -2923,32 +3045,36 @@ mod tests {
         assert_eq!(texts(&d), ["Text:Top"]);
     }
 
-    /// The header row taken away from inside it: the caret goes to the
-    /// row now on top, in its column; put back, into it. Removing the
-    /// header's row takes the header too.
+    /// The header row turned off from inside it: its words stay, a plain
+    /// row now, the caret in them; on again, the top row is the header.
+    /// A table of one row turns its header off too. Removing the header's
+    /// row takes the header, and its words.
     #[test]
     fn the_header_row_goes_and_comes_back() {
         let t = Table::from_cells(vec![vec!["Day".into(), "Miles".into()], vec!["Fri".into(), "30".into()]]);
         let (top, col) = (t.rows[0].id, t.cols[1]);
-        let fri = t.rows[1].id;
         let mut d = doc(vec![Block::new(Kind::Table(t))]);
         let block = d.blocks()[0].id;
-        let mut c = Caret::at(start(Slot { block, cell: Some((top, col)) }));
+        let mut c = Caret::at(Pos { slot: Slot { block, cell: Some((top, col)) }, byte: 2 });
         let table = |d: &Doc| match &d.blocks()[0].kind {
             Kind::Table(t) => t.clone(),
             _ => panic!(),
         };
+        let words = |d: &Doc| table(d).rows.iter().map(|r| r.cells.join(" ")).collect::<Vec<_>>();
+        let was = c;
         assert!(table_op(&mut d, &mut c, TableOp::Header, false));
-        let t = table(&d);
-        assert_eq!((t.header, t.rows.len()), (false, 1));
-        assert_eq!(c.head.slot.cell, Some((fri, col)));
-        assert!(!table_op(&mut d, &mut c, TableOp::DelRow, false), "never the last row");
+        assert_eq!((table(&d).header, words(&d)), (false, vec!["Day Miles".to_string(), "Fri 30".to_string()]));
+        assert_eq!(c, was, "the caret stays in its words");
+        assert!(doc::to_markdown(None, &d).starts_with("| | |\n| --- | --- |\n| Day | Miles |\n"), "under an empty header line");
         assert!(table_op(&mut d, &mut c, TableOp::Header, false));
-        let t = table(&d);
-        assert!(t.header && t.rows.len() == 2);
-        assert_eq!(c.head.slot.cell, Some((t.rows[0].id, col)), "into the new header");
+        assert_eq!((table(&d).header, words(&d).len()), (true, 2));
         assert!(table_op(&mut d, &mut c, TableOp::DelRow, false));
-        assert!(!table(&d).header, "its row gone, the header with it");
+        assert_eq!((table(&d).header, words(&d)), (false, vec!["Fri 30".to_string()]), "its row gone, the header with it");
+        // One row: off, it is a plain row under the empty header line.
+        let mut d = doc(vec![Block::new(Kind::Table(Table::from_cells(vec![vec!["Only".into()]])))]);
+        let mut c = at(&d, 0, 0);
+        assert!(table_op(&mut d, &mut c, TableOp::Header, false));
+        assert_eq!(doc::to_markdown(None, &d), "| |\n| --- |\n| Only |\n");
     }
 
     /// A picture copied (its one line of Markdown) and pasted into a line
@@ -3581,6 +3707,73 @@ mod tests {
     fn bold(t: &mut Typing, d: &Doc, c: Caret) {
         let (pre, post) = t.switch(d, c, inline::Kind::Bold);
         t.pend(c, "bold", pre, post);
+    }
+
+    /// Typed at the end of a link's words — where a click just after it
+    /// puts the caret — words go past the link, outside its address, and
+    /// are no part of it: made a link of their own, the first keeps its
+    /// address. In a bold run around the link they are bold still; inside
+    /// its words, the link's.
+    #[test]
+    fn typing_at_a_links_end_goes_past_it() {
+        let (mut d, mut c) = para("see [docs](http://a)", 8);
+        let s = c.head.slot;
+        let mut t = Typing::default();
+        assert!(!t.style_at(&d, c).link, "what is typed there is no link");
+        t.type_text(&mut d, &mut c, " now");
+        assert_eq!(text(&d, s), "see [docs](http://a) now");
+        assert_eq!(visible(&d, s).drawn(c.head.byte), 12, "the caret after the words typed");
+        let mut sel = Caret { anchor: Pos { slot: s, byte: visible(&d, s).at(9) }, head: c.head };
+        assert!(make_link(&mut d, &mut sel, "http://b"));
+        assert_eq!(text(&d, s), "see [docs](http://a) [now](http://b)");
+        assert_eq!(link_at(&d, at(&d, 0, 6)).map(|l| l.2).as_deref(), Some("http://a"), "the first link as it was");
+        let (mut d, mut c) = para("**[a](u)**", 1);
+        let mut t = Typing::default();
+        t.type_text(&mut d, &mut c, "b");
+        assert_eq!(text(&d, c.head.slot), "**[a](u)b**");
+        let (mut d, mut c) = para("[docs](u)", 2);
+        t.type_text(&mut d, &mut c, "x");
+        assert_eq!(text(&d, c.head.slot), "[doxcs](u)");
+    }
+
+    /// Marks typed by hand that close a style leave the caret past them:
+    /// the words after are plain, for each style.
+    #[test]
+    fn a_style_closed_by_typed_marks_ends_there() {
+        for m in ["**", "*", "~~", "==", "`"] {
+            let (mut d, mut c) = para("", 0);
+            let mut t = Typing::default();
+            for ch in format!("{m}tb{m} after").chars() {
+                t.type_text(&mut d, &mut c, &ch.to_string());
+            }
+            assert_eq!(text(&d, c.head.slot), format!("{m}tb{m} after"));
+            assert_eq!(visible(&d, c.head.slot).text(text(&d, c.head.slot)), "tb after", "{m}");
+            assert_eq!(t.style_at(&d, c), inline::Style::default(), "{m}: plain after");
+        }
+    }
+
+    /// `` ``` `` (with a language, or `/code`) and Enter open a code
+    /// block, the caret on its first line: what is typed is that line, no
+    /// empty one before it. Typed, the marks are words until then; on a
+    /// paragraph's last line, the lines before stay a paragraph.
+    #[test]
+    fn a_code_block_opens_on_enter_at_its_first_line() {
+        for (typed, fence) in [("```", "```"), ("```rust", "```rust"), ("/code", "```")] {
+            let (mut d, mut c) = para("", 0);
+            let mut t = Typing::default();
+            t.type_text(&mut d, &mut c, typed);
+            assert_eq!(texts(&d), [format!("Text:{typed}")], "not yet");
+            assert!(enter(&mut d, &mut c, false));
+            t.type_text(&mut d, &mut c, "fn a() {}");
+            assert_eq!(text(&d, c.head.slot), format!("{fence}\nfn a() {{}}\n```"));
+        }
+        let (mut d, mut c) = para("intro\n```", 9);
+        assert!(enter(&mut d, &mut c, false));
+        assert_eq!(texts(&d)[0], "Text:intro");
+        assert_eq!(c.head, Pos { slot: Slot::block(d.blocks()[1].id), byte: 4 });
+        let (mut d, mut c) = para("```", 3);
+        assert!(enter(&mut d, &mut c, true));
+        assert_eq!(texts(&d), ["Text:```\n"], "Shift+Enter: a line break");
     }
 
     #[test]
