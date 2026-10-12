@@ -79,14 +79,14 @@ impl Url {
 }
 
 /// Whether the link `url`, given by the server at `origin`, may be
-/// followed: it reads ([`Url::parse`]); it's https, or http to `origin`
-/// itself (scheme, host and port), when that's http; and it's on no host
-/// [`inner`] unless the server's is too. An object store's link is on a
-/// host of its own, and that's fine: a public one.
+/// followed: it reads ([`Url::parse`]); it's https, or the server itself
+/// is reached by plain http (one tried out, or on a home network, with
+/// its object store beside it the same way: nothing a link could lower);
+/// and it's on no host [`inner`] unless the server's is too. An object
+/// store's link is on a host of its own, and that's fine.
 pub fn fair(origin: &str, url: &str) -> bool {
     let (Ok(link), Ok(server)) = (Url::parse(url), Url::parse(origin)) else { return false };
-    let same = link.tls == server.tls && link.host == server.host && link.port == server.port;
-    (link.tls || same) && (!inner(&link.host) || inner(&server.host))
+    (link.tls || !server.tls) && (!inner(&link.host) || inner(&server.host))
 }
 
 /// Whether `host` is this computer, or on its network: `localhost` (and
@@ -197,14 +197,18 @@ mod tests {
         ] {
             assert!(!fair(public, bad), "{bad:?}");
         }
-        // A server tried out on this computer: its own http links, and
-        // other hosts here, but still no http elsewhere.
+        // A server tried out on this computer, by plain http: its own
+        // links, and an object store beside it the same way (here, or by
+        // a container's name), as nothing is lowered by them.
         let here = "http://127.0.0.1:8787";
         assert!(fair(here, "http://127.0.0.1:8787/v1/blobs/t"));
-        assert!(fair(here, "https://localhost:9000/bucket/x"));
+        assert!(fair(here, "http://localhost:9000/bucket/x"));
+        assert!(fair(here, "http://rustfs:9000/carnet/x"));
         assert!(fair(here, "https://bucket.example/x"));
-        assert!(!fair(here, "http://127.0.0.1:2375/x"), "another port is another origin");
-        assert!(!fair(here, "http://bucket.example/x"));
+        // One on the internet by plain http: still nothing on this
+        // computer or its network.
+        assert!(fair("http://notes.example.com", "http://bucket.example/x"));
+        assert!(!fair("http://notes.example.com", "http://127.0.0.1:2375/x"));
         // On a home network: its own, and the store beside it. Known by
         // a name, the server isn't known to be on one.
         assert!(fair("https://192.168.1.5", "https://192.168.1.5/v1/blobs/t"));

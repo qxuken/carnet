@@ -1,8 +1,10 @@
 //! `migrate` (`migrate.rs`): a data folder copied to Postgres and a
 //! bucket, whole, checked, and again with nothing more to do; a folder in
 //! use, or a database or bucket a server ran on, refused. And the whole
-//! way end to end: a server on SQLite filled by devices over its sockets,
-//! moved, started on Postgres and a bucket, and the devices carry on.
+//! way end to end: a server on SQLite filled over its sockets, moved,
+//! started on Postgres and a bucket, and serving what it kept as before
+//! (notes, a deleted one refused, a picture by the bucket's link). The
+//! apps know nothing of it: to them it's the same server.
 //!
 //! With the `postgres` feature (and `s3` for the pictures), against a
 //! real database (`CARNET_TEST_POSTGRES`) and bucket (`CARNET_TEST_S3`,
@@ -140,7 +142,7 @@ fn plan(data: &Path, url: &str) -> Plan {
 /// side, found by the check and put right by a run. The folder never
 /// changes.
 #[test]
-fn a_folder_moves_whole_and_again_finds_nothing_to_do() {
+fn migrate_copies_a_folder_whole_and_a_rerun_finds_nothing() {
     let Some((url, _schema)) = database("whole") else { return };
     let data = temp("whole");
     fill(&data);
@@ -225,7 +227,7 @@ fn a_folder_moves_whole_and_again_finds_nothing_to_do() {
 /// A folder a server has open is refused, not waited for; a database or
 /// bucket a server has run on isn't copied over.
 #[test]
-fn a_folder_in_use_or_a_database_served_is_refused() {
+fn migrate_refuses_a_folder_or_database_in_use() {
     let Some((url, _schema)) = database("refused") else { return };
     let data = temp("refused");
     fill(&data);
@@ -330,7 +332,7 @@ async fn reqwest_free_get(addr: std::net::SocketAddr, path: &str) -> std::io::Re
 /// note stays deleted. And `migrate` won't run over it again.
 #[cfg(feature = "s3")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_server_moves_to_postgres_and_a_bucket_and_its_devices_carry_on() {
+async fn migrate_to_postgres_and_a_bucket_serves_what_it_kept() {
     use carnet_server::s3::S3Blobs;
     use carnet_server::server::{self, Host};
     use carnet_sync::crypto::{DeviceKey, OsRandom, Ring, VaultKey};
@@ -515,7 +517,7 @@ async fn migrated(plan: &Plan) -> (Result<migrate::Done, carnet_server::storage:
 /// refused.
 #[cfg(feature = "s3")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_pictures_go_first_while_the_server_runs() {
+async fn migrate_pictures_first_while_the_server_runs() {
     use carnet_server::server::{self, Host};
     use carnet_sync::crypto::{DeviceKey, OsRandom, Ring, VaultKey};
     use carnet_sync::session::{Event, Identity, Transfer};
@@ -784,7 +786,7 @@ mod device {
 /// there has already is refused, as a device setting it is: never taken
 /// from that account, and nothing of the account copied changed.
 #[test]
-fn an_import_never_takes_a_key_from_another_account() {
+fn migrate_import_never_takes_a_key_from_another_account() {
     let Some((url, _schema)) = database("conflict") else { return };
     let data = temp("conflict");
     fill(&data);
