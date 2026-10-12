@@ -16,9 +16,17 @@
 //! its path kept, holding `-<id>` where its blob's id was. The id stays so
 //! that a note brought back showing it (an old version restored) can fetch
 //! it again while the server still keeps it.
+//!
+//! What another device wrote is read as a name, a folder or a path from
+//! the notes folder only when it is one on every system
+//! ([`is_plain_path`]): no `..`, no full path, drive or share, no `\` or
+//! `:`, no hidden name or device's. Anything else is read as not there,
+//! so nothing past the vault ever joins it onto the notes folder; nor is
+//! it written here.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use carnet_core::name::{is_plain_name, is_plain_path};
 use loro::{LoroMap, LoroValue};
 
 use crate::note::{Key, NoteDoc, Version};
@@ -39,6 +47,14 @@ pub struct Place {
     pub name: String,
     pub pinned: bool,
     pub trashed: bool,
+}
+
+impl Place {
+    /// Whether its folder and name can be joined onto the notes folder:
+    /// a plain path (or "" for the top), and a plain name.
+    pub fn is_plain(&self) -> bool {
+        (self.folder.is_empty() || is_plain_path(&self.folder)) && is_plain_name(&self.name)
+    }
 }
 
 /// Every note's place and every folder, as the vault holds them.
@@ -75,6 +91,7 @@ impl NoteDoc {
         }
         let name = text(get("name")).filter(|n| !n.is_empty())?;
         Some(Place { folder: text(get("folder")).unwrap_or_default(), name, pinned: flag(get("pinned")), trashed: flag(get("trashed")) })
+            .filter(Place::is_plain)
     }
 
     /// The layout the vault holds now.
@@ -98,8 +115,12 @@ impl NoteDoc {
 
     /// `key`'s place becomes `place`: only the fields that differ are
     /// written, so a field this device didn't change doesn't overwrite
-    /// another device's. True if anything was.
+    /// another device's. True if anything was. One not
+    /// [plain](Place::is_plain) isn't written.
     pub fn set_place(&self, key: Key, place: &Place) -> bool {
+        if !place.is_plain() {
+            return false;
+        }
         let map = self.notes_map();
         let now = self.layout().notes.get(&key).cloned();
         let mut wrote = false;
@@ -153,7 +174,7 @@ impl NoteDoc {
             LoroValue::Map(m) => m
                 .iter()
                 .filter_map(|(k, v)| match v {
-                    LoroValue::String(s) => Some((k.clone(), s.to_string())),
+                    LoroValue::String(s) if is_plain_path(k) => Some((k.clone(), s.to_string())),
                     _ => None,
                 })
                 .collect(),
@@ -188,6 +209,9 @@ impl NoteDoc {
     /// use: the one `path` held before, if no other path holds it now. That
     /// one the server may drop (docs/SYNC.md §6).
     pub fn put_picture(&self, path: &str, id: &str) -> (bool, Option<String>) {
+        if !is_plain_path(path) {
+            return (false, None);
+        }
         let all = self.picture_map();
         let old = all.get(path).filter(|o| live(o) && o.as_str() != id).cloned();
         if all.get(path).map(String::as_str) == Some(id) {
@@ -210,7 +234,7 @@ impl NoteDoc {
 
     /// A folder there, or not. True if that changed.
     pub fn set_folder(&self, folder: &str, there: bool) -> bool {
-        if self.layout().folders.contains(folder) == there {
+        if !is_plain_path(folder) || self.layout().folders.contains(folder) == there {
             return false;
         }
         let _ = self.folders_map().insert(folder, there);
@@ -246,10 +270,10 @@ fn read(notes: &LoroValue, folders: &LoroValue) -> Layout {
     }
     out.notes.retain(|k, _| !gone.contains(k));
     // A note with no name yet (only some of its fields arrived) has no
-    // place to put it.
-    out.notes.retain(|_, p| !p.name.is_empty());
+    // place to put it; nor has one whose place isn't plain.
+    out.notes.retain(|_, p| !p.name.is_empty() && p.is_plain());
     if let LoroValue::Map(m) = folders {
-        out.folders = m.iter().filter(|(_, v)| matches!(v, LoroValue::Bool(true))).map(|(k, _)| k.clone()).collect();
+        out.folders = m.iter().filter(|(k, v)| matches!(v, LoroValue::Bool(true)) && is_plain_path(k)).map(|(k, _)| k.clone()).collect();
     }
     out
 }
@@ -326,5 +350,44 @@ mod tests {
         // Put back: there again.
         v.set_picture("attachments/a.png", "cc");
         assert!(v.dropped_pictures().is_empty());
+    }
+
+    /// A place, a folder or a picture's path another device wrote that
+    /// reaches out of the notes folder (or names a drive, a share, a
+    /// device) is read as not there; nor is one written here.
+    #[test]
+    fn what_reaches_outside_is_not_there() {
+        let v = NoteDoc::new(1);
+        let (good, bad_folder, bad_name) = (Key::random(), Key::random(), Key::random());
+        v.set_place(good, &place("Work", "Plan"));
+        assert!(!v.set_place(bad_name, &place("", "../../x")), "not written here");
+        // As a hostile or older device would write them: straight into
+        // the maps.
+        let notes = v.notes_map();
+        for (key, folder, name) in [(bad_folder, "../../Library", "x"), (bad_name, "", r"..\..\x")] {
+            notes.insert(&format!("{key}/folder"), folder).unwrap();
+            notes.insert(&format!("{key}/name"), name).unwrap();
+        }
+        let folders = v.folders_map();
+        for f in ["Work", "/etc", "..", r"a\b", "C:", "Work/../.."] {
+            folders.insert(f, true).unwrap();
+        }
+        let pictures = v.loro().get_map(PICTURES);
+        for p in ["attachments/a.png", "attachments/../../../Library/LaunchAgents/x.plist", "/abs.png", r"attachments\..\x.png"] {
+            pictures.insert(p, "aa").unwrap();
+        }
+        pictures.insert("attachments/../gone.png", "-bb").unwrap();
+        v.loro().commit();
+
+        assert_eq!(v.layout().notes.keys().collect::<Vec<_>>(), [&good]);
+        assert_eq!((v.place(bad_folder), v.place(bad_name)), (None, None));
+        assert_eq!(v.folders().into_iter().collect::<Vec<_>>(), ["Work"]);
+        assert_eq!(v.pictures().into_keys().collect::<Vec<_>>(), ["attachments/a.png"]);
+        assert!(v.dropped_pictures().is_empty() && v.dropped_id("attachments/../gone.png").is_none());
+        assert!(!v.set_folder("../x", true) && !v.set_picture("/x.png", "cc"));
+        // A bad place is put right as any is written over: by a device
+        // writing its own.
+        assert!(v.set_place(bad_name, &place("", "Found")));
+        assert_eq!(v.place(bad_name), Some(place("", "Found")));
     }
 }

@@ -47,6 +47,9 @@ carnet-server = { path = "crates/carnet-server" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync"] }
 # A hosted service's signup route, faked beside a real server.
 axum = "0.8"
+# src/sync_tests.rs: a vault written as a hostile or older device would,
+# past what carnet-sync writes. The version carnet-sync pins.
+loro = "=1.16.2"
 
 # The Windows executable's icon and version (packaging/windows/carnet.rc).
 [build-dependencies]

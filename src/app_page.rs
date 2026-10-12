@@ -826,6 +826,8 @@ impl Carnet {
                         }
                         Some(images::Entry::Failed(_)) => (Glyph::Warning, "This picture couldn't be opened"),
                         Some(_) => (Glyph::Picture, "Opening the picture\u{2026}"),
+                        // A file on another computer, never looked at.
+                        None if !wiki && !store::is_web(src) => (Glyph::Warning, "Picture not found"),
                         None => (Glyph::Picture, "A picture on the web, not loaded"),
                     };
                     let path = store::decode_src(src);
@@ -925,7 +927,10 @@ impl Carnet {
                         );
                     }
                     if theirs {
-                        self.theirs_mark(ui, l, selected && self.editing && !self.reading(), float == Float::Right);
+                        // The ways in only for a picture shown: one that
+                        // isn't one stays the user's.
+                        let shown = matches!(entry, Some(images::Entry::Ready { .. }));
+                        self.theirs_mark(ui, l, shown && selected && self.editing && !self.reading(), float == Float::Right);
                     }
                     if resizing.is_some() {
                         ui.text_in(
@@ -1627,7 +1632,7 @@ impl Carnet {
             items.push(MenuItem::separator());
             // The user's own file: ways to make it Carnet's.
             if self.picture_at_caret().is_some_and(|(src, wiki)| {
-                self.store.picture_file(&self.page_folder(), &src, wiki).is_some_and(|p| p.is_file() && !self.store.owns(&p))
+                self.store.picture_file(&self.page_folder(), &src, wiki).is_some_and(|p| p.is_file() && !self.store.owns(&p) && self.images.is_ready(&p))
             }) {
                 items.extend([item("Move into Carnet", "into-carnet:0"), item("Copy into Carnet", "into-carnet:1"), MenuItem::separator()]);
             }

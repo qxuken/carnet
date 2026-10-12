@@ -988,23 +988,27 @@ pub fn image_line(line: &str) -> Option<Kind> {
 /// folder (`attachments/x.png`); `None` for a web address or a path that
 /// climbs out of it.
 pub fn resolve_picture(folder: &str, src: &str) -> Option<String> {
-    if src.contains("://") || src.starts_with("data:") || src.starts_with('/') {
+    if src.contains("://") || src.starts_with("data:") || src.starts_with(['/', '\\']) {
         return None;
     }
     join_path(folder, &src.replace("%20", " "))
 }
 
 /// `path` from `folder`, `..` and `.` worked out, as a path from the
-/// notes folder; `None` if it climbs out.
+/// notes folder; `None` if it climbs out, or has a part that isn't one
+/// plain name ([`is_plain_name`](crate::name::is_plain_name): a drive, a
+/// device). `\` parts it as `/` does, as Windows reads it: what a
+/// note's text says is never more than it looks.
 fn join_path(folder: &str, path: &str) -> Option<String> {
     let mut parts: Vec<&str> = folder.split('/').filter(|p| !p.is_empty()).collect();
-    for p in path.split('/') {
+    for p in path.split(['/', '\\']) {
         match p {
             "" | "." => {}
             ".." => {
                 parts.pop()?;
             }
-            p => parts.push(p),
+            p if crate::name::is_plain_name(p) => parts.push(p),
+            _ => return None,
         }
     }
     Some(parts.join("/"))
@@ -1972,6 +1976,13 @@ Second line of the same paragraph.
         assert_eq!(resolve_picture("Trips/Lisbon", "../../attachments/a%20b.png").as_deref(), Some("attachments/a b.png"));
         assert_eq!(resolve_picture("", "../x.png"), None, "out of the notes folder");
         assert_eq!(resolve_picture("", "https://e.com/x.png"), None);
+        // A Windows path climbs as one with `/` does, and a drive, a
+        // device or a share isn't a path from the notes folder.
+        assert_eq!(resolve_picture("", r"attachments\..\..\..\Users\me\x.docx"), None);
+        assert_eq!(resolve_picture("Work", r"..\attachments\a.png").as_deref(), Some("attachments/a.png"));
+        for src in [r"\\host\share\x.png", r"\x.png", "C:/x.png", r"C:\x.png", "attachments/con.png", "attachments/a:b.png", "attachments/a\0.png"] {
+            assert_eq!(resolve_picture("", src), None, "{src:?}");
+        }
         let md = "# Trip\n\n![](../attachments/a.png)\n\nText ![not](inline.png) here\n![w|right|300](<../attachments/b c.png>)\n![](https://e.com/x.png)\n";
         let found: Vec<String> = picture_paths("Trips", md, &Files::default()).into_iter().collect();
         assert_eq!(found, ["attachments/a.png", "attachments/b c.png"]);

@@ -1175,3 +1175,107 @@ fn a_note_moved_there_has_its_links_rewritten_once() {
         assert!(peers.windows(2).all(|w| w[0] == w[1]), "edited by another run on {side}: {peers:?}");
     }
 }
+
+/// What a hostile device, or a buggy one, could write in the vault:
+/// places, folders and pictures' paths that climb out of the notes
+/// folder, full paths, Windows' separator. The other device reads none of
+/// them: the notes come at the top, named for their titles, no such
+/// folder is made, no such picture written, nothing at all outside its
+/// notes folder, and nothing fails.
+#[test]
+fn a_vault_naming_places_outside_the_notes_folder_writes_nothing_there() {
+    let base = temp("outside");
+    std::fs::create_dir_all(base.join("in")).unwrap();
+    let mut two = Two::with_folders("outside", [Some(base.join("in/notes0")), Some(base.join("in/notes1"))]);
+    // A picture of Carnet's, on the server: what the bad paths name.
+    let photo: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+    let a = &mut two.sides[0].store;
+    let src = a.save_attachment("", "png", &photo).unwrap();
+    let mut n = crate::store::Note::new("Shown", Doc::new(vec![Block::text("a picture")]));
+    n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.clone(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    a.notes.push(n);
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&photo));
+
+    // Written as no Carnet writes them: straight into the vault's maps.
+    let abs = base.join("abs").to_string_lossy().into_owned();
+    let raw = loro::LoroDoc::new();
+    raw.set_peer_id(0xbad).unwrap();
+    let notes = raw.get_map("notes");
+    let mut evil = Vec::new();
+    for (title, folder, name) in [("Climbing", "../../outside", "Climbing"), ("Absolute", abs.as_str(), "Absolute"), ("Sideways", "", r"..\..\sideways")] {
+        let k = Key::random();
+        notes.insert(&format!("{k}/folder"), folder).unwrap();
+        notes.insert(&format!("{k}/name"), name).unwrap();
+        evil.push((k, title));
+    }
+    let folders = raw.get_map("folders");
+    for f in ["../../outside-folder", abs.as_str(), r"a\b", "Fine/../../.."] {
+        folders.insert(f, true).unwrap();
+    }
+    let pictures = raw.get_map("pictures");
+    let abs_png = format!("{abs}.png");
+    for p in ["attachments/../../../outside.png", abs_png.as_str(), r"attachments\..\..\..\sideways.png", "attachments/../in.png"] {
+        pictures.insert(p, id.as_str()).unwrap();
+    }
+    raw.commit();
+    let bytes = raw.export(loro::ExportMode::all_updates()).unwrap();
+    let a = &mut two.sides[0];
+    let r = a.store.replica.as_mut().unwrap();
+    r.vault().import(&bytes).unwrap();
+    r.persist_vault().unwrap();
+    for (k, title) in &evil {
+        r.record(*k, &format!("elsewhere/{title}.md"), &format!("# {title}\n\nfrom elsewhere\n"), carnet_sync::Origin::Save).unwrap();
+        a.session.saved(&k.to_string(), r, &mut OsRandom);
+    }
+    a.session.saved(vault::ROOM, r, &mut OsRandom);
+    for _ in 0..4 {
+        two.pump();
+    }
+
+    let b = &two.sides[1];
+    for (_, title) in &evil {
+        let i = two.note(1, title).unwrap_or_else(|| panic!("{title} came: {:?}", two.shape(1)));
+        assert_eq!(b.store.notes[i].path.as_deref(), Some(b.dir.join(format!("{title}.md")).as_path()), "at the top, named for its title");
+    }
+    assert!(b.store.folders.is_empty(), "{:?}", b.store.folders);
+    assert_eq!(b.store.replica.as_ref().unwrap().vault().pictures().into_keys().collect::<Vec<_>>(), std::slice::from_ref(&src));
+    assert_eq!(std::fs::read(b.dir.join(&src)).ok(), Some(photo), "the picture's own path is fetched");
+    let mut outside: Vec<String> = std::fs::read_dir(&base).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    outside.sort();
+    assert_eq!(outside, ["in"]);
+    let mut beside: Vec<String> = std::fs::read_dir(base.join("in")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    beside.sort();
+    assert_eq!(beside, ["notes0", "notes0.replica", "notes1", "notes1.replica"]);
+    drop(two);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A name a Mac allows and another system reads as more than a name
+/// (`a:b`, `x\y`): sent as one it reads as a name, and the file here
+/// follows, as one renamed elsewhere would. (Windows names no file so.)
+#[cfg(unix)]
+#[test]
+fn a_name_only_a_mac_allows_goes_as_a_plain_one() {
+    let mut two = Two::new("mac-names");
+    two.make(0, "", "Ratio", "two to one");
+    let a = &mut two.sides[0];
+    let i = a.store.notes.iter().position(|n| n.title == "Ratio").unwrap();
+    let from = a.store.notes[i].path.clone().unwrap();
+    std::fs::rename(&from, a.dir.join(r"2:1 \ ratio.md")).unwrap();
+    a.store.rescan();
+    for _ in 0..4 {
+        two.pump();
+    }
+    for side in 0..2 {
+        let (notes, ..) = two.shape(side);
+        assert!(notes.iter().any(|(_, f, _)| f == "2-1 - ratio.md"), "on {side}: {notes:?}");
+        assert!(notes.iter().all(|(_, f, _)| !f.contains([':', '\\'])), "on {side}: {notes:?}");
+    }
+    let r = two.sides[1].store.replica.as_ref().unwrap();
+    assert!(r.vault().layout().notes.values().any(|p| p.name == "2-1 - ratio"));
+}

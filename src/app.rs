@@ -1075,7 +1075,8 @@ impl Carnet {
     /// version of a note shows. Moved, every note that showed it shows it
     /// there, saved; their undo histories say so too, so an undo never
     /// brings back a path that leads nowhere; the notice's Undo moves it
-    /// back.
+    /// back. Only a picture shown is taken in: whatever else a note's
+    /// text names (`![](../.ssh/id_rsa)`) stays where it is.
     fn take_in_picture(&mut self, copy: bool) {
         let Some((src, wiki)) = self.picture_at_caret() else { return };
         let folder = self.page_folder();
@@ -1083,7 +1084,7 @@ impl Carnet {
             self.error = Some("Couldn't take the picture in: it isn't there any more".into());
             return;
         };
-        if self.store.owns(&from) || self.reading() {
+        if self.store.owns(&from) || self.reading() || !self.images.is_ready(&from) {
             return;
         }
         let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();

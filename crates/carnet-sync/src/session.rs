@@ -981,7 +981,14 @@ impl Session {
             Frame::Carnet(Carnet::Inspected { rooms, log }) => self.events.push(Event::Inspected(rooms, log)),
             Frame::Carnet(Carnet::InviteList { owner, invites, accounts }) => self.events.push(Event::Invites { owner, invites, accounts }),
             // Pictures: where to put one the server wants, or fetch one
-            // asked for; kept; or not there.
+            // asked for; kept; or not there. A link not plainly the web's
+            // (`link::fair`) is never followed: a put is offered again
+            // later, a fetch fails.
+            Frame::Carnet(Carnet::BlobLink { id, put, url, .. }) if !crate::link::fair(&self.id.origin, &url) => {
+                if !put && self.fetching.remove(&id) {
+                    self.events.push(Event::BlobFailed(id));
+                }
+            }
             Frame::Carnet(Carnet::BlobLink { id, put: true, url, .. }) => {
                 self.putting.insert(id, url);
                 self.events.push(Event::BlobWanted(id));

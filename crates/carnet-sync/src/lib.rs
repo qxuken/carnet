@@ -14,6 +14,7 @@ pub mod compat;
 pub mod crypto;
 pub mod elo;
 pub mod invite;
+pub mod link;
 #[cfg(all(feature = "net", not(target_arch = "wasm32")))]
 pub mod http;
 #[cfg(all(feature = "net", not(target_arch = "wasm32")))]
