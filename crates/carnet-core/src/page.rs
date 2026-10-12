@@ -1580,6 +1580,15 @@ pub const PICTURE_MIN: f32 = 48.0;
 /// text's width, so the words keep room beside it.
 pub const PICTURE_BESIDE: f32 = 0.45;
 
+/// Whether a block runs beside pictures at an edge: words do (a
+/// paragraph, a heading, a list, a quote, code). A table doesn't: it
+/// starts below them, at its full width, rather than squeezed into what
+/// they leave; nor does a divider, which ends a part of the note, nor
+/// another picture. The desktop, the editor and the reader hold to it.
+pub fn runs_beside(kind: &Kind) -> bool {
+    !matches!(kind, Kind::Table(_) | Kind::Divider | Kind::Image { .. })
+}
+
 /// The widths a picture is given from a menu: each a share, in percent,
 /// of the text's width.
 pub const PICTURE_SIZES: [(&str, u32); 4] = [("Small", 25), ("Medium", 50), ("Large", 75), ("Full width", 100)];
@@ -3108,6 +3117,15 @@ mod tests {
         let mut c = at(&d, 0, 5);
         insert_block(&mut d, &mut c, Kind::Divider);
         assert_eq!(kinds(&d)[..3], ["Text(\"Hello\")", "---", "c.png"]);
+    }
+
+    /// Words run beside pictures at an edge; a table, a divider and
+    /// another picture start below them.
+    #[test]
+    fn what_runs_beside_a_picture_at_an_edge() {
+        let md = "Words\n\n## Plan\n\n- [ ] one\n\n> A quote\n\n```\ncode\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n---\n\n![a](a.png)\n";
+        let beside: Vec<bool> = crate::doc::parse_blocks(md).iter().map(|b| runs_beside(&b.kind)).collect();
+        assert_eq!(beside, [true, true, true, true, true, false, false, false]);
     }
 
     /// A picture's width: its own, at an edge 45% of the text's at most,

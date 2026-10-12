@@ -16,7 +16,7 @@
 :root {
   --page: #fcfaf7; --side: #f5f1ec; --card: #ffffff; --sunken: #f1ece5;
   --ink: #2f2a27; --muted: #71635d; --faint: #8d817c;
-  --border: #eeebe7; --border-strong: #ded9d6;
+  --border: #eeebe7; --border-strong: #ded9d6; --ring: #9a8f8a;
   --accent: #c27c68; --accent-ink: #955f50; --primary: #9f6655; --on-accent: #ffffff;
   --accent-soft: #c27c681f; --selection: #c27c6838; --focus: #955f50;
   --hover: #2f2a270b; --pressed: #2f2a2714;
@@ -32,7 +32,7 @@
   :root {
     --page: #1f1b18; --side: #171412; --card: #2c2622; --sunken: #25201d;
     --ink: #efe6dc; --muted: #a1948b; --faint: #776c65;
-    --border: #35302c; --border-strong: #4c4540;
+    --border: #35302c; --border-strong: #4c4540; --ring: #706760;
     --accent: #d9a08c; --accent-ink: #d9a08c; --primary: #d9a08c; --on-accent: #1f1b18;
     --accent-soft: #d9a08c29; --selection: #d9a08c4d; --focus: #d9a08c;
     --hover: #efe6dc0d; --pressed: #efe6dc17;
@@ -59,12 +59,13 @@ button { font: inherit; color: inherit; }
 .note h1, .note h2, .note h3 { font-family: var(--serif); font-weight: 600; line-height: 1.25; }
 .note h1 { font-size: 32px; margin: 0 0 18px; }
 /* A heading of the first level under the title: the editor's size. */
-.note h1:not(:first-child) { font-size: 26px; line-height: 1.3; margin: 28px 0 10px; }
-.note h2 { font-size: 24px; margin: 28px 0 10px; }
-.note h3, .note h4, .note h5, .note h6 { font-size: 19px; margin: 22px 0 8px; }
+/* The space round a heading, the desktop's: more above than below. */
+.note h1:not(:first-child) { font-size: 26px; line-height: 1.3; margin: 34px 0 12px; }
+.note h2 { font-size: 24px; margin: 28px 0 12px; }
+.note h3, .note h4, .note h5, .note h6 { font-size: 19px; margin: 22px 0 12px; }
 .note p { margin: 0 0 12px; }
 .note ul, .note ol { margin: 0 0 12px; padding-left: 24px; }
-.note li { margin: 3px 0; }
+.note li { margin: 4px 0; }
 .note > :is(ul, ol) > li:first-child { margin-top: 0; }
 .note > :is(ul, ol) > li:last-child { margin-bottom: 0; }
 /* The editor's marks: a dot, a ring, a square by depth, in the accent. */
@@ -73,27 +74,43 @@ button { font: inherit; color: inherit; }
 .note ul ul ul { list-style: square; }
 .note ul > li::marker { color: var(--accent); }
 .note ol > li::marker { color: var(--muted); }
-.note li.task { list-style: none; margin-left: -24px; display: flex; gap: 10px; align-items: flex-start; }
+.note li.task { list-style: none; margin-left: -24px; display: flex; gap: 12px; align-items: flex-start; }
 .note li.task.done { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--faint); }
 .note li.task input {
-  appearance: none; flex: none; width: 20px; height: 20px; margin: 3px 0 0;
-  border: 1.6px solid var(--border-strong); border-radius: 50%; background: var(--card); cursor: pointer;
+  appearance: none; flex: none; width: 18px; height: 18px; margin: 5px 0 0;
+  border: 1.5px solid var(--ring); border-radius: 50%; background: transparent; cursor: pointer;
 }
 .note li.task input:checked { background: var(--accent); border-color: var(--accent); }
 .note li.task input:checked::after {
-  content: ''; display: block; width: 6px; height: 10px; margin: 2px 0 0 6px;
+  content: ''; display: block; width: 5px; height: 9px; margin: 1px 0 0 5px;
   border: solid var(--on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg);
 }
-.note blockquote { margin: 0 0 12px; padding-left: 14px; border-left: 3px solid var(--border-strong); color: var(--muted); }
+.note blockquote { margin: 0 0 12px; padding-left: 14px; border-left: 3px solid var(--border-strong); color: var(--muted); font-family: var(--serif); }
 .note blockquote > p:last-child { margin-bottom: 0; }
 .note code { font: 14px/1.5 ui-monospace, Menlo, monospace; background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
 .note pre { background: var(--sunken); padding: 12px 14px; border-radius: var(--radius); overflow-x: auto; }
 .note pre code { background: none; padding: 0; }
-.note table { border-collapse: collapse; margin: 0 0 14px; width: 100%; display: block; overflow-x: auto; border: 0 !important; font-size: 15px; line-height: 1.5; }
-.note th, .note td { border: 1px solid var(--border-strong); padding: 6px 10px; text-align: left; vertical-align: top; }
-.note th { background: var(--sunken); font-weight: 600; color: var(--muted); font-size: 14px; }
-/* A divider goes below the pictures at an edge, as on the desktop. */
-.note hr { border: 0; border-top: 1px solid var(--border-strong); margin: 20px 0; clear: both; }
+/* A table as the desktop draws it (the editor's the same, theme.ts): the
+   text's width, its columns sharing it alike; one hairline in the
+   border's colour for the rounded frame and the rules; the header row
+   small and quiet on a wash; the cells roomy, in the words' type. Never
+   beside pictures at an edge (carnet_core::page::runs_beside): below
+   them. Its box (export::viewer's `div.table`) scrolls one too wide. */
+.note .table { clear: both; margin: 12px 0; padding-top: 8px; overflow-x: auto; }
+.note table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; border: 1px solid var(--border); border-radius: var(--radius); }
+.note th, .note td { border: 0; border-top: 1px solid var(--border); border-left: 1px solid var(--border); padding: 8px 14px; text-align: left; vertical-align: top; }
+.note tr:first-child > * { border-top: 0; }
+.note tr > :first-child { border-left: 0; }
+.note th { background: var(--sunken); color: var(--muted); font: 400 12.5px/18px var(--sans); padding: 9px 14px; }
+.note tr:first-child > :first-child { border-top-left-radius: calc(var(--radius) - 1px); }
+.note tr:first-child > :last-child { border-top-right-radius: calc(var(--radius) - 1px); }
+/* A divider as the desktop draws it by default (settings `divider =
+   dots`): three dots 3px round, 15px apart, faint, with the desktop's
+   space round them; below the pictures at an edge. */
+.note hr {
+  width: 33px; height: 3px; margin: 26px auto 28px; border: 0; clear: both; color: var(--faint);
+  background: radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x;
+}
 .note a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent-ink) 40%, transparent); }
 .note img { max-width: 100%; height: auto; border-radius: var(--radius); background: var(--sunken); }
 /* Pictures at an edge, one after another (`--n` of them): a row there,
@@ -102,9 +119,9 @@ button { font: inherit; color: inherit; }
    beside the row, a block at a time, where 180px or more is left; else
    it goes below. A picture on a line of its own, or another row, starts
    below. Widths are of the note (Reader's `.reading`, a container). */
-.note .pictures { --share: calc((100cqi - (var(--n) - 1) * 16px) / var(--n)); display: flex; gap: 16px; align-items: flex-start; max-width: 100%; margin: 4px 0 12px; }
-.note .pictures.left { float: left; margin-right: 24px; }
-.note .pictures.right { float: right; margin-left: 24px; }
+.note .pictures { --share: calc((100cqi - (var(--n) - 1) * 16px) / var(--n)); display: flex; gap: 16px; align-items: flex-start; max-width: 100%; margin: 8px 0 14px; }
+.note .pictures.left { float: left; margin-right: 20px; }
+.note .pictures.right { float: right; margin-left: 20px; }
 .note .pictures img { flex: none; min-width: 48px; max-width: var(--share); }
 .note .pictures img:not([width]) { max-width: min(45cqi, var(--share)); }
 .note .pictures ~ :is(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote) { display: flow-root; min-width: min(180px, 100%); }
@@ -128,8 +145,8 @@ button { font: inherit; color: inherit; }
    one does not spill it into the next. */
 .note p.initial { display: flow-root; }
 .note p.initial::first-letter {
-  float: left; font-family: var(--serif); font-weight: 600; font-size: 4.3em; line-height: 0.8;
-  margin: 0.04em 0.08em 0 0; color: var(--accent-ink);
+  float: left; font-family: var(--serif); font-weight: 400; font-size: 6em; line-height: 0.78;
+  margin: 0.02em 0.06em 0 0; color: var(--accent-ink);
 }
 @supports (initial-letter: 3) or (-webkit-initial-letter: 3) {
   .note p.initial::first-letter {

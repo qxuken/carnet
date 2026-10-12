@@ -35,6 +35,9 @@ export type Look = {
   cells: Cell[][];
   /// A table's first row is its header.
   hd: boolean;
+  /// A paragraph's first line whose first letter drops: 1, or 2 when the
+  /// letter has a colour of its own.
+  ini: number;
 };
 
 export const TURN = { text: 0, h1: 1, h2: 2, h3: 3, bullet: 4, number: 5, todo: 6, quote: 7 } as const;
@@ -393,6 +396,7 @@ function build(view: EditorView, toggle: (line: number) => void, tables: TableCo
       const cls = [`cm-${look.k}`];
       if (look.f && n > 1) cls.push('cm-block');
       if (look.d) cls.push('cm-ticked');
+      if (look.ini) cls.push(look.ini === 2 ? 'cm-initial cm-own' : 'cm-initial');
       const attrs: Record<string, string> = { class: cls.join(' ') };
       if (look.i) attrs.style = `--indent:${look.i}`;
       out.push(Decoration.line({ attributes: attrs }).range(line.from));

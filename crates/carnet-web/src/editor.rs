@@ -689,7 +689,17 @@ impl Editor {
         let b = &self.doc.blocks()[i];
         let mut look = Look { first: l.first, ..Look::default() };
         match &b.kind {
-            Kind::Text(_) => look.kind = "text",
+            Kind::Text(t) => {
+                look.kind = "text";
+                // A dropped first letter, on the paragraph's first line, as
+                // the desktop drops it; its own colour, if it has one, kept.
+                if b.initial && l.start == 0
+                    && let Some((f, to)) = inline::initial_letter(t)
+                {
+                    let st = inline::styles(t);
+                    look.initial = if (f..to).any(|i| !st[i].marker && st[i].ink != 0) { 2 } else { 1 };
+                }
+            }
             Kind::Heading { level, .. } => look.kind = ["h1", "h2", "h3"][(*level as usize).clamp(1, 3) - 1],
             Kind::Item { style, indent, done, .. } => {
                 look.kind = match style {
@@ -821,6 +831,9 @@ pub struct Look {
     pub cells: Vec<Vec<(String, Runs)>>,
     /// The table's first row is its header.
     pub head: bool,
+    /// A paragraph's first line whose first letter drops: 1, or 2 when
+    /// the letter has a colour of its own.
+    pub initial: u8,
 }
 
 fn prev_char(s: &str, b: usize) -> usize {
@@ -864,6 +877,15 @@ mod tests {
         assert!(e.look(1).runs.iter().any(|r| r.2.mark != 0 && (r.0, r.1) == (9, 13)));
         assert!(e.look(3).runs.iter().any(|r| r.2.ink != 0 && (r.0, r.1) == (2, 5)));
         assert_eq!(e.look(4).kind, "divider");
+    }
+
+    /// A paragraph's dropped first letter is its first line's, as the
+    /// desktop draws it; a letter with a colour of its own says so.
+    #[test]
+    fn a_dropped_first_letter_is_its_first_lines() {
+        let e = Editor::open("# T\n\n<span class=\"initial\">T</span>he coast road\nruns on.\n\n<span class=\"initial\" style=\"color: #C0553F\">O</span>nce.\n\nPlain.\n");
+        let lines: Vec<(&str, u8)> = e.lines().iter().enumerate().map(|(i, l)| (l.text.as_str(), e.look(i).initial)).collect();
+        assert_eq!(lines[1..5], [("The coast road", 1), ("runs on.", 0), ("Once.", 2), ("Plain.", 0)]);
     }
 
     /// A picture selected whole; its width and side are set as

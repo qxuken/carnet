@@ -134,12 +134,15 @@
   .tool:hover { background: var(--hover); color: var(--ink); }
   .done { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--primary); color: var(--on-accent); font-weight: 600; cursor: pointer; }
   .error { color: var(--danger); }
-  .deleted { max-width: 720px; margin: 4px auto 0; padding: 12px 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; border-bottom: 1px solid var(--line, var(--hover)); }
+  .deleted { max-width: 648px; margin: 4px auto 0; padding: 12px 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; border-bottom: 1px solid var(--line, var(--hover)); }
   .deleted p { flex: 1 1 240px; margin: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
   .ways { display: flex; gap: 8px; flex-wrap: wrap; }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--hover); color: var(--ink); font-weight: 600; cursor: pointer; }
   .pill.danger { background: var(--danger); color: var(--on-accent); }
-  .note { max-width: 720px; margin: 0 auto; padding: 8px 20px calc(48px + env(safe-area-inset-bottom)); }
+  /* The text as wide as the desktop's at its usual page width (settings
+     `width = medium`: 608), so the lines break alike and pictures, a
+     share of it (carnet_core::page::picture_width), come out the same. */
+  .note { max-width: 648px; margin: 0 auto; padding: 8px 20px calc(48px + env(safe-area-inset-bottom)); }
   /* What pictures at an edge are sized by (styles.css `.pictures`). */
   .reading { container-type: inline-size; }
 </style>

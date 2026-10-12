@@ -772,7 +772,8 @@ impl PageEditor {
     /// i: indent, d: done, n: number, r: [[from, to, flags, mark, ink]],
     /// src, wk: the src an Obsidian embed's, alt, w, fl: a picture's place
     /// (0 its own line, 1 left, 2 right), cells, hd: a table's first row
-    /// its header}]`. Flags: 1 bold, 2 italic, 4 struck, 8 code,
+    /// its header, ini: a paragraph's first line whose first letter drops,
+    /// 1, or 2 when the letter has a colour of its own}]`. Flags: 1 bold, 2 italic, 4 struck, 8 code,
     /// 16 link; colours 0xRRGGBBAA, a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
         let n = self.e.lines().len();
@@ -808,7 +809,7 @@ impl PageEditor {
                     })
                     .collect();
                 format!(
-                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}],"hd":{}}}"#,
+                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}],"hd":{},"ini":{}}}"#,
                     l.kind,
                     l.first,
                     l.indent,
@@ -821,7 +822,8 @@ impl PageEditor {
                     l.width.map_or("null".into(), |w| w.to_string()),
                     float_number(l.float),
                     cells.join(","),
-                    l.head
+                    l.head,
+                    l.initial
                 )
             })
             .collect();

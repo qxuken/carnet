@@ -125,8 +125,9 @@
   .meta { color: var(--muted); font-size: 13.5px; flex: 1; min-width: 0; }
   .pill { display: inline-flex; align-items: center; gap: 6px; flex: none; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--sunken); color: var(--ink); font-weight: 500; cursor: pointer; }
   .pill.primary { background: var(--primary); color: var(--on-accent); }
-  .confirm { max-width: 720px; margin: 0 auto; padding: 4px 20px 8px; color: var(--muted); font-size: 13.5px; }
+  .confirm { max-width: 648px; margin: 0 auto; padding: 4px 20px 8px; color: var(--muted); font-size: 13.5px; }
   .confirm p { margin: 0 0 10px; }
   .buttons { display: flex; gap: 8px; justify-content: flex-end; }
-  .note { max-width: 720px; margin: 0 auto; padding: 8px 20px calc(48px + env(safe-area-inset-bottom)); }
+  /* As wide as the reader's (Reader.svelte `.note`), the desktop's. */
+  .note { max-width: 648px; margin: 0 auto; padding: 8px 20px calc(48px + env(safe-area-inset-bottom)); }
 </style>

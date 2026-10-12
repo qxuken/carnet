@@ -16,11 +16,13 @@ export const theme = EditorView.theme({
   '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': { backgroundColor: 'var(--selection) !important' },
   // A block's space above, as the reader spaces them; items close.
   '.cm-block': { paddingTop: '12px !important' },
-  '.cm-bullet.cm-block, .cm-number.cm-block, .cm-todo.cm-block': { paddingTop: '3px !important' },
+  '.cm-bullet.cm-block, .cm-number.cm-block, .cm-todo.cm-block': { paddingTop: '4px !important' },
   '.cm-title': { font: '600 32px/1.25 var(--serif)', paddingBottom: '6px !important' },
-  '.cm-h1': { font: '600 26px/1.3 var(--serif)', paddingTop: '18px !important' },
-  '.cm-h2': { font: '600 24px/1.3 var(--serif)', paddingTop: '16px !important' },
-  '.cm-h3': { font: '600 19px/1.35 var(--serif)', paddingTop: '12px !important' },
+  // A heading's space above, the desktop's: its own and the block's
+  // before it.
+  '.cm-h1': { font: '600 26px/1.3 var(--serif)', paddingTop: '34px !important' },
+  '.cm-h2': { font: '600 24px/1.3 var(--serif)', paddingTop: '28px !important' },
+  '.cm-h3': { font: '600 19px/1.35 var(--serif)', paddingTop: '22px !important' },
   '.cm-ph': { color: 'var(--faint)', pointerEvents: 'none' },
   // A list item: its mark in the gutter, its words after it, indented.
   '.cm-bullet, .cm-number, .cm-todo': { paddingLeft: 'calc(30px + var(--indent, 0) * 24px) !important', textIndent: '-30px' },
@@ -29,7 +31,7 @@ export const theme = EditorView.theme({
   '.cm-num': { textAlign: 'right', paddingRight: '8px', boxSizing: 'border-box', color: 'var(--muted)' },
   '.cm-box': {
     appearance: 'none', width: '18px', height: '18px', margin: '0 12px 0 0', verticalAlign: '-3px', cursor: 'pointer',
-    border: '1.6px solid var(--border-strong)', borderRadius: '50%', background: 'var(--card)', textIndent: '0',
+    border: '1.5px solid var(--ring)', borderRadius: '50%', background: 'transparent', textIndent: '0',
   },
   '.cm-box:checked': { background: 'var(--accent)', borderColor: 'var(--accent)' },
   '.cm-box:checked::after': {
@@ -37,7 +39,18 @@ export const theme = EditorView.theme({
     border: 'solid var(--on-accent)', borderWidth: '0 2px 2px 0', transform: 'rotate(45deg)',
   },
   '.cm-ticked': { color: 'var(--muted)', textDecoration: 'line-through', textDecorationColor: 'var(--faint)' },
-  '.cm-quote': { borderLeft: '3px solid var(--border-strong)', paddingLeft: '14px !important', color: 'var(--muted)' },
+  '.cm-quote': { borderLeft: '3px solid var(--border-strong)', paddingLeft: '14px !important', color: 'var(--muted)', fontFamily: 'var(--serif)' },
+  // A paragraph's dropped first letter (page.ts `ini`), as the desktop and
+  // the reader drop it (styles.css `p.initial`): three lines tall in the
+  // headings' serif, in the accent unless it has a colour of its own.
+  // Floated, sized to reach from the first line's capitals to the third's
+  // baseline: `initial-letter` sinks it only two lines where the spaces
+  // are kept as written, as an editor keeps them.
+  '.cm-initial::first-letter': {
+    float: 'left', fontFamily: 'var(--serif)', fontWeight: '400', fontSize: '6em', lineHeight: '0.78',
+    margin: '0.02em 0.06em 0 0', color: 'var(--accent-ink)',
+  },
+  '.cm-initial.cm-own::first-letter': { color: 'inherit' },
   '.cm-code, .cm-front': { font: '14px/1.6 ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', paddingLeft: '12px !important', paddingRight: '12px !important' },
   '.cm-front': { color: 'var(--muted)' },
   '.cm-b': { fontWeight: '700' },
@@ -46,11 +59,18 @@ export const theme = EditorView.theme({
   '.cm-c': { font: '0.85em ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', borderRadius: '4px', padding: '1px 4px' },
   '.cm-l': { color: 'var(--accent-ink)', textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, var(--accent-ink) 40%, transparent)' },
   '.cm-marked': { borderRadius: '3px' },
-  '.cm-rule': { display: 'inline-block', width: '100%', borderTop: '1px solid var(--border-strong)', verticalAlign: 'middle' },
+  // A divider as the desktop draws it by default (settings `divider =
+  // dots`): three dots 3px round, 15px apart, faint, with the desktop's
+  // space round them (styles.css `hr` the same).
+  '.cm-divider': { textAlign: 'center', paddingTop: '26px !important', paddingBottom: '16px' },
+  '.cm-rule': {
+    display: 'inline-block', width: '33px', height: '3px', verticalAlign: 'middle', color: 'var(--faint)',
+    background: 'radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x',
+  },
   // A divider selected whole (page.ts `ruleChosen`): the selection's
-  // wash over its line, the rule in the accent.
+  // wash over its line, the dots in the accent.
   '.cm-rule-on': { backgroundColor: 'var(--selection)', borderRadius: 'var(--radius)' },
-  '.cm-rule-on .cm-rule': { borderTopColor: 'var(--accent)' },
+  '.cm-rule-on .cm-rule': { color: 'var(--accent)' },
   // Pictures (page.ts `PictureRow`), laid out as the reading view lays
   // them out (styles.css `.pictures`). Every space is inside what
   // CodeMirror measures: padding, never a margin, and a line that goes
@@ -75,8 +95,8 @@ export const theme = EditorView.theme({
     '--share': 'calc((100cqi - (var(--n) - 1) * 16px) / var(--n))',
     display: 'flex', gap: '16px', alignItems: 'flex-start', clear: 'both', maxWidth: '100%',
   },
-  '.cm-left .cm-pics-row': { float: 'left', margin: '4px 24px 12px 0' },
-  '.cm-right .cm-pics-row': { float: 'right', margin: '4px 0 12px 24px' },
+  '.cm-left .cm-pics-row': { float: 'left', margin: '8px 20px 14px 0' },
+  '.cm-right .cm-pics-row': { float: 'right', margin: '8px 0 14px 20px' },
   '.cm-float .cm-picture-box': { flex: 'none' },
   '.cm-float .cm-picture': { minWidth: '48px', maxWidth: 'var(--share)' },
   '.cm-float .cm-picture-box:not(.cm-sized) .cm-picture': { maxWidth: 'min(45cqi, var(--share))' },
@@ -89,6 +109,12 @@ export const theme = EditorView.theme({
   '.cm-alone .cm-pics-row': { width: '100%', marginLeft: '0', marginRight: '0' },
   '.cm-right.cm-alone .cm-pics-row': { justifyContent: 'flex-end' },
   '.cm-alone ~ .cm-line, .cm-divider': { display: 'block' },
+  // A table never runs beside them (carnet_core::page::runs_beside): it
+  // starts below, at its full width, cleared inside its line, measured.
+  '.cm-line.cm-table': { display: 'block', paddingTop: '0 !important', paddingBottom: '8px' },
+  // No empty line of the caret's above and below it.
+  '.cm-line.cm-table > .cm-widgetBuffer': { position: 'absolute' },
+  '.cm-table::before': { content: "''", display: 'block', clear: 'both', paddingTop: '20px' },
   // Its place until it comes (styles.css `.picture-card`) the same.
   '.cm-pics .picture-card': { margin: '0' },
   '.cm-float .picture-card': { flex: 'none', maxWidth: 'var(--share)' },
@@ -124,9 +150,23 @@ export const theme = EditorView.theme({
     background: 'var(--card)', color: 'var(--ink)', font: '500 12.5px/1.3 var(--sans)', whiteSpace: 'nowrap', boxShadow: '0 1px 4px #0000001f',
   },
   '.cm-picked.dragging .cm-picked-size': { display: 'block' },
+  // A table as the desktop draws it (styles.css `.note table` the same):
+  // the text's width, its columns sharing it alike; one hairline in the
+  // border's colour for the rounded frame and the rules; the header row
+  // small and quiet on a wash; the cells roomy, in the words' type.
   '.cm-tablewrap': { display: 'block', overflowX: 'auto' },
-  '.cm-tablewrap table': { borderCollapse: 'collapse', margin: '4px 0', font: '400 15px/1.5 var(--sans)' },
-  '.cm-tablewrap th, .cm-tablewrap td': { border: '1px solid var(--border-strong)', padding: '6px 10px', textAlign: 'left', verticalAlign: 'top', minWidth: '3em', outline: 'none', caretColor: 'var(--accent)' },
+  '.cm-tablewrap table': {
+    width: '100%', tableLayout: 'fixed', borderCollapse: 'separate', borderSpacing: '0',
+    border: '1px solid var(--border)', borderRadius: 'var(--radius)', font: 'inherit',
+  },
+  '.cm-tablewrap th, .cm-tablewrap td': {
+    border: '0', borderTop: '1px solid var(--border)', borderLeft: '1px solid var(--border)', padding: '8px 14px',
+    textAlign: 'left', verticalAlign: 'top', outline: 'none', caretColor: 'var(--accent)', overflowWrap: 'anywhere',
+  },
+  '.cm-tablewrap tr:first-child > *': { borderTop: '0' },
+  '.cm-tablewrap tr > :first-child': { borderLeft: '0' },
   '.cm-tablewrap th:focus, .cm-tablewrap td:focus': { boxShadow: 'inset 0 0 0 2px var(--accent-soft)' },
-  '.cm-tablewrap th': { background: 'var(--sunken)', color: 'var(--muted)', fontWeight: '600', fontSize: '14px' },
+  '.cm-tablewrap th': { background: 'var(--sunken)', color: 'var(--muted)', font: '400 12.5px/18px var(--sans)', padding: '9px 14px' },
+  '.cm-tablewrap tr:first-child > :first-child': { borderTopLeftRadius: 'calc(var(--radius) - 1px)' },
+  '.cm-tablewrap tr:first-child > :last-child': { borderTopRightRadius: 'calc(var(--radius) - 1px)' },
 });
