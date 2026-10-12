@@ -3770,7 +3770,7 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     d.click(&mut a, r.x + r.w / 2.0, r.y + r.h / 2.0);
     until("sent", &mut a, &mut d, &|x| x.signup.sent_to.is_some());
     d_frame_twice(&mut a, &mut d);
-    assert!(drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here"));
+    assert!(drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here."));
     assert!(!drawn(&mut d, &mut a, "Send me an invite"), "the email field gone");
     assert!(drawn(&mut d, &mut a, "No invite yet?"), "asked again if it doesn't come");
     assert_eq!(focused(&a, &d), Some(Field::SyncCode));
@@ -3795,9 +3795,9 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     assert!(drawn(
         &mut d,
         &mut a,
-        "We emailed ann@example.com a moment ago. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in 10 minutes"
+        "We emailed ann@example.com a moment ago. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in 10 minutes."
     ));
-    assert!(!drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here"), "nothing sent, so not said sent");
+    assert!(!drawn(&mut d, &mut a, "We sent an invite to ann@example.com. Paste its code here."), "nothing sent, so not said sent");
     assert_eq!(focused(&a, &d), Some(Field::SyncCode));
     // The code pasted: in.
     type_in(&mut a, &mut d, &invite.text());
@@ -3943,7 +3943,13 @@ fn the_app_learns_at_once_its_account_can_write_again() {
 
     plan.0.lock().unwrap().writable = false;
     tell();
-    until("read only, said", &mut a, &mut da, &|x| x.sync.error.as_deref().is_some_and(|e| e.contains("read only")));
+    until("read only, said", &mut a, &mut da, &|x| x.sync.read_only);
+    // Said once: in the account's card, not again as an error below it.
+    da.core.set_inspect(true);
+    da.frame(&mut a);
+    let said = da.core.nodes().iter().filter(|n| n.text.as_deref().is_some_and(|t| t.contains("Read only for now") || t.contains("read only for now"))).count();
+    assert_eq!(said, 1, "read only, said once");
+    assert_eq!(a.sync.error, None);
     let before = held();
     type_in(&mut a, &mut da, "Typed while suspended");
     a.save_current();
@@ -3955,7 +3961,9 @@ fn the_app_learns_at_once_its_account_can_write_again() {
 
     *plan.0.lock().unwrap() = Limit { bytes: Some(1 << 30), writable: true, plan: "Family".into(), until: 0 };
     tell();
-    until("writable again, the plan new", &mut a, &mut da, &|x| x.sync.error.is_none() && x.sync.usage.as_ref().is_some_and(|u| u.plan == "Family"));
+    until("writable again, the plan new", &mut a, &mut da, &|x| !x.sync.read_only && x.sync.usage.as_ref().is_some_and(|u| u.plan == "Family"));
+    da.frame(&mut a);
+    assert!(!da.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.contains("Read only for now"))), "taken back");
     let t0 = Instant::now();
     while held() == before {
         assert!(t0.elapsed() < Duration::from_secs(15), "timed out: what waited sent");
@@ -3968,6 +3976,144 @@ fn the_app_learns_at_once_its_account_can_write_again() {
     rt.block_on(served).unwrap().unwrap();
     drop(a);
     remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A picture pasted while the account is over its plan is held back (the
+/// server says it's full, and Settings says so); the plan raised while
+/// the app is open (the host tells the hub), the picture goes at once,
+/// with no restart and Settings not even open, and "full" goes with it.
+#[test]
+fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
+    use carnet_server::quota::{Limit, Quota};
+    use carnet_server::server::{self, Config, HubHandle};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    struct Plan(Mutex<Limit>);
+    impl Quota for Plan {
+        fn limit(&self, _: &[u8]) -> Limit {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    let data = std::env::temp_dir().join(format!("carnet-app-held-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    // A plan the notes alone fill: no picture goes.
+    let plan = Arc::new(Plan(Mutex::new(Limit { bytes: Some(1), writable: true, plan: "Tiny".into(), until: 0 })));
+    let handle: Arc<Mutex<Option<HubHandle>>> = Arc::default();
+    let h = handle.clone();
+    let host = server::Host { quota: plan.clone(), first_invite: false, ready: Some(Box::new(move |hub| *h.lock().unwrap() = Some(hub))), ..server::Host::default() };
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let named = |x: &Carnet| x.store.replica.as_ref().is_some_and(|r| r.vault().pictures().keys().any(|p| p.starts_with("attachments/")));
+    let (mut a, mut da, dir_a) = fresh("held-a");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut da, &|x| x.sync.status == crate::sync::Status::Online);
+    key(&mut a, &mut da, "enter");
+    type_in(&mut a, &mut da, "Over the plan");
+    let rgba: Vec<u8> = (0..12).flat_map(|_| [10u8, 20, 30, 255]).collect();
+    a.paste_picture(4, 3, &rgba);
+    a.save_current();
+    until("held back, said", &mut a, &mut da, &|x| x.sync.error.as_deref() == Some(carnet_sync::session::FULL));
+    for _ in 0..40 {
+        da.frame(&mut a);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!named(&a), "not sent while full");
+
+    let hub = handle.lock().unwrap().clone().unwrap();
+    let account = rt.block_on(async move { hub.run(|hub, _| hub.store().account_list()[0].0.clone()).await.unwrap() });
+    *plan.0.lock().unwrap() = Limit { bytes: Some(1 << 30), writable: true, plan: "Family".into(), until: 0 };
+    let hub = handle.lock().unwrap().clone().unwrap();
+    rt.block_on(async move { hub.limit_changed(account).await.unwrap() });
+    // Well before the slow retry: the room said is what sends it.
+    let t0 = Instant::now();
+    until("sent, once there's room", &mut a, &mut da, &named);
+    assert!(t0.elapsed() < Duration::from_secs(10));
+    assert_eq!(a.sync.error, None, "full, taken back");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(a);
+    remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Settings' list of devices is fresh while it's open: a device that goes
+/// offline is no longer "Online now" without Settings being opened again
+/// (the server tells), and opening Settings asks the server again.
+#[test]
+fn the_device_list_says_who_is_online_as_they_come_and_go() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-online-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps[0].0) {
+            assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let laptop_online = |x: &Carnet| x.sync.devices.as_ref().and_then(|l| l.iter().find(|d| !d.you).map(|d| d.online));
+    let (mut a, mut da, dir_a) = fresh("online-a");
+    let (mut b, mut db, dir_b) = fresh("online-b");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("a online", &mut [(&mut a, &mut da)], &|x| x.sync.status == crate::sync::Status::Online);
+    a.settings_open = true;
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x.sync.code.is_some());
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    {
+        let mut both = [(&mut a, &mut da), (&mut b, &mut db)];
+        until("b listed, online now", &mut both, &|x| laptop_online(x) == Some(true));
+    }
+    // b goes (quit): a's list, open all along, says so unasked.
+    drop(b);
+    until("b no longer online", &mut [(&mut a, &mut da)], &|x| laptop_online(x) == Some(false));
+    // Settings closed and opened again: asked again (the list stays shown
+    // meanwhile).
+    a.settings_open = false;
+    da.frame(&mut a);
+    a.settings_open = true;
+    da.frame(&mut a);
+    assert!(a.sync.devices.is_some(), "the list stays while asked again");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(a);
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
     let _ = std::fs::remove_dir_all(&data);
 }
 
@@ -4871,6 +5017,86 @@ fn a_missing_picture_is_a_small_card_that_selects_and_deletes() {
         assert_eq!(texts(&app), ["Before the picture", "After words", "More words"], "{float}");
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// With sync on, a note from another device showing that device's own
+/// picture (beside the note there, which by design doesn't sync) says
+/// where the picture is, as the web does, in the same small card; one of
+/// Carnet's own that isn't here is still "Picture not found".
+#[test]
+fn another_devices_own_picture_says_it_is_on_that_device() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-elsewhere-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+        let _ = stopped.await;
+    }));
+    let (store, dir) = temp_store("elsewhere");
+    drop(store);
+    std::fs::create_dir_all(dir.join("Home")).unwrap();
+    std::fs::write(dir.join("Home/Weekend.md"), "# Weekend\n\nThe hill\n\n![](hill.jpg)\n\n![](../attachments/gone.png)\n\nAfter\n").unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.frame(&mut app);
+    let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+    // (The inspector keeps a long text's first 60 characters.)
+    let says_elsewhere = |d: &Drive| d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with(&super::page_view::ELSEWHERE[..50])));
+    let i = app.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    app.open(i);
+    for _ in 0..6 {
+        d.frame(&mut app);
+    }
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    assert!(!says_elsewhere(&d), "sync off: this is the only device");
+    assert!(shown(&d, "Picture not found"));
+
+    app.sync_server = origin.clone();
+    app.sync_code = invite.text();
+    app.on_plain(Msg::SyncStart);
+    let t0 = Instant::now();
+    while app.sync.status != crate::sync::Status::Online {
+        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: online");
+        d.frame(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let i = app.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    app.open(i);
+    for _ in 0..6 {
+        d.frame(&mut app);
+    }
+    assert!(says_elsewhere(&d), "the user's, on the device that has it");
+    assert!(shown(&d, "hill.jpg"), "named");
+    assert!(shown(&d, "Picture not found"), "Carnet's own, missing, as before");
+    // In the box the picture takes (as the web has it): the text's width,
+    // a picture's height at least. "Picture not found" stays a small card.
+    let words = d.core.nodes().iter().find(|n| n.text.as_deref().is_some_and(|t| t.starts_with(&super::page_view::ELSEWHERE[..50]))).unwrap().rect;
+    let card = d
+        .core
+        .nodes()
+        .iter()
+        .map(|n| n.rect)
+        .filter(|r| r.x <= words.x && r.y <= words.y && r.x + r.w >= words.x + words.w && r.y + r.h >= words.y + words.h && r.h >= 100.0)
+        .min_by(|a, b| (a.w * a.h).total_cmp(&(b.w * b.h)))
+        .unwrap();
+    assert!(card.h >= 120.0 && card.w >= app.text_w - 20.0 && card.w <= app.text_w, "the picture's box, {card:?} in {}", app.text_w);
+    let pics: Vec<u64> = blocks(&app).iter().filter(|b| matches!(b.kind, Kind::Image { .. })).map(|b| b.id).collect();
+    let ours = app.row_rects.iter().find(|(b, _)| *b == pics[1]).map(|(_, r)| *r).unwrap();
+    assert!(ours.h < 100.0, "{ours:?}");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(app);
+    remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
 }
 
 #[test]

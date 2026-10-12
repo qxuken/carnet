@@ -427,3 +427,41 @@ fn the_list_says_who_is_online_now() {
     let _b = net.back(d);
     assert_eq!(online(&net.list(a)), [(b"first".to_vec(), true), (b"laptop".to_vec(), true)], "back");
 }
+
+/// A device going offline, or coming online, is told to the account's
+/// other devices online, unasked, so a list on screen is never stale; the
+/// one gone was last seen as it went. A device still online on another
+/// socket isn't gone.
+#[test]
+fn the_others_are_told_unasked_when_a_device_comes_or_goes() {
+    let mut net = Net::new(6, Box::new(Memory::default()));
+    let vault = VaultKey::generate(&mut net.rng);
+    let a = net.first_device(&vault);
+    let b = net.pair(a, b"laptop", 2);
+    let told = |net: &mut Net| -> Option<Vec<(Vec<u8>, bool, u64)>> {
+        let events = std::mem::take(&mut net.device(a).events);
+        events.into_iter().rev().find_map(|e| match e {
+            Event::Devices(list) => {
+                let mut o: Vec<(Vec<u8>, bool, u64)> = list.iter().map(|d| (d.id.clone(), d.online, d.seen)).collect();
+                o.sort();
+                Some(o)
+            }
+            _ => None,
+        })
+    };
+    let _ = told(&mut net);
+    net.hub.tick(5_000);
+    let d = net.take(b);
+    net.pump();
+    let list = told(&mut net).expect("told, unasked");
+    assert_eq!(list[1], (b"laptop".to_vec(), false, 5_000), "gone, and last seen as it went");
+    // Back: told again (its card, sent on every login, says so).
+    net.hub.tick(6_000);
+    let b = net.back(d);
+    let list = told(&mut net).expect("told, unasked");
+    assert!(list[1].1, "online again");
+    // A socket closed that never logged in tells nobody.
+    let _ = net.hub.connect(999, &mut net.rng);
+    assert!(net.hub.disconnect(999).is_empty());
+    let _ = b;
+}

@@ -98,6 +98,18 @@ impl Two {
                     side.pictures.event(&e, &mut side.store, &mut side.session, &mut OsRandom).unwrap();
                     continue;
                 }
+                // As the app does: pictures held back, offered again once
+                // there's room.
+                if let Event::Refused(why) = &e
+                    && (why == carnet_sync::session::FULL || why == carnet_sync::session::READ_ONLY)
+                {
+                    side.pictures.held_back();
+                }
+                if let Event::Usage(u) = &e
+                    && u.has_room()
+                {
+                    side.pictures.retry();
+                }
                 if let Event::Changed(room) = e {
                     if room == vault::ROOM {
                         side.store.vault_changed().unwrap();
@@ -639,6 +651,54 @@ fn pictures_follow_their_notes() {
     let kept = two.worker.blobs.get(ACCOUNT, &id).expect("kept");
     assert!(!kept.windows(64).any(|w| w == &photo[..64]));
     assert!(two.sides[1].pictures_arrived());
+}
+
+/// A picture offered while the account is full is held back by the
+/// server, with no word for it alone: it isn't waited on (the sweep isn't
+/// held up for it), the sweep leaves it, and once the server says there's
+/// room (a plan raised, told unasked) it goes, and reaches the other
+/// device, with no new login.
+#[test]
+fn a_picture_held_back_while_full_goes_once_there_is_room() {
+    use carnet_server::quota::{Limit, Quota};
+    use std::sync::{Arc, Mutex};
+    struct Plan(Mutex<Limit>);
+    impl Quota for Plan {
+        fn limit(&self, _: &[u8]) -> Limit {
+            self.0.lock().unwrap().clone()
+        }
+    }
+    let mut two = Two::new("held");
+    let plan = Arc::new(Plan(Mutex::new(Limit { bytes: Some(1), writable: true, plan: "Tiny".into(), until: 0 })));
+    two.hub.set_quota(plan.clone());
+    let photo: Vec<u8> = (0..20_000u32).map(|i| (i % 241) as u8).collect();
+    let a = &mut two.sides[0].store;
+    let src = a.save_attachment("", "png", &photo).unwrap();
+    let mut n = crate::store::Note::new("Over", Doc::new(vec![Block::text("full")]));
+    n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.clone(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    a.notes.push(n);
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let p = &two.sides[0].pictures;
+    assert!(p.is_holding(), "held back");
+    assert!(!p.busy(), "not waited on");
+    assert!(p.busy_paths().contains(&src), "but kept from the sweep");
+    assert!(!two.sides[1].dir.join(&src).exists());
+    // More pumps (ticks) send nothing more while full.
+    two.pump();
+    assert!(two.sides[0].pictures.is_holding());
+
+    *plan.0.lock().unwrap() = Limit { bytes: Some(1 << 30), writable: true, plan: "Family".into(), until: 0 };
+    let outs = two.hub.limit_changed(ACCOUNT);
+    two.deliver(outs);
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert!(!two.sides[0].pictures.is_holding());
+    assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok().as_deref(), Some(photo.as_slice()), "on the other device");
 }
 
 /// A picture beside its note is the user's: it stays on its device, not

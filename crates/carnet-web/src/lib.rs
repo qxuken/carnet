@@ -535,6 +535,7 @@ impl Vault {
                 }
                 Said::PasskeySet => r#"{"passkeySet":true}"#.to_string(),
                 Said::Writable => r#"{"writable":true}"#.to_string(),
+                Said::ReadOnly => r#"{"readOnly":true}"#.to_string(),
                 Said::Usage(u) => format!(
                     r#"{{"usage":{{"notes":{},"pictures":{},"limit":{},"writable":{},"plan":{},"until":{}}}}}"#,
                     u.notes,

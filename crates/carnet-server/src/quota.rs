@@ -110,8 +110,7 @@ impl Admission for ByInvite {
     fn admitted(&self, _: [u8; 32], _: &[u8]) {}
 }
 
-/// What a device is told when the account is full.
-pub const FULL: &str = "This account is full, so new pictures stay on this device for now. Delete some, or move to a bigger plan.";
-
-/// What a device is told when the account can't write.
-pub const READ_ONLY: &str = "This account is read only for now: changes stay on this device, and sync once it can write again.";
+/// What a device is told when the account is full, and when it can't
+/// write: the apps know these words (`carnet_sync::session`), and offer
+/// what was held back once there's room.
+pub use carnet_sync::session::{FULL, READ_ONLY};

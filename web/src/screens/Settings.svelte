@@ -132,13 +132,14 @@
     {/if}
     {#if space}
       <p class="row quiet"><Icon name="cloud" size={16} /> {space.line}</p>
-      {#if !space.writable}
-        <p class="row danger"><Icon name="warning" size={16} /> Read only for now: what’s written here stays here, and syncs once the account can write again.</p>
-      {:else if space.over}
-        <!-- The server takes no new picture at or over the limit; notes'
-             text it always takes. -->
-        <p class="row warn"><Icon name="warning" size={16} /> {space.over}: new pictures stay on this device until there’s room. Notes still sync.</p>
-      {/if}
+    {/if}
+    <!-- Read only: said here, and only here (not again as an error). -->
+    {#if sync.readOnly || (space && !space.writable)}
+      <p class="row danger"><Icon name="warning" size={16} /> Read only for now: what’s written here stays here, and syncs once the account can write again.</p>
+    {:else if space?.over}
+      <!-- The server takes no new picture at or over the limit; notes'
+           text it always takes. -->
+      <p class="row warn"><Icon name="warning" size={16} /> {space.over}: new pictures stay on this device until there’s room. Notes still sync.</p>
     {/if}
     <h2>Devices</h2>
     <section>

@@ -3,7 +3,7 @@
 //! vault. What lib.rs binds for the browser.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use carnet_sync::crypto::BlobId;
 
@@ -148,11 +148,10 @@ pub enum Said {
     /// The account can write again (a plan renewed, a suspension lifted):
     /// what waited here is on its way, and the read-only words go.
     Writable,
+    /// The account can't write for now: the page says so once, in its
+    /// status line and the account's card, until [`Said::Writable`].
+    ReadOnly,
 }
-
-/// What the page says while the account can't write; it goes once it can
-/// ([`Said::Writable`]).
-pub const READ_ONLY: &str = "This account is read only for now: what's written here stays here, and syncs once the account can write again.";
 
 /// A version of a note, as its history lists it.
 #[derive(Clone, Debug, PartialEq)]
@@ -237,6 +236,11 @@ pub struct Notes {
     /// if the server lacks it, then put in the vault, so no device asks
     /// for a picture the server hasn't got.
     uploads: HashMap<BlobId, (String, Vec<u8>)>,
+    /// Of those, the ones offered, the server's word awaited, and the
+    /// ones it wanted, being sent: not offered again meanwhile. One the
+    /// server held back (the account full, or read only) is neither.
+    offered: HashSet<BlobId>,
+    sending: HashSet<BlobId>,
     /// Invites made here: the server keeps only their hashes, so only
     /// here can their codes be shown again.
     made: Vec<InviteCode>,
@@ -278,7 +282,7 @@ impl Notes {
             ring: me.ring.clone(),
             name: name.to_string(),
         };
-        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), made: Vec::new(), reviving: HashMap::new() };
+        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), made: Vec::new(), reviving: HashMap::new() };
         // Deleted forever, and pictures dropped, the server hasn't said
         // done: said again once in.
         for line in forgotten.lines() {
@@ -380,14 +384,32 @@ impl Notes {
                     self.said.push(Said::Invites { owner, waiting, accounts });
                 }
                 Event::Denied(why) => self.errors.push(format!("The server turned this browser away: {why}")),
-                Event::Refused(why) => self.errors.push(why),
-                Event::Usage(u) => self.said.push(Said::Usage(u)),
+                // Pictures held back: no word comes for each, so none is
+                // awaited; offered again once there's room. Read only,
+                // the page says so already.
+                Event::Refused(why) if why == carnet_sync::session::READ_ONLY => self.offered.clear(),
+                Event::Refused(why) => {
+                    if why == carnet_sync::session::FULL {
+                        self.offered.clear();
+                    }
+                    self.errors.push(why);
+                }
+                Event::Usage(u) => {
+                    // Room again (a plan raised): pictures held back go.
+                    if u.has_room() {
+                        self.offer_again();
+                    }
+                    self.said.push(Said::Usage(u));
+                }
                 Event::Password { allowed, id, only } => self.said.push(Said::Password { allowed, id, only }),
                 Event::PasswordSet => self.said.push(Said::PasswordSet),
                 Event::Passkeys(list) => self.said.push(Said::Passkeys(list)),
                 Event::PasskeySet => self.said.push(Said::PasskeySet),
-                Event::ReadOnly => self.errors.push(READ_ONLY.into()),
-                Event::Writable => self.said.push(Said::Writable),
+                Event::ReadOnly => self.said.push(Said::ReadOnly),
+                Event::Writable => {
+                    self.offer_again();
+                    self.said.push(Said::Writable);
+                }
                 Event::Devices(mut list) => {
                     list.sort_by(|a, b| b.you.cmp(&a.you).then_with(|| a.name.cmp(&b.name)));
                     self.said.push(Said::Devices(list));
@@ -397,15 +419,21 @@ impl Notes {
                 Event::PairFailed(why) => self.said.push(Said::PairFailed(why)),
                 Event::RecoverySet => self.said.push(Said::RecoverySet),
                 Event::LoggedIn => {
-                    let ids: Vec<BlobId> = self.uploads.keys().copied().collect();
-                    self.session.offer_blobs(ids);
+                    self.offered.clear();
+                    self.sending.clear();
+                    self.offer_again();
                 }
                 Event::BlobWanted(id) => {
-                    if let Some((_, bytes)) = self.uploads.get(&id) {
-                        self.session.put_blob(bytes, rng);
+                    self.offered.remove(&id);
+                    if let Some((_, bytes)) = self.uploads.get(&id)
+                        && self.session.put_blob(bytes, rng)
+                    {
+                        self.sending.insert(id);
                     }
                 }
                 Event::BlobStored(id) => {
+                    self.offered.remove(&id);
+                    self.sending.remove(&id);
                     if let Some((path, _)) = self.uploads.remove(&id) {
                         let vault = self.rooms.doc(vault::ROOM);
                         let (changed, unused) = vault.put_picture(&path, &hex(&id));
@@ -417,9 +445,13 @@ impl Notes {
                         self.said.push(Said::Uploaded(hex(&id)));
                     }
                 }
-                // One being put is offered again at the next login; one
-                // asked for, the page is told of.
-                Event::BlobFailed(id) if !self.uploads.contains_key(&id) => {
+                // One being put is offered again at the next login, or
+                // once there's room; one asked for, the page is told of.
+                Event::BlobFailed(id) if self.uploads.contains_key(&id) => {
+                    self.offered.remove(&id);
+                    self.sending.remove(&id);
+                }
+                Event::BlobFailed(id) => {
                     self.reviving.remove(&id);
                     self.missing.push(id);
                 }
@@ -762,8 +794,22 @@ impl Notes {
             return Some(hexed);
         }
         self.uploads.insert(id, (path.to_string(), bytes));
-        self.session.offer_blobs(vec![id]);
+        self.offer_again();
         Some(hexed)
+    }
+
+    /// Every picture put in here and not on the server, but those being
+    /// sent, offered (again): logged in, or the server has room again
+    /// for the ones it held back (the account full, or read only).
+    fn offer_again(&mut self) {
+        // Not logged in: at the login.
+        if !self.session.is_ready() {
+            return;
+        }
+        let mut ids: Vec<BlobId> = self.uploads.keys().filter(|id| !self.offered.contains(*id) && !self.sending.contains(*id)).copied().collect();
+        ids.sort_unstable();
+        self.offered.extend(ids.iter().copied());
+        self.session.offer_blobs(ids);
     }
 
     /// The id, in hex, of the picture at `path` (from the notes folder).

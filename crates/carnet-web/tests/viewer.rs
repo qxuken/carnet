@@ -780,17 +780,63 @@ fn an_open_browser_learns_its_account_can_write_again() {
     };
     plan.0.lock().unwrap().writable = false;
     tell(&mut hub, &mut desk, &mut web, &mut rng);
-    assert_eq!(web.errors, [carnet_web::notes::READ_ONLY.to_string()]);
+    // Said once, for the status line and the card: not as an error too.
+    assert_eq!(web.said.iter().filter(|s| **s == Said::ReadOnly).count(), 1, "{:?}", web.said);
+    assert!(web.errors.is_empty(), "{:?}", web.errors);
     let (_, base) = web.source(&ks).unwrap();
     web.edit(&ks, &base, "# Plan\n\nA walk. Typed while suspended.\n", &mut rng).unwrap();
+    // A picture put in meanwhile: held back, and that's not said again.
+    let pic = web.picture_free("suspended", "png");
+    web.upload(&pic, vec![5; 1500]).unwrap();
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(!desk.docs[&ks].text().contains("suspended"), "nothing sent");
+    assert!(web.errors.is_empty(), "{:?}", web.errors);
 
     *plan.0.lock().unwrap() = Limit { bytes: Some(5_000_000), writable: true, plan: "Personal".into(), until: 0 };
     tell(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.said.contains(&Said::Writable), "{:?}", web.said);
     assert!(web.said.iter().any(|s| matches!(s, Said::Usage(u) if u.writable && u.plan == "Personal")));
     assert!(desk.docs[&ks].text().contains("Typed while suspended."), "what waited went");
+    assert!(desk.docs[vault::ROOM].pictures().contains_key(&pic), "the picture too, without a reload");
+}
+
+/// A picture put in while the account is over its plan is held back (the
+/// server says it's full); the plan raised while the page is open, it
+/// goes at once, with no reload, and reaches the vault.
+#[test]
+fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
+    use carnet_server::quota::Limit;
+    let mut rng = Seeded(13);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    // A plan the notes alone fill.
+    let plan = std::sync::Arc::new(Plan(std::sync::Mutex::new(Limit { bytes: Some(1), writable: true, plan: "Tiny".into(), until: 0 })));
+    hub.set_quota(plan.clone());
+    let k = Key::random();
+    let ks = k.to_string();
+    desk.docs.insert(ks.clone(), NoteDoc::new(7));
+    desk.docs[&ks].record("# Plan\n\nA walk.\n", Origin::Save);
+    desk.session.saved(&ks, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let pic = web.picture_free("over", "png");
+    let id = web.upload(&pic, vec![6; 2500]).unwrap();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.errors, [carnet_sync::session::FULL.to_string()], "said full");
+    assert!(desk.docs.get(vault::ROOM).is_none_or(|v| !v.pictures().contains_key(&pic)), "held back");
+    web.said.clear();
+
+    *plan.0.lock().unwrap() = Limit { bytes: Some(5_000_000), writable: true, plan: "Personal".into(), until: 0 };
+    let outs = WORKER.with(|w| w.borrow_mut().done(hub.limit_changed(ACCOUNT)));
+    for o in outs {
+        if let Out::Send(conn, bytes) = o {
+            match conn {
+                1 => desk.session.receive(&bytes, &mut DeskDocs(&mut desk.docs), &mut rng),
+                _ => web.receive(&bytes, &mut rng),
+            }
+        }
+    }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
+    assert_eq!(desk.docs[vault::ROOM].pictures().get(&pic), Some(&id));
 }
 
 /// A browser opened on an account that already has many notes (more
