@@ -51,6 +51,8 @@ thread_local! {
     /// each test (each runs on a thread of its own).
     static WORKER: std::cell::RefCell<carnet_server::blobs::Worker<carnet_server::blobs::MemoryBlobs>> =
         std::cell::RefCell::new(carnet_server::blobs::Worker::memory());
+    /// The pictures the browser has put on the server, counted.
+    static WEB_PUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Everything delivered, both ways, until nothing moves.
@@ -72,6 +74,7 @@ fn pump_with(hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, joiner: &m
         for t in web.take_transfers() {
             moved = true;
             let put = matches!(t, carnet_sync::session::Transfer::Put { .. });
+            WEB_PUTS.with(|p| p.set(p.get() + usize::from(put)));
             web.transferred(t.id(), put, serve(&t), rng);
         }
         let mut outs: Vec<Out> = Vec::new();
@@ -597,6 +600,44 @@ fn a_picture_put_in_here_goes_to_the_server_then_the_vault() {
     pump(&mut hub, &mut desk, &mut offline, &mut rng);
     assert!(desk.docs[vault::ROOM].pictures().contains_key(&path));
     assert!(offline.said.iter().any(|s| matches!(s, Said::Uploaded(_))), "{:?}", offline.said);
+}
+
+/// The same picture put in twice, under two names (pasted twice): sent
+/// once, and both names in the vault, so the desktop has a file at each.
+/// Put in again once it's on the server: that name too, nothing sent.
+#[test]
+fn the_same_picture_put_in_twice_is_named_at_both() {
+    let mut rng = Seeded(16);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let bytes: Vec<u8> = (0..50_000u32).map(|i| (i * 13 % 241) as u8).collect();
+    let first = web.picture_free("pasted-2026-10-12-015034", "png");
+    let id = web.upload(&first, bytes.clone()).unwrap();
+    let second = web.picture_free("pasted-2026-10-12-015102", "png");
+    assert_eq!(web.upload(&second, bytes.clone()).as_deref(), Some(id.as_str()), "one picture, one id");
+    assert_eq!(web.picture_free("pasted-2026-10-12-015034", "png"), "attachments/pasted-2026-10-12-015034-2.png", "both taken while they go");
+    assert_eq!(web.picture_free("pasted-2026-10-12-015102", "png"), "attachments/pasted-2026-10-12-015102-2.png");
+    let puts = WEB_PUTS.with(|p| p.get());
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(WEB_PUTS.with(|p| p.get()) - puts, 1, "sent once");
+    assert_eq!(web.said.iter().filter(|s| **s == Said::Uploaded(id.clone())).count(), 1, "{:?}", web.said);
+    let pictures = desk.docs[vault::ROOM].pictures();
+    assert_eq!(pictures.get(&first), Some(&id), "the first name too");
+    assert_eq!(pictures.get(&second), Some(&id));
+    // What the desktop fetches for either name: the picture.
+    let blob: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
+    desk.session.get_blob(blob);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let got = desk.session.take_events().into_iter().find_map(|e| if let Event::BlobGot(_, b) = e { Some(b) } else { None });
+    assert_eq!(got.as_deref(), Some(bytes.as_slice()));
+
+    // Once more, now the server has it: named, and nothing sent.
+    let third = web.picture_free("pasted-2026-10-12-015200", "png");
+    web.upload(&third, bytes.clone()).unwrap();
+    let puts = WEB_PUTS.with(|p| p.get());
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(WEB_PUTS.with(|p| p.get()), puts, "the server has it");
+    let pictures = desk.docs[vault::ROOM].pictures();
+    assert!([&first, &second, &third].iter().all(|p| pictures.get(*p) == Some(&id)), "{pictures:?}");
 }
 
 /// A note in Deleted, deleted forever here: gone from the desktop and the
