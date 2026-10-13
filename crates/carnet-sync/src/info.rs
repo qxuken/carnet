@@ -128,7 +128,7 @@ mod tests {
     use crate::compat::{OLDEST, PROTOCOL};
 
     fn answer(status: u16, body: &str) -> Answer {
-        Answer { status, body: body.as_bytes().to_vec() }
+        Answer { status, body: body.as_bytes().to_vec(), ..Answer::default() }
     }
 
     #[test]

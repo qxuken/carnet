@@ -37,6 +37,9 @@ notify = "8.2"
 jiff = "0.2"
 # The pairing code as a QR code, for a phone's camera (Settings → Sync).
 qrcode = { version = "0.14", default-features = false }
+# GitHub's answer on the latest release (src/update.rs): already in the
+# tree, through carnet-sync.
+serde_json = "1"
 
 # The picture decoders and the font shaper are slow unoptimised: a debug
 # build optimises its dependencies, so a dropped photo shows as quickly

@@ -129,10 +129,19 @@ async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer, server: Optio
 
 /// An answer, whatever its status: what a question of the app's own
 /// ([`ask`]) reads, a refusal's words among them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Answer {
     pub status: u16,
     pub body: Vec<u8>,
+    /// The headers asked for by name ([`ask_with`]), as they came.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Answer {
+    /// A header asked for, by its name in any case.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
 }
 
 /// How long a question may take, all of it.
@@ -144,6 +153,21 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(20);
 /// `wake` is called then. Asked now and then (whether a server takes
 /// signups, an invite asked for), so a thread each is enough.
 pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static) -> std::io::Result<mpsc::Receiver<Result<Answer, String>>> {
+    ask_with(url, json, Ask::default(), wake)
+}
+
+/// What a question sends besides, and what of its answer it keeps.
+#[derive(Clone, Debug, Default)]
+pub struct Ask {
+    /// Headers sent with it, after the request's own (a name and value
+    /// with no line break in either; others are left out).
+    pub send: Vec<(String, String)>,
+    /// The answer's headers kept, by name ([`Answer::headers`]).
+    pub keep: Vec<String>,
+}
+
+/// [`ask`], with headers sent and kept.
+pub fn ask_with(url: String, json: Option<Vec<u8>>, with: Ask, wake: impl Fn() + Send + 'static) -> std::io::Result<mpsc::Receiver<Result<Answer, String>>> {
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new().name("carnet-ask".into()).spawn(move || {
         let result = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -151,7 +175,7 @@ pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static)
                 let config = crate::net::client_config(&[]);
                 let body = json.as_deref().map(|b| ("application/json", b));
                 let method = if body.is_some() { "POST" } else { "GET" };
-                match tokio::time::timeout(ASK_TIMEOUT, request(config, method, &url, body, None)).await {
+                match tokio::time::timeout(ASK_TIMEOUT, request_with(config, method, &url, body, None, &with)).await {
                     Ok(r) => r,
                     Err(_) => Err("timed out".into()),
                 }
@@ -169,6 +193,10 @@ pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static)
 /// the server, the link is one it gave, and is checked where it leads
 /// ([`addresses`]).
 async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>, server: Option<&Server>) -> Result<Answer, String> {
+    request_with(config, method, url, body, server, &Ask::default()).await
+}
+
+async fn request_with(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>, server: Option<&Server>, with: &Ask) -> Result<Answer, String> {
     // Read strictly (`link`): nothing in the request line but the link's
     // printable ASCII.
     let u = Url::parse(url)?;
@@ -177,9 +205,9 @@ async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, bod
     if u.tls {
         let name = rustls::pki_types::ServerName::try_from(u.host.clone()).map_err(|e| e.to_string())?;
         let tls = tokio_rustls::TlsConnector::from(config).connect(name, tcp).await.map_err(|e| e.to_string())?;
-        exchange(tls, &u, method, body).await
+        exchange(tls, &u, method, body, with).await
     } else {
-        exchange(tcp, &u, method, body).await
+        exchange(tcp, &u, method, body, with).await
     }
 }
 
@@ -278,8 +306,15 @@ fn all_inner(at: &[SocketAddr]) -> bool {
     !at.is_empty() && at.iter().all(|a| inner_ip(a.ip()))
 }
 
-async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &str, body: Option<(&str, &[u8])>) -> Result<Answer, String> {
+async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &str, body: Option<(&str, &[u8])>, with: &Ask) -> Result<Answer, String> {
     let mut head = format!("{method} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: Carnet\r\n", u.path, u.host_header());
+    // A header's name a token, its value printable: nothing in either
+    // could end the line and start another.
+    let token = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let printable = |v: &str| v.bytes().all(|b| b == b' ' || b == b'\t' || b.is_ascii_graphic());
+    for (name, value) in with.send.iter().filter(|(n, v)| token(n) && printable(v)) {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
     if let Some((kind, b)) = body {
         head.push_str(&format!("Content-Type: {kind}\r\nContent-Length: {}\r\n", b.len()));
     }
@@ -293,7 +328,7 @@ async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &
     // end. Read as it comes; never past what a picture may be.
     let mut buf = Vec::new();
     let mut chunk = [0u8; 16 * 1024];
-    let (status, length, chunked, start) = loop {
+    let (status, length, chunked, start, headers) = loop {
         let n = s.read(&mut chunk).await.map_err(|e| e.to_string())?;
         if n == 0 {
             return Err("the server closed before answering".into());
@@ -306,7 +341,8 @@ async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &
                 let header = |name: &str| res.headers.iter().find(|h| h.name.eq_ignore_ascii_case(name)).and_then(|h| std::str::from_utf8(h.value).ok());
                 let length = header("content-length").and_then(|v| v.trim().parse::<usize>().ok());
                 let chunked = header("transfer-encoding").is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
-                break (res.code.unwrap_or(0), length, chunked, at);
+                let kept: Vec<(String, String)> = with.keep.iter().filter_map(|k| Some((k.clone(), header(k)?.to_string()))).collect();
+                break (res.code.unwrap_or(0), length, chunked, at, kept);
             }
             httparse::Status::Partial if buf.len() > 64 * 1024 => return Err("an answer's head past its size".into()),
             httparse::Status::Partial => {}
@@ -330,7 +366,7 @@ async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &
     if body.len() > MOST {
         return Err("an answer past what a picture may be".into());
     }
-    Ok(Answer { status, body })
+    Ok(Answer { status, body, headers })
 }
 
 /// A chunked body, put back together.
@@ -553,7 +589,7 @@ mod tests {
         let w = woke.clone();
         let rx = ask(format!("{base}/v1/signup"), Some(br#"{"email":"ann@example.com"}"#.to_vec()), move || w.store(true, std::sync::atomic::Ordering::SeqCst)).unwrap();
         let got = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
-        assert_eq!(got, Answer { status: 429, body: br#"{"error":"slow down"}"#.to_vec() });
+        assert_eq!(got, Answer { status: 429, body: br#"{"error":"slow down"}"#.to_vec(), headers: Vec::new() });
         // Woken just after the answer is sent: given a moment.
         let by = std::time::Instant::now() + Duration::from_secs(5);
         while !woke.load(std::sync::atomic::Ordering::SeqCst) && std::time::Instant::now() < by {
@@ -572,6 +608,24 @@ mod tests {
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
         let refused = ask(format!("http://{closed}/v1/info"), None, || {}).unwrap().recv_timeout(Duration::from_secs(10)).unwrap().unwrap_err();
         assert_eq!(domain_not_found(&refused), None, "refused, not a name unknown: {refused}");
+    }
+
+    /// Headers sent with a question, and those asked for kept from its
+    /// answer; one that could start a line of its own isn't sent.
+    #[test]
+    fn a_question_sends_headers_and_keeps_those_asked_for() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+        let (base, server) = rt.block_on(one_answer(b"HTTP/1.1 304 Not Modified\r\nETag: W/\"abc\"\r\nX-Other: no\r\nContent-Length: 0\r\n\r\n".to_vec()));
+        let with = Ask {
+            send: vec![("If-None-Match".into(), "W/\"abc\"".into()), ("X-Bad".into(), "a\r\nHost: elsewhere".into()), ("Bad Name".into(), "x".into())],
+            keep: vec!["etag".into()],
+        };
+        let got = ask_with(format!("{base}/latest"), None, with, || {}).unwrap().recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+        assert_eq!((got.status, got.header("ETag")), (304, Some("W/\"abc\"")));
+        assert_eq!(got.headers.len(), 1, "only what was asked for");
+        let asked = String::from_utf8(rt.block_on(server).unwrap()).unwrap();
+        assert!(asked.contains("\r\nIf-None-Match: W/\"abc\"\r\n"), "{asked}");
+        assert!(!asked.contains("elsewhere") && !asked.contains("Bad Name"), "{asked}");
     }
 
     /// A name the DNS has no address for (`.invalid` never has one) is

@@ -72,6 +72,13 @@ impl Carnet {
             Msg::SetToolbar { to } => s.fade_tools = to == 1,
             Msg::SetFocus { to } => s.focus = to == 1,
             Msg::SetTypewriter { to } => s.typewriter = to == 1,
+            Msg::SetCheckUpdates { to } => s.check_updates = to == 1,
+            Msg::OpenRelease => {
+                if let Some(page) = self.updates.newer().map(crate::update::Release::page) {
+                    self.open_url(&page);
+                }
+                return;
+            }
             // From zen, the library's switch shows it: zen is over.
             Msg::ToggleSidebar if self.zen => {
                 self.zen = false;
@@ -184,6 +191,26 @@ impl Carnet {
             self.sync_reset_fields = true;
             self.sync.error = None;
             self.focus_req = Some(Field::SyncCode);
+        }
+    }
+
+    /// Whether a newer Carnet is out, its turn: asked of GitHub when it's
+    /// time, while the check is on. A version found is said once, in a
+    /// notice, when no other is showing; Settings → About says it while
+    /// it's out.
+    pub(super) fn updates_tick(&mut self) {
+        if let Some(found) = self.updates.tick(self.settings.check_updates, Instant::now()) {
+            let v = found.version.to_string();
+            if self.settings.told_update != v {
+                self.update_to_tell = Some(v);
+            }
+        }
+        if self.notice.is_none()
+            && let Some(v) = self.update_to_tell.take()
+        {
+            self.notify(format!("Carnet {v} is out: Settings has the download"), None);
+            self.settings.told_update = v;
+            self.save_settings();
         }
     }
 
@@ -601,6 +628,40 @@ impl Carnet {
                 TextStyle::new(Type::SMALL.size).color(t.muted),
             );
         }
+
+        // -- this version, and whether a newer one is out
+        section(ui, l, "About");
+        let newer = self.updates.newer().map(|r| r.version.to_string());
+        let up_to_date = self.updates.checked() && newer.is_none();
+        let check = self.settings.check_updates;
+        card(ui, l, "card-about", |ui| {
+            ui.with(
+                NodeSpec::row().grow_width().min_height(54.0).pad_xy(18.0, 8.0).gap(12.0).cross_align(Align::Center).wrap(),
+                |ui| {
+                    ui.with(NodeSpec::column().grow_width().min_width(120.0).gap(2.0).selectable(), |ui| {
+                        ui.text(&format!("Carnet {}", env!("CARGO_PKG_VERSION")), TextStyle::new(Type::STRONG.size).color(t.fg));
+                        let line = match &newer {
+                            Some(v) => Some((Icon::Download, t.accent, format!("Carnet {v} is out"))),
+                            None if up_to_date => Some((Icon::Check, t.muted, "Up to date".to_string())),
+                            None => None,
+                        };
+                        if let Some((g, ink, words)) = line {
+                            ui.with_keyed("about-update", NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center).live(kui_native::Live::Polite), |ui| {
+                                crate::icons::icon(ui, g, ink, 14.0, false);
+                                ui.text_in(NodeSpec::row().grow_width().min_width(0.0), &words, TextStyle::new(Type::SMALL.size).color(ink));
+                            });
+                        }
+                    });
+                    if newer.is_some() {
+                        pill_button(ui, l, "update-download", "Download", true, true, Msg::OpenRelease);
+                    }
+                },
+            );
+            rule(ui, l);
+            setting(ui, l, "Check for updates", Some("Once a day, Carnet asks GitHub for its newest version. Nothing else is sent, and nothing is installed."), |ui| {
+                segmented(ui, l, "check-updates", &["Off", "On"], usize::from(check), |to| Msg::SetCheckUpdates { to });
+            });
+        });
     }
 
     /// Settings → Sync (docs/SYNC.md §5, §7): off, the way in chosen and

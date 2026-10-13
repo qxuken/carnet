@@ -7409,6 +7409,77 @@ fn five_quick_clicks_on_the_settings_title_turn_the_debug_information_on_and_off
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A newer Carnet, as GitHub says: told once in a notice (and kept told
+/// in the settings, so a later start doesn't say it again); Settings →
+/// About says it while it's out, its Download opens the release's page.
+/// Checking off is saved, and nothing is asked.
+#[test]
+fn a_newer_version_is_told_once_and_settings_offer_its_download() {
+    use carnet_sync::http::Answer;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::mpsc;
+    type Answers = Rc<RefCell<Vec<mpsc::Sender<Result<Answer, String>>>>>;
+    let github = |answers: &Answers| {
+        let a = answers.clone();
+        crate::update::Updates::with(Some(Box::new(move |_, _| {
+            let (tx, rx) = mpsc::channel();
+            a.borrow_mut().push(tx);
+            Some(rx)
+        })))
+    };
+    let release = include_str!("../assets/fixtures/github-release.json").replace("\"v0.1.2\"", "\"v999.0.0\"");
+    let answer = || Ok(Answer { status: 200, body: release.as_bytes().to_vec(), ..Answer::default() });
+    let told = "Carnet 999.0.0 is out: Settings has the download";
+
+    // Settings open, the window tall enough to show them whole.
+    let (mut app, mut d, dir) = tall("updates");
+    let answers = Answers::default();
+    app.updates = github(&answers);
+    d.frame(&mut app);
+    assert_eq!(answers.borrow().len(), 1, "asked at start");
+    answers.borrow()[0].send(answer()).unwrap();
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some(told));
+    assert_eq!(app.settings.told_update, "999.0.0");
+    app.notice = None;
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_none(), "told once");
+    assert_eq!(answers.borrow().len(), 1, "not asked again today");
+
+    assert!(drawn(&mut d, &mut app, &format!("Carnet {}", env!("CARGO_PKG_VERSION"))));
+    assert!(drawn(&mut d, &mut app, "Carnet 999.0.0 is out"));
+    assert!(drawn(&mut d, &mut app, "Check for updates"));
+    store::OPENED.with_borrow_mut(std::mem::take);
+    let download = d.key_of("update-download").expect("Download");
+    d.click_key(&mut app, download);
+    assert_eq!(store::OPENED.with_borrow_mut(std::mem::take), ["https://github.com/qxuken/carnet/releases/tag/v999.0.0"]);
+
+    // A later start, the same release found: not told again.
+    let settings = app.settings.clone();
+    let (store2, dir2) = temp_store("updates-later");
+    let mut later = Carnet::with_settings(store2, settings);
+    let mut d2 = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    let answers = Answers::default();
+    later.updates = github(&answers);
+    d2.frame(&mut later);
+    answers.borrow()[0].send(answer()).unwrap();
+    d_frame_twice(&mut later, &mut d2);
+    assert!(later.notice.is_none(), "told before");
+    assert!(later.updates.newer().is_some());
+
+    // Off: saved so, and nothing asked.
+    app.on_settings(Msg::SetCheckUpdates { to: 0 });
+    assert!(app.settings.to_text().contains("check_updates = off\n"));
+    let answers = Answers::default();
+    app.updates = github(&answers);
+    d_frame_twice(&mut app, &mut d);
+    assert!(answers.borrow().is_empty());
+    assert!(!drawn(&mut d, &mut app, "Carnet 999.0.0 is out"), "nothing known");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
 /// A selection over several lines: the toolbar's list tools and their
 /// shortcuts make every one of them an item; again, every one back into
 /// a paragraph. A mix is made all one kind first. Headings and quotes

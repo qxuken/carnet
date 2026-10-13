@@ -163,6 +163,12 @@ pub struct Settings {
     /// Colours given lately, newest first (0xRRGGBBAA): the picker's
     /// recent row.
     pub colors: Vec<u32>,
+    /// Once a day, GitHub asked whether a newer Carnet is out
+    /// (src/update.rs).
+    pub check_updates: bool,
+    /// The newest version the app has said is out, so it's said once;
+    /// empty for none.
+    pub told_update: String,
     /// Where the notes live; `None` for `~/Documents/Carnet`.
     pub dir: Option<PathBuf>,
     /// The file they are kept in; `None` keeps them in memory (tests).
@@ -192,6 +198,8 @@ impl Default for Settings {
             typewriter: false,
             sidebar: true,
             colors: Vec::new(),
+            check_updates: true,
+            told_update: String::new(),
             dir: None,
             file: None,
         }
@@ -277,6 +285,8 @@ impl Settings {
                 "colors" => {
                     s.colors = v.split(',').filter_map(carnet_core::inline::parse_color).take(10).collect();
                 }
+                "check_updates" => s.check_updates = v != "off",
+                "told_update" => s.told_update = v.to_string(),
                 "dir" if !v.is_empty() => s.dir = Some(PathBuf::from(v)),
                 _ => {}
             }
@@ -302,7 +312,7 @@ impl Settings {
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ncheck_updates = {}\ntold_update = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
@@ -320,6 +330,8 @@ impl Settings {
             if self.typewriter { "on" } else { "off" },
             if self.sidebar { "shown" } else { "hidden" },
             self.colors.iter().map(|&c| carnet_core::inline::css_color(c)).collect::<Vec<_>>().join(","),
+            if self.check_updates { "on" } else { "off" },
+            self.told_update,
         )
     }
 
@@ -327,7 +339,8 @@ impl Settings {
     /// colours, faces, size, width, the letter and dividers, the window
     /// (solid or translucent, taken at the next start), and the writing
     /// aids. Not the notes folder, the library (its order, dates, width,
-    /// whether it shows), nor the colours given lately.
+    /// whether it shows), the colours given lately, nor the check for
+    /// updates.
     pub fn reset_look(&mut self) {
         *self = Settings {
             sort: self.sort,
@@ -335,6 +348,8 @@ impl Settings {
             library_w: self.library_w,
             sidebar: self.sidebar,
             colors: std::mem::take(&mut self.colors),
+            check_updates: self.check_updates,
+            told_update: std::mem::take(&mut self.told_update),
             dir: self.dir.take(),
             file: self.file.take(),
             ..Settings::default()
@@ -404,6 +419,8 @@ mod tests {
             typewriter: true,
             sidebar: false,
             colors: vec![0xc0504dff, 0x12345680],
+            check_updates: false,
+            told_update: "0.1.2".into(),
             dir: Some(PathBuf::from("D:\\My notes")),
             file: None,
         };
@@ -421,6 +438,23 @@ mod tests {
         assert!(!old.to_text().contains("initial ="));
         assert_eq!(Settings::parse("initial_lines = 9\n").initial_lines, 4);
         assert_eq!(Settings::parse("initial_lines = 1\n").initial_lines, 2);
+    }
+
+    /// The check for updates is on unless the file says off: a file from
+    /// before it checks; one an older app wrote back (dropping the key)
+    /// checks again.
+    #[test]
+    fn the_check_for_updates_is_on_unless_turned_off() {
+        assert!(Settings::default().check_updates);
+        assert!(Settings::parse("theme = dark\n").check_updates, "a file from before it");
+        let off = Settings::parse("check_updates = off\ntold_update = 0.1.2\n");
+        assert!(!off.check_updates);
+        assert_eq!(off.told_update, "0.1.2");
+        assert!(off.to_text().contains("check_updates = off\n"));
+        assert!(Settings::parse(&Settings::default().to_text()).check_updates);
+        let mut s = Settings { check_updates: false, size: 20, ..Settings::default() };
+        s.reset_look();
+        assert!(!s.check_updates, "not part of the look");
     }
 
     #[test]
