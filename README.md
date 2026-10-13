@@ -130,7 +130,7 @@ The toolbar acts on the blocks the caret touches: turn them into another kind, d
 | Ctrl+\\ | show or hide the notes list |
 | Ctrl+. | zen mode: only the note |
 | Ctrl+, | settings |
-| F2, Delete on a folder in the list | rename it in place, delete it (one with notes goes to the trash whole, and Undo brings it back) |
+| F2, Delete or Backspace on a folder in the list | rename it in place, delete it (one with notes goes to the trash whole, and Undo brings it back) |
 | drag a note onto a folder | move it there ("All notes" takes it to the top level) |
 | Shift+click / Ctrl+click in the list | choose several notes and folders, to trash or move together |
 | right-click a note in the list | open, its history, pin, show in Explorer or Finder, copy its path, move to a folder, move to the trash |

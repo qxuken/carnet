@@ -3616,6 +3616,19 @@ impl Carnet {
             self.trash_picked();
             return;
         }
+        // Delete or Backspace (or ⌘Backspace, a Mac's) after a click on a
+        // folder, the keyboard on nothing in particular: the folder shown
+        // goes, as from its row with the keyboard on it.
+        if matches!(k.code, KeyCode::Backspace | KeyCode::Delete)
+            && !(m.ctrl || m.alt || m.shift)
+            && self.folders_clicked
+            && !self.deleted
+            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && let Some(f) = self.folder.clone()
+        {
+            self.folder_row_key(&FolderRow::Folder(f), &k);
+            return;
+        }
         // F2 with the keyboard on nothing in particular — after a click on
         // a folder, which shows it and leaves the keyboard on the window:
         // the folder shown is renamed, as Finder's selected one is.

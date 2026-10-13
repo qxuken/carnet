@@ -8556,3 +8556,41 @@ fn a_title_changed_from_outside_is_drawn() {
     assert_eq!(drawn_title(&app, &d).as_deref(), Some("Plans for June"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A folder chosen by a click goes with Backspace or Delete, as one with
+/// the keyboard on its row does; on a Mac ⌘Backspace too, on the row or
+/// after the click.
+#[test]
+fn backspace_or_delete_after_a_click_on_a_folder_removes_it() {
+    let (mut app, mut d, dir) = on_folder_row("row-click-backspace", &["A", "B", "C", "D"]);
+    let click = |app: &mut Carnet, d: &mut Drive, f: &str| {
+        let k = app.folder_rows.iter().find(|(_, r)| *r == folder(f)).unwrap().0;
+        let r = d.rect_of(k).unwrap();
+        d.click(app, r.x + 20.0, r.y + r.h / 2.0);
+        d.frame(app);
+        assert_eq!(app.folder.as_deref(), Some(f));
+    };
+    click(&mut app, &mut d, "B");
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(app.store.folders, ["A", "C", "D"]);
+    assert_eq!(focused_row(&app, &d), Some(folder("C")), "the keyboard on the row that took its place");
+    click(&mut app, &mut d, "A");
+    key(&mut app, &mut d, "delete");
+    assert_eq!(app.store.folders, ["C", "D"]);
+    if cfg!(target_os = "macos") {
+        click(&mut app, &mut d, "C");
+        key_with(&mut app, &mut d, "backspace", CMD);
+        assert_eq!(app.store.folders, ["D"]);
+        focus_row(&mut app, &mut d, folder("D"));
+        key_with(&mut app, &mut d, "backspace", CMD);
+        assert!(app.store.folders.is_empty());
+    }
+    // Nothing shown but all notes: nothing goes, and no note either.
+    let notes = app.store.notes.len();
+    app.show_folder(None);
+    d.core.set_focus(None);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(app.store.notes.len(), notes);
+    let _ = std::fs::remove_dir_all(dir);
+}
