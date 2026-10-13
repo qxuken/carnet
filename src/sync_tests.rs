@@ -1582,3 +1582,45 @@ fn the_browsers_folder_changes_reach_the_files() {
         assert!(!two.sides[side].dir.join("Ideas").exists(), "on {side}");
     }
 }
+
+/// A note that came from another device is dated when it was last edited
+/// there, not when it came: its file's modified time, which the list and
+/// the page say and sort by, is its history's.
+#[test]
+fn a_synced_note_is_dated_when_it_was_edited_not_when_it_came() {
+    let secs = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut two = Two::new("dated");
+    let a = &mut two.sides[0].store;
+    a.notes.push(crate::store::Note::new("Older", Doc::new(vec![Block::text("first")])));
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    let older = secs(a.notes[i].modified);
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    let a = &mut two.sides[0].store;
+    a.notes.push(crate::store::Note::new("Newer", Doc::new(vec![Block::text("second")])));
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    let newer = secs(a.notes[i].modified);
+    // Both come now, together, a while after the first was written.
+    std::thread::sleep(std::time::Duration::from_millis(2100));
+    two.pump();
+    let came = secs(std::time::SystemTime::now());
+    let b = &two.sides[1].store;
+    let when = |t: &str| secs(b.notes[two.note(1, t).unwrap()].modified);
+    assert!(when("Older").abs_diff(older) <= 1, "Older: {} (edited {older}, came {came})", when("Older"));
+    assert!(when("Newer").abs_diff(newer) <= 1, "Newer: {} (edited {newer}, came {came})", when("Newer"));
+    assert!(when("Older") + 2 <= came && when("Older") < when("Newer"), "sorted as edited, not as they came");
+    // The file says so too, read again from disk.
+    let path = b.notes[two.note(1, "Older").unwrap()].path.clone().unwrap();
+    assert_eq!(secs(std::fs::metadata(&path).unwrap().modified().unwrap()), when("Older"));
+    // An edit there later: dated then, here too.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    two.type_into(0, "Older", "more");
+    let i = two.note(0, "Older").unwrap();
+    two.sides[0].store.save(i, true).unwrap();
+    let edited = secs(two.sides[0].store.notes[i].modified);
+    two.pump();
+    let b = &two.sides[1].store;
+    let now_when = secs(b.notes[two.note(1, "Older").unwrap()].modified);
+    assert!(now_when.abs_diff(edited) <= 1 && now_when > older, "{now_when} vs {edited}");
+}

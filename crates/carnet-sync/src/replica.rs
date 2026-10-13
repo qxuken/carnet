@@ -350,6 +350,12 @@ impl Replica {
         bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
     }
 
+    /// When the note last changed, on whichever device changed it, in
+    /// seconds since 1970 (0: never, or by a writer keeping no clock).
+    pub fn modified(&mut self, key: Key) -> i64 {
+        self.doc(key).modified()
+    }
+
     /// Every version of the note, newest first; none for a note the
     /// replica never saw.
     pub fn history(&mut self, key: Key) -> Vec<Revision> {

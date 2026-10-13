@@ -2081,6 +2081,7 @@ impl Store {
             }
             let path = self.inside(self.free_path(&stem, None, &folder))?;
             write_atomic(&path, &text)?;
+            self.edited_when(key, &path);
             let (mut note, text) = Note::load_text(&path)?;
             note.key = Some(key);
             note.folder = folder;
@@ -2121,10 +2122,28 @@ impl Store {
         }
         self.keep_before_sync(i, &path, &before, &text)?;
         write_atomic(&path, &text)?;
+        self.edited_when(key, &path);
         let (fresh, written) = self.notes[i].reread(&path)?;
         self.reloaded(i, fresh);
         self.track(i, &written, Origin::OtherApp);
         Ok(Remote::Updated(i))
+    }
+
+    /// A note written as another device left it: its file's modified time
+    /// is when it was last edited there, as its history says, not when it
+    /// came — what the list and the page say of it, and sort it by. (Never
+    /// later than now: another device's clock may be ahead.)
+    fn edited_when(&mut self, key: Key, path: &Path) {
+        let Some(secs) = self.replica.as_mut().map(|r| r.modified(key)).filter(|s| *s > 0) else { return };
+        let Some(t) = epoch_time(secs as u64) else { return };
+        let t = t.min(SystemTime::now());
+        if let Ok(f) = fs::File::options().write(true).open(path)
+            && f.set_modified(t).is_ok()
+        {
+            // As the app left it: no other app's change to the watch.
+            drop(f);
+            mark_own(path);
+        }
     }
 
     /// Note `i` reloaded as `fresh` with another device's change: what it
