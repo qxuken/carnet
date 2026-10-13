@@ -98,7 +98,10 @@ fn same_answers(a: &dyn Storage, b: &dyn Storage) {
         assert_eq!(a.passkeys(acct), b.passkeys(acct));
         assert_eq!((a.epoch(acct), a.seq(acct), a.is_owner(acct)), (b.epoch(acct), b.seq(acct), b.is_owner(acct)));
         assert_eq!(a.rooms(acct), b.rooms(acct));
+        // What a write is judged by, counted on the way in.
+        assert_eq!(a.room_count(acct), b.room_count(acct));
         for room in [R, "gone"] {
+            assert_eq!(a.live(acct, room), b.live(acct, room));
             assert_eq!(a.spans(acct, room), b.spans(acct, room));
             assert_eq!(a.base(acct, room), b.base(acct, room));
             assert_eq!(a.shelf(acct, room), b.shelf(acct, room));

@@ -1292,8 +1292,11 @@ impl<S: Storage> Hub<S> {
     /// Whether to ask `conn` for `room` as a snapshot now: the room is past
     /// its limits, nobody holds a lease on it, and nobody else is writing
     /// (this device is the account's only one online, or the room has
-    /// taken nothing for a while). The device has had everything the
-    /// server holds before this reaches it: one socket keeps its order.
+    /// taken nothing for a while), or the room is halfway to what it
+    /// keeps uncompacted (a device writing on and on while another is
+    /// online: an import, its vault a record a note). The device has had
+    /// everything the server holds before this reaches it: one socket
+    /// keeps its order.
     fn compact_now(&mut self, conn: ConnId, account: &[u8], room: &str, live: Live) -> Option<Out> {
         if live.records < self.compact_count as u64 && live.bytes < self.compact_bytes as u64 {
             return None;
@@ -1307,7 +1310,8 @@ impl<S: Storage> Hub<S> {
             .iter()
             .any(|(&id, c)| id != conn && matches!(&c.state, State::Ready { account: a, .. } if a == account));
         let quiet = self.last_write.get(&key).is_none_or(|&t| self.now >= t + QUIET);
-        if !alone && !quiet {
+        let filling = live.records >= self.room_records / 2 || live.bytes >= self.room_bytes / 2;
+        if !alone && !quiet && !filling {
             return None;
         }
         self.leases.insert(key, Lease { conn, until: self.now + LEASE, repair: false });

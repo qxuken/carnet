@@ -256,7 +256,7 @@ On login a device joins every room it has a doc for, the vault's first, and with
 - **Needed:** the room holds more than 200 deltas since its base (`--compact-after N`), or more than 256 KiB of them.
 - **Safe:** all of these hold.
   1. **The device is caught up.** The device is asked right after the server has sent it everything it holds for the room (on one socket, in order), so the snapshot it writes covers everything.
-  2. **Nobody else is writing.** The device is the account's only one connected, or the room has had no new record for 5 minutes.
+  2. **Nobody else is writing.** The device is the account's only one connected, or the room has had no new record for 5 minutes. Or the room is halfway to what it keeps uncompacted (below: 5,000 records, or 32 MiB): then the device writing to it is asked whoever else is online. A device that writes on and on while another is connected (a big import with a browser tab open, the vault taking a record for every note) would otherwise never be asked, and its room would fill and stop taking writes.
   3. **One lease.** The server sends `Compact { room }` to that one device, which holds the lease for 10 minutes. No other device is asked meanwhile, so two snapshots never race.
 
   A device is asked when it joins or writes to a room. An edit that lands during compaction is harmless: the snapshot's version vector doesn't cover it, so that delta stays.
@@ -269,7 +269,7 @@ On login a device joins every room it has a doc for, the vault's first, and with
 
 A buggy or hostile client therefore can't wipe history by claiming a version it doesn't hold. Snapshots carry full history; nothing on the server trims it.
 
-**What it judges by.** Whether a room is due is counted where its records are (`Storage::live`: how many, their bytes, whether there's a base), none of them read, so a write costs the hub the same whatever the room holds. What the hub keeps for compaction goes hourly once it can't matter: a room's last write past the 5 quiet minutes, a lease past its time. A repair is taken only for a room the server keeps.
+**What it judges by.** Whether a room is due, or full, is kept counted by the store (`Storage::live`: how many live records, their bytes, whether there's a base; `Storage::room_count`: how many rooms hold anything), in the transaction that changes them, so a write costs the hub the same whatever the room holds: no records counted, none read. On SQLite and Postgres a table (`rooms`) has a row a room, kept by triggers on the records and bases however they change (a write, a snapshot setting them aside, a roll back, a room removed, `migrate` copying them in), and the account its count of rooms; a database from before it is counted once when a server first opens it. A write finds a record of the same peer it covers, or that covers it, by an index on where each live record ends (`records_reach`), not by reading the peer's records. What the hub keeps for compaction goes hourly once it can't matter: a room's last write past the 5 quiet minutes, a lease past its time. A repair is taken only for a room the server keeps.
 
 **What a room and an account may hold** (`hub.rs`), against a device that never compacts (a lease it's given simply runs out), far past what compaction keeps a room to:
 

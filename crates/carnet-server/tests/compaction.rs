@@ -11,7 +11,7 @@ use carnet_server::storage::covers;
 use carnet_server::{ConnId, Out, Storage};
 use carnet_sync::crypto::{Random, VaultKey};
 use carnet_sync::elo::{self, Header};
-use carnet_sync::session::Event;
+use carnet_sync::session::{Docs, Event};
 use carnet_sync::wire::{self, CrdtType, Frame};
 use carnet_sync::NoteDoc;
 use common::*;
@@ -196,6 +196,40 @@ fn nobody_compacts_while_others_write_nor_without_the_lease() {
         let _ = b2;
         assert!(net.hub.store().base(ACCOUNT, ROOM).is_some(), "asked on joining, the room quiet");
         assert_eq!(net.hub.store().base(ACCOUNT, ROOM).unwrap().by, b"laptop");
+    }
+}
+
+/// A big import with another device online: the vault takes a record
+/// for every note, its writer never quiet and never alone. Before the
+/// room reaches what it keeps uncompacted, the writer is asked for it
+/// compacted all the same (another device writing meanwhile is harmless:
+/// what the snapshot doesn't hold stays), so the vault never stops
+/// taking writes.
+#[test]
+fn a_room_near_its_cap_is_compacted_whoever_else_is_online() {
+    const VAULT: &str = "vault";
+    for store in stores() {
+        let (mut net, vault) = net(36, store);
+        net.hub.room_caps(40, u64::MAX, carnet_server::hub::MAX_ROOMS);
+        let a = net.first_device(&vault);
+        let b = net.pair(a, b"browser", 2);
+        let mut text = String::new();
+        for i in 0..120 {
+            text.push_str(&format!("note {i}\n"));
+            let Net { peers, rng, .. } = &mut net;
+            let Some(Peer::Device(d)) = peers.get_mut(&a) else { panic!() };
+            d.notes.doc(VAULT).record(&text, carnet_sync::Origin::Save);
+            d.session.saved(VAULT, &mut d.notes, rng);
+            net.pump();
+            let live = net.hub.store().live(ACCOUNT, VAULT);
+            assert!(live.records < 40, "at save {i}, the vault holds {live:?}");
+        }
+        assert_eq!(net.device(a).session.waiting(), 0, "nothing held back");
+        assert!(!net.device(a).events.iter().any(|e| matches!(e, Event::Refused(_))), "nothing refused");
+        assert_eq!(net.hub.store().base(ACCOUNT, VAULT).unwrap().by, b"first");
+        assert_eq!(net.device(b).notes.docs[VAULT].text(), text, "the other device has it all");
+        let c = net.pair(a, b"phone", 3);
+        assert_eq!(net.device(c).notes.docs[VAULT].text(), text, "and a new one, from the base");
     }
 }
 

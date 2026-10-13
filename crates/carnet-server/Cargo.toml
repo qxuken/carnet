@@ -57,6 +57,9 @@ postgres = ["dep:postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webp
 s3 = ["dep:rusty-s3", "dep:ureq", "dep:md-5", "dep:url"]
 
 [dev-dependencies]
+# sqlite.rs: what SQLite steps through for a write, counted (its progress
+# handler), so a write's cost is checked by more than a clock.
+rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 tokio-tungstenite = "0.30"
 # tests/link.rs: the desktop's own socket against this binary.
 carnet-sync = { path = "../carnet-sync", features = ["net"] }

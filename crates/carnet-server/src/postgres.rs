@@ -14,12 +14,13 @@
 //! connection, its statements prepared once, made again if it drops.
 //!
 //! ```text
-//! accounts   id, owner, created, seq, epoch           the directory and each file's meta
+//! accounts   id, owner, created, seq, epoch, rooms    the directory and each file's meta
 //! invites    hash, owner, expires
 //! devices    account, id, public, revoked, created, card, seen
 //! rekeys     account, device, epoch, sealed
 //! records    account, seq, room, peer, span_start, span_end, bytes, shelved_by, shelved_at
 //! bases      account, seq, room, vv, bytes, made_by, at, verified, undoable, shelved_by, shelved_at
+//! rooms      account, room, records, bytes, bases     what each holds live, kept counted (triggers)
 //! removed    account, room, at
 //! log        account, n, at, device, room, what
 //! recovery   account, public, wrapped, created, card
@@ -171,6 +172,86 @@ pub const SCHEMA: &[&str] = &[
         n BIGSERIAL
     );
     CREATE INDEX passkeys_account ON passkeys (account, made, n);
+    ",
+    // 3: what each room holds live, kept counted (schema 9 of the files):
+    // what `live` and `room_count` answer at every write, no room's
+    // records counted. Kept by triggers, in the transaction that changes
+    // them, whatever changes them (`put_rows` too); counted once here
+    // from what a database holds.
+    "
+    CREATE TABLE rooms (
+        account BYTEA NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+        room TEXT NOT NULL,
+        records BIGINT NOT NULL DEFAULT 0,
+        bytes BIGINT NOT NULL DEFAULT 0,
+        bases BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (account, room)
+    );
+    ALTER TABLE accounts ADD COLUMN rooms BIGINT NOT NULL DEFAULT 0;
+    -- What a write asks: a live record of the peer's that covers the new
+    -- one, or that it covers, each reaching as far as the new one starts.
+    CREATE INDEX records_reach ON records (account, room, peer, span_end) WHERE shelved_by = 0;
+
+    -- A record or base live, or no more: its room counted so. One more
+    -- comes only of a row of the account's (an insert, one set back),
+    -- one less may come of the account itself going, its rooms with it:
+    -- that's an update only, never a row made.
+    CREATE FUNCTION carnet_count_live() RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE
+        r RECORD;
+        n BIGINT;
+    BEGIN
+        IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND NEW.shelved_by > 0) THEN
+            r := OLD;
+            n := -1;
+        ELSE
+            r := NEW;
+            n := 1;
+        END IF;
+        IF TG_TABLE_NAME = 'records' THEN
+            IF n > 0 THEN
+                INSERT INTO rooms AS k (account, room, records, bytes) VALUES (r.account, r.room, 1, LENGTH(r.bytes))
+                    ON CONFLICT (account, room) DO UPDATE SET records = k.records + 1, bytes = k.bytes + EXCLUDED.bytes;
+            ELSE
+                UPDATE rooms SET records = records - 1, bytes = bytes - LENGTH(r.bytes) WHERE account = r.account AND room = r.room;
+            END IF;
+        ELSIF n > 0 THEN
+            INSERT INTO rooms AS k (account, room, bases) VALUES (r.account, r.room, 1)
+                ON CONFLICT (account, room) DO UPDATE SET bases = k.bases + 1;
+        ELSE
+            UPDATE rooms SET bases = bases - 1 WHERE account = r.account AND room = r.room;
+        END IF;
+        RETURN NULL;
+    END $$;
+    CREATE TRIGGER records_in AFTER INSERT ON records FOR EACH ROW WHEN (NEW.shelved_by = 0) EXECUTE FUNCTION carnet_count_live();
+    CREATE TRIGGER records_out AFTER DELETE ON records FOR EACH ROW WHEN (OLD.shelved_by = 0) EXECUTE FUNCTION carnet_count_live();
+    CREATE TRIGGER records_moved AFTER UPDATE OF shelved_by ON records FOR EACH ROW
+        WHEN ((OLD.shelved_by = 0) <> (NEW.shelved_by = 0)) EXECUTE FUNCTION carnet_count_live();
+    CREATE TRIGGER bases_in AFTER INSERT ON bases FOR EACH ROW WHEN (NEW.shelved_by = 0) EXECUTE FUNCTION carnet_count_live();
+    CREATE TRIGGER bases_out AFTER DELETE ON bases FOR EACH ROW WHEN (OLD.shelved_by = 0) EXECUTE FUNCTION carnet_count_live();
+    CREATE TRIGGER bases_moved AFTER UPDATE OF shelved_by ON bases FOR EACH ROW
+        WHEN ((OLD.shelved_by = 0) <> (NEW.shelved_by = 0)) EXECUTE FUNCTION carnet_count_live();
+
+    -- How many rooms of the account hold anything live.
+    CREATE FUNCTION carnet_count_rooms() RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE
+        was BOOLEAN := TG_OP <> 'INSERT' AND (OLD.records > 0 OR OLD.bases > 0);
+        holds BOOLEAN := TG_OP <> 'DELETE' AND (NEW.records > 0 OR NEW.bases > 0);
+    BEGIN
+        IF was <> holds THEN
+            UPDATE accounts SET rooms = rooms + CASE WHEN holds THEN 1 ELSE -1 END
+                WHERE id = CASE WHEN TG_OP = 'DELETE' THEN OLD.account ELSE NEW.account END;
+        END IF;
+        RETURN NULL;
+    END $$;
+    CREATE TRIGGER rooms_kept AFTER INSERT OR UPDATE OR DELETE ON rooms FOR EACH ROW EXECUTE FUNCTION carnet_count_rooms();
+
+    INSERT INTO rooms (account, room, records, bytes, bases)
+        SELECT account, room, SUM(records), SUM(bytes), SUM(bases) FROM (
+            SELECT account, room, 1 AS records, LENGTH(bytes) AS bytes, 0 AS bases FROM records WHERE shelved_by = 0
+            UNION ALL SELECT account, room, 0, 0, 1 FROM bases WHERE shelved_by = 0) AS live
+        GROUP BY account, room;
+    UPDATE accounts SET rooms = (SELECT COUNT(*) FROM rooms WHERE rooms.account = accounts.id AND (records > 0 OR bases > 0));
     ",
 ];
 
@@ -745,26 +826,38 @@ impl Storage for Postgres {
     }
 
     fn put(&mut self, account: &[u8], room: &str, peer: u64, start: u64, end: u64, record: Vec<u8>) -> Result<Option<u64>, Failed> {
-        if self.base(account, room).is_some_and(|b| covers(&b.vv, &[(peer, end)])) {
+        // What the base holds, not the base (a snapshot, however big).
+        let vv = self.read(None, |c| {
+            let st = c.st("SELECT vv FROM bases WHERE account = $1 AND room = $2 AND shelved_by = 0")?;
+            Ok(c.client.query_opt(&st, &[&account, &room]).map_err(failed)?.map(|r| r.get::<_, Vec<u8>>(0)))
+        });
+        if vv.is_some_and(|vv| covers(&decode_vv(&vv).unwrap_or_default(), &[(peer, end)])) {
             return Ok(None);
         }
         self.write(
             &[
-                "SELECT EXISTS (SELECT 1 FROM records WHERE account = $1 AND room = $2 AND peer = $3
-                     AND span_start <= $4 AND $5 <= span_end AND shelved_by = 0)",
-                "DELETE FROM records WHERE account = $1 AND room = $2 AND peer = $3
-                     AND $4 <= span_start AND span_end <= $5 AND shelved_by = 0",
+                // Each by `records_reach`: what covers it reaches past its
+                // end, what it covers past its start. Each a range of
+                // `span_end` with both ends given ($6 the most there is),
+                // or a plan made once for every write guesses a third of
+                // the peer's records and reads them all.
+                "SELECT EXISTS (SELECT 1 FROM records WHERE account = $1 AND room = $2 AND peer = $3 AND shelved_by = 0
+                     AND span_end BETWEEN $5 AND $6 AND span_start <= $4)",
+                "DELETE FROM records WHERE account = $1 AND room = $2 AND peer = $3 AND shelved_by = 0
+                     AND span_end >= $4 AND span_end <= $5 AND span_start >= $4",
                 NEXT_SEQ,
                 "INSERT INTO records (account, seq, room, peer, span_start, span_end, bytes) VALUES ($1, $2, $3, $4, $5, $6, $7)",
             ],
             |tx, st| {
                 let (peer, start, end) = (int(peer), int(start), int(end));
-                let covered: bool = tx.query_one(&st[0], &[&account, &room, &peer, &start, &end]).map_err(failed)?.get(0);
+                let covered: bool = tx.query_one(&st[0], &[&account, &room, &peer, &start, &end, &i64::MAX]).map_err(failed)?.get(0);
                 if covered {
                     return Ok(None);
                 }
-                tx.execute(&st[1], &[&account, &room, &peer, &start, &end]).map_err(failed)?;
+                // The account first (its seq), then the room's count (the
+                // records' triggers), as every write takes them.
                 let seq = next_seq(tx, &st[2], account)?;
+                tx.execute(&st[1], &[&account, &room, &peer, &start, &end]).map_err(failed)?;
                 tx.execute(&st[3], &[&account, &seq, &room, &peer, &start, &end, &record]).map_err(failed)?;
                 Ok(Some(uint(seq)))
             },
@@ -805,23 +898,16 @@ impl Storage for Postgres {
 
     fn live(&self, account: &[u8], room: &str) -> Live {
         self.read(Live::default(), |c| {
-            let st = c.st(
-                "SELECT (SELECT COUNT(*) FROM records WHERE account = $1 AND room = $2 AND shelved_by = 0),
-                        (SELECT COALESCE(SUM(LENGTH(bytes)), 0) FROM records WHERE account = $1 AND room = $2 AND shelved_by = 0)::BIGINT,
-                        EXISTS (SELECT 1 FROM bases WHERE account = $1 AND room = $2 AND shelved_by = 0)",
-            )?;
-            let r = c.client.query_one(&st, &[&account, &room]).map_err(failed)?;
-            Ok(Live { records: uint(r.get(0)), bytes: uint(r.get(1)), based: r.get(2) })
+            let st = c.st("SELECT records, bytes, bases > 0 FROM rooms WHERE account = $1 AND room = $2")?;
+            let r = c.client.query_opt(&st, &[&account, &room]).map_err(failed)?;
+            Ok(r.map_or_else(Live::default, |r| Live { records: uint(r.get(0)), bytes: uint(r.get(1)), based: r.get(2) }))
         })
     }
 
     fn room_count(&self, account: &[u8]) -> u64 {
         self.read(0, |c| {
-            let st = c.st(
-                "SELECT COUNT(*) FROM (SELECT room FROM records WHERE account = $1 AND shelved_by = 0
-                     UNION SELECT room FROM bases WHERE account = $1 AND shelved_by = 0) AS kept",
-            )?;
-            Ok(uint(c.client.query_one(&st, &[&account]).map_err(failed)?.get(0)))
+            let st = c.st("SELECT rooms FROM accounts WHERE id = $1")?;
+            Ok(c.client.query_opt(&st, &[&account]).map_err(failed)?.map_or(0, |r| uint(r.get(0))))
         })
     }
 
@@ -881,15 +967,19 @@ impl Storage for Postgres {
         let Some(b) = self.base(account, room).filter(|b| b.undoable) else { return Ok(false) };
         self.write(
             &[
+                // The account first, as every write to its rooms takes it:
+                // the room's count after, in that order, never the other.
+                ACCOUNT,
                 "DELETE FROM bases WHERE account = $1 AND seq = $2",
                 "UPDATE bases SET shelved_by = 0, shelved_at = 0 WHERE account = $1 AND shelved_by = $2 AND room = $3",
                 "UPDATE records SET shelved_by = 0, shelved_at = 0 WHERE account = $1 AND shelved_by = $2 AND room = $3",
             ],
             |tx, st| {
                 let seq = int(b.seq);
-                tx.execute(&st[0], &[&account, &seq]).map_err(failed)?;
-                tx.execute(&st[1], &[&account, &seq, &room]).map_err(failed)?;
+                Self::account_known(tx, &st[0], account)?;
+                tx.execute(&st[1], &[&account, &seq]).map_err(failed)?;
                 tx.execute(&st[2], &[&account, &seq, &room]).map_err(failed)?;
+                tx.execute(&st[3], &[&account, &seq, &room]).map_err(failed)?;
                 Ok(true)
             },
         )
@@ -923,13 +1013,15 @@ impl Storage for Postgres {
                 ACCOUNT,
                 "DELETE FROM records WHERE account = $1 AND room = $2",
                 "DELETE FROM bases WHERE account = $1 AND room = $2",
+                "DELETE FROM rooms WHERE account = $1 AND room = $2",
                 "INSERT INTO removed (account, room, at) VALUES ($1, $2, $3) ON CONFLICT (account, room) DO NOTHING",
             ],
             |tx, st| {
                 Self::account_known(tx, &st[0], account)?;
                 tx.execute(&st[1], &[&account, &room]).map_err(failed)?;
                 tx.execute(&st[2], &[&account, &room]).map_err(failed)?;
-                tx.execute(&st[3], &[&account, &room, &int(now)]).map(|_| ()).map_err(failed)
+                tx.execute(&st[3], &[&account, &room]).map_err(failed)?;
+                tx.execute(&st[4], &[&account, &room, &int(now)]).map(|_| ()).map_err(failed)
             },
         )
     }

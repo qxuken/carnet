@@ -174,15 +174,17 @@ pub trait Storage {
 
     /// How many live records `room` has and their bytes, and whether it
     /// has a base: what [`spans`](Storage::spans) and
-    /// [`base`](Storage::base) would say, counted where the records are,
-    /// none read (the hub asks after every write).
+    /// [`base`](Storage::base) would say, kept counted as they change, so
+    /// asking costs the same however many the room has (the hub asks
+    /// before and after every write). A store's own does; this one, for
+    /// a store that keeps none, counts them.
     fn live(&self, account: &[u8], room: &str) -> Live {
         let spans = self.spans(account, room);
         Live { records: spans.len() as u64, bytes: spans.iter().map(|s| s.record.len() as u64).sum(), based: self.base(account, room).is_some() }
     }
 
     /// How many rooms have anything kept: [`rooms`](Storage::rooms),
-    /// counted.
+    /// counted (a store's own keeps the count, as [`live`](Storage::live)).
     fn room_count(&self, account: &[u8]) -> u64 {
         self.rooms(account).len() as u64
     }
@@ -510,6 +512,11 @@ struct Account {
     seq: u64,
     rooms: HashMap<String, Vec<Span>>,
     bases: HashMap<String, Base>,
+    /// Each room's live records and their bytes, kept counted as they
+    /// come and go (as the databases keep theirs), and how many rooms
+    /// hold anything live.
+    live: HashMap<String, (u64, u64)>,
+    kept: u64,
     /// Set aside: by which base's seq, when, and what (a span, or the base
     /// before it).
     shelved: Vec<(u64, u64, String, Shelved)>,
@@ -523,6 +530,37 @@ struct Account {
     owner: bool,
     /// When it was made: the order accounts are listed in.
     made: u64,
+}
+
+impl Account {
+    fn holds(&self, room: &str) -> bool {
+        self.live.get(room).is_some_and(|&(n, _)| n > 0) || self.bases.contains_key(room)
+    }
+
+    /// `change` made to `room`, and the rooms holding anything counted
+    /// again for it.
+    fn changing<T>(&mut self, room: &str, change: impl FnOnce(&mut Account) -> T) -> T {
+        let before = self.holds(room);
+        let out = change(self);
+        match (before, self.holds(room)) {
+            (false, true) => self.kept += 1,
+            (true, false) => self.kept -= 1,
+            _ => {}
+        }
+        out
+    }
+
+    /// `room`'s live records counted `n` more (or fewer), `bytes` with them.
+    fn count(&mut self, room: &str, n: i64, bytes: i64) {
+        let c = self.live.entry(room.to_string()).or_default();
+        c.0 = c.0.wrapping_add_signed(n);
+        c.1 = c.1.wrapping_add_signed(bytes);
+    }
+}
+
+/// How many spans, and their bytes.
+fn weigh<'a>(spans: impl IntoIterator<Item = &'a Span>) -> (i64, i64) {
+    spans.into_iter().fold((0, 0), |(n, b), s| (n + 1, b + s.record.len() as i64))
 }
 
 /// An account's password, as the server keeps it: the email it signs in
@@ -666,14 +704,19 @@ impl Storage for Memory {
         if a.bases.get(room).is_some_and(|b| covers(&b.vv, &[(peer, end)])) {
             return Ok(None);
         }
-        let spans = a.rooms.entry(room.to_string()).or_default();
-        if spans.iter().any(|s| s.peer == peer && s.start <= start && end <= s.end) {
+        if a.rooms.get(room).is_some_and(|spans| spans.iter().any(|s| s.peer == peer && s.start <= start && end <= s.end)) {
             return Ok(None);
         }
-        spans.retain(|s| !(s.peer == peer && start <= s.start && s.end <= end));
-        a.seq += 1;
-        spans.push(Span { peer, start, end, seq: a.seq, record });
-        Ok(Some(a.seq))
+        a.changing(room, |a| {
+            let spans = a.rooms.entry(room.to_string()).or_default();
+            let (gone, kept): (Vec<Span>, Vec<Span>) = spans.drain(..).partition(|s| s.peer == peer && start <= s.start && s.end <= end);
+            *spans = kept;
+            a.seq += 1;
+            let (n, b) = weigh(&gone);
+            a.count(room, 1 - n, record.len() as i64 - b);
+            a.rooms.entry(room.to_string()).or_default().push(Span { peer, start, end, seq: a.seq, record });
+            Ok(Some(a.seq))
+        })
     }
 
     fn spans(&self, account: &[u8], room: &str) -> Vec<Span> {
@@ -683,14 +726,12 @@ impl Storage for Memory {
 
     fn live(&self, account: &[u8], room: &str) -> Live {
         let Some(a) = self.accounts.get(account) else { return Live::default() };
-        let spans = a.rooms.get(room).map_or(&[][..], Vec::as_slice);
-        Live { records: spans.len() as u64, bytes: spans.iter().map(|s| s.record.len() as u64).sum(), based: a.bases.contains_key(room) }
+        let (records, bytes) = a.live.get(room).copied().unwrap_or_default();
+        Live { records, bytes, based: a.bases.contains_key(room) }
     }
 
     fn room_count(&self, account: &[u8]) -> u64 {
-        let Some(a) = self.accounts.get(account) else { return 0 };
-        let live = a.rooms.iter().filter(|(r, s)| !s.is_empty() && !a.bases.contains_key(*r)).count();
-        (live + a.bases.len()) as u64
+        self.accounts.get(account).map_or(0, |a| a.kept)
     }
 
     fn changed_since(&self, account: &[u8], seq: u64) -> Vec<(String, u64)> {
@@ -716,17 +757,21 @@ impl Storage for Memory {
 
     fn set_base(&mut self, account: &[u8], room: &str, vv: Vec<(u64, u64)>, record: Vec<u8>, by: &[u8], now: u64) -> Result<u64, Failed> {
         let a = self.accounts.entry(account.to_vec()).or_default();
-        a.seq += 1;
-        let seq = a.seq;
-        if let Some(old) = a.bases.remove(room) {
-            a.shelved.push((seq, now, room.to_string(), Shelved::Base(old)));
-        }
-        let spans = a.rooms.entry(room.to_string()).or_default();
-        let (covered, live): (Vec<Span>, Vec<Span>) = spans.drain(..).partition(|s| covers(&vv, &[(s.peer, s.end)]));
-        *spans = live;
-        a.shelved.extend(covered.into_iter().map(|s| (seq, now, room.to_string(), Shelved::Span(s))));
-        a.bases.insert(room.to_string(), Base { seq, vv, record, by: by.to_vec(), at: now, verified: false, undoable: true });
-        Ok(seq)
+        a.changing(room, |a| {
+            a.seq += 1;
+            let seq = a.seq;
+            if let Some(old) = a.bases.remove(room) {
+                a.shelved.push((seq, now, room.to_string(), Shelved::Base(old)));
+            }
+            let spans = a.rooms.entry(room.to_string()).or_default();
+            let (covered, live): (Vec<Span>, Vec<Span>) = spans.drain(..).partition(|s| covers(&vv, &[(s.peer, s.end)]));
+            *spans = live;
+            let (n, b) = weigh(&covered);
+            a.count(room, -n, -b);
+            a.shelved.extend(covered.into_iter().map(|s| (seq, now, room.to_string(), Shelved::Span(s))));
+            a.bases.insert(room.to_string(), Base { seq, vv, record, by: by.to_vec(), at: now, verified: false, undoable: true });
+            Ok(seq)
+        })
     }
 
     fn verify_base(&mut self, account: &[u8], room: &str, seq: u64) -> Result<(), Failed> {
@@ -740,20 +785,25 @@ impl Storage for Memory {
         let Some(a) = self.accounts.get_mut(account) else { return Ok(false) };
         let Some(b) = a.bases.get(room).filter(|b| b.undoable) else { return Ok(false) };
         let seq = b.seq;
-        a.bases.remove(room);
-        let (back, kept): (Vec<_>, Vec<_>) = a.shelved.drain(..).partition(|(by, _, r, _)| *by == seq && r == room);
-        a.shelved = kept;
-        for (_, _, _, s) in back {
-            match s {
-                Shelved::Span(s) => a.rooms.entry(room.to_string()).or_default().push(s),
-                Shelved::Base(old) => {
-                    a.bases.insert(room.to_string(), old);
+        a.changing(room, |a| {
+            a.bases.remove(room);
+            let (back, kept): (Vec<_>, Vec<_>) = a.shelved.drain(..).partition(|(by, _, r, _)| *by == seq && r == room);
+            a.shelved = kept;
+            for (_, _, _, s) in back {
+                match s {
+                    Shelved::Span(s) => {
+                        a.count(room, 1, s.record.len() as i64);
+                        a.rooms.entry(room.to_string()).or_default().push(s);
+                    }
+                    Shelved::Base(old) => {
+                        a.bases.insert(room.to_string(), old);
+                    }
                 }
             }
-        }
-        if let Some(spans) = a.rooms.get_mut(room) {
-            spans.sort_by_key(|s| s.seq);
-        }
+            if let Some(spans) = a.rooms.get_mut(room) {
+                spans.sort_by_key(|s| s.seq);
+            }
+        });
         Ok(true)
     }
 
@@ -780,8 +830,11 @@ impl Storage for Memory {
 
     fn remove_room(&mut self, account: &[u8], room: &str, now: u64) -> Result<(), Failed> {
         let Some(a) = self.accounts.get_mut(account) else { return Err(Failed("no such account".into())) };
-        a.rooms.remove(room);
-        a.bases.remove(room);
+        a.changing(room, |a| {
+            a.rooms.remove(room);
+            a.bases.remove(room);
+            a.live.remove(room);
+        });
         a.shelved.retain(|(_, _, r, _)| r != room);
         a.removed.entry(room.to_string()).or_insert(now);
         Ok(())
