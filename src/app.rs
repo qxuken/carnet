@@ -3848,7 +3848,7 @@ pub(super) fn revision_ago(r: &Revision) -> String {
 }
 
 pub(super) fn revision_time(r: &Revision) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(r.time.max(0) as u64)
+    store::epoch_time(r.time.max(0) as u64).unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 impl Carnet {

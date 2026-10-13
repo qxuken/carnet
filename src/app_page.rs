@@ -2541,7 +2541,8 @@ impl Carnet {
 
     /// A link's address opened by the system: a web page or a mail. One
     /// written without a scheme is given one (`example.com` the web's);
-    /// anything else stays shut.
+    /// anything else stays shut, as does a mail link that would attach a
+    /// file of this computer's (export.rs `safe_href`), whatever opens it.
     pub(super) fn open_url(&mut self, url: &str) {
         // A file in the notes folder (a PDF or a recording an export
         // brought): opened in its own app, or, one that could run, shown
@@ -2558,12 +2559,22 @@ impl Carnet {
             }
             return;
         }
-        let url = inline::with_scheme(url);
-        let ok = ["http://", "https://", "mailto:"].iter().any(|s| url.to_ascii_lowercase().starts_with(s));
-        if !ok {
-            self.error = Some(format!("Only web and mail links open from a note: {url}"));
+        // Read as a browser reads it, given its scheme, then read again:
+        // `me@example.com?attach=…` is a mail link only once it has one.
+        // What opens is the address as read, not as written.
+        let safe = carnet_core::export::safe_href(url)
+            .map(|u| inline::with_scheme(&u))
+            .and_then(|u| carnet_core::export::safe_href(&u))
+            .filter(|u| ["http://", "https://", "mailto:"].iter().any(|s| u.to_ascii_lowercase().starts_with(s)));
+        let Some(url) = safe else {
+            let url = inline::with_scheme(url);
+            self.error = Some(if url.to_ascii_lowercase().starts_with("mailto:") {
+                "A mail link that attaches a file doesn't open from a note".to_string()
+            } else {
+                format!("Only web and mail links open from a note: {url}")
+            });
             return;
-        }
+        };
         if let Err(e) = store::open_url(&url) {
             self.error = Some(format!("Couldn't open the link: {e}"));
         }

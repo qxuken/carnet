@@ -619,7 +619,7 @@ impl Carnet {
         let online = self.sync.status == Status::Online;
         let now = SystemTime::now();
         let secs = now.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let ago = |s: u64| super::chrome::ago(now, SystemTime::UNIX_EPOCH + Duration::from_secs(s));
+        let ago = |s: u64| ago_or_unknown(now, s);
         let names: HashMap<Vec<u8>, String> = self
             .sync
             .devices
@@ -677,7 +677,7 @@ impl Carnet {
             };
             let ahead = |a: &[(u64, u64)], b: &[(u64, u64)]| -> u64 {
                 let b: HashMap<u64, u64> = b.iter().copied().collect();
-                a.iter().map(|(p, c)| c.saturating_sub(b.get(p).copied().unwrap_or(0))).sum()
+                a.iter().map(|(p, c)| c.saturating_sub(b.get(p).copied().unwrap_or(0))).fold(0, u64::saturating_add)
             };
             let (mine, theirs) = (ahead(&here, &r.held), ahead(&r.held, &here));
             if r.base.is_none() && r.shelved == 0 && mine == 0 && theirs == 0 {
@@ -697,7 +697,7 @@ impl Carnet {
             };
             let open = self.sync_inspect_open.as_deref() == Some(r.room.as_str());
             let armed = self.sync_inspect_armed.as_ref().filter(|(room, _)| *room == r.room).map(|(_, repair)| *repair);
-            let days_left = (r.shelved_since + KEEP_DAYS * 86_400).saturating_sub(secs).div_ceil(86_400).max(1);
+            let days_left = r.shelved_since.saturating_add(KEEP_DAYS * 86_400).saturating_sub(secs).div_ceil(86_400).max(1);
             let undoable = r.base.as_ref().is_some_and(|b| b.undoable) && r.shelved > 0;
             // Its ways to fix it: undo packing, if it's packed; replace the
             // server's copy with this device's, if this device has one.
@@ -1138,22 +1138,22 @@ impl Carnet {
                     // What the server keeps for the account, and, on a
                     // hosted plan, how much it may.
                     if let Some(u) = &usage {
-                        let kept = size_words(u.notes + u.pictures);
+                        let kept = size_words(u.notes.saturating_add(u.pictures));
                         let mut line = match u.limit {
                             Some(limit) => format!("{kept} of {} used", size_words(limit)),
                             None => format!("{kept} kept on the server"),
                         };
                         if !u.plan.is_empty() {
                             line.push_str(&format!(" \u{b7} {}", u.plan));
-                            if let Some(until) = u.until {
-                                line.push_str(&format!(", until {}", super::chrome::date_words(SystemTime::UNIX_EPOCH + Duration::from_secs(until))));
+                            if let Some(until) = u.until.and_then(store::epoch_time) {
+                                line.push_str(&format!(", until {}", super::chrome::date_words(until)));
                             }
                         }
                         said(ui, Icon::Cloud, t.muted, &line);
                         if u.writable
                             && !read_only
                             && let Some(limit) = u.limit
-                            && let Some(over) = over_limit(u.notes + u.pictures, limit)
+                            && let Some(over) = over_limit(u.notes.saturating_add(u.pictures), limit)
                         {
                             said(ui, Icon::Warning, t.warning, &over);
                         }
@@ -1206,7 +1206,7 @@ impl Carnet {
                             } else if d.seen == 0 {
                                 "Not seen since it came in".to_string()
                             } else {
-                                format!("Last seen {}", super::chrome::ago(now, SystemTime::UNIX_EPOCH + Duration::from_secs(d.seen)))
+                                format!("Last seen {}", ago_or_unknown(now, d.seen))
                             };
                             // Its id, short: two devices of one name told apart.
                             let short: String = d.id.iter().take(3).map(|b| format!("{b:02x}")).collect();
@@ -1429,7 +1429,7 @@ impl Carnet {
                         } else if p.made == 0 {
                             "Signs a browser in to this account".to_string()
                         } else {
-                            let added = super::chrome::ago(now, SystemTime::UNIX_EPOCH + Duration::from_secs(p.made));
+                            let added = ago_or_unknown(now, p.made);
                             format!("Added {added}. Signs a browser in to this account.")
                         };
                         ui.with_key(ui.child_key("sync-passkey").index(i as u64), NodeSpec::column().grow_width(), |ui| {
@@ -1504,7 +1504,7 @@ impl Carnet {
                             let seen = if a.seen == 0 {
                                 "not seen yet".to_string()
                             } else {
-                                format!("last seen {}", super::chrome::ago(now, SystemTime::UNIX_EPOCH + Duration::from_secs(a.seen)))
+                                format!("last seen {}", ago_or_unknown(now, a.seen))
                             };
                             let short: String = a.id.iter().take(3).map(|b| format!("{b:02x}")).collect();
                             let armed = self.sync_account_armed.as_deref() == Some(a.id.as_slice());
@@ -2227,6 +2227,12 @@ fn qr_rgba(text: &str) -> Option<(u32, Vec<u8>)> {
         }
     }
     Some((side as u32, rgba))
+}
+
+/// How long ago a time the server gave was ("5 minutes ago"), or, for one
+/// no day can be said of ([`store::epoch_time`]), that it isn't known.
+fn ago_or_unknown(now: SystemTime, secs: u64) -> String {
+    store::epoch_time(secs).map_or_else(|| "at an unknown time".to_string(), |t| super::chrome::ago(now, t))
 }
 
 /// How long an invite has left, rounded up (one just made has a week):

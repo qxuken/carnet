@@ -1280,7 +1280,7 @@ impl Store {
     /// one.
     pub fn first_version(&mut self, i: usize) -> Option<SystemTime> {
         let first = self.history(i).last()?.time;
-        Some(UNIX_EPOCH + Duration::from_secs(first.max(0) as u64))
+        Some(epoch_time(first.max(0) as u64).unwrap_or(UNIX_EPOCH))
     }
 
     /// Note `i`'s text as it was at `version`.
@@ -2334,7 +2334,7 @@ impl Store {
                 continue;
             }
             let (folder, name, when) = match origins.get(&key) {
-                Some((f, n, w, _)) => (f.clone(), n.clone(), UNIX_EPOCH + Duration::from_millis(*w)),
+                Some((f, n, w, _)) => (f.clone(), n.clone(), UNIX_EPOCH.checked_add(Duration::from_millis(*w)).unwrap_or(UNIX_EPOCH)),
                 None => (String::new(), key.clone(), e.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH)),
             };
             let (title, snippet) = if is_folder {
@@ -2961,6 +2961,14 @@ fn keep_created(f: &fs::File, t: SystemTime) {
     let _ = (f, t);
 }
 
+/// `secs` since 1970 as a time, when it is one a day can be said of: past
+/// the year 9999 (a server's mistake, or a server's harm) it is none,
+/// where adding it to 1970 would overflow and stop the app.
+pub fn epoch_time(secs: u64) -> Option<SystemTime> {
+    const LAST: u64 = 253_402_300_799;
+    (secs <= LAST).then(|| UNIX_EPOCH + Duration::from_secs(secs))
+}
+
 /// Whether a file a note links to is one to open in its own app: a
 /// document, a picture, a recording, a film. Anything else (a program, a
 /// script) is shown in its folder, never run from a link.
@@ -2997,7 +3005,21 @@ pub fn plain_error(e: &io::Error) -> String {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What a test had the system open, in order: nothing is opened.
+    pub static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Opens a web or mail address in the system's own app for it.
+#[cfg(test)]
+pub fn open_url(url: &str) -> io::Result<()> {
+    OPENED.with_borrow_mut(|o| o.push(url.to_string()));
+    Ok(())
+}
+
+/// Opens a web or mail address in the system's own app for it.
+#[cfg(not(test))]
 pub fn open_url(url: &str) -> io::Result<()> {
     use std::process::Command;
     #[cfg(windows)]

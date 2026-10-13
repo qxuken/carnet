@@ -1062,52 +1062,138 @@ fn alt_parts(alt: &str) -> (&str, Option<u32>, Float) {
 /// other editors write them; a side (`|left`) is kept in the text but
 /// means nothing among words.
 pub fn inline_picture(text: &str, at: usize) -> Option<CellPicture> {
-    let rest = text.get(at..)?;
-    if let Some(inner) = rest.strip_prefix("![[") {
-        let len = inner.find("]]")?;
-        let raw = &inner[..len];
-        if raw.contains(['[', ']', '\n']) {
-            return None;
-        }
-        let Some(Kind::Image { src, alt, width, float, wiki }) = wiki_image(&format!("![[{}]]", raw.replace("\\|", "|"))) else { return None };
-        // The source as written: before the first `|` (or `\|`), its
-        // spaces left out.
-        let first = raw.split('|').next().unwrap_or(raw);
-        let first = first.strip_suffix('\\').unwrap_or(first);
-        let lead = first.len() - first.trim_start().len();
-        let s = at + 3 + lead;
-        if text.get(s..s + src.len()) != Some(src.as_str()) {
-            return None;
-        }
-        return Some(CellPicture { at: (at, at + 3 + len + 2), src_at: (s, s + src.len()), src, alt, width, float, wiki });
+    Pictures::new(text).at(at)
+}
+
+/// Where the next byte that `is` it is, from a point on, kept from one
+/// question to the next: asked along a line, left to right, it reads the
+/// line once, however many pictures start (or almost start) on it.
+struct Next {
+    is: fn(&[u8], usize) -> bool,
+    /// The last question, and its answer.
+    from: usize,
+    found: Option<usize>,
+}
+
+impl Next {
+    fn new(is: fn(&[u8], usize) -> bool) -> Self {
+        Next { is, from: usize::MAX, found: None }
     }
-    let inner = rest.strip_prefix("![")?;
-    let close = inner.find(']')?;
-    let alt = &inner[..close];
-    let target = inner[close + 1..].strip_prefix('(')?;
-    let t0 = at + 2 + close + 2;
-    let ((s, e), end) = if let Some(t) = target.strip_prefix('<') {
-        let n = t.find(">)")?;
-        ((t0 + 1, t0 + 1 + n), t0 + 1 + n + 2)
-    } else {
-        let n = target.find(')')?;
-        let t = &target[..n];
-        let lead = t.len() - t.trim_start().len();
-        let bare = t.trim();
-        // A title after the source (`"…"`) is dropped, as alone.
-        let src = bare.split_once(" \"").map_or(bare, |(a, _)| a);
-        if src.contains(['\t', '(']) {
+
+    fn after(&mut self, b: &[u8], from: usize) -> Option<usize> {
+        // Nothing found from an earlier point, or found no earlier than
+        // here: the same answer.
+        if from < self.from || self.found.is_some_and(|f| f < from) {
+            self.from = from;
+            self.found = (from..b.len()).find(|&i| (self.is)(b, i));
+        }
+        self.found
+    }
+}
+
+/// The pictures of a line of words, read at one point after another
+/// ([`Pictures::at`]): what each reads past is remembered, so that a line
+/// of things that only start pictures (`![[![[![[…`) is read in one go,
+/// not once for each.
+pub(crate) struct Pictures<'a> {
+    text: &'a str,
+    /// The first `[`, `]` or line break: what ends a picture's alt text
+    /// (or an embed's words), well or not.
+    bracket: Next,
+    paren: Next,
+    angle: Next,
+    newline: Next,
+    title: Next,
+    /// What a source written bare can't hold.
+    unsafe_src: Next,
+    /// A bare source's last `)`, and where its spaces before it start.
+    trimmed: Option<(usize, usize)>,
+}
+
+impl<'a> Pictures<'a> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        Pictures {
+            text,
+            bracket: Next::new(|b, i| matches!(b[i], b'[' | b']' | b'\n')),
+            paren: Next::new(|b, i| b[i] == b')'),
+            angle: Next::new(|b, i| b[i] == b'>' && b.get(i + 1) == Some(&b')')),
+            newline: Next::new(|b, i| b[i] == b'\n'),
+            title: Next::new(|b, i| b[i] == b' ' && b.get(i + 1) == Some(&b'"')),
+            unsafe_src: Next::new(|b, i| matches!(b[i], b'\t' | b'(' | b'\n')),
+            trimmed: None,
+        }
+    }
+
+    /// The picture that starts at byte `at`, as [`inline_picture`].
+    pub(crate) fn at(&mut self, at: usize) -> Option<CellPicture> {
+        let text = self.text;
+        let b = text.as_bytes();
+        let rest = text.get(at..)?;
+        if rest.starts_with("![[") {
+            // Its words up to `]]`, with no other bracket nor line break.
+            let close = self.bracket.after(b, at + 3)?;
+            if b[close] != b']' || b.get(close + 1) != Some(&b']') {
+                return None;
+            }
+            let len = close - (at + 3);
+            let raw = &text[at + 3..close];
+            let Some(Kind::Image { src, alt, width, float, wiki }) = wiki_image(&format!("![[{}]]", raw.replace("\\|", "|"))) else { return None };
+            // The source as written: before the first `|` (or `\|`), its
+            // spaces left out.
+            let first = raw.split('|').next().unwrap_or(raw);
+            let first = first.strip_suffix('\\').unwrap_or(first);
+            let lead = first.len() - first.trim_start().len();
+            let s = at + 3 + lead;
+            if text.get(s..s + src.len()) != Some(src.as_str()) {
+                return None;
+            }
+            return Some(CellPicture { at: (at, at + 3 + len + 2), src_at: (s, s + src.len()), src, alt, width, float, wiki });
+        }
+        if !rest.starts_with("![") {
             return None;
         }
-        ((t0 + lead, t0 + lead + src.len()), t0 + n + 1)
-    };
-    let src = &text[s..e];
-    if src.is_empty() || alt.contains(['[', '\n']) || src.contains('\n') {
-        return None;
+        // The alt text, up to `]`, with no other bracket nor line break.
+        let close = self.bracket.after(b, at + 2)?;
+        if b[close] != b']' || b.get(close + 1) != Some(&b'(') {
+            return None;
+        }
+        let alt = &text[at + 2..close];
+        let t0 = close + 2;
+        let ((s, e), end) = if b.get(t0) == Some(&b'<') {
+            let n = self.angle.after(b, t0 + 1)?;
+            ((t0 + 1, n), n + 2)
+        } else {
+            let paren = self.paren.after(b, t0)?;
+            let t = &text[t0..paren];
+            let s = t0 + (t.len() - t.trim_start().len());
+            // Where its spaces before the `)` start: the same `)` closes
+            // every picture started before it, so it is looked for once.
+            let bare_end = match self.trimmed {
+                Some((p, e)) if p == paren => e,
+                _ => {
+                    let e = t0 + t.trim_end().len();
+                    self.trimmed = Some((paren, e));
+                    e
+                }
+            };
+            // A title after the source (`"…"`) is dropped, as alone.
+            let e = match self.title.after(b, s) {
+                Some(q) if q < paren => q,
+                _ => bare_end.max(s),
+            };
+            if self.unsafe_src.after(b, s).is_some_and(|k| k < e) {
+                return None;
+            }
+            ((s, e), paren + 1)
+        };
+        if s == e || self.newline.after(b, s).is_some_and(|k| k < e) {
+            return None;
+        }
+        let src = &text[s..e];
+        let alt = alt.replace("\\|", "|");
+        let (alt, width, float) = alt_parts(&alt);
+        Some(CellPicture { at: (at, end), src_at: (s, e), src: src.to_string(), alt: alt.to_string(), width, float, wiki: false })
     }
-    let alt = alt.replace("\\|", "|");
-    let (alt, width, float) = alt_parts(&alt);
-    Some(CellPicture { at: (at, end), src_at: (s, e), src: src.to_string(), alt: alt.to_string(), width, float, wiki: false })
 }
 
 /// Every picture in a line of words, as [`inline_picture`] reads them,
@@ -1115,9 +1201,10 @@ pub fn inline_picture(text: &str, at: usize) -> Option<CellPicture> {
 /// say), as for [`picture_paths`].
 pub fn inline_pictures(text: &str) -> Vec<CellPicture> {
     let mut out = Vec::new();
+    let mut pictures = Pictures::new(text);
     let mut i = 0;
     while let Some(k) = text[i..].find("![") {
-        match inline_picture(text, i + k) {
+        match pictures.at(i + k) {
             Some(p) => {
                 i = p.at.1;
                 out.push(p);
@@ -1693,12 +1780,13 @@ fn split_row(line: &str) -> Vec<String> {
     let t = t.strip_prefix('|').unwrap_or(t);
     let mut cells = Vec::new();
     let mut cur = String::new();
+    let mut pictures = Pictures::new(t);
     let mut i = 0;
     while let Some(c) = t[i..].chars().next() {
         // A picture's `|`s are its own (`![|left|260](a.png)`), as other
         // editors read them: it is taken whole, as written.
         if c == '!'
-            && let Some(p) = inline_picture(t, i)
+            && let Some(p) = pictures.at(i)
         {
             cur.push_str(&t[i..p.at.1]);
             i = p.at.1;
@@ -2298,5 +2386,38 @@ Second line of the same paragraph.
         let md = "![[a.png]]\n![](here.png)\n![[Lisbon/c.png|200]]\n![[Other note]]\n";
         let found: Vec<String> = picture_paths("Trips", md, &files).into_iter().collect();
         assert_eq!(found, ["Trips/Lisbon/c.png", "Trips/here.png", "attachments/a.png"]);
+    }
+
+    #[test]
+    fn a_cell_of_many_pictures_or_almost_pictures_is_read_quickly() {
+        let n = 60_000;
+        let cells = [
+            "![[".repeat(n / 3),
+            "![[".repeat(n / 3) + "]]",
+            "![".repeat(n / 2),
+            "![".repeat(n / 2) + "]",
+            "![a](".repeat(n / 5),
+            "![a](".repeat(n / 5) + ")",
+            "![a](<".repeat(n / 6) + ">)",
+            "![a](".repeat(n / 10) + &" ".repeat(n / 2) + ")",
+            "![a](x \"".repeat(n / 9) + ")",
+            "![a](b.png) ".repeat(n / 12),
+            "![[b.png|20]] ".repeat(n / 14),
+        ];
+        for cell in &cells {
+            let md = format!("| a |\n| --- |\n| {cell} |\n");
+            // An unoptimised build, every way a cell's pictures are read:
+            // the note's blocks, the pictures it keeps, the page made of
+            // it, and the cell's own words.
+            let t0 = std::time::Instant::now();
+            let _ = parse_blocks(&md);
+            let _ = picture_paths("", &md, &Files::default());
+            let _ = crate::export::viewer(&md, |s, _| crate::export::Picture::Url(s.into()));
+            let _ = inline::cell_pictures(cell);
+            let _cell = inline::cell_text(true);
+            let _ = inline::runs(cell);
+            let took = t0.elapsed();
+            assert!(took.as_millis() < 3000, "{took:?} for {}…", &cell[..40]);
+        }
     }
 }
