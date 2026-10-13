@@ -172,8 +172,11 @@ impl Editor {
             let slot = slots[0];
             let t = page::text(&self.doc, slot);
             let words = page::visible(&self.doc, slot).text(t);
-            let mut start = 0;
-            for (n, line) in words.split('\n').enumerate() {
+            // Code's lines between its fences: the fences are Markdown,
+            // never shown, nor stood on (`page::writable`).
+            let (lo, hi) = if matches!(b.kind, Kind::Raw(_)) { page::writable(&self.doc, slot) } else { (0, words.len()) };
+            let mut start = lo;
+            for (n, line) in words[lo..hi].split('\n').enumerate() {
                 out.push(Line { block: Some(i), slot: Some(slot), start, text: line.to_string(), first: n == 0 });
                 start += line.len() + 1;
             }
@@ -220,7 +223,15 @@ impl Editor {
         if b.kind.is_atomic() {
             return (first, p.byte.min(1));
         }
-        let d = page::visible(&self.doc, p.slot).drawn(p.byte);
+        // In code, a place on a fence is shown at the nearer end of the
+        // lines between them.
+        let byte = if matches!(b.kind, Kind::Raw(_)) {
+            let (lo, hi) = page::writable(&self.doc, p.slot);
+            p.byte.clamp(lo, hi)
+        } else {
+            p.byte
+        };
+        let d = page::visible(&self.doc, p.slot).drawn(byte);
         let n = mine.iter().rev().copied().find(|&n| self.lines[n].start <= d).unwrap_or(first);
         let l = &self.lines[n];
         (n, byte_to_u16(&l.text, d - l.start))
@@ -1294,8 +1305,45 @@ mod tests {
             assert!(e.enter(false));
             keys(&mut e, "let x = 1;");
             assert_eq!(e.markdown(), format!("# T\n\n{fence}\nlet x = 1;\n```\n"));
-            assert_eq!(e.lines()[2].text, "let x = 1;");
+            assert_eq!(e.lines()[1].text, "let x = 1;", "the fences not shown");
         }
+    }
+
+    /// The editor shows words only: a code block's fences are not among
+    /// CodeMirror's lines, so no arrow or click can put the caret on one.
+    /// ↓ from its last line is the next block, ↑ from its first the one
+    /// before; Backspace and Delete at its ends leave the fences whole.
+    #[test]
+    fn a_code_blocks_fences_are_not_shown_nor_stood_on() {
+        let md = "# T\n\nAbove\n\n```rust\nlet x;\nlet y;\n```\n\nBelow\n";
+        let mut e = Editor::open(md);
+        let texts: Vec<&str> = e.lines().iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["T", "Above", "let x;", "let y;", "Below"]);
+        assert!(!e.text().contains('`'));
+        // A place in the code's lines is the same place in the note.
+        e.select(3, 4, 3, 4);
+        assert!(e.input("!"));
+        assert_eq!(e.markdown(), "# T\n\nAbove\n\n```rust\nlet x;\nlet !y;\n```\n\nBelow\n");
+        assert_eq!(e.caret_lc(), (3, 5, 3, 5));
+        // ↓ from the last line, ↑ from the first: CodeMirror's next line
+        // is the block beyond.
+        let md = e.markdown();
+        e.select(4, 0, 4, 0);
+        assert!(e.input("B"));
+        e.select(1, 5, 1, 5);
+        assert!(e.input("A"));
+        assert_eq!(e.markdown(), md.replace("Above", "AboveA").replace("Below", "BBelow"));
+        // Backspace at the code's start goes up, Delete at its end down:
+        // neither takes a fence's line break.
+        let md = e.markdown();
+        e.select(2, 0, 2, 0);
+        e.backspace(false);
+        e.select(3, 7, 3, 7);
+        e.delete(false);
+        assert_eq!(e.markdown(), md);
+        // A caret the page put on a fence is shown in the lines between.
+        e.caret = Caret::at(Pos { slot: Slot::block(e.doc.blocks()[1].id), byte: 0 });
+        assert_eq!(e.caret_lc().2, 2);
     }
 
     /// A picture put in at the end of the words before a table: no empty

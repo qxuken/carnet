@@ -999,11 +999,14 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     // A letter (or a word) before the caret: taken by the words, so a
     // mark is never half deleted and goes with the last of its words.
     let v = visible(doc, p.slot);
-    let d = v.drawn(p.byte);
-    if d > 0 {
+    // In code, at its first line's start is at its start: the fence above
+    // is not taken back into the words.
+    let (lo, hi) = drawn_edges(doc, p.slot, &v);
+    let d = v.drawn(p.byte).clamp(lo, hi);
+    if d > lo {
         let t = text(doc, p.slot);
         let w = v.text(t);
-        let nd = if word { prev_word(&w, d) } else { prev_char(&w, d) };
+        let nd = if word { prev_word(&w, d) } else { prev_char(&w, d) }.max(lo);
         let (from, to) = (v.source(nd), v.at(d));
         let marks = styled(doc, p.slot);
         let mut at = from;
@@ -1060,7 +1063,8 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
             true
         }
         Kind::Raw(t) => {
-            if t.is_empty() {
+            // Empty code (no line written between its fences) goes.
+            if t.is_empty() || code_body(&t).is_some_and(|(a, b)| a == b) {
                 doc.remove(i);
                 *c = Caret::at(after_removal_up(doc, i));
                 keep_writable(doc, c);
@@ -1155,10 +1159,12 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     }
     let t = text(doc, p.slot);
     let v = visible(doc, p.slot);
-    let d = v.drawn(p.byte);
-    if d < v.drawn_len() {
+    // In code, its last line's end is its end: nothing joins the fence.
+    let (lo, hi) = drawn_edges(doc, p.slot, &v);
+    let d = v.drawn(p.byte).clamp(lo, hi);
+    if d < hi {
         let w = v.text(t);
-        let nd = if word { next_word(&w, d) } else { next_char(&w, d) };
+        let nd = if word { next_word(&w, d) } else { next_char(&w, d) }.min(hi);
         let (from, to) = (v.source(d), v.at(nd));
         let marks = styled(doc, p.slot);
         if let Some(t) = text_mut(doc, p.slot) {
@@ -4316,6 +4322,33 @@ mod tests {
         let mut c = Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 13 });
         enter(&mut d, &mut c, false);
         assert_eq!(md(&d), "above\n\n```\nlet x;\n\n```\n");
+    }
+
+    /// Backspace at the start of code's first line and Delete at the end
+    /// of its last take no fence's line break (`` ```let x; ``): they go
+    /// on to the block beyond, as ← and → do. Empty code goes whole.
+    #[test]
+    fn backspace_and_delete_leave_codes_fences_whole() {
+        let mut d = doc(vec![Block::text("above"), Block::new(Kind::Raw("```\nlet x;\n```".into())), Block::text("below")]);
+        let code = Slot::block(d.blocks()[1].id);
+        let mut c = Caret::at(Pos { slot: code, byte: 4 });
+        backspace(&mut d, &mut c, false);
+        assert_eq!(text(&d, code), "```\nlet x;\n```");
+        assert_eq!(c, at(&d, 0, 5), "on to the line above");
+        let mut c = Caret::at(Pos { slot: code, byte: 10 });
+        delete(&mut d, &mut c, true);
+        assert_eq!(text(&d, code), "```\nlet x;\n```");
+        assert_eq!(c, at(&d, 2, 0), "on to the line below");
+        let mut d = doc(vec![Block::new(Kind::Raw("```\n  indented\n```".into()))]);
+        let code = Slot::block(d.blocks()[0].id);
+        let mut c = Caret::at(Pos { slot: code, byte: 6 });
+        backspace(&mut d, &mut c, true);
+        assert_eq!(text(&d, code), "```\nindented\n```", "a word back stops at the code's start");
+        let mut d = doc(vec![Block::text("above"), Block::new(Kind::Raw("```\n\n```".into())), Block::text("")]);
+        let mut c = Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 4 });
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:above", "Text:"]);
+        assert_eq!(c, at(&d, 0, 5));
     }
 
     /// The finding: a picture chosen by → with a table after it, "Q"

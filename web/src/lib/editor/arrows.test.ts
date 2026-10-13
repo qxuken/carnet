@@ -114,3 +114,25 @@ describe('sideOn', () => {
     expect(onRow(coords(25, sideOn(25, rowOf(2), coords)), rowOf(2))).toBe(true);
   });
 });
+
+// A code block's lines are its words alone (its fences are never among
+// the editor's lines, editor.rs `relay`): ↓ from its last line is the
+// next block's line, ↑ from its first the one before, measured as any.
+describe('vertical by code', () => {
+  // 1 title 0..1, 2 text 2..7, 3 code 8..14, 4 code 15..21, 5 text 22..27
+  const code = page([
+    ['title', 'T'],
+    ['text', 'Above'],
+    ['code', 'let x;'],
+    ['code', 'let y;'],
+    ['text', 'Below'],
+  ]);
+  it('leaves the code from its last line down and its first line up', () => {
+    expect(vertical(code, at(21), true, false)).toEqual({ line: 5, leaving: true });
+    expect(vertical(code, at(8), false, false)).toEqual({ line: 2, leaving: true });
+  });
+  it('comes into it at its last line up and its first line down', () => {
+    expect(vertical(code, at(22), false, false)).toEqual({ line: 4, leaving: true });
+    expect(vertical(code, at(2), true, false)).toEqual({ line: 3, leaving: true });
+  });
+});
