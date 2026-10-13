@@ -451,7 +451,8 @@ impl Editor {
         })
     }
 
-    /// Bold, italic, struck or code (`inline::Kind`) on the selection; with
+    /// Bold, italic, struck, underlined or code (`inline::Kind`) on the
+    /// selection; with
     /// nothing selected, or a picture or divider chosen, on (or off) for
     /// what is typed next.
     pub fn style(&mut self, kind: inline::Kind) -> bool {
@@ -492,6 +493,7 @@ impl Editor {
                     "Bold" => s.bold = !s.bold,
                     "Italic" => s.italic = !s.italic,
                     "Strike" => s.strike = !s.strike,
+                    "Underline" => s.underline = !s.underline,
                     "Code" => s.code = !s.code,
                     "mark" => s.mark = self.typing.pending_tint(self.caret, false).unwrap_or(s.mark),
                     _ => {}
@@ -1230,6 +1232,32 @@ mod tests {
         assert!(e.markdown().contains("*==two==*"), "as the desktop nests it: {}", e.markdown());
         // The words CodeMirror has are the same throughout.
         assert_eq!(e.lines()[1].text, "one two three");
+    }
+
+    /// Underline as the desktop has it: `<u>` in the note, never among
+    /// the words CodeMirror has; on the selection, and for what is typed
+    /// with none; off again the same way; a copy's HTML `<u>`.
+    #[test]
+    fn underline_on_the_selection_and_for_what_is_typed() {
+        let mut e = Editor::open("# T\n\none two three\n");
+        e.select(1, 4, 1, 7);
+        assert!(e.style(inline::Kind::Underline));
+        assert!(e.markdown().contains("one <u>two</u> three"), "{}", e.markdown());
+        assert_eq!(e.lines()[1].text, "one two three");
+        assert!(e.look(1).runs.iter().any(|(a, b, s)| (*a, *b) == (4, 7) && s.underline), "drawn underlined");
+        assert!(e.style_here().underline);
+        let html = e.copy_for_html().map(|md| carnet_core::export::html(&md, |s, _| s.to_string()));
+        assert_eq!(html.as_deref(), Some("<p><u>two</u></p>"));
+        e.select(1, 4, 1, 7);
+        e.style(inline::Kind::Underline);
+        assert!(e.markdown().contains("one two three"), "{}", e.markdown());
+        // Nothing selected: on for what is typed, the toolbar's state too.
+        e.select(1, 13, 1, 13);
+        assert!(e.style(inline::Kind::Underline));
+        assert!(e.style_here().underline);
+        e.input(" four");
+        assert!(e.markdown().contains("one two three <u>four</u>"), "{}", e.markdown());
+        assert_eq!(e.lines()[1].text, "one two three four");
     }
 
     #[test]

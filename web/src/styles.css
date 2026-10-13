@@ -122,6 +122,10 @@ button { font: inherit; color: inherit; }
   background: radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x;
 }
 .note a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent-ink) 40%, transparent); }
+/* Underlined words, a little below the letters; a link's words underlined
+   keep the link's one line. */
+.note u { text-decoration-line: underline; text-underline-offset: 0.18em; }
+.note a u { text-decoration: none; }
 .note img { max-width: 100%; height: auto; border-radius: var(--radius); background: var(--sunken); }
 /* A picture among a table cell's words: its own width, never wider than
    its cell, the columns being fixed shares of the table, as the desktop

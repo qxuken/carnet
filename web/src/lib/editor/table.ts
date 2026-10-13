@@ -17,6 +17,7 @@ import { WidgetType, type EditorView } from '@codemirror/view';
 import type { PageEditor } from '../../wasm/carnet_web.js';
 import { inkCss, washCss } from '../colors';
 import { show, unshown } from '../pictures';
+import { styleOfKey } from './styles';
 
 export type Run = [number, number, number, number, number];
 /// A picture among a cell's words: the place of its letter in them, its
@@ -91,6 +92,7 @@ function paint(el: HTMLElement, text: string, runs: Run[], pics: CellPic[], ctx:
     if (flags & 4) c.push('cm-s');
     if (flags & 8) c.push('cm-c');
     if (flags & 16) c.push('cm-l');
+    if (flags & 64) c.push('cm-u');
     if (mark) c.push('cm-marked');
     s.className = c.join(' ');
     if (ink) s.style.color = inkCss(ink);
@@ -471,10 +473,7 @@ function bind(wrap: Wrap) {
     }
     let f: (() => boolean) | null = null;
     if (e.key === 'Tab') f = () => pe.tab(e.shiftKey);
-    else if (mod && !e.shiftKey && k === 'b') f = () => pe.style(0);
-    else if (mod && !e.shiftKey && k === 'i') f = () => pe.style(1);
-    else if (mod && e.shiftKey && k === 'x') f = () => pe.style(2);
-    else if (mod && !e.shiftKey && k === 'e') f = () => pe.style(3);
+    else if (mod && !e.altKey && styleOfKey(k, e.shiftKey) !== null) f = () => pe.style(styleOfKey(k, e.shiftKey)!);
     else if (mod && e.shiftKey && k === 'h') f = () => pe.tint(false, 1);
     else if (mod && !e.shiftKey && k === 'z') f = () => pe.undo();
     else if (mod && e.shiftKey && k === 'z') f = () => pe.redo();

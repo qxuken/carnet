@@ -27,7 +27,8 @@ use proptest::sample::{Index, select};
 const INLINE: &[&str] = &[
     "word", "Ünï", "é", "ё", "名前", "👩\u{200d}👩\u{200d}👧", "e\u{301}", " ", "  ", "\t", "**", "*", "_", "~~", "==",
     "`", "[", "](", "](https://example.com)", ")", "<mark>", "</mark>", "<mark style=\"background: #D8EAC0CC\">",
-    "<span style=\"color: #C0553F\">", "<span style=\"color: #C0553F; background: #F8EBA6CC\">", "</span>", "\\", "|",
+    "<span style=\"color: #C0553F\">", "<span style=\"color: #C0553F; background: #F8EBA6CC\">", "</span>", "<u>", "</u>",
+    "<ins>", "</ins>", "\\", "|",
     "#", ">", "1.", "-", "!", "[x]",
 ];
 
@@ -46,7 +47,7 @@ fn line() -> impl Strategy<Value = String> {
 const BALANCED: &[&str] = &[
     "word", "Ünï", "名前", "👩\u{200d}👩\u{200d}👧", " ", "**bold**", "*it*", "~~gone~~", "==lit==", "`code`",
     "[link](https://example.com)", "<mark style=\"background: #D8EAC0CC\">wash</mark>",
-    "<span style=\"color: #C0553F\">red</span>", "**a *b* c**",
+    "<span style=\"color: #C0553F\">red</span>", "**a *b* c**", "<u>under</u>", "<u>**both**</u>",
 ];
 
 fn balanced_line() -> impl Strategy<Value = String> {
@@ -177,7 +178,7 @@ proptest! {
         text in line(),
         a in any::<Index>(),
         b in any::<Index>(),
-        which in 0..6usize,
+        which in 0..7usize,
         color in select(&[inline::HIGHLIGHT, compare::ADDED, compare::REMOVED, 0][..]),
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
@@ -188,7 +189,8 @@ proptest! {
             2 => inline::emphasis(&text, a, b, Kind::Strike),
             3 => inline::emphasis(&text, a, b, Kind::Code),
             4 => inline::tint(&text, a, b, true, color),
-            _ => inline::tint(&text, a, b, false, color),
+            5 => inline::tint(&text, a, b, false, color),
+            _ => inline::emphasis(&text, a, b, Kind::Underline),
         };
     }
 
@@ -200,7 +202,7 @@ proptest! {
         text in balanced_line(),
         a in any::<Index>(),
         b in any::<Index>(),
-        which in 0..6usize,
+        which in 0..7usize,
         color in select(&[inline::HIGHLIGHT, compare::ADDED, compare::REMOVED, 0][..]),
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
@@ -211,7 +213,8 @@ proptest! {
             2 => inline::emphasis(&text, a, b, Kind::Strike),
             3 => inline::emphasis(&text, a, b, Kind::Code),
             4 => inline::tint(&text, a, b, true, color),
-            _ => inline::tint(&text, a, b, false, color),
+            5 => inline::tint(&text, a, b, false, color),
+            _ => inline::emphasis(&text, a, b, Kind::Underline),
         };
         if let Some((out, _, _)) = styled {
             prop_assert_eq!(inline::plain(&out), inline::plain(&text));
@@ -225,7 +228,7 @@ proptest! {
         text in balanced_line(),
         a in any::<Index>(),
         b in any::<Index>(),
-        which in 0..6usize,
+        which in 0..7usize,
         color in select(&[inline::HIGHLIGHT, compare::ADDED, compare::REMOVED, 0][..]),
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
@@ -236,7 +239,8 @@ proptest! {
             2 => inline::emphasis(&text, a, b, Kind::Strike),
             3 => inline::emphasis(&text, a, b, Kind::Code),
             4 => inline::tint(&text, a, b, true, color),
-            _ => inline::tint(&text, a, b, false, color),
+            5 => inline::tint(&text, a, b, false, color),
+            _ => inline::emphasis(&text, a, b, Kind::Underline),
         };
         let vis = Visible::of(&text);
         let words = &vis.text(&text)[vis.drawn(a)..vis.drawn(b)];
@@ -254,7 +258,7 @@ proptest! {
         text in line(),
         a in any::<Index>(),
         b in any::<Index>(),
-        which in 0..6usize,
+        which in 0..7usize,
         color in select(&[inline::HIGHLIGHT, compare::ADDED, compare::REMOVED, 0][..]),
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
@@ -265,7 +269,8 @@ proptest! {
             2 => inline::emphasis(&text, a, b, Kind::Strike),
             3 => inline::emphasis(&text, a, b, Kind::Code),
             4 => inline::tint(&text, a, b, true, color),
-            _ => inline::tint(&text, a, b, false, color),
+            5 => inline::tint(&text, a, b, false, color),
+            _ => inline::emphasis(&text, a, b, Kind::Underline),
         };
         if let Some((out, _, _)) = styled {
             prop_assert_eq!(inline::plain(&out), inline::plain(&text));

@@ -864,7 +864,7 @@ impl PageEditor {
     /// of its words}]], hd: a table's first row its header, ini: a
     /// paragraph's first line whose first letter drops, 1, or 2 when the
     /// letter has a colour of its own}]`. Flags: 1 bold, 2 italic, 4
-    /// struck, 8 code, 16 link, 32 a cell's picture; colours 0xRRGGBBAA,
+    /// struck, 8 code, 16 link, 32 a cell's picture, 64 underlined; colours 0xRRGGBBAA,
     /// a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
         let n = self.e.lines().len();
@@ -875,7 +875,12 @@ impl PageEditor {
                     .runs
                     .iter()
                     .map(|(a, b, s)| {
-                        let flags = u8::from(s.bold) | u8::from(s.italic) << 1 | u8::from(s.strike) << 2 | u8::from(s.code) << 3 | u8::from(s.link) << 4;
+                        let flags = u8::from(s.bold)
+                            | u8::from(s.italic) << 1
+                            | u8::from(s.strike) << 2
+                            | u8::from(s.code) << 3
+                            | u8::from(s.link) << 4
+                            | u8::from(s.underline) << 6;
                         format!("[{a},{b},{flags},{},{}]", s.mark, s.ink)
                     })
                     .collect();
@@ -895,7 +900,8 @@ impl PageEditor {
                                             | u8::from(s.strike) << 2
                                             | u8::from(s.code) << 3
                                             | u8::from(s.link) << 4
-                                            | u8::from(s.picture) << 5;
+                                            | u8::from(s.picture) << 5
+                                            | u8::from(s.underline) << 6;
                                         format!("[{a},{b},{flags},{},{}]", s.mark, s.ink)
                                     })
                                     .collect();
@@ -977,9 +983,10 @@ impl PageEditor {
         self.e.turned_to(u64::from(to))
     }
 
-    /// 0 bold, 1 italic, 2 struck, 3 code.
+    /// 0 bold, 1 italic, 2 struck, 3 code, 4 underlined.
     pub fn style(&mut self, which: u32) -> bool {
-        let kind = [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Code][(which as usize).min(3)];
+        let kinds = [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Code, inline::Kind::Underline];
+        let kind = kinds[(which as usize).min(kinds.len() - 1)];
         self.e.style(kind)
     }
 
@@ -992,7 +999,13 @@ impl PageEditor {
     /// 32 for highlighted.
     pub fn style_here(&self) -> u32 {
         let s = self.e.style_here();
-        u32::from(s.bold) | u32::from(s.italic) << 1 | u32::from(s.strike) << 2 | u32::from(s.code) << 3 | u32::from(s.link) << 4 | u32::from(s.mark != 0) << 5
+        u32::from(s.bold)
+            | u32::from(s.italic) << 1
+            | u32::from(s.strike) << 2
+            | u32::from(s.code) << 3
+            | u32::from(s.link) << 4
+            | u32::from(s.mark != 0) << 5
+            | u32::from(s.underline) << 6
     }
 
     pub fn toggle(&mut self, line: u32) -> bool {

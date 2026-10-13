@@ -22,6 +22,7 @@ pub enum Glyph {
     Bold,
     Italic,
     Strike,
+    Underline,
     Code,
     Table,
     Divider,
@@ -174,6 +175,8 @@ impl Glyph {
                  M15.6 14.3c.5.6.8 1.2.8 2 0 1.9-1.9 3.2-4.5 3.2-2.3 0-4-1-4.6-2.6",
                 "",
             ),
+            // A U standing on its line.
+            Underline => ("M7.5 4.5v6.8a4.5 4.5 0 0 0 9 0V4.5 M5.5 20h13", ""),
             Code => ("M8.5 7.5L4 12l4.5 4.5 M15.5 7.5L20 12l-4.5 4.5 M13.2 5.5l-2.4 13", ""),
             Table => ("M3.5 10.5h17 M9.5 10.5v8", ""),
             // A rule with the space it makes: chevrons parting from it.
@@ -298,9 +301,9 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 67] = [
+    pub const ALL: [Glyph; 68] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
-        Glyph::Italic, Glyph::Strike, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
+        Glyph::Italic, Glyph::Strike, Glyph::Underline, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
         Glyph::Indent, Glyph::Up, Glyph::Down, Glyph::Cross, Glyph::Star, Glyph::Trash, Glyph::Back, Glyph::Plus,
         Glyph::Minus, Glyph::Folder, Glyph::FolderPlus, Glyph::Settings, Glyph::Search, Glyph::ChevronDown,

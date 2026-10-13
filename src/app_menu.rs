@@ -118,6 +118,7 @@ impl Carnet {
                 page("Bold", keys::BOLD),
                 page("Italic", keys::ITALIC),
                 page("Strikethrough", keys::STRIKE),
+                page("Underline", keys::UNDERLINE),
                 page("Code", keys::CODE),
                 page("Highlight", keys::HIGHLIGHT),
                 MenuItem::separator(),

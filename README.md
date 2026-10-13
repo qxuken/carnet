@@ -46,7 +46,7 @@ And what it leaves out, on purpose:
 - **Edits made in other apps are merged.** A note changed in Obsidian, VS Code or a sync client while it has edits here keeps both sets of edits.
 - **History.** Every version a note has been, with what each one added and took away. Restore any of them, or restore one as a copy.
 - **Pictures** pasted or dropped in, resized, and placed on their own line or beside the text.
-- **Copy that keeps formatting.** A selection copies as Markdown with an HTML version beside it, so a paste into Mail, Word or Google Docs keeps headings, lists, checkboxes, tables, bold and links.
+- **Copy that keeps formatting.** A selection copies as Markdown with an HTML version beside it, so a paste into Mail, Word or Google Docs keeps headings, lists, checkboxes, tables, bold, underline and links.
 - **A trash you can restore from.** Deleted notes and folders go to a trash folder inside your notes folder, and each one goes back where it came from.
 - **Calm, readable design.** Five palettes, each light and dark, three densities, font pairings, page widths, text sizes from 12 to 24 px, focus and typewriter modes, and a zen mode that leaves only the note.
 - **Sync** between your devices, end-to-end encrypted, through a server you can run yourself, and a **web app** that installs on a phone and works offline.
@@ -96,11 +96,12 @@ On a Mac every shortcut below is the same with ⌘ for Ctrl and ⌥ for Alt; too
 | Backspace at a list item's start | undo its structure (outdent, then plain text), then join the line above |
 | Ctrl+Enter | tick or untick a checklist item |
 | Ctrl+B / Ctrl+I / Ctrl+Shift+X / Ctrl+E | bold / italic / strikethrough / code |
+| Ctrl+U | underline, written `<u>like this</u>`: Markdown has none, and most viewers show the HTML tag |
 | Ctrl+Shift+H | highlight, written `==like this==` as Obsidian does |
 | Ctrl+K | add, change or remove a link |
 | Ctrl+click a link | open it (or a click, or a double-click: Settings → Writing → Open links with) |
 
-The toolbar's highlighter and text-colour buttons offer ten calm hues. They are written as HTML any Markdown viewer shows (`<span style="color: #C0553F">`, `<mark style="background: #F8EBA6CC">`), and Carnet draws each hue in the current theme's own colours.
+The toolbar's highlighter and text-colour buttons offer ten calm hues. They are written as HTML any Markdown viewer shows (`<span style="color: #C0553F">`, `<mark style="background: #F8EBA6CC">`), and Carnet draws each hue in the current theme's own colours. Underline is HTML too, `<u>…</u>`; one written `<ins>…</ins>` in another app is read as underline and kept as it was written.
 
 ### Moving around and editing blocks
 
