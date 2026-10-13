@@ -95,9 +95,12 @@ impl Carnet {
             }
             Msg::ResetLook => {
                 self.reset_armed = false;
+                let window = s.translucent;
                 s.reset_look();
                 self.font_pick = None;
-                self.notify("Appearance and writing reset", None);
+                // The window changes only when the app next starts: said.
+                let said = if s.translucent != window { "Appearance and writing reset; the window from the next start" } else { "Appearance and writing reset" };
+                self.notify(said, None);
             }
             Msg::ResetLookCancel => {
                 self.reset_armed = false;
@@ -493,7 +496,7 @@ impl Carnet {
                 ui,
                 l,
                 "Reset appearance and writing",
-                Some("Colors, fonts, sizes and the writing options, back as they were at first. Notes, the library, the window and sync stay as they are."),
+                Some("Colors, fonts, sizes, the window and the writing options, back as they were at first (the window from the next start). Notes, the library and sync stay as they are."),
                 |ui| {
                     if armed {
                         pill_button(ui, l, "reset-cancel", "Cancel", false, true, Msg::ResetLookCancel);
@@ -1388,6 +1391,17 @@ impl Carnet {
                                 self.focus_req = None;
                             }
                         });
+                        // Why it wasn't taken, by the fields it's of.
+                        if let Some(why) = self.sync.password_error.clone() {
+                            ui.with_keyed(
+                                "pw-error",
+                                NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 10.0 }).gap(8.0).cross_align(Align::Center).selectable().live(kui_native::Live::Polite),
+                                |ui| {
+                                    crate::icons::icon(ui, Icon::Warning, t.danger, 15.0, false);
+                                    ui.text_in(NodeSpec::row().grow_width().min_width(0.0), &why, TextStyle::new(Type::UI.size).color(t.danger));
+                                },
+                            );
+                        }
                         if only.is_some() {
                             ui.text_in(
                                 NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 6.0 }),
@@ -1401,7 +1415,7 @@ impl Carnet {
                             TextStyle::new(Type::SMALL.size).color(t.muted),
                         );
                         // The row's own buttons, under its fields, whatever the width.
-                        let ready = only.as_deref().unwrap_or(&email).contains('@') && password.chars().count() >= 8;
+                        let ready = only.as_deref().unwrap_or(&email).contains('@') && password.chars().count() >= carnet_sync::password::MIN_LEN;
                         ui.with(NodeSpec::row().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).gap(10.0).main_align(Align::End), |ui| {
                             pill_button(ui, l, "pw-cancel", "Cancel", false, true, Msg::SyncPasswordCancel);
                             pill_button(ui, l, "pw-save", "Save", true, ready && online, Msg::SyncPasswordSave);

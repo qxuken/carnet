@@ -148,7 +148,9 @@ impl NoteDoc {
             return false;
         }
         let map = self.notes_map();
-        let now = self.layout().notes.get(&key).cloned();
+        // This note's fields alone: reading every note's for each one set
+        // made 10,000 notes take minutes.
+        let now = self.place(key);
         let mut wrote = false;
         let mut put = |field: &str, v: LoroValue| {
             let _ = map.insert(&format!("{key}/{field}"), v);

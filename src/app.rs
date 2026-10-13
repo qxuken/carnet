@@ -58,6 +58,10 @@ const BODY_LH: f32 = Type::BODY.line;
 const PAGE_MIN: f32 = 592.0;
 /// How long typing has to pause before the note is written.
 const SAVE_AFTER: Duration = Duration::from_millis(600);
+/// What another app did to the folder is caught up with once typing here
+/// has paused this long: looking again at 10,000 notes takes a few
+/// frames, never in the middle of a word.
+const WATCH_QUIET: Duration = Duration::from_secs(2);
 const NOTICE_FOR: Duration = Duration::from_secs(8);
 /// How far the pointer moves, in px, before typing is taken to be over.
 const POINTER_NUDGE: f32 = 6.0;
@@ -491,6 +495,12 @@ pub struct Carnet {
     histories: HashMap<u64, History>,
     /// When the pictures no note shows are next looked for.
     next_sweep: Instant,
+    /// The notes folder watched for what other apps do to it
+    /// (watch.rs): started with the first frame, and again for a folder
+    /// chosen in Settings.
+    watch: Option<crate::watch::Watch>,
+    /// What wakes the app from another thread, once the shell gives it.
+    waker: Option<Waker>,
     /// The page's key sink, as last declared.
     pub page_key: Option<Key>,
     /// Give the page the keyboard on the next frame.
@@ -928,6 +938,8 @@ impl Carnet {
             editing: false,
             histories: HashMap::new(),
             next_sweep: Instant::now() + SWEEP_FIRST,
+            watch: None,
+            waker: None,
             page_key: None,
             focus_page: false,
             slot_keys: HashMap::new(),
@@ -1516,6 +1528,22 @@ impl Carnet {
             }
             Ok(_) => self.error = None,
             Err(e) => self.error = Some(format!("Couldn't save: {e}")),
+        }
+    }
+
+    /// The notes folder watched, and caught up with when another app
+    /// changed it: without the window having to come to the front.
+    fn watch_tick(&mut self) {
+        if self.watch.as_ref().is_none_or(|w| w.dir() != self.store.dir) {
+            let waker = self.waker.clone();
+            self.watch = Some(crate::watch::Watch::start(self.store.dir.clone(), crate::watch::EVERY, move || {
+                if let Some(w) = &waker {
+                    w.wake();
+                }
+            }));
+        }
+        if self.last_edit.elapsed() >= WATCH_QUIET && self.watch.as_ref().is_some_and(crate::watch::Watch::take) {
+            self.rescan();
         }
     }
 
@@ -3136,6 +3164,7 @@ impl Carnet {
                 self.pw_edit = Some((email, String::new()));
                 self.pw_remove_armed = false;
                 self.sync.error = None;
+                self.sync.password_error = None;
                 self.focus_req = Some(if only.is_some() { Field::PasswordNew } else { Field::PasswordEmail });
             }
             Msg::SyncPasswordSave => {
@@ -3147,6 +3176,7 @@ impl Carnet {
             Msg::SyncPasswordCancel => {
                 self.pw_edit = None;
                 self.pw_remove_armed = false;
+                self.sync.password_error = None;
             }
             Msg::SyncPasswordRemove if !self.pw_remove_armed => self.pw_remove_armed = true,
             Msg::SyncPasswordRemove => {
@@ -3732,13 +3762,20 @@ impl Carnet {
                 }
                 self.sync_password = text;
             }
+            // What was said of the password typed goes as it's edited.
             Field::PasswordEmail => {
                 if let Some((email, _)) = self.pw_edit.as_mut() {
+                    if *email != text {
+                        self.sync.password_error = None;
+                    }
                     *email = text;
                 }
             }
             Field::PasswordNew => {
                 if let Some((_, password)) = self.pw_edit.as_mut() {
+                    if *password != text {
+                        self.sync.password_error = None;
+                    }
                     *password = text;
                 }
             }
@@ -3891,6 +3928,7 @@ fn blank_note() -> Note {
 
 impl App for Carnet {
     fn setup(&mut self, waker: Waker) {
+        self.waker = Some(waker.clone());
         let wake = waker.clone();
         self.sync.set_wake(move || wake.wake());
         let wake = waker.clone();
@@ -3905,6 +3943,7 @@ impl App for Carnet {
         if self.store.notes[self.current].dirty && self.last_edit.elapsed() >= SAVE_AFTER {
             self.save_current();
         }
+        self.watch_tick();
         self.sync_tick();
         self.connect_tick();
         // A notice lasts a while, then goes; Undo lasts as long as it shows.
@@ -3928,6 +3967,10 @@ impl App for Carnet {
         }
         if let Some(n) = &self.notice {
             due.push(NOTICE_FOR.saturating_sub(n.at.elapsed()));
+        }
+        // A change elsewhere, waiting for typing to pause.
+        if self.watch.as_ref().is_some_and(crate::watch::Watch::pending) {
+            due.push(WATCH_QUIET.saturating_sub(self.last_edit.elapsed()));
         }
         // The pictures no note shows, now and then.
         if Instant::now() >= self.next_sweep {

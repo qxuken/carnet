@@ -3817,9 +3817,40 @@ fn a_new_device_comes_in_by_email_and_password() {
     until("A knows the server takes passwords", &mut a, &mut da, &|x| x.sync.password == Some((true, None)));
     assert!(drawn(&mut da, &mut a, "Set one"));
     a.on_plain(Msg::SyncPassword);
+    // One letter short of what the library takes: Save stays off. Asked
+    // anyway, why is said by the password's field, above its Save, not
+    // under the whole card; an edit takes it away.
+    let short = "a".repeat(carnet_sync::password::MIN_LEN - 1);
+    a.pw_edit = Some(("Ann@Example.com".into(), short.clone()));
+    let saves = |d: &mut Drive, app: &mut Carnet| {
+        d.core.set_inspect(true);
+        d.frame(app);
+        d.core.nodes().iter().filter(|n| n.label.as_deref() == Some("pw-save") && !n.flags.contains(&"disabled")).count()
+    };
+    assert_eq!(saves(&mut da, &mut a), 0, "{} letters", short.len());
+    a.on_plain(Msg::SyncPasswordSave);
+    let why = a.sync.password_error.clone().expect("said why");
+    assert!(why.contains(&format!("{} letters", carnet_sync::password::MIN_LEN)), "{why}");
+    assert_eq!(a.sync.error, None, "not the card's");
+    assert!(drawn(&mut da, &mut a, &why));
+    let nodes = da.core.nodes();
+    let said_at = nodes.iter().find(|n| n.text.as_deref() == Some(why.as_str())).unwrap().rect.y;
+    let save_at = nodes.iter().find(|n| n.label.as_deref() == Some("pw-save")).unwrap().rect.y;
+    let field_at = da.rect_of(app_field(&a, Field::PasswordNew).unwrap()).unwrap().y;
+    assert!(field_at < said_at && said_at < save_at, "field {field_at}, said {said_at}, Save {save_at}");
+    a.on_field_changed(Field::PasswordNew, format!("{short}b"));
+    assert_eq!(a.sync.password_error, None, "edited: gone");
+    assert!(!drawn(&mut da, &mut a, &why));
+    assert_eq!(saves(&mut da, &mut a), 1, "long enough: Save");
+    // Said again, then a password that's taken: gone for good.
+    a.pw_edit = Some(("Ann@Example.com".into(), short.clone()));
+    a.on_plain(Msg::SyncPasswordSave);
+    assert!(a.sync.password_error.is_some());
     a.pw_edit = Some(("Ann@Example.com".into(), "correct horse battery".into()));
     a.on_plain(Msg::SyncPasswordSave);
     until("set", &mut a, &mut da, &|x| x.notice.as_ref().is_some_and(|n| n.text.starts_with("Password set")));
+    assert_eq!((a.sync.password_error.as_deref(), a.sync.error.as_deref()), (None, None));
+    assert!(!drawn(&mut da, &mut a, &why));
     until("listed", &mut a, &mut da, &|x| x.sync.password == Some((true, Some("ann@example.com".into()))));
 
     // A wrong one: nothing let in, and said.
@@ -6811,7 +6842,7 @@ fn a_reset_puts_the_look_back_when_asked_twice() {
     d.core.set_inspect(true);
     d_frame_twice(&mut app, &mut d);
     let enabled = |d: &mut Drive, label: &str| d.core.nodes().iter().any(|n| n.label.as_deref() == Some(label) && !n.flags.contains(&"disabled"));
-    assert!(!enabled(&mut d, "Reset"), "nothing to reset yet");
+    assert!(!enabled(&mut d, "reset"), "nothing to reset yet");
     app.on_plain(Msg::SetSize { by: 3 });
     app.on_plain(Msg::SetPalette { to: 2 });
     app.on_plain(Msg::SetFocus { to: 1 });
@@ -6837,10 +6868,18 @@ fn a_reset_puts_the_look_back_when_asked_twice() {
     let s = &app.settings;
     assert_eq!((s.size, s.palette, s.focus, s.theme), (16, crate::design::Palette::Linen, false, ThemePref::System));
     assert_eq!(s.sort, Sort::Title, "the library's order stays");
-    assert!(!s.translucent, "the window stays as chosen: the system's look, set for the next start");
-    assert!(drawn(&mut d, &mut app, "Colors, fonts, sizes and the writing options, back as they were at first. Notes, the library, the window and sync stay as they are."));
-    assert!(!app.reset_armed && !enabled(&mut d, "Reset"));
-    assert!(app.notice.as_ref().is_some_and(|n| n.text == "Appearance and writing reset"));
+    assert!(s.translucent, "the window back to translucent, as at first");
+    assert!(drawn(&mut d, &mut app, "Colors, fonts, sizes, the window and the writing options, back as they were at first (the window from the next start). Notes, the library and sync stay as they are."));
+    assert!(drawn(&mut d, &mut app, "The desktop through the library, blurred; from the next start"), "the Window row says when");
+    assert!(!app.reset_armed && !enabled(&mut d, "reset"));
+    assert!(app.notice.as_ref().is_some_and(|n| n.text == "Appearance and writing reset; the window from the next start"), "{:?}", app.notice.as_ref().map(|n| &n.text));
+    // Solid alone: Reset puts it back too.
+    app.on_plain(Msg::SetWindow { to: 0 });
+    d_frame_twice(&mut app, &mut d);
+    assert!(enabled(&mut d, "reset"), "the window is reset too");
+    app.on_plain(Msg::ResetLook);
+    app.on_plain(Msg::ResetLook);
+    assert!(app.settings.translucent);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -7960,5 +7999,28 @@ fn shift_with_the_arrows_chooses_notes_from_the_keyboard() {
     app.on_plain(Msg::Undo);
     d.frame(&mut app);
     assert!(dir.join("Bravo.md").exists() && dir.join("Charlie.md").exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A note another app writes into the folder shows in the list while the
+/// window stays where it is: no coming to the front needed. Not while
+/// typing here, though: once it pauses.
+#[test]
+fn a_file_written_from_outside_shows_without_the_window_coming_to_the_front() {
+    let (mut app, mut d, dir) = body("outside");
+    type_in(&mut app, &mut d, "typing");
+    std::fs::write(dir.join("From outside.md"), "# From outside\n\nwritten by another app\n").unwrap();
+    let shown = |app: &Carnet| app.store.notes.iter().any(|n| n.title == "From outside");
+    let t0 = Instant::now();
+    while !shown(&app) && t0.elapsed() < Duration::from_secs(10) {
+        if t0.elapsed() < WATCH_QUIET / 2 {
+            type_in(&mut app, &mut d, "a");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        d.frame(&mut app);
+    }
+    assert!(shown(&app), "not seen in {:?}", t0.elapsed());
+    assert!(t0.elapsed() >= WATCH_QUIET, "waited for the typing to pause: {:?}", t0.elapsed());
+    assert!(app.order.iter().any(|&i| app.store.notes[i].title == "From outside"), "and listed");
     let _ = std::fs::remove_dir_all(dir);
 }
