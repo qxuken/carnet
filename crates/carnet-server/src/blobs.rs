@@ -23,6 +23,15 @@
 //! (`BlobDrop`): marked, and gone [`KEEP`] later, unless a device offers,
 //! asks for or puts it meanwhile. The server can't read the notes to
 //! know; the wait is for the device that still has a use for it.
+//!
+//! An account removed has its removal recorded where its pictures are
+//! ([`Blobs::forget`]: `gone/<account>`), then its pictures go. A put by
+//! a link given before (a bucket's can't be taken back) lands after, so
+//! the hourly sweep takes the pictures of accounts recorded so, and no
+//! others: pictures of an account the store doesn't know, and whose
+//! removal isn't recorded, are kept. The store alone can't say an account
+//! is no more: one restored from an older backup, or a new one, doesn't
+//! know the accounts made since, and their pictures would all go.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -80,7 +89,8 @@ pub trait Blobs: Send {
     /// A link to `PUT` it, of exactly `put` bytes and no other number,
     /// or (`None`) to `GET` it, good until `expires`.
     fn link(&mut self, account: &[u8], id: &[u8; 32], put: Option<u64>, expires: u64) -> String;
-    /// The account was removed: its pictures go.
+    /// The account was removed: that recorded ([`Blobs::removed`]), and
+    /// its pictures go.
     fn forget(&mut self, account: &[u8]);
     /// Marked to go, as of `now`, if kept and not marked already.
     fn mark(&mut self, account: &[u8], id: &[u8; 32], now: u64);
@@ -103,6 +113,12 @@ pub trait Blobs: Send {
     /// or not: what [`Worker::sweep_unowned`] asks the store about.
     fn owners(&mut self) -> Vec<Vec<u8>> {
         Vec::new()
+    }
+    /// Every account whose removal was recorded here ([`Blobs::forget`]):
+    /// the only ones whose pictures the sweep takes without a device's
+    /// word. None if it can't be read: nothing goes for a failure.
+    fn removed(&mut self) -> HashSet<Vec<u8>> {
+        HashSet::new()
     }
 }
 
@@ -138,6 +154,9 @@ impl<T: Blobs + ?Sized> Blobs for Box<T> {
     fn owners(&mut self) -> Vec<Vec<u8>> {
         (**self).owners()
     }
+    fn removed(&mut self) -> HashSet<Vec<u8>> {
+        (**self).removed()
+    }
 }
 
 fn hex(b: &[u8]) -> String {
@@ -166,6 +185,32 @@ impl BlobFiles {
 
     pub fn path(&self, account: &[u8], id: &[u8; 32]) -> PathBuf {
         self.root.join(hex(account)).join(hex(id))
+    }
+
+    /// An account's removal, recorded: `gone/<account>`, when, in seconds
+    /// since 1970 (`gone` names no account: not hex).
+    fn removal_path(&self, account: &[u8]) -> PathBuf {
+        self.root.join("gone").join(hex(account))
+    }
+
+    /// The account's removal recorded, as of `now`, on the disk when this
+    /// returns: before its pictures go, so a crash between leaves the
+    /// sweep to finish.
+    pub fn record_removal(&self, account: &[u8], now: u64) -> io::Result<()> {
+        let dir = self.root.join("gone");
+        if !dir.exists() {
+            crate::private::dir(&dir)?;
+            sync_dir(&self.root)?;
+        }
+        let mut file = crate::private::create().open(self.removal_path(account))?;
+        io::Write::write_all(&mut file, now.to_string().as_bytes())?;
+        file.sync_all()?;
+        sync_dir(&dir)
+    }
+
+    /// Every account whose removal is recorded.
+    pub fn removed(&self) -> HashSet<Vec<u8>> {
+        fs::read_dir(self.root.join("gone")).into_iter().flatten().flatten().filter_map(|e| unhex(&e.file_name().to_string_lossy()).filter(|a| !a.is_empty())).collect()
     }
 
     /// Beside a picture marked to go: when it was, in seconds since 1970.
@@ -270,7 +315,16 @@ impl Blobs for FileBlobs {
     }
 
     fn forget(&mut self, account: &[u8]) {
+        // Not recorded, not deleted: the sweep would never finish it.
+        if let Err(e) = self.files.record_removal(account, unix_now()) {
+            eprintln!("carnet-server: pictures: recording an account's removal: {e}");
+            return;
+        }
         let _ = fs::remove_dir_all(self.files.root.join(hex(account)));
+    }
+
+    fn removed(&mut self) -> HashSet<Vec<u8>> {
+        self.files.removed()
     }
 
     fn mark(&mut self, account: &[u8], id: &[u8; 32], now: u64) {
@@ -316,6 +370,7 @@ impl Blobs for FileBlobs {
 pub struct MemoryBlobs {
     held: HashMap<(Vec<u8>, [u8; 32]), Vec<u8>>,
     marked: HashMap<(Vec<u8>, [u8; 32]), u64>,
+    removed: HashSet<Vec<u8>>,
 }
 
 impl MemoryBlobs {
@@ -373,6 +428,7 @@ impl Blobs for MemoryBlobs {
         }
     }
     fn forget(&mut self, account: &[u8]) {
+        self.removed.insert(account.to_vec());
         self.held.retain(|(a, _), _| a != account);
         self.marked.retain(|(a, _), _| a != account);
     }
@@ -405,6 +461,38 @@ impl Blobs for MemoryBlobs {
         let all: HashSet<Vec<u8>> = self.held.keys().map(|(a, _)| a.clone()).collect();
         all.into_iter().collect()
     }
+
+    fn removed(&mut self) -> HashSet<Vec<u8>> {
+        self.removed.clone()
+    }
+}
+
+/// What [`Worker::sweep_unowned`] found: how many accounts the store
+/// doesn't have hold pictures here, removed ones' gone, the rest kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Unowned {
+    /// Removed (recorded so): their pictures gone.
+    pub gone: usize,
+    /// Never known to the store, or not any more, removal not recorded:
+    /// their pictures kept.
+    pub kept: usize,
+}
+
+/// Accounts with pictures here that the store doesn't have, and whose
+/// removal isn't recorded here: what a server refuses to start beside
+/// with no account of its own (`server::Start`), its records likely not
+/// put back. `has` is the store's word on each.
+pub fn strangers(blobs: &mut dyn Blobs, has: impl Fn(&[u8]) -> bool) -> Vec<Vec<u8>> {
+    let owners = blobs.owners();
+    if owners.is_empty() {
+        return Vec::new();
+    }
+    let removed = blobs.removed();
+    owners.into_iter().filter(|a| !removed.contains(a) && !has(a)).collect()
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
 /// What the worker has done, for `/metrics`: read from any thread.
@@ -446,7 +534,7 @@ impl<B: Blobs> Worker<B> {
 
     /// Does `job`, saying what it sends in `out`.
     pub fn run(&mut self, job: Job, out: &mut dyn FnMut(Out)) {
-        self.run_at(job, SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()), out);
+        self.run_at(job, unix_now(), out);
     }
 
     /// Does `job` as of `now`, in seconds since 1970.
@@ -562,23 +650,29 @@ impl<B: Blobs> Worker<B> {
         n
     }
 
-    /// Pictures of accounts that are no more, gone: a put by a link given
-    /// before its account was deleted, or one the deletion missed. `gone`
-    /// says which of the accounts with pictures here aren't accounts now
-    /// (the store's to say: asked after the pictures are listed, so an
-    /// account made meanwhile isn't among them). How many accounts'
-    /// pictures went.
-    pub fn sweep_unowned(&mut self, gone: impl FnOnce(Vec<Vec<u8>>) -> Vec<Vec<u8>>) -> usize {
+    /// Pictures of accounts removed, gone: a put by a link given before
+    /// its account was deleted, or one the deletion missed. `unknown`
+    /// says which of the accounts with pictures here the store doesn't
+    /// have now (asked after the pictures are listed, so an account made
+    /// meanwhile isn't among them); of those, only the ones whose removal
+    /// is recorded here go ([`Blobs::removed`]). The rest are kept: the
+    /// store may be older than they are (restored from a backup), or new.
+    pub fn sweep_unowned(&mut self, unknown: impl FnOnce(Vec<Vec<u8>>) -> Vec<Vec<u8>>) -> Unowned {
         let owners = self.blobs.owners();
         if owners.is_empty() {
-            return 0;
+            return Unowned::default();
         }
-        let gone = gone(owners);
+        let unknown = unknown(owners);
+        if unknown.is_empty() {
+            return Unowned::default();
+        }
+        let removed = self.blobs.removed();
+        let (gone, kept): (Vec<_>, Vec<_>) = unknown.into_iter().partition(|a| removed.contains(a));
         for account in &gone {
             self.pending.remove(account);
             self.blobs.forget(account);
         }
-        gone.len()
+        Unowned { gone: gone.len(), kept: kept.len() }
     }
 
     /// `outs` with the picture work in them done: what the hub sent and
@@ -785,6 +879,31 @@ mod tests {
         assert!(!files.mark_path(b"acct", &[1; 32]).exists());
         b.forget(b"acct");
         assert_eq!(b.size(b"acct", &[1; 32]), None);
+        assert_eq!(b.removed(), HashSet::from([b"acct".to_vec()]), "its removal recorded");
+        assert!(b.owners().is_empty(), "the record names no account folder");
         let _ = fs::remove_dir_all(&data);
+    }
+
+    /// Of the accounts with pictures the store doesn't have, only those
+    /// removed here lose them; the others are kept, and are what a store
+    /// with no account refuses to start beside.
+    #[test]
+    fn the_sweep_takes_only_removed_accounts_pictures() {
+        let mut w = Worker::memory();
+        for a in [&b"here"[..], b"removed", b"stranger"] {
+            w.blobs.put(a, &[1; 32], b"sealed");
+        }
+        w.run_at(Job::Gone { account: b"removed".to_vec() }, 0, &mut |_| {});
+        // A put by a link given before, after.
+        w.blobs.put(b"removed", &[2; 32], b"late");
+        let store = |a: &[u8]| a == b"here";
+        assert_eq!(strangers(&mut w.blobs, store), [b"stranger".to_vec()]);
+        let swept = w.sweep_unowned(|owners| owners.into_iter().filter(|a| !store(a)).collect());
+        assert_eq!(swept, Unowned { gone: 1, kept: 1 });
+        assert_eq!(w.blobs.get(b"removed", &[2; 32]), None);
+        assert!(w.blobs.get(b"stranger", &[1; 32]).is_some() && w.blobs.get(b"here", &[1; 32]).is_some());
+        // The store that doesn't know "here" either (an empty one): kept.
+        assert_eq!(w.sweep_unowned(|owners| owners), Unowned { gone: 0, kept: 2 });
+        assert!(w.blobs.get(b"here", &[1; 32]).is_some());
     }
 }

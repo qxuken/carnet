@@ -80,6 +80,7 @@ A binary built this way doesn't include the web app; [The web app](#the-web-app)
 | `--tls-client-ca FILE` | `CARNET_TLS_CLIENT_CA` | none | with TLS, only clients showing a certificate this CA signed (Cloudflare's Authenticated Origin Pulls) |
 | `--passwords` | `CARNET_PASSWORDS=1` | off | let devices set an email and password, and sign in with them (OPAQUE: the password never reaches the server). Off, codes and the recovery words are the ways in |
 | `--compact-after N` | `CARNET_COMPACT_AFTER` | `200` | a note kept as this many records is asked to be compacted into one |
+| `--beside-old-pictures` | `CARNET_BESIDE_OLD_PICTURES=1` | off | start with no accounts beside pictures of accounts this server has no record of (see [Restoring](#restoring)); the pictures are kept, unused |
 
 `carnet-server --help` lists them all, with the commands below.
 
@@ -104,6 +105,7 @@ data/carnet.db                the directory: accounts, invites
 data/accounts/<account>.db    one account's devices and sealed records
 data/blobs/<account>/<id>     one account's pictures, sealed, a file each
 data/blobs/<account>/<id>.drop  a picture no note shows: when it was said (gone 30 days on)
+data/blobs/gone/<account>     an account removed: when (its pictures, and any put after, go)
 data/spool/                   pictures coming in, until whole (emptied on start)
 data/links.key                what signs the links to pictures (never leaves)
 data/opaque.key               with --passwords: the server's OPAQUE key (never leaves; keep it in backups)
@@ -256,6 +258,8 @@ It copies every database into a new folder laid out as `data/` is, consistent wh
 
 The keys are not copied. The link key doesn't matter: a restored server makes a new one, and links last minutes anyway. But with `--passwords`, every password depends on `data/opaque.key`: copy it beside the backup yourself, and keep that copy as safe as the server.
 
+With a bucket (`--s3`), it copies the databases and leaves the pictures to the bucket's own backup: a `blobs/` folder in the data folder is from before the bucket, and left out.
+
 With Docker, back up inside the container and copy the result out:
 
 ```bash
@@ -264,9 +268,23 @@ docker cp carnet:/tmp/carnet-backup ./carnet-backup
 docker exec carnet rm -rf /tmp/carnet-backup
 ```
 
+### Restoring
+
+Stop the server, put the copy where `--data` points (or restore the Postgres database), and start it. Keep the pictures where they were (a bucket keeps them anyway): a picture is never deleted for being of an account the records don't have. The hourly sweep (the first at start) deletes only pictures a device dropped 30 days before, and those of accounts removed on this server, whose removal it records beside the pictures (`blobs/gone/<account>`, or `gone/<account>` in the bucket) before deleting them, so a picture put after, by a link given before, goes too. Records restored from before some accounts were made leave those accounts' pictures where they are; the log says how many accounts' pictures it keeps so. Their devices can't sign in to the restored server, and those pictures stay until removed by hand.
+
+A server with **no accounts** (a new data folder, an empty database) beside pictures of accounts it has no record of won't start: the records were likely not put back, and a new first account would be made beside another server's pictures. It says so and stops, before making anything:
+
+```text
+carnet-server: The bucket holds pictures of 12 accounts, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on another bucket (or another folder in it). To start anyway, with those pictures kept and unused, give --beside-old-pictures (CARNET_BESIDE_OLD_PICTURES=1)
+```
+
+Put the records back, or point it at another bucket (or folder of one), or another data folder. `--beside-old-pictures` starts it anyway: nothing is deleted, the pictures stay there unused, and the flag matters no more once an account is made.
+
 ## Upgrading
 
 Back up, then start the new version on the same data: `docker pull qxuken/carnet-server` and recreate the container, or replace the binary and restart it. A newer server brings an older data folder (or Postgres database) up to date on its first start; an older server refuses data a newer one has written, so going back means restoring the backup.
+
+Carnet 0.1.0 took a picture for one of a removed account whenever the records didn't have its account, and deleted it: started on records older than its pictures, it deleted the newer accounts' pictures. Later servers delete only those of accounts they removed themselves (see [Restoring](#restoring)). Don't restore older records under 0.1.0 beside newer pictures: upgrade first. Pictures put by a link after their account was removed under 0.1.0 aren't recorded so, and are kept.
 
 Devices keep what they write while the server is down and send it once it answers again. Apps and servers of different versions tell each other which protocol they speak, and `GET /v1/info` says which apps a server still takes ([docs/SYNC.md](../../docs/SYNC.md) §14).
 
@@ -295,7 +313,8 @@ cargo build --release -p carnet-server --features postgres,s3
     ```
   - **A put's size.** A device says how long each picture is, sealed, when it offers it, and its `PUT` link is signed with that `Content-Length`: the bucket refuses a put of any other length, so nothing past 32 MiB, or past what was offered, gets in. Within its five minutes a link may put its picture again, over the first: harmless (only the account's own device has the link, and a picture that isn't the one its id names opens on no device), so a conditional put isn't asked for, and CORS needs no more headers. The link is signed with `Content-Type: application/octet-stream` too, which both apps send, so nothing of another type (a page, a script) is kept on the bucket's origin; CORS lets `content-type` through, as above.
 - **What stays in the data folder:** `opaque.key` (every password depends on it) and `links.key`. Keep `--data` pointing at the folder, and keep it in backups. Postgres holds no secret.
-- **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only. With the records in SQLite and the pictures in a bucket, it copies the databases and leaves the pictures to the bucket (`Sharded::backup_with(to, false)`, as a host's backup calls it).
+- **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only. With the records in SQLite and the pictures in a bucket, it copies the databases and leaves the pictures to the bucket (a host's own backup calls `Sharded::backup_with(to, false)` for the same).
+- **Restoring** either, or starting on a bucket that has pictures already: a server deletes only the pictures of accounts it removed itself, recorded under `gone/` in the bucket, never those of an account its records just don't have; one with no accounts at all refuses to start beside such pictures ([Restoring](#restoring)). A bucket (or folder of one) is one server's: two servers on one folder would each take the other's accounts for ones they don't know, and the pictures of an account one removes go for both.
 
 ## Moving to Postgres and a bucket
 
@@ -363,6 +382,6 @@ cargo test -p carnet-server --features postgres,s3
 ```
 
 - `tests/sim.rs` simulates devices, the server and a faulty network from a seed, on memory and on SQLite alike (and Postgres, given one).
-- `tests/migrate.rs` moves a folder to Postgres and a bucket and compares every answer; refuses a folder in use and a database served; copies the pictures first beside a running server, a picture half put meanwhile, then the rest after the stop; and end to end, fills a server on SQLite through its sockets, moves it, starts it on Postgres and the bucket, and its devices carry on (notes, a picture by the bucket's link, a password, a note deleted for good). `tests/s3.rs` puts and fetches by the bucket's links (a put of another length or type refused), marks and sweeps.
-- `tests/server.rs` runs the binary's own path end to end: HTTP, WebSockets, SQLite, a restart, what health and metrics say, and the limits behind a trusted proxy; the data folder's permissions, a deleted account's links and pictures, and sockets from other sites' pages.
+- `tests/migrate.rs` moves a folder to Postgres and a bucket and compares every answer; refuses a folder in use and a database served; copies the pictures first beside a running server, a picture half put meanwhile, then the rest after the stop; and end to end, fills a server on SQLite through its sockets, moves it, starts it on Postgres and the bucket, and its devices carry on (notes, a picture by the bucket's link, a password, a note deleted for good). `tests/s3.rs` puts and fetches by the bucket's links (a put of another length or type refused), marks and sweeps. `tests/old_pictures.rs` starts a new data folder, then an empty and an older Postgres database, on a bucket with pictures: refused with no accounts unless told, the newer accounts' pictures kept, a removed account's late picture gone.
+- `tests/server.rs` runs the binary's own path end to end: HTTP, WebSockets, SQLite, a restart, what health and metrics say, and the limits behind a trusted proxy; the data folder's permissions, a deleted account's links and pictures, the sweep taking only removed accounts' pictures, a new data folder beside old pictures refused, and sockets from other sites' pages.
 - `tests/auth.rs` sends what an attacker would, frame by frame: everything but a login before one, logins signed with the wrong key, for another nonce or server or account, false invites and recoveries, another account's rooms, devices and pictures, writes and snapshots out of turn, the owner's frames from someone else, and too many tries from one address.

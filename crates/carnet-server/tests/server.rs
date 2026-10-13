@@ -871,6 +871,13 @@ async fn the_data_is_private_and_a_deleted_accounts_link_puts_nothing() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(!folder.exists(), "its pictures gone with it");
+    let removal = data.join("blobs").join("gone").join(hex(&account));
+    assert!(removal.exists(), "its removal recorded, for the sweep");
+    #[cfg(unix)]
+    {
+        assert_eq!(mode(&data.join("blobs").join("gone")), 0o700);
+        assert_eq!(mode(&removal), 0o600);
+    }
     let (status, _, body) = request(addr, "PUT", &put_path, &len(sealed.len()), &sealed).await;
     assert_eq!(status, 403, "{}", String::from_utf8_lossy(&body));
     assert!(!folder.exists(), "not made again");
@@ -881,34 +888,113 @@ async fn the_data_is_private_and_a_deleted_accounts_link_puts_nothing() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
-/// Pictures whose account is no more (put by a link given before it was
-/// deleted, or missed by its deletion) go on the hourly sweep, the first
-/// at start; an account's own stay, and a folder that names no account
-/// is left alone.
+/// A server whose hub is handed back, started as `start` says: what the
+/// sweep's tests remove an account through.
+async fn start_hosted(data: &Path, start: server::Start) -> (Running, server::HubHandle) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (handle_tx, handle_rx) = oneshot::channel();
+    let host = server::Host {
+        ready: Some(Box::new(move |h| {
+            let _ = handle_tx.send(h);
+        })),
+        ..server::Host::default()
+    };
+    let (stop, rx) = oneshot::channel::<()>();
+    let config = Config { data: data.to_path_buf(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
+    let done = tokio::spawn(server::serve_started(config, listener, None, host, server::SocketLimits::default(), start, async {
+        let _ = rx.await;
+    }));
+    let hub = tokio::time::timeout(Duration::from_secs(10), handle_rx).await.expect("starts").expect("starts");
+    (Running { addr, stop, done }, hub)
+}
+
+/// Waits (up to five seconds) for `path` to be gone: whether it went.
+async fn goes(path: &Path) -> bool {
+    for _ in 0..50 {
+        if !path.exists() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    !path.exists()
+}
+
+/// The hourly sweep (the first at start) takes the pictures of accounts
+/// removed here, and no others. An account removed has that recorded
+/// beside the pictures, so a picture put after (by a link given before,
+/// which a bucket can't refuse) goes on the next sweep; an account's own
+/// stay; those of an account the store never knew (its records restored
+/// from before that account was made) are kept; a folder that names no
+/// account is left alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pictures_of_accounts_that_are_no_more_are_swept() {
+async fn only_pictures_of_accounts_removed_here_are_swept() {
     use carnet_server::Storage;
     let data = temp("unowned");
     {
         let mut db = Sharded::open(&data).unwrap();
-        db.add_account(b"here", true).unwrap();
-        db.add_device(b"here", b"d", [1; 32]).unwrap();
+        for (account, owner) in [(&b"here"[..], true), (b"leaving", false)] {
+            db.add_account(account, owner).unwrap();
+            db.add_device(account, b"d", [1; 32]).unwrap();
+        }
     }
     let blobs = data.join("blobs");
-    for owner in [hex(b"here"), hex(b"gone"), "not-an-account".into()] {
-        std::fs::create_dir_all(blobs.join(&owner)).unwrap();
-        std::fs::write(blobs.join(&owner).join("07".repeat(32)), b"SEALED").unwrap();
+    let picture = |owner: &str, id: &str| {
+        std::fs::create_dir_all(blobs.join(owner)).unwrap();
+        std::fs::write(blobs.join(owner).join(id.repeat(32)), b"SEALED").unwrap();
+    };
+    for owner in [hex(b"here"), hex(b"leaving"), hex(b"newer"), "not-an-account".into()] {
+        picture(&owner, "07");
     }
-    let srv = start(&data, None).await;
-    for _ in 0..50 {
-        if !blobs.join(hex(b"gone")).exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(!blobs.join(hex(b"gone")).exists(), "an account that's no more: its pictures gone");
+    let (srv, hub) = start_hosted(&data, server::Start::default()).await;
+    hub.run(|hub, outs| outs.extend(hub.remove_account(b"leaving").unwrap())).await.unwrap();
+    assert!(goes(&blobs.join(hex(b"leaving"))).await, "an account removed: its pictures gone with it");
+    assert!(blobs.join("gone").join(hex(b"leaving")).exists(), "and that recorded");
+    // A put by a link given before, landing after.
+    picture(&hex(b"leaving"), "08");
+    srv.stop().await;
+
+    let (srv, _hub) = start_hosted(&data, server::Start::default()).await;
+    assert!(goes(&blobs.join(hex(b"leaving"))).await, "a removed account's late picture: gone on the sweep");
     assert!(blobs.join(hex(b"here")).join("07".repeat(32)).exists(), "an account's own stay");
+    assert!(blobs.join(hex(b"newer")).join("07".repeat(32)).exists(), "an account the store never knew: kept");
     assert!(blobs.join("not-an-account").exists(), "not a picture folder: left as it is");
+    srv.stop().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A data folder with no account beside pictures of accounts it has no
+/// record of (its records not put back, the pictures left): the server
+/// refuses to start, says why and what to do, and makes nothing (no
+/// invite). Told to start anyway, it does, and keeps them. Pictures of
+/// accounts whose removal is recorded alone don't stop it: they go.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_accounts_beside_old_pictures_refuses_to_start() {
+    use carnet_server::Storage;
+    let data = temp("old-pictures");
+    let blobs = data.join("blobs");
+    let old = blobs.join(hex(b"old")).join("07".repeat(32));
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, b"SEALED").unwrap();
+    let removed = blobs.join(hex(b"removed"));
+    std::fs::create_dir_all(&removed).unwrap();
+    std::fs::write(removed.join("07".repeat(32)), b"SEALED").unwrap();
+    carnet_server::blobs::BlobFiles::open(&data).unwrap().record_removal(b"removed", 1).unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = Config { data: data.clone(), origin: "http://127.0.0.1:1".into(), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
+    let refused = tokio::time::timeout(Duration::from_secs(10), server::serve(config, listener, std::future::pending())).await.expect("refuses at once").expect_err("refused");
+    let said = refused.to_string();
+    assert!(said.contains("The data folder holds pictures of 1 account, and there are no accounts here"), "{said}");
+    assert!(said.contains("Put the records back first") && said.contains("--beside-old-pictures"), "{said}");
+    assert!(Sharded::open(&data).unwrap().invites().is_empty(), "no invite made");
+    assert!(old.exists() && removed.exists(), "nothing deleted");
+
+    let start = server::Start { beside_old_pictures: true };
+    let (srv, hub) = start_hosted(&data, start).await;
+    assert!(goes(&removed).await, "a removed account's pictures go");
+    assert!(old.exists(), "the old pictures kept");
+    assert_eq!(hub.run(|hub, _| hub.store().invites().len()).await, Some(1), "the first invite, as on any first start");
     srv.stop().await;
     let _ = std::fs::remove_dir_all(&data);
 }

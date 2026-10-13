@@ -8,6 +8,7 @@
 //! ```text
 //! <prefix><account>/<id>        a picture, sealed (account and id in hex)
 //! <prefix>drop/<account>/<id>   a picture no note shows: when it was said, in seconds
+//! <prefix>gone/<account>        an account removed: when, in seconds (put before its pictures go)
 //! <prefix>served                a server has run on this bucket (`migrate` won't copy over it)
 //! ```
 //!
@@ -40,7 +41,10 @@
 //! A link can't be taken back, though: one given before its account was
 //! deleted may still put, within its five minutes. So the hourly sweep
 //! lists the account folders ([`Blobs::owners`], by S3's delimiter, a
-//! thousand to a call) and takes those of accounts that are no more.
+//! thousand to a call) and takes those of accounts removed: recorded so
+//! under `gone/` when they were, and not in the store. An account folder
+//! the store doesn't know, and whose removal isn't recorded, is kept: the
+//! store may be older than the bucket (restored from a backup), or new.
 //!
 //! The bucket needs CORS for the web app: `PUT` and `GET` from the
 //! server's origin (the README says how).
@@ -181,6 +185,10 @@ impl S3Blobs {
     /// Where `account`'s picture `id` is.
     pub fn key(&self, account: &[u8], id: &[u8; 32]) -> String {
         format!("{}{}/{}", self.prefix, hex(account), hex(id))
+    }
+
+    fn removal_key(&self, account: &[u8]) -> String {
+        format!("{}gone/{}", self.prefix, hex(account))
     }
 
     fn mark_key(&self, account: &[u8], id: &[u8; 32]) -> String {
@@ -429,6 +437,11 @@ impl Blobs for S3Blobs {
     }
 
     fn forget(&mut self, account: &[u8]) {
+        // Recorded first: not recorded, not deleted, or the sweep would
+        // never finish it.
+        if Self::said(self.put(&self.removal_key(account), now().to_string().as_bytes())).is_none() {
+            return;
+        }
         for prefix in [format!("{}{}/", self.prefix, hex(account)), format!("{}drop/{}/", self.prefix, hex(account))] {
             if let Some(all) = Self::said(self.list(&prefix)) {
                 let keys: Vec<String> = all.into_iter().map(|o| o.key).collect();
@@ -460,7 +473,12 @@ impl Blobs for S3Blobs {
         gone
     }
 
-    /// Each account's folder (`drop/` isn't one: not hex).
+    fn removed(&mut self) -> std::collections::HashSet<Vec<u8>> {
+        let prefix = format!("{}gone/", self.prefix);
+        Self::said(self.list(&prefix)).unwrap_or_default().iter().filter_map(|o| unhex(o.key.strip_prefix(&prefix)?)).filter(|a| !a.is_empty()).collect()
+    }
+
+    /// Each account's folder (`drop/`, `gone/` aren't: not hex).
     fn owners(&mut self) -> Vec<Vec<u8>> {
         Self::said(self.folders(&self.prefix)).unwrap_or_default().iter().filter_map(|f| unhex(f)).filter(|a| !a.is_empty()).collect()
     }
