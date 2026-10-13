@@ -3,10 +3,10 @@
 //!
 //! ```text
 //! carnet-server [--data DIR] [--listen ADDR] [--origin URL] [--web DIR] [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
-//!               [--passwords] [--compact-after N] [--postgres URL] [--s3 URL [--s3-region R] [--s3-virtual-host]]
+//!               [--tls-cert FILE --tls-key FILE [--tls-client-ca FILE]] [--passwords] [--compact-after N] [--postgres URL] [--s3 URL [--s3-region R] [--s3-virtual-host]]
 //! carnet-server invite [--data DIR] [--postgres URL]
 //! carnet-server backup DIR [--data DIR]
-//! carnet-server health [--listen ADDR]
+//! carnet-server health [--listen ADDR | --metrics ADDR]
 //! carnet-server migrate [--from DIR] [--to-postgres URL] [--to-s3 URL [--s3-region R]] [--verify-only | --pictures-first]
 //! ```
 //!
@@ -21,7 +21,9 @@
 //! separated, whose word on who a request is from is believed; none by
 //! default), `CARNET_CLIENT_HEADER` (the header they say it in: `xff`,
 //! `X-Forwarded-For`, by default; `cf`, Cloudflare's `CF-Connecting-IP`,
-//! straight behind Cloudflare), `CARNET_POSTGRES` and `CARNET_S3` (with the features
+//! straight behind Cloudflare), `CARNET_TLS_CERT`, `CARNET_TLS_KEY` and
+//! `CARNET_TLS_CLIENT_CA` (TLS on the listener itself; none by default),
+//! `CARNET_POSTGRES` and `CARNET_S3` (with the features
 //! built in; none by default), `CARNET_S3_REGION`, `CARNET_S3_VIRTUAL_HOST`.
 //! A bucket's keys come only from the environment: `CARNET_S3_ACCESS_KEY`
 //! and `CARNET_S3_SECRET_KEY` (or AWS's own two names).
@@ -37,10 +39,11 @@ const HELP: &str = "carnet-server: the sync server for Carnet notes
 usage:
   carnet-server [--data DIR] [--listen ADDR] [--origin URL] [--web DIR]
                 [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
+                [--tls-cert FILE --tls-key FILE [--tls-client-ca FILE]]
                 [--passwords] [--compact-after N] [--postgres URL] [--s3 URL]
   carnet-server invite [--data DIR] [--postgres URL]
   carnet-server backup DIR [--data DIR]
-  carnet-server health [--listen ADDR]
+  carnet-server health [--listen ADDR | --metrics ADDR]
   carnet-server migrate [--from DIR] [--to-postgres URL] [--to-s3 URL]
                 [--verify-only | --pictures-first]
 
@@ -60,6 +63,13 @@ usage:
                   (nginx, Caddy); cf, Cloudflare's CF-Connecting-IP, only
                   when Cloudflare (a Tunnel too) is the proxy named
                                                         (CARNET_CLIENT_HEADER, xff)
+  --tls-cert FILE, --tls-key FILE  TLS on the listener itself, with this
+                  certificate (PEM, its chain) and key: when nothing in
+                  front ends it, as with Cloudflare proxying to an Origin
+                  certificate             (CARNET_TLS_CERT, CARNET_TLS_KEY)
+  --tls-client-ca FILE  and only clients showing a certificate this CA
+                  signed (Cloudflare's Authenticated Origin Pulls)
+                                                        (CARNET_TLS_CLIENT_CA)
   --passwords     let devices set a password, and sign in by email and
                   password (OPAQUE: the password never reaches the
                   server)                      (CARNET_PASSWORDS=1, off)
@@ -76,6 +86,9 @@ usage:
   --s3-region R   the bucket's region         (CARNET_S3_REGION, us-east-1)
   --s3-virtual-host  the bucket as the host's first name, not the path's
                                                (CARNET_S3_VIRTUAL_HOST=1, off)
+  --s3-ca FILE    the CA (PEM) the bucket's certificate is signed by, for
+                  a bucket of one's own: trusted instead of the web's roots
+                                                        (CARNET_S3_CA, none)
 
   invite          print a new invite code: one account, good for a week
   backup DIR      copy every database into DIR (new, or empty), safely
@@ -112,12 +125,16 @@ struct Args {
     trusted: Vec<carnet_server::limits::Network>,
     client_header: carnet_server::limits::ClientHeader,
     passwords: bool,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    tls_client_ca: Option<PathBuf>,
     postgres: Option<String>,
     s3: Option<String>,
     to_postgres: Option<String>,
     to_s3: Option<String>,
     s3_region: String,
     s3_virtual_host: bool,
+    s3_ca: Option<PathBuf>,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -134,10 +151,14 @@ fn args() -> Result<Args, String> {
         web: env("CARNET_WEB").map(PathBuf::from),
         metrics: env("CARNET_METRICS"),
         passwords: on("CARNET_PASSWORDS"),
+        tls_cert: env("CARNET_TLS_CERT").map(PathBuf::from),
+        tls_key: env("CARNET_TLS_KEY").map(PathBuf::from),
+        tls_client_ca: env("CARNET_TLS_CLIENT_CA").map(PathBuf::from),
         postgres: env("CARNET_POSTGRES"),
         s3: env("CARNET_S3"),
         s3_region: env("CARNET_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
         s3_virtual_host: on("CARNET_S3_VIRTUAL_HOST"),
+        s3_ca: env("CARNET_S3_CA").map(PathBuf::from),
         ..Args::default()
     };
     if let Some(list) = env("CARNET_TRUSTED_PROXY") {
@@ -166,10 +187,14 @@ fn args() -> Result<Args, String> {
             "--trusted-proxy" => a.trusted = carnet_server::limits::networks(&value("--trusted-proxy")?).map_err(|e| format!("--trusted-proxy: {e}"))?,
             "--client-header" => a.client_header = value("--client-header")?.parse().map_err(|e| format!("--client-header: {e}"))?,
             "--passwords" => a.passwords = true,
+            "--tls-cert" => a.tls_cert = Some(value("--tls-cert")?.into()),
+            "--tls-key" => a.tls_key = Some(value("--tls-key")?.into()),
+            "--tls-client-ca" => a.tls_client_ca = Some(value("--tls-client-ca")?.into()),
             "--postgres" => a.postgres = Some(value("--postgres")?),
             "--s3" => a.s3 = Some(value("--s3")?),
             "--s3-region" => a.s3_region = value("--s3-region")?,
             "--s3-virtual-host" => a.s3_virtual_host = true,
+            "--s3-ca" => a.s3_ca = Some(value("--s3-ca")?.into()),
             "--to-postgres" => a.to_postgres = Some(value("--to-postgres")?),
             "--to-s3" => a.to_s3 = Some(value("--to-s3")?),
             "--verify-only" => a.verify_only = true,
@@ -192,7 +217,7 @@ fn args() -> Result<Args, String> {
 fn s3_config(url: &str, a: &Args) -> Result<carnet_server::s3::S3Config, String> {
     let key = env("CARNET_S3_ACCESS_KEY").or_else(|| env("AWS_ACCESS_KEY_ID")).ok_or("a bucket needs CARNET_S3_ACCESS_KEY (or AWS_ACCESS_KEY_ID)")?;
     let secret = env("CARNET_S3_SECRET_KEY").or_else(|| env("AWS_SECRET_ACCESS_KEY")).ok_or("a bucket needs CARNET_S3_SECRET_KEY (or AWS_SECRET_ACCESS_KEY)")?;
-    Ok(carnet_server::s3::S3Config { url: url.to_string(), region: a.s3_region.clone(), key, secret, virtual_host: a.s3_virtual_host })
+    Ok(carnet_server::s3::S3Config { url: url.to_string(), region: a.s3_region.clone(), key, secret, virtual_host: a.s3_virtual_host, ca: a.s3_ca.clone() })
 }
 
 /// The store the server runs on: Postgres if one is given.
@@ -280,7 +305,14 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     };
     if a.health {
-        return match health(&a.listen) {
+        // With TLS, the public listener may ask a client certificate the
+        // check hasn't: the metrics address answers it in plain HTTP.
+        let at = match (&a.tls_cert, &a.metrics) {
+            (None, _) => &a.listen,
+            (Some(_), Some(m)) => m,
+            (Some(_), None) => return fail("with TLS, health is asked on the metrics address: give --metrics (CARNET_METRICS)".into()),
+        };
+        return match health(at) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(e),
         };
@@ -323,7 +355,16 @@ fn main() -> ExitCode {
         (Ok(s), Ok(b)) => (s, b),
         (Err(e), _) | (_, Err(e)) => return fail(e),
     };
-    let origin = a.origin.unwrap_or_else(|| format!("http://{}", a.listen));
+    let tls = match (&a.tls_cert, &a.tls_key) {
+        (Some(cert), Some(key)) => match carnet_server::tls::Tls::load(cert, key, a.tls_client_ca.as_deref()) {
+            Ok(t) => Some(t),
+            Err(e) => return fail(e.to_string()),
+        },
+        (None, None) if a.tls_client_ca.is_none() => None,
+        _ => return fail("TLS needs --tls-cert and --tls-key both (a client CA only with them)".into()),
+    };
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    let origin = a.origin.unwrap_or_else(|| format!("{scheme}://{}", a.listen));
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(r) => r,
         Err(e) => return fail(e.to_string()),
@@ -339,7 +380,7 @@ fn main() -> ExitCode {
             println!("carnet-server: stopping");
         };
         let host = server::Host { passwords: a.passwords, store, blobs, ..server::Host::default() };
-        server::serve_hosted(Config { data: a.data, origin, compact_after: a.compact_after, web: a.web, trusted: a.trusted, client_header: a.client_header }, listener, metrics, host, stop).await
+        server::serve_hosted(Config { data: a.data, origin, compact_after: a.compact_after, web: a.web, trusted: a.trusted, client_header: a.client_header, tls }, listener, metrics, host, stop).await
     });
     match served {
         Ok(()) => ExitCode::SUCCESS,

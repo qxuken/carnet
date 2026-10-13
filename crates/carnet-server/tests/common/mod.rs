@@ -365,7 +365,7 @@ pub fn bucket(name: &str) -> Option<(carnet_server::s3::S3Blobs, carnet_server::
         return None;
     };
     let env = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("CARNET_TEST_S3 needs {k}"));
-    let base = S3Config { url: url.clone(), region: "us-east-1".into(), key: env("CARNET_S3_ACCESS_KEY"), secret: env("CARNET_S3_SECRET_KEY"), virtual_host: false };
+    let base = S3Config { url: url.clone(), region: "us-east-1".into(), key: env("CARNET_S3_ACCESS_KEY"), secret: env("CARNET_S3_SECRET_KEY"), virtual_host: false, ca: None };
     S3Blobs::new(&base).unwrap().make_bucket().unwrap();
     let config = S3Config { url: format!("{}/{name}-{}", url.trim_end_matches('/'), std::process::id()), ..base };
     let s3 = S3Blobs::new(&config).unwrap();

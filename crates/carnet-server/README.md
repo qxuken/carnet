@@ -76,6 +76,8 @@ A binary built this way doesn't include the web app; [The web app](#the-web-app)
 | `--metrics ADDR` | `CARNET_METRICS` | none | serve `/metrics` there, a listener of its own (see below) |
 | `--trusted-proxy LIST` | `CARNET_TRUSTED_PROXY` | none | the proxies in front (`127.0.0.1`, `172.16.0.0/12`), comma separated, whose word on who a request is from is taken (see below) |
 | `--client-header cf\|xff` | `CARNET_CLIENT_HEADER` | `xff` | the header they say it in: `xff`, `X-Forwarded-For` (nginx, Caddy); `cf`, `CF-Connecting-IP`, only when Cloudflare is the proxy named (see below) |
+| `--tls-cert FILE`, `--tls-key FILE` | `CARNET_TLS_CERT`, `CARNET_TLS_KEY` | none | TLS on the listener itself, with this certificate (PEM, its chain) and key, when nothing in front ends it (see below) |
+| `--tls-client-ca FILE` | `CARNET_TLS_CLIENT_CA` | none | with TLS, only clients showing a certificate this CA signed (Cloudflare's Authenticated Origin Pulls) |
 | `--passwords` | `CARNET_PASSWORDS=1` | off | let devices set an email and password, and sign in with them (OPAQUE: the password never reaches the server). Off, codes and the recovery words are the ways in |
 | `--compact-after N` | `CARNET_COMPACT_AFTER` | `200` | a note kept as this many records is asked to be compacted into one |
 
@@ -163,6 +165,22 @@ notes.example.com {
 }
 ```
 
+**Cloudflare proxied, with an Origin certificate.** With the DNS record proxied by Cloudflare (the orange cloud) to the server's own address and nothing else on the machine, the server can end TLS itself: Cloudflare connects to it over HTTPS, checking a certificate from Cloudflare's Origin CA (SSL/TLS → Origin Server → Create certificate), and the encryption mode set to **Full (strict)**.
+
+```bash
+carnet-server --listen 0.0.0.0:443 --origin https://notes.example.com \
+    --tls-cert origin.pem --tls-key origin.key \
+    --tls-client-ca origin-pull-ca.pem \
+    --trusted-proxy 173.245.48.0/20,103.21.244.0/22,… --client-header cf
+```
+
+- **Only Cloudflare.** Turn on Authenticated Origin Pulls (SSL/TLS → Origin Server), and give the server Cloudflare's origin-pull CA (`--tls-client-ca`, [from Cloudflare's docs](https://developers.cloudflare.com/ssl/origin-configuration/authenticated-origin-pull/set-up/zone-level/)): Cloudflare then shows a certificate that CA signed on every connection, and the server refuses a connection that shows none, or another's, in the handshake, before any of it is read. So nobody reaches it by its address around Cloudflare, and with a firewall open to Cloudflare's addresses alone, nobody gets that far either.
+- **Who a request is for**: Cloudflare's addresses (https://www.cloudflare.com/ips/) as the proxies named, and `--client-header cf`.
+- **WebSockets** on in Cloudflare's Network settings (they are by default), for `/v1/sync`.
+- **Health.** The public listener asks every client for Cloudflare's certificate, so a check on the machine can't ask it there: `/v1/health` is answered on the metrics address too, in plain HTTP, and `carnet-server health` asks it there when TLS is on (`--metrics` needed).
+
+It speaks HTTP/1.1 (ALPN `http/1.1`), as without TLS; each connection's handshake has the same 30 seconds as a request's head. rustls with ring, as the rest of Carnet's TLS: no OpenSSL. The certificate is read at start: restart the server after replacing it (an Origin certificate lasts up to 15 years).
+
 **Tell it which proxy is yours.** The server limits how much one address (an IPv6 address's whole /64) may ask of it: sockets opened (30 at once, then one every 2 seconds, at most 64 open), and tries that guess at something or cost it work (a login that fails, an invite used, a pairing joined, a recovery: 10 at once, then one every 6 seconds). A login that succeeds is never counted, so your own devices are never shut out. Behind a proxy, every request comes from the proxy's address, so name it, and the server counts by the address it says each request is for: `X-Forwarded-For`, read from the right past the proxies named. It believes it from the proxies named, and nobody else:
 
 ```bash
@@ -190,7 +208,7 @@ Password sign-ins (with `--passwords`) are also counted by the email they name, 
 
 ## Is it well?
 
-`GET /v1/health` answers `200 {"ok":true}` while the server's hub does, and `503` if it doesn't within five seconds: for an uptime monitor, or a load balancer. The container checks it itself (`HEALTHCHECK`, so `docker ps` says `healthy`), through `carnet-server health`, which asks the server on this machine and exits 0 or 1.
+`GET /v1/health` answers `200 {"ok":true}` while the server's hub does, and `503` if it doesn't within five seconds: for an uptime monitor, or a load balancer. The container checks it itself (`HEALTHCHECK`, so `docker ps` says `healthy`), through `carnet-server health`, which asks the server on this machine and exits 0 or 1. The metrics address answers `/v1/health` too, and with TLS on, `health` asks it there.
 
 For more, give it a metrics address. `/metrics` is served there in Prometheus' text format, on a listener of its own, so it stays off the public address: keep it on `127.0.0.1`, or a private network, and point Prometheus (or Grafana Agent, or anything that reads the format) at it.
 
@@ -266,6 +284,7 @@ cargo build --release -p carnet-server --features postgres,s3
 | `--s3 URL` | `CARNET_S3` | the pictures in a bucket: `https://host/bucket`, or `https://host/bucket/folder` to keep to a folder of it |
 | `--s3-region R` | `CARNET_S3_REGION` | the bucket's region (`us-east-1` by default; R2's is `auto`) |
 | `--s3-virtual-host` | `CARNET_S3_VIRTUAL_HOST=1` | the bucket as the host's first name (`bucket.host`), not the path's |
+| `--s3-ca FILE` | `CARNET_S3_CA` | the CA (PEM) the bucket's certificate is signed by, trusted for the server's own calls to it instead of the web's roots: a bucket of one's own with a private CA (devices must trust it too) |
 | | `CARNET_S3_ACCESS_KEY`, `CARNET_S3_SECRET_KEY` | the bucket's keys (or AWS's own `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`): only from the environment, never a flag |
 
 - **Postgres.** Every account in one schema, each row naming its account, gone with it. The tables are made on the first start and brought up to date on later ones; a database from a newer server is refused. The server keeps one connection, and makes it again if it drops. The URL holds a password: give it by the variable, not the flag, so `ps` doesn't show it.
@@ -276,7 +295,7 @@ cargo build --release -p carnet-server --features postgres,s3
     ```
   - **A put's size.** A device says how long each picture is, sealed, when it offers it, and its `PUT` link is signed with that `Content-Length`: the bucket refuses a put of any other length, so nothing past 32 MiB, or past what was offered, gets in. Within its five minutes a link may put its picture again, over the first: harmless (only the account's own device has the link, and a picture that isn't the one its id names opens on no device), so a conditional put isn't asked for, and CORS needs no more headers. The link is signed with `Content-Type: application/octet-stream` too, which both apps send, so nothing of another type (a page, a script) is kept on the bucket's origin; CORS lets `content-type` through, as above.
 - **What stays in the data folder:** `opaque.key` (every password depends on it) and `links.key`. Keep `--data` pointing at the folder, and keep it in backups. Postgres holds no secret.
-- **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only.
+- **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only. With the records in SQLite and the pictures in a bucket, it copies the databases and leaves the pictures to the bucket (`Sharded::backup_with(to, false)`, as a host's backup calls it).
 
 ## Moving to Postgres and a bucket
 

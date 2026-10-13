@@ -19,6 +19,7 @@ pub mod s3;
 pub mod server;
 pub mod sqlite;
 pub mod storage;
+pub mod tls;
 
 pub use hub::{ConnId, Hub, Out};
 pub use sqlite::Sharded;
