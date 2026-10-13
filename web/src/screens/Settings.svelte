@@ -5,7 +5,7 @@
   // accounts too.
   import { onDestroy, onMount } from 'svelte';
   import { sync } from '../lib/sync.svelte';
-  import { ago, left } from '../lib/time';
+  import { ago, dateWords, left } from '../lib/time';
   import Icon from '../lib/Icon.svelte';
   import { pair_link, password_fault, qr_svg } from '../wasm/carnet_web.js';
   import { waysBack } from '../lib/words';
@@ -92,7 +92,8 @@
     let line = u.limit === null ? `${kept} kept on the server` : `${kept} of ${size(u.limit)} used`;
     if (u.plan) {
       line += ` · ${u.plan}`;
-      if (u.until) line += `, until ${new Date(u.until * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' })}`;
+      const until = u.until ? dateWords(u.until) : null;
+      if (until) line += `, until ${until}`;
     }
     const used = u.notes + u.pictures;
     const over = u.limit === null ? '' : used > u.limit ? `Over this plan’s ${size(u.limit)}` : used === u.limit ? `Reached this plan’s ${size(u.limit)}` : '';
