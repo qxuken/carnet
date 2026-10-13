@@ -119,4 +119,19 @@ describe('typed with a picture chosen', () => {
     e.update({ changes: { from: e.line(3).from, insert: 'replaced' }, userEvent: 'input.type' });
     expect(e.pe.markdown()).toBe('# Title\n\nreplaced\n\n- [ ] Book\n');
   });
+
+  // The finding: with Bold on, an input method's words came out plain:
+  // as it made "k" "か", the bold "k" went with its marks.
+  it('in any paragraph, an input method keeps the bold switched on', () => {
+    const e = open('# T\n\nAbove.\n\nBelow.\n');
+    const end = e.line(2).to;
+    e.update({ selection: { anchor: end } });
+    expect(e.pe.style(0)).toBe(true);
+    const compose = (from: number, to: number, insert: string) =>
+      e.update({ changes: { from, to, insert }, userEvent: 'input.type.compose', selection: { anchor: from + insert.length } });
+    compose(end, end, 'k');
+    compose(end, end + 1, 'か');
+    compose(end + 1, end + 1, 'ん');
+    expect(e.pe.markdown()).toBe('# T\n\nAbove.**かん**\n\nBelow.\n');
+  });
 });
