@@ -808,6 +808,9 @@ pub struct Carnet {
     /// The pairing code shown as a QR code: the link it carries, and its
     /// picture, made once per code.
     pub pair_qr: Option<(String, kui_native::ImageId)>,
+    /// Settings said "A new device is in": once they're left, it's been
+    /// seen, and isn't said again (`Sync::joined` let go).
+    pub joined_said: bool,
     /// Settings → Sync's fields are to show `sync_server` and `sync_code`
     /// when next drawn: a field keeps its own text, so changing ours is not
     /// enough.
@@ -1075,6 +1078,7 @@ impl Carnet {
             sync_account_armed: None,
             sync_rename: None,
             pair_qr: None,
+            joined_said: false,
             sync_reset_fields: false,
             passwords_shown: Vec::new(),
             passwords_now: Vec::new(),
@@ -4047,6 +4051,10 @@ impl App for Carnet {
         self.watch_tick();
         self.sync_tick();
         self.connect_tick();
+        if self.joined_said && !self.settings_open {
+            self.joined_said = false;
+            self.sync.joined = None;
+        }
         // A notice lasts a while, then goes; Undo lasts as long as it shows.
         // Its while starts again as long as the pointer is on it, on its way
         // to its Undo, or the window is in the background, where it can't
