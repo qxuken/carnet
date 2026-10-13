@@ -71,6 +71,8 @@ export const theme = EditorView.theme({
   '.cm-i': { fontStyle: 'italic' },
   '.cm-s': { textDecoration: 'line-through' },
   '.cm-c': { font: '0.85em ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', borderRadius: '4px', padding: '1px 4px' },
+  // Over a link a press would open (links.ts): a hand.
+  '&.cm-link-hand .cm-content': { cursor: 'pointer' },
   '.cm-l': { color: 'var(--accent-ink)', textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, var(--accent-ink) 40%, transparent)' },
   '.cm-marked': { borderRadius: '3px' },
   // A divider as the desktop draws it by default (settings `divider =
@@ -168,6 +170,9 @@ export const theme = EditorView.theme({
   '.cm-grip-left, .cm-grip-right': { top: '50%', width: '8px', height: 'min(30px, 50%)', transform: 'translateY(-50%)', cursor: 'ew-resize' },
   '.cm-grip-left': { left: '-9px' },
   '.cm-grip-right': { right: '-9px' },
+  // A resize lined up with a picture beside it (picture.ts): a thin line
+  // under them, as the desktop draws it.
+  '.cm-snap-guide': { position: 'absolute', height: '1.5px', background: 'var(--accent)', pointerEvents: 'none', zIndex: '4' },
   '.cm-grip-corner': { right: '-10px', bottom: '-10px', width: '14px', height: '14px', cursor: 'nwse-resize' },
   '.cm-picked.right .cm-grip-corner': { right: 'auto', left: '-10px', cursor: 'nesw-resize' },
   '@media (pointer: coarse)': {

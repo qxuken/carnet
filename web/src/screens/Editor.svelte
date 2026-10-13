@@ -19,6 +19,7 @@
   import { HUES, inkOf, inkCss, washCss } from '../lib/colors';
   import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
   import { drawnPicture, picked as pictureHere, textWidth, type Picked } from '../lib/editor/picture';
+  import { linkOpening } from '../lib/editor/links';
 
   let props: { key: string; folder: string; fresh: boolean } = $props();
   // Which note, as it was opened: an editor is for one note (the reader
@@ -360,6 +361,7 @@
         selection: { anchor: fresh ? 0 : text.length },
         extensions: [
           ...page.extensions,
+          linkOpening(pe),
           keymap.of([{ key: 'Mod-k', run: () => (openLink(), true) }, { key: 'Escape', run: () => (sheet !== null ? ((sheet = null), true) : false) }]),
           keymap.of(defaultKeymap),
           theme,

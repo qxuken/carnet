@@ -1946,6 +1946,31 @@ pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
     ((w - fit).abs() >= 2.0).then_some(w as u32)
 }
 
+/// How near (in px) a picture being resized comes to the height of one
+/// beside it in its row before it takes that height, so the row lines up.
+pub const PICTURE_SNAP: f32 = 6.0;
+
+/// A picture being resized to `w`, `aspect` its height over its width,
+/// in a row beside pictures `heights` tall: the width it takes, and the
+/// height it snapped to. Within [`PICTURE_SNAP`] of the nearest of those
+/// heights, the width that gives exactly that height, if it is within
+/// [`PICTURE_MIN`] and `max`; else `w` as it is, snapped to none.
+pub fn snapped_width(w: f32, aspect: f32, heights: &[f32], max: f32) -> (f32, Option<f32>) {
+    if !(aspect > 0.0 && aspect.is_finite()) {
+        return (w, None);
+    }
+    let h = w * aspect;
+    let near = heights
+        .iter()
+        .copied()
+        .filter(|t| t.is_finite() && (t - h).abs() <= PICTURE_SNAP)
+        .min_by(|a, b| (a - h).abs().total_cmp(&(b - h).abs()));
+    match near.map(|t| (t / aspect, t)) {
+        Some((sw, t)) if (PICTURE_MIN..=max.max(PICTURE_MIN)).contains(&sw) => (sw, Some(t)),
+        _ => (w, None),
+    }
+}
+
 /// Where a shortcut for `to` puts a picture that is at `now`: there, or
 /// back on its own line when it is there already.
 pub fn float_toggled(now: doc::Float, to: doc::Float) -> doc::Float {
@@ -2356,6 +2381,89 @@ pub fn link_at(doc: &Doc, c: Caret) -> Option<(Slot, usize, String)> {
     }
     let _r = reading(p.slot);
     inline::link_at(text(doc, p.slot), p.byte).map(|(_, url)| (p.slot, p.byte, url))
+}
+
+/// How a link in a note opens while it is written in (the reader opens
+/// one on a plain click whatever this says). The press that opens a link
+/// never places the caret; every other still does, so its words can
+/// always be edited.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LinkOpen {
+    /// ⌘-click (Ctrl-click elsewhere); a plain click places the caret.
+    #[default]
+    ModClick,
+    /// A plain click, let go where it was pressed. A drag or a
+    /// Shift-click selects; a ⌘-click places the caret; so does a click
+    /// at the link's very end, or beside it.
+    Click,
+    /// A double-click, in place of choosing the word; a ⌘-click too.
+    DoubleClick,
+}
+
+/// When a press opens the link under it: at once, or once let go where it
+/// was pressed (a drag from there selects instead).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpensOn {
+    Press,
+    Release,
+}
+
+impl LinkOpen {
+    pub const ALL: [LinkOpen; 3] = [LinkOpen::ModClick, LinkOpen::Click, LinkOpen::DoubleClick];
+
+    /// As a settings file writes it.
+    pub fn key(self) -> &'static str {
+        match self {
+            LinkOpen::ModClick => "cmd-click",
+            LinkOpen::Click => "click",
+            LinkOpen::DoubleClick => "double-click",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|h| h.key() == s.trim())
+    }
+
+    /// Whether a press opens the link under it, `clicks` of them in a row
+    /// with ⌘ (Ctrl elsewhere: `cmd`) or Shift held; and when.
+    pub fn opens(self, clicks: u32, cmd: bool, shift: bool) -> Option<OpensOn> {
+        match self {
+            _ if shift => None,
+            LinkOpen::ModClick | LinkOpen::DoubleClick if cmd && clicks == 1 => Some(OpensOn::Press),
+            LinkOpen::Click if !cmd && clicks == 1 => Some(OpensOn::Release),
+            LinkOpen::DoubleClick if !cmd && clicks == 2 => Some(OpensOn::Press),
+            _ => None,
+        }
+    }
+
+    /// Whether the pointer is a hand over a link with these keys held: a
+    /// press (or two, as it opens) there would open it.
+    pub fn hand(self, cmd: bool, shift: bool) -> bool {
+        match self {
+            _ if shift => false,
+            LinkOpen::ModClick => cmd,
+            LinkOpen::Click => !cmd,
+            LinkOpen::DoubleClick => true,
+        }
+    }
+}
+
+/// The address a press at `pos` opens, links opening `how`: the link
+/// whose words hold it, if it's one a note may follow
+/// ([`crate::export::safe_href`]; never a `javascript:` one). On a plain
+/// click, only inside its words: one at their very end (a press on the
+/// last letter's far half, or just past it) places the caret there, which
+/// is how a link's words are reached to be added to.
+pub fn link_under(doc: &Doc, pos: Pos, how: LinkOpen) -> Option<String> {
+    if !styled(doc, pos.slot) {
+        return None;
+    }
+    let _r = reading(pos.slot);
+    let (pair, url) = inline::link_at(text(doc, pos.slot), pos.byte)?;
+    if how == LinkOpen::Click && !(pair.open.1 < pos.byte && pos.byte < pair.close.0) {
+        return None;
+    }
+    crate::export::safe_href(&url).map(|_| url)
 }
 
 /// The link at `at` in `slot` given address `url`, or taken off its words
@@ -4148,6 +4256,75 @@ mod tests {
         let (mut d, mut c) = para("[docs](u)", 2);
         t.type_text(&mut d, &mut c, "x");
         assert_eq!(text(&d, c.head.slot), "[doxcs](u)");
+    }
+
+    /// How a link opens, by the setting: ⌘-click (the default), a click,
+    /// or a double-click. The press that opens it never places the caret;
+    /// every other does, so the link's words can still be edited: with a
+    /// plain click opening, a drag or a Shift-click selects, a ⌘-click
+    /// places the caret, and so does a click at the words' very end.
+    #[test]
+    fn how_links_open() {
+        use LinkOpen::*;
+        assert_eq!(LinkOpen::default(), ModClick);
+        for h in LinkOpen::ALL {
+            assert_eq!(LinkOpen::from_key(h.key()), Some(h));
+        }
+        assert_eq!(LinkOpen::from_key("triple"), None);
+        // ⌘-click: a ⌘-click, at the press; a plain click places the caret.
+        assert_eq!(ModClick.opens(1, true, false), Some(OpensOn::Press));
+        assert_eq!(ModClick.opens(1, false, false), None);
+        assert_eq!(ModClick.opens(2, false, false), None, "two choose the word");
+        assert!(ModClick.hand(true, false) && !ModClick.hand(false, false));
+        // A click: once let go, so a drag selects; ⌘ places the caret.
+        assert_eq!(Click.opens(1, false, false), Some(OpensOn::Release));
+        assert_eq!(Click.opens(1, true, false), None);
+        assert_eq!(Click.opens(1, false, true), None, "Shift-click selects");
+        assert_eq!(Click.opens(2, false, false), None);
+        assert!(Click.hand(false, false) && !Click.hand(true, false) && !Click.hand(false, true));
+        // A double-click, in place of the word; ⌘-click too.
+        assert_eq!(DoubleClick.opens(1, false, false), None, "one places the caret");
+        assert_eq!(DoubleClick.opens(2, false, false), Some(OpensOn::Press));
+        assert_eq!(DoubleClick.opens(1, true, false), Some(OpensOn::Press));
+        assert!(DoubleClick.hand(false, false) && DoubleClick.hand(true, false) && !DoubleClick.hand(false, true));
+
+        // Which link a press is on: inside its words; at their very end
+        // only when a click doesn't open it.
+        let d = doc(vec![Block::text("see [docs](https://a.test) and [run](javascript:alert(1))")]);
+        let p = |byte| at(&d, 0, byte).head;
+        assert_eq!(link_under(&d, p(6), Click).as_deref(), Some("https://a.test"));
+        assert_eq!(link_under(&d, p(6), ModClick).as_deref(), Some("https://a.test"));
+        assert_eq!(link_under(&d, p(9), Click), None, "at the words' end: the caret goes there");
+        assert_eq!(link_under(&d, p(5), Click), None, "nor at their start");
+        assert_eq!(link_under(&d, p(9), ModClick).as_deref(), Some("https://a.test"));
+        assert_eq!(link_under(&d, p(2), Click), None, "no link");
+        // One that would run never opens, however.
+        let run = text(&d, p(0).slot).find("run").unwrap() + 1;
+        assert!(link_at(&d, at(&d, 0, run)).is_some());
+        for h in LinkOpen::ALL {
+            assert_eq!(link_under(&d, p(run), h), None, "{h:?}");
+        }
+    }
+
+    /// A picture resized beside others takes a neighbour's height when it
+    /// comes within a few px of it, so the row lines up; its width
+    /// follows its shape. Not past its bounds.
+    #[test]
+    fn a_resized_picture_snaps_to_its_neighbours_height() {
+        // 2:1 (height half the width), beside ones 100 and 150 tall.
+        assert_eq!(snapped_width(204.0, 0.5, &[100.0, 150.0], 600.0), (200.0, Some(100.0)));
+        assert_eq!(snapped_width(196.0, 0.5, &[100.0, 150.0], 600.0), (200.0, Some(100.0)));
+        assert_eq!(snapped_width(296.0, 0.5, &[100.0, 150.0], 600.0), (300.0, Some(150.0)));
+        // Further than the snap: as dragged.
+        assert_eq!(snapped_width(220.0, 0.5, &[100.0, 150.0], 600.0), (220.0, None));
+        // The nearest of two within reach.
+        assert_eq!(snapped_width(200.0, 1.0, &[196.0, 203.0], 600.0), (203.0, Some(203.0)));
+        // Not past the room, nor under the least.
+        assert_eq!(snapped_width(298.0, 1.0, &[302.0], 300.0), (298.0, None));
+        assert_eq!(snapped_width(50.0, 1.0, &[44.0], 600.0), (50.0, None));
+        // Alone, or with no shape: as dragged.
+        assert_eq!(snapped_width(200.0, 0.5, &[], 600.0), (200.0, None));
+        assert_eq!(snapped_width(200.0, 0.0, &[0.0], 600.0), (200.0, None));
     }
 
     /// Marks typed by hand that close a style leave the caret past them:

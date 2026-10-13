@@ -267,6 +267,12 @@ impl Vault {
         self.notes.session.is_ready()
     }
 
+    /// Whether the account's vault has come this session: until it has,
+    /// a picture of Carnet's it doesn't name yet may still be on its way.
+    pub fn vault_come(&self) -> bool {
+        self.notes.session.has_joined(carnet_sync::vault::ROOM)
+    }
+
     /// How many changes (a note's, or the library's) the server isn't
     /// known to keep yet: offline, read only, or on their way.
     pub fn waiting(&self) -> u32 {
@@ -1004,6 +1010,13 @@ impl PageEditor {
         self.e.link_to_open()
     }
 
+    /// The address a press at CodeMirror's `line` and `col` opens, links
+    /// opening `how` (`cmd-click`, `click`, `double-click`): what the
+    /// pointer is a hand over too.
+    pub fn link_under(&self, line: usize, col: usize, how: &str) -> Option<String> {
+        self.e.link_under(line, col, how)
+    }
+
     /// The caret put in a table's cell: CodeMirror's line, the row, the
     /// column, and the selection in the cell's words (UTF-16).
     pub fn cell_select(&mut self, line: u32, r: u32, c: u32, a: u32, h: u32) -> bool {
@@ -1197,6 +1210,34 @@ pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
 #[wasm_bindgen]
 pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
     page::resized_width(w, fit)
+}
+
+/// A picture being resized to `w` (`aspect` its height over its width)
+/// beside pictures `heights` tall ([`page::snapped_width`]): `[width,
+/// the height it snapped to]`, the height 0 when it snapped to none.
+#[wasm_bindgen]
+pub fn snapped_width(w: f32, aspect: f32, heights: Vec<f32>, max: f32) -> Vec<f32> {
+    let (w, h) = page::snapped_width(w, aspect, &heights, max);
+    vec![w, h.unwrap_or(0.0)]
+}
+
+/// Whether a press opens the link under it, links opening `how`
+/// ([`page::LinkOpen::opens`]): 0 not, 1 at once, 2 once let go where it
+/// was pressed.
+#[wasm_bindgen]
+pub fn link_opens(how: &str, clicks: u32, cmd: bool, shift: bool) -> u8 {
+    match page::LinkOpen::from_key(how).unwrap_or_default().opens(clicks, cmd, shift) {
+        None => 0,
+        Some(page::OpensOn::Press) => 1,
+        Some(page::OpensOn::Release) => 2,
+    }
+}
+
+/// Whether the pointer is a hand over a link with these keys held
+/// ([`page::LinkOpen::hand`]).
+#[wasm_bindgen]
+pub fn link_hand(how: &str, cmd: bool, shift: bool) -> bool {
+    page::LinkOpen::from_key(how).unwrap_or_default().hand(cmd, shift)
 }
 
 /// The widths a picture is given from a menu, as JSON: `[[name, percent

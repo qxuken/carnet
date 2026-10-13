@@ -9,6 +9,7 @@
   import Icon from '../lib/Icon.svelte';
   import { pair_link, password_fault, qr_svg } from '../wasm/carnet_web.js';
   import { joinedSaid, waysBack } from '../lib/words';
+  import { LINK_OPENS, linkOpen, linkOpenWords, setLinkOpen, type LinkOpen } from '../lib/editor/links';
 
   let { back }: { back: (() => void) | null } = $props();
   /// The device whose removal is asked to be confirmed.
@@ -34,6 +35,13 @@
   let pwFault = $state<string | null>(null);
   /// This browser's name, as typed while it's being changed.
   let naming = $state<string | null>(null);
+
+  /// How links open while a note is written in (links.ts), kept here.
+  let opensWith = $state<LinkOpen>(linkOpen());
+  const openWith = (h: LinkOpen) => {
+    setLinkOpen(h);
+    opensWith = h;
+  };
 
   /// The name selected as the field opens: typing replaces it.
   const selected = (input: HTMLInputElement) => input.select();
@@ -465,6 +473,22 @@
       {/if}
     {/if}
 
+    <h2>Writing</h2>
+    <section>
+      <div class="row choose">
+        <Icon name="link" size={20} />
+        <div class="text">
+          <b id="opens-with">Open links with</b>
+          <span>How a link in a note opens while you write</span>
+        </div>
+        <div class="segmented" role="radiogroup" aria-labelledby="opens-with">
+          {#each LINK_OPENS as h (h)}
+            <button role="radio" aria-checked={opensWith === h} class:on={opensWith === h} onclick={() => openWith(h)}>{linkOpenWords(h)}</button>
+          {/each}
+        </div>
+      </div>
+    </section>
+
     <h2>This browser</h2>
     <section>
       {#if ios && !installed}
@@ -583,6 +607,11 @@
   /* An error said by the part it came from, in the row's place. */
   .row.said-here { font-size: 14px; gap: 8px; color: var(--danger); }
   .note { color: var(--faint); font-size: 13px; margin: 18px 4px 0; }
+  .row.choose { flex-wrap: wrap; }
+  .segmented { display: inline-flex; flex: none; padding: 2px; border-radius: 999px; background: var(--sunken); }
+  .segmented button { padding: 6px 12px; border: 0; border-radius: 999px; background: none; color: var(--muted); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
+  .segmented button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px #0000001a; }
+  .segmented button:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 0; }
   @media (max-width: 480px) {
     .confirm, .code, .words, .invite { padding-left: 16px; }
   }

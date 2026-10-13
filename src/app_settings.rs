@@ -72,6 +72,7 @@ impl Carnet {
             Msg::SetToolbar { to } => s.fade_tools = to == 1,
             Msg::SetFocus { to } => s.focus = to == 1,
             Msg::SetTypewriter { to } => s.typewriter = to == 1,
+            Msg::SetLinkOpen { to } => s.link_open = page::LinkOpen::ALL[(to as usize).min(page::LinkOpen::ALL.len() - 1)],
             // From zen, the library's switch shows it: zen is over.
             Msg::ToggleSidebar if self.zen => {
                 self.zen = false;
@@ -487,6 +488,12 @@ impl Carnet {
             setting(ui, l, "Typewriter", Some("The line you write stays near the middle of the window"), |ui| {
                 let cur = if s.typewriter { 1 } else { 0 };
                 segmented(ui, l, "typewriter", &["Off", "On"], cur, |to| Msg::SetTypewriter { to });
+            });
+            rule(ui, l);
+            setting(ui, l, "Open links with", Some("How a link in a note opens while you write"), |ui| {
+                let cur = page::LinkOpen::ALL.iter().position(|h| *h == s.link_open).unwrap_or(0);
+                let cmd = if cfg!(target_os = "macos") { "\u{2318}-click" } else { "Ctrl-click" };
+                segmented(ui, l, "links", &[cmd, "Click", "Double-click"], cur, |to| Msg::SetLinkOpen { to });
             });
         });
         // Both cards above as they first were; asked first.

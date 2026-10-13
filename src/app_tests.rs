@@ -1476,6 +1476,62 @@ fn a_picture_resizes_from_its_corner_and_keeps_its_shape() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Pictures side by side at an edge: one resized by its handle takes the
+/// height of the one beside it when it comes within a few pixels, so the
+/// row lines up — a thin line under both says so while dragged — and its
+/// width follows its shape. Further off, it's as dragged.
+#[test]
+fn a_picture_resized_in_a_row_snaps_to_its_neighbours_height() {
+    let (mut app, mut d, dir) = library("pic-snap", &[("Row", "![a|left|200](attachments/a.png)\n\n![b|left|160](attachments/b.png)\n\nWords beside them")]);
+    png_file(&dir.join("attachments"), "a.png");
+    let square: Vec<u8> = (0..16).flat_map(|_| [94u8, 124, 164, 255]).collect();
+    std::fs::write(dir.join("attachments").join("b.png"), crate::images::encode_png(4, 4, &square).unwrap()).unwrap();
+    app.store.index_files();
+    app.images.retry_failed();
+    app.open(app.store.notes.iter().position(|n| n.title == "Row").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    let width_of = |app: &Carnet, alt: &str| {
+        app.doc().blocks().iter().find_map(|b| match &b.kind {
+            Kind::Image { alt: a, width, .. } if a == alt => Some(*width),
+            _ => None,
+        })
+    };
+    let pick_b = |app: &mut Carnet, d: &mut Drive| {
+        let i = app.doc().blocks().iter().position(|b| matches!(&b.kind, Kind::Image { alt, .. } if alt == "b")).unwrap();
+        app.caret = page::select_blocks(app.doc(), i, i);
+        app.editing = true;
+        d_frame_twice(app, d);
+    };
+    // a is 200 × 150; b, square, 160 × 160. b dragged 7 narrower, 153
+    // tall, is 3 off a's height: it takes it, 150 wide.
+    pick_b(&mut app, &mut d);
+    let handle = d.key_of("resize-r").expect("b's handle");
+    let from = d.core.nodes().iter().find(|n| n.key == handle).map(|n| n.rect.center()).unwrap();
+    d.input(&mut app, InputEvent::CursorMoved(from));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(from.x - 20.0, from.y)));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(from.x - 7.0, from.y)));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.resizing.map(|r| (r.w, r.snap)), Some((150.0, Some(150.0))));
+    assert!(d.key_of("snap").is_some(), "the line under them while dragged");
+    d.input(&mut app, InputEvent::mouse_up());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(width_of(&app, "b"), Some(Some(150)));
+    assert_eq!(width_of(&app, "a"), Some(Some(200)), "the other as it was");
+    assert!(d.key_of("snap").is_none(), "the line gone once let go");
+    // Each picture's node and its row's: both pictures 150 tall.
+    let heights: Vec<f32> = d.core.nodes().iter().filter(|n| n.role == Some(Role::Image)).map(|n| n.rect.h).filter(|h| *h < 170.0).collect();
+    assert!(heights.len() == 2 && heights.iter().all(|h| (h - 150.0).abs() < 1.0), "lined up: {heights:?}");
+    // Further off than the snap: as dragged.
+    pick_b(&mut app, &mut d);
+    let handle = d.key_of("resize-r").unwrap();
+    let from = d.core.nodes().iter().find(|n| n.key == handle).map(|n| n.rect.center()).unwrap();
+    d.drag(&mut app, from, Vec2::new(from.x + 30.0, from.y));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(width_of(&app, "b"), Some(Some(180)));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn dropped_pictures_go_where_the_line_is() {
     let (mut app, mut d, dir) = body("drop-line");
@@ -1971,6 +2027,120 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
     assert_eq!(opened(), ["https://x.test/a"], "and a web one opens from the menu");
     let _ = std::fs::remove_dir_all(dir);
 }
+/// Links open as Settings says: ⌘-click (Ctrl elsewhere, the default),
+/// a click, or a double-click. The press that opens one leaves the caret
+/// where it was; any other places it, so a link's words can always be
+/// edited: with a click opening, a drag or a Shift-click selects, a
+/// ⌘-click places the caret, and so does a click at the words' end. A
+/// link that would run opens by none. The pointer is a hand over a link
+/// just when a press there would open it.
+#[test]
+fn links_open_as_the_settings_say() {
+    use page::LinkOpen;
+    let (mut app, mut d, dir) = body("link-modes");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "see [docs](https://x.test/d) end [run](javascript:alert(1))");
+    let slot = app.caret.head.slot;
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "below");
+    let below = app.caret;
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take);
+    let with = |app: &mut Carnet, d: &mut Drive, mods: KeyMods, f: &dyn Fn(&mut Carnet, &mut Drive)| {
+        d.input(app, InputEvent::Modifiers(mods));
+        f(app, d);
+        d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+        d.frame(app);
+    };
+    let point = |app: &Carnet, d: &Drive, at: usize| {
+        let r = d.core.caret_rect(*app.slot_keys.get(&slot).unwrap(), at).unwrap();
+        Vec2::new(r.x + 1.0, r.y + r.h / 2.0)
+    };
+    let in_link = |app: &Carnet| page::link_at(app.doc(), app.caret).is_some();
+    let hand = |app: &mut Carnet, d: &mut Drive, at: usize, mods: KeyMods| {
+        let p = point(app, d, at);
+        d.input(app, InputEvent::Modifiers(mods));
+        d.move_to(app, p.x, p.y);
+        d.frame(app);
+        let shape = d.core.cursor_shape();
+        d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+        d.frame(app);
+        shape == kui_native::CursorShape::Pointer
+    };
+
+    // ⌘-click, as ever: a plain click places the caret in the link.
+    assert_eq!(app.settings.link_open, LinkOpen::ModClick);
+    click_drawn(&mut app, &mut d, slot, 6);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(in_link(&app));
+    with(&mut app, &mut d, CTRL, &|app, d| click_drawn(app, d, slot, 6));
+    assert_eq!(opened(), ["https://x.test/d"]);
+    assert!(!hand(&mut app, &mut d, 6, KeyMods::NONE), "no hand with no key held");
+    assert!(hand(&mut app, &mut d, 6, CTRL), "a hand while it's held");
+    assert!(!hand(&mut app, &mut d, 2, CTRL), "not over plain words");
+
+    // A click.
+    app.settings.link_open = LinkOpen::Click;
+    app.caret = below;
+    d.frame(&mut app);
+    click_drawn(&mut app, &mut d, slot, 6);
+    assert_eq!(opened(), ["https://x.test/d"]);
+    assert_eq!(app.caret, below, "the caret left where it was");
+    assert_eq!(app.error, None);
+    // ⌘-click places the caret in it, to edit its words.
+    with(&mut app, &mut d, CTRL, &|app, d| click_drawn(app, d, slot, 6));
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(in_link(&app) && app.caret.is_empty());
+    assert_eq!(drawn_caret(&app), 6);
+    // A click at its words' end places the caret there.
+    click_drawn(&mut app, &mut d, slot, 8);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert_eq!(drawn_caret(&app), 8);
+    // A drag across it selects.
+    let (a, b) = (point(&app, &d, 5), point(&app, &d, 7));
+    d.drag(&mut app, a, b);
+    d.frame(&mut app);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(!app.caret.is_empty(), "a selection");
+    // Shift-click: the selection to it.
+    app.caret = Caret::at(Pos { slot, byte: 0 });
+    d.frame(&mut app);
+    with(&mut app, &mut d, SHIFT, &|app, d| click_drawn(app, d, slot, 6));
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(!app.caret.is_empty());
+    // One that would run: a click places the caret, and says nothing.
+    let run = "see docs end r".len();
+    click_drawn(&mut app, &mut d, slot, run);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert_eq!(app.error, None);
+    assert!(in_link(&app));
+    assert!(hand(&mut app, &mut d, 6, KeyMods::NONE), "a hand over a link");
+    assert!(!hand(&mut app, &mut d, 6, CTRL), "not with ⌘, which places the caret");
+    assert!(!hand(&mut app, &mut d, 8, KeyMods::NONE), "not at its end");
+    assert!(!hand(&mut app, &mut d, run, KeyMods::NONE), "not over one that won't open");
+
+    // A double-click, in place of choosing the word; one click places
+    // the caret.
+    app.settings.link_open = LinkOpen::DoubleClick;
+    app.caret = below;
+    d.frame(&mut app);
+    click_drawn(&mut app, &mut d, slot, 6);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(in_link(&app));
+    let p = point(&app, &d, 6);
+    d.double_click(&mut app, p.x, p.y);
+    d.frame(&mut app);
+    assert_eq!(opened(), ["https://x.test/d"]);
+    assert!(app.caret.is_empty(), "no word chosen");
+    // Elsewhere two clicks still choose a word.
+    let p = point(&app, &d, 1);
+    d.double_click(&mut app, p.x, p.y);
+    d.frame(&mut app);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(!app.caret.is_empty());
+    assert!(hand(&mut app, &mut d, 6, KeyMods::NONE));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_colour_picker_colours_the_selection() {
     let (mut app, mut d, dir) = body("tint");
@@ -6323,6 +6493,110 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     rt.block_on(served).unwrap().unwrap();
     drop(app);
     remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A note come from another device while its picture is still on its
+/// way (the found: "Picture not found" until it came) shows a quiet box
+/// saying it's downloading, the picture's place; then the picture once
+/// it lands. One that's nowhere is still "Picture not found".
+#[test]
+fn a_picture_on_its_way_by_sync_says_so_then_shows() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-coming-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&mut [(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+
+    // A: a note with a picture of Carnet's, on the server.
+    let (mut a, mut da, dir_a) = fresh("coming-a");
+    a.sync_server = origin.clone();
+    a.sync_how = 0;
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Harbour");
+    key(&mut a, &mut da, "enter");
+    let rgba: Vec<u8> = (0..400 * 300).flat_map(|_| [90u8, 140, 170, 255]).collect();
+    a.paste_picture(400, 300, &rgba);
+    type_in(&mut a, &mut da, "The boats");
+    a.save_current();
+    until("A's picture on the server", &mut [(&mut a, &mut da)], &|x| {
+        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty()) && x[0].0.sync.pictures_waiting() == 0
+    });
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+
+    // B comes in, its pictures held on the way.
+    let (mut b, mut db, dir_b) = fresh("coming-b");
+    b.sync.hold_fetches = true;
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    until("B has the note, its picture asked for", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
+        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty())
+    });
+    let i = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
+    b.open(i);
+    db.core.set_inspect(true);
+    until("B says it's on its way", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, super::page_view::DOWNLOADING));
+    assert!(!shown(&db, "Picture not found"));
+    // In the box the picture takes: a picture's height at least.
+    let words = db.core.nodes().iter().find(|n| n.text.as_deref() == Some(super::page_view::DOWNLOADING)).unwrap().rect;
+    let card = db
+        .core
+        .nodes()
+        .iter()
+        .map(|n| n.rect)
+        .filter(|r| r.x <= words.x && r.y <= words.y && r.x + r.w >= words.x + words.w && r.y + r.h >= words.y + words.h && r.h >= 100.0)
+        .min_by(|p, q| (p.w * p.h).total_cmp(&(q.w * q.h)));
+    assert!(card.is_some_and(|c| c.h >= 120.0), "{card:?}");
+
+    // Let through: the picture.
+    b.sync.hold_fetches = false;
+    until("B shows the picture", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
+        let (app, d) = (&mut *x[1].0, &mut *x[1].1);
+        !shown(d, super::page_view::DOWNLOADING)
+            && app.store.notes[app.current].doc.blocks().iter().any(|bl| match &bl.kind {
+                Kind::Image { src, wiki, .. } => {
+                    let f = app.page_folder();
+                    app.store.picture_file(&f, src, *wiki).is_some_and(|p| app.images.is_ready(&p))
+                }
+                _ => false,
+            })
+    });
+    assert!(!shown(&db, "Picture not found"));
+
+    // One the vault doesn't name, nowhere at all: not found, as ever.
+    let n = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
+    b.store.notes[n].doc.push(Block::new(Kind::Image { src: "attachments/nowhere.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false }));
+    b.store.notes[n].touch();
+    until("B says the other is nowhere", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, "Picture not found"));
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop((a, b));
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
     let _ = std::fs::remove_dir_all(&data);
 }
 

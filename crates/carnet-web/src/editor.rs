@@ -775,6 +775,19 @@ impl Editor {
         self.link_here().as_deref().and_then(carnet_core::export::safe_href)
     }
 
+    /// The address a press at CodeMirror's `line` and `col` opens, links
+    /// opening `how` (`page::LinkOpen::key`; ⌘-click if it's none of
+    /// them): the link whose words are there, if a page may follow it
+    /// ([`page::link_under`]). What the pointer is a hand over, too.
+    pub fn link_under(&self, line: usize, col: usize, how: &str) -> Option<String> {
+        if line == 0 {
+            return None;
+        }
+        let pos = self.pos(line, col)?;
+        let url = page::link_under(&self.doc, pos, page::LinkOpen::from_key(how).unwrap_or_default())?;
+        carnet_core::export::safe_href(&inline::without_bidi(&url))
+    }
+
     /// The link the caret is in given address `url`, or taken off its
     /// words (`None`); else the selection made a link to `url` (with
     /// nothing selected, the address typed in as its own link).
@@ -1442,6 +1455,23 @@ mod tests {
             assert!(e.link_here().is_some(), "{url}: {}", e.markdown());
             assert_eq!(e.link_to_open().as_deref(), opens, "{url}");
         }
+    }
+
+    /// The link under a press, as the editor's pointer asks: inside its
+    /// words; at their end only when a click doesn't open it; never one
+    /// a page may not follow; never in the title.
+    #[test]
+    fn the_link_under_a_press() {
+        let mut e = Editor::open("# T\n\nsee [docs](https://a.test) [run](javascript:x)\n");
+        assert_eq!(e.link_under(1, 6, "click").as_deref(), Some("https://a.test"));
+        assert_eq!(e.link_under(1, 8, "click"), None, "at the words' end");
+        assert_eq!(e.link_under(1, 8, "cmd-click").as_deref(), Some("https://a.test"));
+        assert_eq!(e.link_under(1, 6, "double-click").as_deref(), Some("https://a.test"));
+        assert_eq!(e.link_under(1, 2, "click"), None);
+        assert_eq!(e.link_under(1, 11, "click"), None, "a script's link");
+        assert_eq!(e.link_under(0, 1, "click"), None, "the title");
+        e.select(1, 0, 1, 0);
+        assert_eq!(e.link_under(1, 6, "nonsense").as_deref(), Some("https://a.test"), "⌘-click when unknown");
     }
 
     /// A picture carried into a table's cell, along to another, and out
