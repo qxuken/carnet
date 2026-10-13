@@ -205,9 +205,16 @@ fn spans(text: &str, viewer: bool, image: Option<&Where<'_>>) -> String {
     let pictures: HashMap<usize, &CellPicture> = pictures.iter().map(|p| (p.at.0, p)).collect();
     // A link's target is a marker run between its text and the next text.
     let runs = inline::runs(text);
+    // The link open, one `<a>` round all its words however they are
+    // styled (or cut by a bidi control): where its words end.
+    let mut link: Option<usize> = None;
     let mut i = 0;
     while i < runs.len() {
         let (a, b, s) = runs[i];
+        if link.is_some_and(|end| a >= end) {
+            out.push_str("</a>");
+            link = None;
+        }
         if s.marker {
             i += 1;
             continue;
@@ -238,18 +245,21 @@ fn spans(text: &str, viewer: bool, image: Option<&Where<'_>>) -> String {
         } else if viewer && s.mark != 0 {
             piece = format!("<mark style=\"--mark:#{:08x}\">{piece}</mark>", s.mark);
         }
-        if s.link {
+        if s.link && link.is_none() {
             // `[text](url)`: the address of the link these words are in,
-            // as the page reads it, brackets in it and all.
-            let url = inline::link_at(text, a).map(|(_, u)| u);
-            // One the page mustn't follow (`javascript:` and the like):
-            // its words, with no link.
-            if let Some(href) = url.as_deref().and_then(safe_href) {
-                piece = format!("<a href=\"{}\">{piece}</a>", escape(&href));
+            // as the page reads it, brackets in it and all. One the page
+            // mustn't follow (`javascript:` and the like): its words, with
+            // no link.
+            if let Some((p, href)) = inline::link_at(text, a).and_then(|(p, u)| Some((p, safe_href(&u)?))) {
+                out.push_str(&format!("<a href=\"{}\">", escape(&href)));
+                link = Some(p.close.0);
             }
         }
         out.push_str(&piece);
         i += 1;
+    }
+    if link.is_some() {
+        out.push_str("</a>");
     }
     out
 }
@@ -361,7 +371,7 @@ mod tests {
         assert!(h.contains("<p>x after</p>"), "{h}");
         let h = html("[Mercury](https://x.org/Mercury_(planet)) [a **b**](https://y)", |s, _| s.to_string());
         assert!(h.contains("<a href=\"https://x.org/Mercury_(planet)\">Mercury</a> "), "{h}");
-        assert!(h.contains("<a href=\"https://y\">a </a><a href=\"https://y\"><b>b</b></a>"), "{h}");
+        assert!(h.contains("<a href=\"https://y\">a <b>b</b></a>"), "{h}");
     }
 
     /// A picture in a table's cell is a picture there, in the reader and
@@ -456,7 +466,27 @@ mod tests {
         let v = viewer("Bidi [abc\u{202E}txt.exe](https://example.com/y) end.", |s, _| Picture::Url(s.into()));
         let words: String = v.split('<').map(|p| p.split_once('>').map_or(p, |(_, w)| w)).collect();
         assert_eq!(words, "Bidi abctxt.exe end.", "{v}");
-        assert!(v.contains("<a href=\"https://example.com/y\">txt.exe</a> end."), "{v}");
+        assert!(v.contains("<a href=\"https://example.com/y\">abctxt.exe</a> end."), "{v}");
         assert!(!v.contains('\u{202E}'), "{v}");
+    }
+
+    /// The finding: a link with a bidi control or partly styled words
+    /// came out as an `<a>` per run, side by side to the same address.
+    /// One link is one `<a>`, round all its styled words; two links side
+    /// by side are two.
+    #[test]
+    fn one_link_is_one_a() {
+        let h = |md: &str| viewer(md, |s, _| Picture::Url(s.into()));
+        let v = h("See [the **bold** and *slanted* ==words==](https://x.test/a) now.");
+        assert_eq!(v.matches("<a ").count(), 1, "{v}");
+        assert!(v.contains("<p>See <a href=\"https://x.test/a\">the <b>bold</b> and <i>slanted</i> <mark>words</mark></a> now.</p>"), "{v}");
+        let v = h("[a\u{2066}b](https://x.test/a)[c](https://x.test/c) and [**all bold**](#top)");
+        assert!(v.contains("<p><a href=\"https://x.test/a\">ab</a><a href=\"https://x.test/c\">c</a> and <a href=\"#top\"><b>all bold</b></a></p>"), "{v}");
+        // One the page mustn't follow: its words, styled, no link.
+        let v = h("[a **b**](javascript:x) end");
+        assert!(v.contains("<p>a <b>b</b> end</p>"), "{v}");
+        // In a copy's HTML too.
+        let c = html("[x *y*](https://x.test)", |s, _| s.to_string());
+        assert!(c.contains("<a href=\"https://x.test\">x <i>y</i></a>"), "{c}");
     }
 }
