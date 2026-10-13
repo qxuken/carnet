@@ -2689,16 +2689,30 @@ impl Typing {
     /// switched on with it chosen still on for the words. What an input
     /// method about to compose over a chosen one needs first, the words
     /// then composed there ([`Typing::type_text`] does it for words typed
-    /// at once).
+    /// at once). Words in one paragraph, all bold (italic, struck, code):
+    /// what takes their place is too, as an input method composing has it
+    /// when it changes a letter it typed (`k` made `か`).
     pub fn make_room(&mut self, doc: &mut Doc, c: &mut Caret) -> bool {
         if c.is_empty() {
             return false;
         }
         let kept = chosen_atom(doc, *c).and(self.pending.take().filter(|q| q.caret == *c));
+        let (a, b) = ordered(doc, *c);
+        let had = (a.slot == b.slot && kept.is_none()).then(|| {
+            let (first, last) = (style_at(doc, *c), style_at(doc, Caret::at(b)));
+            [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Code].into_iter().filter(move |&k| k.on(&first) && k.on(&last))
+        });
+        let had: Vec<inline::Kind> = had.into_iter().flatten().collect();
         self.pending = None;
         self.carry = None;
         let changed = replace_selection(doc, c);
         self.pending = kept.map(|q| Pending { caret: *c, ..q });
+        // Taken out with their words: on again for what's typed.
+        let now = self.style_at(doc, *c);
+        for k in had.into_iter().filter(|k| !k.on(&now)) {
+            let (pre, post) = self.switch(doc, *c, k);
+            self.pend(*c, &format!("{k:?}"), pre, post);
+        }
         changed
     }
 
@@ -4725,6 +4739,34 @@ mod tests {
             w.type_text(&mut d, &mut c, "replaced");
             assert_eq!(texts(&d), ["Text:Plan", "Text:**replaced**", written, "Text:"]);
             assert_eq!(c, at(&d, 1, 10));
+        }
+    }
+
+    /// The finding (the web): with Bold on, an input method composing lost
+    /// the bold as it changed the letter it had typed (`k` made `か`):
+    /// typed over, the bold words went with their marks. Words all of a
+    /// style, typed over, are replaced by words of it.
+    #[test]
+    fn words_typed_over_keep_the_style_they_all_had() {
+        let mut d = doc(vec![Block::text("**k**")]);
+        let slot = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot, byte: 2 }, head: Pos { slot, byte: 3 } };
+        Typing::default().type_text(&mut d, &mut c, "か");
+        assert_eq!(texts(&d), ["Text:**か**"]);
+        for (t, from, to, words, out) in [
+            ("a **bold** b", 4, 8, "x", "Text:a **x** b"),
+            ("a *it* and ~~gone~~ b", 3, 5, "IT", "Text:a *IT* and ~~gone~~ b"),
+            ("a ***both*** b", 5, 9, "x", "Text:a ***x*** b"),
+            // Part bold, part not: plain, as before.
+            ("a **bo**ld b", 4, 10, "x", "Text:a x b"),
+            // Inside a run: in it, as ever.
+            ("a **bold** b", 5, 7, "x", "Text:a **bxd** b"),
+        ] {
+            let mut d = doc(vec![Block::text(t)]);
+            let slot = Slot::block(d.blocks()[0].id);
+            let mut c = Caret { anchor: Pos { slot, byte: from }, head: Pos { slot, byte: to } };
+            Typing::default().type_text(&mut d, &mut c, words);
+            assert_eq!(texts(&d), [out], "{t:?} {from}..{to}");
         }
     }
 

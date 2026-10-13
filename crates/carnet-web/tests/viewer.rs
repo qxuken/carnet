@@ -600,6 +600,12 @@ fn the_browser_edits_merges_renames_makes_and_deletes_notes() {
     assert_eq!(text, "# Plan\n\nA walk.\n");
     let (merged, base) = web.edit(&ks, &base, "# Plan\n\nA walk. Water.\n", &mut rng).unwrap();
     assert_eq!(merged, "# Plan\n\nA walk. Water.\n");
+    // Its card, read alone (the page's at once after an edit), as the
+    // whole list has it.
+    let card = web.listed(&ks).expect("listed");
+    assert_eq!(card.snippet, "A walk. Water.");
+    assert_eq!(Some(&card), web.notes().iter().find(|n| n.key == ks));
+    assert_eq!(web.listed("not a key"), None);
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert_eq!(desk.docs[&ks].text(), merged);
 

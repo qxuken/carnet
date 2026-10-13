@@ -655,6 +655,21 @@ impl Notes {
         out
     }
 
+    /// One note as [`Notes::notes`] lists it, read alone: the open note's
+    /// card after an edit, without listing ten thousand.
+    pub fn listed(&self, key: &str) -> Option<Listed> {
+        let k = Key::parse(key)?;
+        let d = self.rooms.docs.get(key)?;
+        let s = Summary::of(d);
+        let place = self.place(key).unwrap_or_default();
+        if s.empty || self.placed().gone.contains(&k) {
+            return None;
+        }
+        let title = s.named(&place).unwrap_or("Untitled").to_string();
+        self.summaries.borrow_mut().insert(key.to_string(), (d.version(), s.clone()));
+        Some(Listed { key: key.to_string(), title, folder: place.folder, pinned: place.pinned, trashed: place.trashed, snippet: s.snippet, done: s.done, todos: s.todos, modified: s.modified })
+    }
+
     /// The rooms the server may not have as they are here: those waiting
     /// to be sent, and those of `before` (waiting when this browser last
     /// looked, perhaps before a reload, when this session knew nothing

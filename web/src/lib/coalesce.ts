@@ -79,3 +79,43 @@ export class Coalesced {
     }
   }
 }
+
+/// A job run once asks have paused for `quiet` milliseconds, each ask
+/// putting it off again: the notes listed again once typing pauses.
+export class AfterQuiet {
+  private timer: unknown = undefined;
+
+  constructor(
+    private job: () => void,
+    private quiet: number,
+    private clock: Clock = pageClock,
+  ) {}
+
+  ask() {
+    this.cancel();
+    this.timer = this.clock.set(() => {
+      this.timer = undefined;
+      this.job();
+    }, this.quiet);
+  }
+
+  /// A run waiting, dropped.
+  cancel() {
+    if (this.timer === undefined) return;
+    this.clock.clear(this.timer);
+    this.timer = undefined;
+  }
+}
+
+/// The list with one note's card as it is now (`card`, as the vault lists
+/// it alone): in its place, or added; taken out when it's no longer
+/// listed (null). The list itself is left as it is when nothing changed.
+export function withCard<T extends { key: string }>(list: T[], key: string, card: T | null): T[] {
+  const at = list.findIndex((n) => n.key === key);
+  if (card === null) return at < 0 ? list : list.filter((_, i) => i !== at);
+  if (at < 0) return [...list, card];
+  if (JSON.stringify(list[at]) === JSON.stringify(card)) return list;
+  const out = list.slice();
+  out[at] = card;
+  return out;
+}

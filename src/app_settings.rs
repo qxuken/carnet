@@ -1271,6 +1271,7 @@ impl Carnet {
                     self.sync.devices.as_ref().is_none_or(|list| list.iter().any(|d| d.id.iter().map(|b| format!("{b:02x}")).collect::<String>() == j))
                 });
                 if code.is_none() && joined_listed {
+                    self.joined_said = true;
                     ui.text_in(
                         NodeSpec::row().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).selectable().live(kui_native::Live::Polite),
                         "A new device is in: it's in the list above.",

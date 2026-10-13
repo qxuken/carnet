@@ -268,6 +268,9 @@
 
   function edited() {
     dirty = true;
+    // Kept apart at once, before it's sent and the rest kept: a reload
+    // or a closed tab loses nothing typed (pending.ts).
+    if (pe) sync.pending.typed(key, base, pe.markdown(), fresh ? props.folder : null);
     clearTimeout(timer);
     timer = setTimeout(send, 500);
   }
@@ -290,10 +293,13 @@
   });
 
   const hidden = () => {
-    if (document.visibilityState === 'hidden') {
-      send();
-      void sync.keepNow();
-    }
+    if (document.visibilityState === 'hidden') leaving();
+  };
+  /// Out of sight, or the page going (a reload, the tab closed): sent and
+  /// kept now. The words typed are kept apart already (`edited`).
+  const leaving = () => {
+    send();
+    void sync.keepNow();
   };
 
   /// Which ends of the tools have more past them, at any width: a fade
@@ -371,6 +377,7 @@
     view.focus();
     moved();
     document.addEventListener('visibilitychange', hidden);
+    addEventListener('pagehide', leaving);
     touch.onchange = () => (small = touch.matches);
     place();
     window.visualViewport?.addEventListener('resize', follow);
@@ -380,6 +387,7 @@
 
   onDestroy(() => {
     document.removeEventListener('visibilitychange', hidden);
+    removeEventListener('pagehide', leaving);
     touch.onchange = null;
     window.visualViewport?.removeEventListener('resize', follow);
     window.visualViewport?.removeEventListener('scroll', follow);

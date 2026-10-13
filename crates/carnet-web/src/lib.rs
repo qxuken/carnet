@@ -368,26 +368,14 @@ impl Vault {
     /// Every note, as JSON: `[{key, title, folder, pinned, trashed,
     /// snippet, done, todos, modified}]`.
     pub fn notes(&self) -> String {
-        let items: Vec<String> = self
-            .notes
-            .notes()
-            .iter()
-            .map(|n| {
-                format!(
-                    r#"{{"key":{},"title":{},"folder":{},"pinned":{},"trashed":{},"snippet":{},"done":{},"todos":{},"modified":{}}}"#,
-                    json(&n.key),
-                    json(&n.title),
-                    json(&n.folder),
-                    n.pinned,
-                    n.trashed,
-                    json(&n.snippet),
-                    n.done,
-                    n.todos,
-                    n.modified
-                )
-            })
-            .collect();
+        let items: Vec<String> = self.notes.notes().iter().map(listed_json).collect();
         format!("[{}]", items.join(","))
+    }
+
+    /// One note as [`Vault::notes`] lists it: the open note's card, after
+    /// an edit. None for one not listed.
+    pub fn note(&self, key: &str) -> Option<String> {
+        self.notes.listed(key).as_ref().map(listed_json)
     }
 
     pub fn folders(&self) -> Vec<String> {
@@ -1303,6 +1291,22 @@ fn json(s: &str) -> String {
     out
 }
 
+/// A note as the library lists it, in JSON.
+fn listed_json(n: &notes::Listed) -> String {
+    format!(
+        r#"{{"key":{},"title":{},"folder":{},"pinned":{},"trashed":{},"snippet":{},"done":{},"todos":{},"modified":{}}}"#,
+        json(&n.key),
+        json(&n.title),
+        json(&n.folder),
+        n.pinned,
+        n.trashed,
+        json(&n.snippet),
+        n.done,
+        n.todos,
+        n.modified
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{json, password_fault};
@@ -1321,3 +1325,4 @@ mod tests {
         assert_eq!(json("a \"q\" \\ b\nc\u{1}"), r#""a \"q\" \\ b\nc\u0001""#);
     }
 }
+

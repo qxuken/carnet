@@ -5446,6 +5446,17 @@ fn two_apps_sync_through_a_server() {
     assert!(b.sync.is_on());
     assert!(b.sync_code.is_empty(), "the code doesn't stay on screen once used");
     assert!(a.sync.joined.is_some(), "Settings says so where the code was");
+    // Said in Settings while they're open; once they're left, seen: not
+    // said again the next time (as the web lets it go).
+    d_frame_twice(&mut a, &mut da);
+    assert!(a.joined_said, "said in Settings");
+    assert!(a.sync.joined.is_some(), "still said while Settings are open");
+    a.settings_open = false;
+    d_frame_twice(&mut a, &mut da);
+    assert!(a.sync.joined.is_none() && !a.joined_said, "Settings left: let go");
+    a.settings_open = true;
+    d_frame_twice(&mut a, &mut da);
+    assert!(!a.joined_said, "not said again");
     // B's own welcome note, untouched, went (not to its Deleted) and was
     // never sent. Each has the same notes on disk, and only those.
     let titles = |s: &Store| {
