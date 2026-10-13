@@ -972,6 +972,19 @@ impl Sync {
         self.pictures.as_ref().and_then(Pictures::held_why)
     }
 
+    /// Logged in, and all the server holds of every note has come: the
+    /// account's notes are here, not just the first of them.
+    pub fn caught_up(&self) -> bool {
+        matches!(&self.phase, Phase::On { session, .. } if session.has_caught_up())
+    }
+
+    /// What the account keeps is known, as of its notes now, and not
+    /// asked again: no answer on its way to take its place.
+    #[cfg(test)]
+    pub fn usage_settled(&self) -> bool {
+        matches!(&self.phase, Phase::On { session, .. } if self.usage.is_some() && !self.asked_usage && session.moves() == self.usage_moves)
+    }
+
     /// Logged in, every room joined, everything sent acknowledged.
     #[cfg(test)]
     pub fn is_idle(&self) -> bool {
