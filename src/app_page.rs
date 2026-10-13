@@ -2501,7 +2501,8 @@ impl Carnet {
         let existing = page::link_at(self.doc(), self.caret);
         self.link_edit = Some(LinkEdit {
             caret: self.caret,
-            url: existing.as_ref().map(|l| l.2.clone()).unwrap_or_default(),
+            // Shown with no bidi control in it to turn it round.
+            url: existing.as_ref().map(|l| inline::without_bidi(&l.2)).unwrap_or_default(),
             existing: existing.is_some(),
             at: None,
         });
@@ -2899,25 +2900,28 @@ impl Carnet {
         self.goal_x = Some(x);
         let doc = self.doc();
         let clamp = |p: Pos| page::fix(doc, Caret::at(p)).head;
-        // Another row of this paragraph above or below?
+        // Another row of this paragraph above or below? In code, a row
+        // between its fences: the fences are drawn, not stood on, so ↓
+        // from its last line is on to the block below.
         if let (Some(_), Some(r)) = (key, r) {
-            let len = page::text(doc, p.slot).len();
+            let (lo, hi) = page::writable(doc, p.slot);
             let more = if up {
-                self.rect_at(core, p.slot, 0).is_some_and(|f| r.y > f.y + 1.0)
+                self.rect_at(core, p.slot, lo).is_some_and(|f| r.y > f.y + 1.0)
             } else {
-                self.rect_at(core, p.slot, len).is_some_and(|e| r.y + 1.0 < e.y)
+                self.rect_at(core, p.slot, hi).is_some_and(|e| r.y + 1.0 < e.y)
             };
             if more {
                 let y = if up { r.y - r.h * 0.5 } else { r.y + r.h * 1.5 };
                 if let Some(byte) = self.byte_under(core, p.slot, Vec2::new(x, y)) {
-                    return clamp(Pos { slot: p.slot, byte });
+                    return clamp(Pos { slot: p.slot, byte: byte.clamp(lo, hi) });
                 }
             }
         }
         let cands = page::vertical(doc, p.slot, up);
         if cands.is_empty() {
             // The first line up, the last down: to its start, or its end.
-            return if up { page::start(p.slot) } else { page::end(doc, p.slot) };
+            let (lo, hi) = page::writable(doc, p.slot);
+            return Pos { slot: p.slot, byte: if up { lo } else { hi } };
         }
         // Of a table row, the cell under the caret's x.
         let left_of = |s: &Slot| self.rect_at(core, *s, 0).is_some_and(|o| o.x <= x + 1.0);
@@ -2929,13 +2933,14 @@ impl Carnet {
         if !self.slot_keys.contains_key(&pick) {
             return page::start(pick);
         }
-        let len = page::text(doc, pick).len();
-        // Its last row coming up, its first going down.
-        let edge = self.rect_at(core, pick, if up { len } else { 0 });
+        // Its last row coming up, its first going down (in code, the
+        // last and first between its fences).
+        let (lo, hi) = page::writable(doc, pick);
+        let edge = self.rect_at(core, pick, if up { hi } else { lo });
         let byte = edge
             .and_then(|e| self.byte_under(core, pick, Vec2::new(x, e.y + e.h * 0.5)))
-            .unwrap_or(if up { len } else { 0 });
-        clamp(Pos { slot: pick, byte })
+            .unwrap_or(if up { hi } else { lo });
+        clamp(Pos { slot: pick, byte: byte.clamp(lo, hi) })
     }
 
     /// Home and End: the start or end of the visual line the caret is on.

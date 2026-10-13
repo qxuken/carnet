@@ -281,14 +281,31 @@ fn text_mut(k: &mut Kind) -> Option<&mut String> {
 /// `text` with every word in it marked `how`.
 fn mark(text: &str, how: Mark) -> String {
     let vis = Visible::of(text);
+    let sealed = inline::sealed(text);
     let spans = vis.spans(0, vis.drawn_len());
     let (open, close) = tags(how);
     let mut inserts = Vec::new();
     for (a, b) in spans {
+        let (a, b) = widen(&sealed, a, b);
         inserts.push((a, Put::Open, open.clone()));
         inserts.push((b, Put::Close, close.clone()));
     }
     splice(text, inserts)
+}
+
+/// `a..b` taken out to the ends of any code span (or autolink) it starts
+/// or ends in: the tags around it go round the code, never inside it,
+/// where they would be shown as written.
+fn widen(sealed: &[(usize, usize, usize)], a: usize, b: usize) -> (usize, usize) {
+    let a = sealed.iter().find(|s| s.0 < a && a < s.2).map_or(a, |s| s.0);
+    let b = sealed.iter().find(|s| s.0 < b && b < s.2).map_or(b, |s| s.2);
+    (a, b)
+}
+
+/// A place inside a code span (or an autolink) put outside it: before it
+/// from the start of its words, else after it.
+fn outside(sealed: &[(usize, usize, usize)], at: usize) -> usize {
+    sealed.iter().find(|s| s.0 < at && at < s.2).map_or(at, |s| if at <= s.1 { s.0 } else { s.2 })
 }
 
 /// The tags a mark is written with: a wash, or red ink struck through.
@@ -337,6 +354,7 @@ fn splice(text: &str, mut inserts: Vec<(usize, Put, String)>) -> String {
 fn words(old: &str, new: &str) -> String {
     let was = inline::plain(old);
     let vis = Visible::of(new);
+    let sealed = inline::sealed(new);
     let now = vis.text(new);
     let (a, b) = (tokens(&was), tokens(&now));
     // Where each new token starts in the new words.
@@ -379,6 +397,7 @@ fn words(old: &str, new: &str) -> String {
             && s < e
         {
             for (sa, sb) in vis.spans(s, e) {
+                let (sa, sb) = widen(&sealed, sa, sb);
                 inserts.push((sa, Put::Open, wash_open.clone()));
                 inserts.push((sb, Put::Close, wash_close.clone()));
             }
@@ -387,7 +406,7 @@ fn words(old: &str, new: &str) -> String {
         if !gone.is_empty() {
             // After the word before, outside the marks of the word after;
             // at the very start, before every mark.
-            let src = if at == 0 { 0 } else { vis.at(at) };
+            let src = if at == 0 { 0 } else { outside(&sealed, vis.at(at)) };
             let lead = if src > 0 && !new[..src].ends_with(char::is_whitespace) { " " } else { "" };
             let trail = if src < new.len() && !new[src..].starts_with(char::is_whitespace) { " " } else { "" };
             inserts.push((src, Put::Struck, format!("{lead}{struck_open}{gone}{struck_close}{trail}")));
@@ -619,6 +638,30 @@ mod tests {
         assert_eq!(marked_blocks, 1);
         let (_, same) = marked(&md, &md);
         assert!(same.blocks().iter().all(|b| !text_of(&b.kind).is_some_and(|t| t.contains('<') || t.contains("=="))));
+    }
+
+    /// The finding: a coloured word gone from beside inline code came
+    /// back inside the code, `` `code ~~<span …>and</span>~~` ``, shown as
+    /// written. Marks go round code, never in it: a change in or next to
+    /// it reads as words.
+    #[test]
+    fn a_change_by_or_in_code_is_marked_outside_it() {
+        let t = texts("# N\n\nRun `code` <span style=\"color: #C0553F\">and</span>\n", "# N\n\nRun `code`\n");
+        assert_eq!(t, [format!("Run `code` {}", r("and"))]);
+        let t = texts("# N\n\nRun `code` <span style=\"color: #C0553F\">and</span> more.\n", "# N\n\nRun `code` more.\n");
+        assert_eq!(t, [format!("Run `code` {} more.", r("and"))]);
+        let t = texts("# N\n\nRun `ab` now.\n", "# N\n\nRun `abc` now.\n");
+        assert_eq!(t, [format!("Run {} {G}`abc`</mark> now.", r("ab"))]);
+        let t = texts("# N\n\nOld.\n", "# N\n\nOld.\n\nNew `x` and <https://a.com>\n");
+        assert_eq!(t[1], format!("{G}New </mark>{G}`x`</mark>{G} and </mark>{G}<https://a.com></mark>"));
+        for line in &t {
+            let (_, d) = doc::from_markdown(line);
+            for b in d.blocks() {
+                let text = b.text_ref().unwrap_or("");
+                let shown = inline::Visible::of(text).text(text);
+                assert!(!shown.contains('<') && !shown.contains('~'), "{shown}");
+            }
+        }
     }
 }
 

@@ -310,6 +310,36 @@ fn styled(doc: &Doc, slot: Slot) -> bool {
     !is_atomic(doc, slot) && !matches!(kind_at(doc, slot), Some(Kind::Raw(_)))
 }
 
+/// The lines of fenced code (or front matter) between its fences: where
+/// they start and end in its text. The caret stands there, the fences
+/// drawn but never written on — typed on, `` ```after `` is no fence.
+/// `None` for code with no line between its fences.
+pub fn code_body(t: &str) -> Option<(usize, usize)> {
+    let first = t.find('\n')?;
+    let fence = |line: &str| {
+        let l = line.trim();
+        ["```", "~~~", "---"].iter().any(|f| l.starts_with(f))
+    };
+    if !fence(&t[..first]) {
+        return None;
+    }
+    let last = t.rfind('\n').unwrap_or(first);
+    let closed = fence(&t[last + 1..]);
+    if last == first && closed {
+        return None;
+    }
+    Some((first + 1, if closed { last } else { t.len() }))
+}
+
+/// Where the caret can stand in `slot`: in code, between its fences
+/// ([`code_body`]); anywhere else, all of it.
+pub fn writable(doc: &Doc, slot: Slot) -> (usize, usize) {
+    match kind_at(doc, slot) {
+        Some(Kind::Raw(t)) if slot.cell.is_none() => code_body(t).unwrap_or((0, t.len())),
+        _ => (0, len(doc, slot)),
+    }
+}
+
 /// A slot's text read as its own: a cell's with its pictures among the
 /// words ([`inline::CellText`]), any other as text. Until it is dropped.
 pub fn reading(slot: Slot) -> inline::CellText {
@@ -375,6 +405,15 @@ fn whole(slot: Slot, rightwards: bool) -> Caret {
     Caret { anchor: Pos { slot, byte: a }, head: Pos { slot, byte: b } }
 }
 
+/// How far ← and → go in a slot's words before they leave it: all of
+/// them, or a code block's lines between its fences ([`writable`]).
+fn drawn_edges(doc: &Doc, slot: Slot, v: &Visible) -> (usize, usize) {
+    match kind_at(doc, slot) {
+        Some(Kind::Raw(_)) => writable(doc, slot),
+        _ => (0, v.drawn_len()),
+    }
+}
+
 /// The picture among cell `slot`'s words drawn as the letter at `drawn`
 /// of them: where it is in the text.
 fn cell_picture_drawn_at(doc: &Doc, slot: Slot, v: &Visible, drawn: usize) -> Option<(usize, usize)> {
@@ -402,7 +441,9 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     let t = text(doc, p.slot);
     // By the words: marks are not there to step over.
     let v = visible(doc, p.slot);
-    let d = v.drawn(p.byte);
+    // In code, past its first line is past its fence: on to what is above.
+    let (lo, hi) = drawn_edges(doc, p.slot, &v);
+    let d = v.drawn(p.byte).clamp(lo, hi);
     if !extend && !word && d > 0
         && let Some((a, b)) = cell_picture_drawn_at(doc, p.slot, &v, prev_char(&v.text(t), d))
     {
@@ -410,9 +451,9 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     }
     let head = if is_atomic(doc, p.slot) && p.byte > 0 {
         Pos { byte: 0, ..p }
-    } else if !is_atomic(doc, p.slot) && d > 0 {
+    } else if !is_atomic(doc, p.slot) && d > lo {
         let w = v.text(t);
-        let nd = if word { prev_word(&w, d) } else { prev_char(&w, d) };
+        let nd = if word { prev_word(&w, d) } else { prev_char(&w, d) }.max(lo);
         Pos { byte: v.at(nd), ..p }
     } else {
         let all = slots(doc);
@@ -443,7 +484,8 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     let _r = reading(p.slot);
     let t = text(doc, p.slot);
     let v = visible(doc, p.slot);
-    let d = v.drawn(p.byte);
+    let (lo, hi) = drawn_edges(doc, p.slot, &v);
+    let d = v.drawn(p.byte).clamp(lo, hi);
     if !extend && !word && d < v.drawn_len()
         && let Some((a, b)) = cell_picture_drawn_at(doc, p.slot, &v, d)
     {
@@ -451,9 +493,9 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
     }
     let head = if is_atomic(doc, p.slot) && p.byte < 1 {
         Pos { byte: 1, ..p }
-    } else if !is_atomic(doc, p.slot) && d < v.drawn_len() {
+    } else if !is_atomic(doc, p.slot) && d < hi {
         let w = v.text(t);
-        let nd = if word { next_word(&w, d) } else { next_char(&w, d) };
+        let nd = if word { next_word(&w, d) } else { next_char(&w, d) }.min(hi);
         Pos { byte: v.at(nd), ..p }
     } else {
         let all = slots(doc);
@@ -636,6 +678,16 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
     if ia == ib {
         if is_atomic(doc, a.slot) {
             let i = doc.index_of(a.slot.block).unwrap_or(0);
+            // Typed over, a divider or a picture is replaced where it is,
+            // by a line for the words, as a cell's picture is: not the
+            // start of whatever came after it.
+            if keep_first {
+                let b = Block::text("");
+                let slot = Slot::block(b.id);
+                doc.set(i, b);
+                *c = Caret::at(start(slot));
+                return true;
+            }
             doc.remove(i);
             *c = Caret::at(after_removal(doc, i));
             return true;
@@ -786,6 +838,9 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
         });
         return true;
     }
+    // In code, never on a fence: between them, at the nearer end.
+    let (lo, hi) = writable(doc, p.slot);
+    let p = Pos { byte: p.byte.clamp(lo, hi), ..p };
     let single = kind_at(doc, p.slot).is_some_and(single_line);
     let s = if single { s.replace('\n', " ") } else { s.to_string() };
     let old = text(doc, p.slot).to_string();
@@ -816,6 +871,19 @@ fn shortcuts(doc: &mut Doc, c: &mut Caret, old: &str) {
             c.head.byte = c.head.byte.saturating_sub(2);
             c.anchor = c.head;
         }
+        // `- [ ] ` typed: `- ` made a bullet, and its box makes it a
+        // checklist's (`[x] ` ticked), as GFM reads it — never the box
+        // kept as words, written `\[ ]`.
+        Kind::Item { style: ListStyle::Bullet, .. } if box_prefix(&new).is_some() && box_prefix(old).is_none() => {
+            let Some((done, n)) = box_prefix(&new) else { return };
+            if let Kind::Item { style, done: d, text, .. } = &mut doc.block_mut(i).kind {
+                *style = ListStyle::Todo;
+                *d = done;
+                text.replace_range(..n, "");
+            }
+            c.head.byte = c.head.byte.saturating_sub(n);
+            c.anchor = c.head;
+        }
         Kind::Text(_) => {
             // The line the caret is on, and where it starts.
             let line_start = new[..p.byte].rfind('\n').map_or(0, |n| n + 1);
@@ -837,6 +905,15 @@ fn shortcuts(doc: &mut Doc, c: &mut Caret, old: &str) {
         }
         _ => {}
     }
+}
+
+/// A checkbox typed at the start of a bullet's words — `[ ] `, `[x] `,
+/// `[] ` — whether it is ticked, and how long it is.
+fn box_prefix(t: &str) -> Option<(bool, usize)> {
+    [("[ ] ", false), ("[] ", false), ("[x] ", true), ("[X] ", true)]
+        .into_iter()
+        .find(|(p, _)| t.starts_with(p))
+        .map(|(p, done)| (done, p.len()))
 }
 
 /// Line `start..end` of paragraph `i`, whose text is `t`, made a block
@@ -1145,6 +1222,11 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
 /// down a column, adds a row at the bottom, and in an empty last row steps
 /// out of the table. In code, it is a newline.
 pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
+    // A divider or a picture chosen: a new line on the side it was come
+    // to from, the thing itself kept.
+    if chosen_atom(doc, *c).is_some() {
+        *c = Caret::at(c.head);
+    }
     replace_selection(doc, c);
     let p = c.head;
     let _r = reading(p.slot);
@@ -1655,14 +1737,7 @@ pub fn insert_blocks_at(doc: &mut Doc, c: &mut Caret, at: usize, kinds: Vec<Kind
     if kinds.is_empty() {
         return false;
     }
-    let mut at = at.min(doc.len());
-    let empty = |doc: &Doc, i: usize| matches!(doc.blocks().get(i).map(|b| &b.kind), Some(Kind::Text(t)) if t.is_empty());
-    if at > 0 && empty(doc, at - 1) {
-        at -= 1;
-        doc.remove(at);
-    } else if empty(doc, at) {
-        doc.remove(at);
-    }
+    let at = in_place_of_empty(doc, at);
     let n = kinds.len();
     for (k, kind) in kinds.into_iter().enumerate() {
         doc.insert(at + k, Block::new(kind));
@@ -1670,6 +1745,24 @@ pub fn insert_blocks_at(doc: &mut Doc, c: &mut Caret, at: usize, kinds: Vec<Kind
     doc.ensure_tail();
     *c = select_blocks(doc, at + n - 1, at + n - 1);
     true
+}
+
+/// Where blocks dropped before block `at` go: in place of an empty
+/// paragraph beside the drop (the one before it, else the one after),
+/// taken out, so no blank line is left between them and the words — nor
+/// one stranded above them at the note's end, past the line kept there.
+fn in_place_of_empty(doc: &mut Doc, at: usize) -> usize {
+    let at = at.min(doc.len());
+    let empty = |doc: &Doc, i: usize| matches!(doc.blocks().get(i).map(|b| &b.kind), Some(Kind::Text(t)) if t.is_empty());
+    if at > 0 && empty(doc, at - 1) {
+        doc.remove(at - 1);
+        at - 1
+    } else {
+        if empty(doc, at) {
+            doc.remove(at);
+        }
+        at
+    }
 }
 
 /// A picture's width (`None`: its own). True when it changed.
@@ -1812,7 +1905,8 @@ pub fn move_picture(doc: &mut Doc, c: &mut Caret, id: u64, to: PicDrop) -> bool 
                 return false;
             }
             let b = doc.remove(from);
-            doc.insert(if i > from { i - 1 } else { i }, b);
+            let at = in_place_of_empty(doc, if i > from { i - 1 } else { i });
+            doc.insert(at, b);
         }
         PicDrop::Beside { id: t, after } => {
             if t == id {
@@ -1870,7 +1964,7 @@ pub fn move_cell_picture(doc: &mut Doc, c: &mut Caret, from: Slot, at: usize, to
         }
         PicDrop::Before(i) => {
             take_from_cell(doc, from, p.at);
-            let i = i.min(doc.len());
+            let i = in_place_of_empty(doc, i);
             doc.insert(i, Block::new(Kind::Image { src: p.src, alt: p.alt, width: None, float: doc::Float::None, wiki: p.wiki }));
             doc.ensure_tail();
             *c = select_blocks(doc, i, i);
@@ -1990,7 +2084,9 @@ fn carry_on(doc: &mut Doc, j: usize) -> Pos {
 /// picture is. No empty line is made between them, to show as a gap; one
 /// is made only where the divider ends the note. Typed (`---`), it does
 /// not select what follows, where the next letter would replace it: the
-/// caret stands just past the divider, where typing starts a paragraph.
+/// caret stands just past the divider, where typing starts a paragraph;
+/// and so before another divider, whose choosing would leave the next
+/// key to take away one that was there already.
 fn past_divider(doc: &mut Doc, j: usize, c: &mut Caret, typed: bool) {
     let Some(b) = doc.blocks().get(j) else {
         *c = Caret::at(carry_on(doc, j));
@@ -1998,7 +2094,7 @@ fn past_divider(doc: &mut Doc, j: usize, c: &mut Caret, typed: bool) {
     };
     *c = if !b.kind.is_atomic() {
         Caret::at(entry(doc, b, 0))
-    } else if typed {
+    } else if typed || b.kind == Kind::Divider {
         Caret::at(end(doc, Slot::block(doc.blocks()[j - 1].id)))
     } else {
         select_blocks(doc, j, j)
@@ -3480,18 +3576,29 @@ mod tests {
         insert_block(&mut d, &mut c, Kind::Divider);
         assert_eq!(texts(&d), ["Text:a", "---", "<table>", "Text:"]);
         assert_eq!(c, at(&d, 2, 0));
-        // Before a picture, or another divider: it is selected.
+        // Before a picture: it is selected.
         let mut d = doc(vec![Block::text("a"), pic(), Block::text("")]);
         let mut c = at(&d, 0, 1);
         insert_block(&mut d, &mut c, Kind::Divider);
         assert_eq!(texts(&d), ["Text:a", "---", "Imag:", "Text:"]);
         assert_eq!(picture_at(&d, c), Some(2));
+        // Before another divider: that one is not chosen, for the next
+        // key to take; the caret stands just past the new one, as after
+        // `---` typed, and a letter there starts a line between them.
         let mut d = doc(vec![Block::text("a"), Block::new(Kind::Divider), Block::text("")]);
         let mut c = at(&d, 0, 1);
         insert_block(&mut d, &mut c, Kind::Divider);
         assert_eq!(texts(&d), ["Text:a", "---", "---", "Text:"]);
-        assert_eq!(c, select_blocks(&d, 2, 2));
-        assert!(coverage(&d, c).whole.contains(&d.blocks()[2].id));
+        assert_eq!(c, Caret::at(end(&d, Slot::block(d.blocks()[1].id))));
+        assert!(chosen_atom(&d, c).is_none() && coverage(&d, c).whole.is_empty());
+        Typing::default().type_text(&mut d, &mut c, "b");
+        assert_eq!(texts(&d), ["Text:a", "---", "Text:b", "---", "Text:"]);
+        // From a chosen divider before another, the same.
+        let mut d = doc(vec![Block::new(Kind::Divider), Block::new(Kind::Divider), Block::text("")]);
+        let mut c = select_blocks(&d, 0, 0);
+        insert_block(&mut d, &mut c, Kind::Divider);
+        assert_eq!(texts(&d), ["---", "---", "---", "Text:"]);
+        assert_eq!(c, Caret::at(end(&d, Slot::block(d.blocks()[1].id))));
         // Before words: their start, from the slash menu's empty line too.
         let mut d = doc(vec![Block::text(""), Block::text("next")]);
         let mut c = at(&d, 0, 0);
@@ -4170,6 +4277,128 @@ mod tests {
         assert_eq!(chosen_cell_picture(&d, c), None);
         let past = right(&d, c, false, false);
         assert!(past.is_empty() && past.head.slot != pic, "{past:?}");
+    }
+
+    /// The finding: `/code`, a line typed, ↓ and "after code" made the
+    /// closing fence `` ```after code ``. The fences are drawn, never
+    /// written on: typing on one goes in between them, and ← and → leave
+    /// the code past its first and last lines.
+    #[test]
+    fn typing_in_code_never_lands_on_a_fence() {
+        assert_eq!(code_body("```\nlet x;\n```"), Some((4, 10)));
+        assert_eq!(code_body("```rust\n\n```"), Some((8, 8)));
+        assert_eq!(code_body("---\ntitle: x\n---"), Some((4, 12)));
+        assert_eq!(code_body("```\nopen to the end"), Some((4, 19)));
+        assert_eq!(code_body("```\n```"), None);
+        let md = |d: &Doc| crate::doc::to_markdown(None, d);
+        let note = || doc(vec![Block::new(Kind::Raw("```\nlet x;\n```".into())), Block::text("")]);
+        let code = |d: &Doc| Slot::block(d.blocks()[0].id);
+        // On the closing fence: at the code's end instead.
+        let mut d = note();
+        let mut c = Caret::at(Pos { slot: code(&d), byte: 13 });
+        Typing::default().type_text(&mut d, &mut c, "after code");
+        assert_eq!(md(&d), "```\nlet x;after code\n```\n");
+        // On the opening one: at its start.
+        let mut d = note();
+        let mut c = Caret::at(Pos { slot: code(&d), byte: 1 });
+        insert(&mut d, &mut c, "// ");
+        assert_eq!(md(&d), "```\n// let x;\n```\n");
+        // → from the code's end and ← from its start leave it.
+        let d = note();
+        let after = right(&d, Caret::at(Pos { slot: code(&d), byte: 10 }), false, false);
+        assert_eq!(after, at(&d, 1, 0), "on to the line below");
+        let mut d = doc(vec![Block::text("above"), Block::new(Kind::Raw("```\nlet x;\n```".into()))]);
+        let c = left(&d, Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 4 }), false, false);
+        assert_eq!(c, at(&d, 0, 5), "on to the line above");
+        let c = left(&d, Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 8 }), true, false);
+        assert_eq!(c.head.byte, 4, "a word back stops at the code's start");
+        // Enter on a fence is a line in the code.
+        let mut c = Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 13 });
+        enter(&mut d, &mut c, false);
+        assert_eq!(md(&d), "above\n\n```\nlet x;\n\n```\n");
+    }
+
+    /// The finding: a picture chosen by → with a table after it, "Q"
+    /// typed made the header cell "QA"; with words after it, "Qbelow". A
+    /// letter typed over a chosen picture (or divider) takes its place,
+    /// as over a cell's picture: a line of its own there. Enter on one
+    /// opens a line beside it, the picture kept.
+    #[test]
+    fn a_letter_typed_over_a_chosen_picture_takes_its_place() {
+        let pic = || Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false });
+        let table = Block::new(Kind::Table(Table::from_cells(vec![vec!["A".into()], vec!["1".into()]])));
+        let mut d = doc(vec![Block::text("above"), pic(), table, Block::text("")]);
+        let mut c = right(&d, at(&d, 0, 5), false, false);
+        assert_eq!(chosen_atom(&d, c), Some(Slot::block(d.blocks()[1].id)));
+        Typing::default().type_text(&mut d, &mut c, "Q");
+        assert_eq!(texts(&d), ["Text:above", "Text:Q", "<table>", "Text:"]);
+        assert_eq!(text(&d, block_slots(&d.blocks()[2])[0]), "A", "the header cell as it was");
+        assert_eq!(c, at(&d, 1, 1));
+        // Words after it: they stay as they were too.
+        let mut d = doc(vec![pic(), Block::text("below words")]);
+        let mut c = select_blocks(&d, 0, 0);
+        insert(&mut d, &mut c, "Q");
+        assert_eq!(texts(&d), ["Text:Q", "Text:below words"]);
+        // A divider the same.
+        let mut d = doc(vec![Block::new(Kind::Divider), Block::text("below")]);
+        let mut c = select_blocks(&d, 0, 0);
+        Typing::default().type_text(&mut d, &mut c, "Q");
+        assert_eq!(texts(&d), ["Text:Q", "Text:below"]);
+        // Enter: a line after it (chosen from before), the picture kept.
+        let mut d = doc(vec![Block::text("above"), pic(), Block::text("below")]);
+        let mut c = right(&d, at(&d, 0, 5), false, false);
+        enter(&mut d, &mut c, false);
+        assert_eq!(texts(&d), ["Text:above", "Imag:", "Text:", "Text:below"]);
+        assert_eq!(c, at(&d, 2, 0));
+    }
+
+    /// The finding: a picture dragged out of a cell to below a table that
+    /// ends the note went in after its last, empty line, which stayed
+    /// above it. Out of a cell, or moved on its own, a picture takes the
+    /// place of an empty line beside the drop, as one dropped in does.
+    #[test]
+    fn a_picture_dragged_out_of_a_cell_leaves_no_empty_line() {
+        let (mut d, _, x, _) = with_table();
+        set_cell(&mut d, x, "![](q.png)");
+        let mut c = at(&d, 0, 0);
+        assert!(move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Before(4)));
+        assert_eq!(texts(&d), ["Text:words", "Imag:", "<table>", "Imag:", "Text:"]);
+        assert_eq!(c, select_blocks(&d, 3, 3));
+        // Onto an empty line between words: in its place.
+        set_cell(&mut d, x, "![](r.png)");
+        d.insert(1, Block::text(""));
+        assert!(move_cell_picture(&mut d, &mut c, x, 0, PicDrop::Before(2)));
+        assert_eq!(texts(&d), ["Text:words", "Imag:", "Imag:", "<table>", "Imag:", "Text:"]);
+        // A picture on its own line moved to the note's end, the same.
+        let (mut d, id, _, _) = with_table();
+        assert!(move_picture(&mut d, &mut c, id, PicDrop::Before(4)));
+        assert_eq!(texts(&d), ["Text:words", "<table>", "Imag:", "Text:"]);
+        let md = crate::doc::to_markdown(None, &d);
+        assert!(md.ends_with(")\n"), "no blank line before it: {md:?}");
+    }
+
+    /// The finding: `- [ ] ` typed made a bullet whose words began with a
+    /// box, written `\\[ ]`. As GFM reads it, the box makes a checklist's
+    /// item, ticked with `[x] `; `[] ` too, as on an empty line.
+    #[test]
+    fn a_box_typed_after_a_dash_makes_a_checklist() {
+        for (typed, done) in [("- [ ] milk", false), ("- [x] milk", true), ("- [] milk", false), ("* [ ] milk", false)] {
+            let mut d = doc(vec![Block::text("")]);
+            let mut c = at(&d, 0, 0);
+            let mut t = Typing::default();
+            for ch in typed.chars() {
+                t.type_text(&mut d, &mut c, &ch.to_string());
+            }
+            assert!(matches!(&d.blocks()[0].kind, Kind::Item { style: ListStyle::Todo, done: x, text, .. } if *x == done && text == "milk"), "{typed}: {:?}", d.blocks()[0].kind);
+            assert_eq!(c, at(&d, 0, 4));
+            let want = if done { "- [x] milk\n" } else { "- [ ] milk\n" };
+            assert_eq!(crate::doc::to_markdown(None, &d), want);
+        }
+        // Words that only start with a box later on stay words.
+        let mut d = doc(vec![Block::new(Kind::item(ListStyle::Bullet, 0, "milk"))]);
+        let mut c = at(&d, 0, 0);
+        insert(&mut d, &mut c, "[x]");
+        assert!(matches!(&d.blocks()[0].kind, Kind::Item { style: ListStyle::Bullet, .. }));
     }
 
     fn set_cell(d: &mut Doc, slot: Slot, to: &str) {

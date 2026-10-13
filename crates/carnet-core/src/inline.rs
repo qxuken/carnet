@@ -288,6 +288,24 @@ fn read_counting(text: &str, count: Count) -> Read {
         }
     }
 
+    // Autolinks, as CommonMark has them: `<https://…>`, `<mailto:…>`, the
+    // address its own words and the brackets its marks. Only one a page
+    // may follow (`export::safe_href`); any other stays as written.
+    let mut i = 0;
+    while let Some(k) = text[i..].find('<') {
+        let at = i + k;
+        i = at + 1;
+        let Some(end) = (!quiet[at]).then(|| autolink_end(text, at)).flatten() else { continue };
+        quiet[at..=end].fill(true);
+        st[at].marker = true;
+        st[end].marker = true;
+        for s in &mut st[at + 1..end] {
+            s.link = true;
+        }
+        pairs.push(Pair { kind: Kind::Link, open: (at, at + 1), close: (end, end + 1) });
+        i = end + 1;
+    }
+
     // Links: `[text](url)`, the text to read and the rest marks. The
     // address may hold brackets of its own, in pairs, as CommonMark has
     // it (`[x](a_(b))`): each `(` is matched to its `)` in one pass along
@@ -327,6 +345,14 @@ fn read_counting(text: &str, count: Count) -> Read {
         quiet[i] = true;
         for s in &mut st[i + 1..j] {
             s.link = true;
+        }
+        // A link's words are drawn without bidi controls: an override in
+        // them would turn the words round, and those after the link, so
+        // `abc\u{202E}txt.exe` read `abcexe.txt`. Kept in the file as marks.
+        for (k, ch) in text[i + 1..j].char_indices() {
+            if is_bidi_control(ch) {
+                st[i + 1 + k..i + 1 + k + ch.len_utf8()].iter_mut().for_each(|s| s.marker = true);
+            }
         }
         for x in j..=k {
             st[x].marker = true;
@@ -555,6 +581,50 @@ fn read_counting(text: &str, count: Count) -> Read {
         }
     }
     Read { styles: st, tints: found, pairs, pictures }
+}
+
+/// The `>` of a CommonMark autolink opening at `at` (`<scheme:…>`, no
+/// space, control or `<` inside), when its address is one a page may
+/// follow: the web's or a mail's.
+fn autolink_end(text: &str, at: usize) -> Option<usize> {
+    let rest = &text[at + 1..];
+    let end = rest.find(['>', '<', ' '])?;
+    let url = &rest[..end];
+    let (scheme, _) = url.split_once(':')?;
+    let ok = rest[end..].starts_with('>')
+        && (2..=32).contains(&scheme.len())
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+        && !url.chars().any(|c| c.is_control() || is_bidi_control(c));
+    (ok && crate::export::safe_href(url).is_some()).then_some(at + 1 + end)
+}
+
+/// Whether a pair is an autolink's (`<https://…>`): its address its words.
+fn is_autolink(text: &str, p: &Pair) -> bool {
+    p.kind == Kind::Link && &text[p.open.0..p.open.1] == "<"
+}
+
+/// Code spans and autolinks, marks and all: where they open, where their
+/// words start, and where they end. Nothing can be put inside one — it
+/// would be read as their words, a tag shown as written in code.
+pub fn sealed(text: &str) -> Vec<(usize, usize, usize)> {
+    pairs(text)
+        .into_iter()
+        .filter(|p| p.kind == Kind::Code || is_autolink(text, p))
+        .map(|p| (p.open.0, p.open.1, p.close.1))
+        .collect()
+}
+
+/// The controls that set which way text runs: embeddings, overrides and
+/// isolates (U+202A–U+202E, U+2066–U+2069).
+pub fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `s` without bidi controls ([`is_bidi_control`]): a link's address as
+/// it is shown, which none can turn round.
+pub fn without_bidi(s: &str) -> String {
+    s.chars().filter(|&c| !is_bidi_control(c)).collect()
 }
 
 /// Where a line's colour tags open and close: every `<mark`, `</mark>`,
@@ -1020,6 +1090,11 @@ fn cut_keeping(text: &str, a: usize, b: usize, keep: Option<Kind>) -> (String, u
         if !crosses(a) && !crosses(b) {
             continue;
         }
+        // An autolink's words are its address: a cut in them is a cut in
+        // the address, its brackets left where they are.
+        if is_autolink(text, p) {
+            continue;
+        }
         // Code is never kept whole around a change: its words are literal,
         // so a style goes outside it, not as marks inside; nor a picture,
         // whose one word is never parted from its marks.
@@ -1437,7 +1512,10 @@ pub fn link_at(text: &str, at: usize) -> Option<(Pair, String)> {
     pairs(text)
         .into_iter()
         .find(|p| p.kind == Kind::Link && p.open.1 <= at && at <= p.close.0)
-        .map(|p| (p, text[p.close.0 + 2..p.close.1 - 1].to_string()))
+        .map(|p| {
+            let url = if is_autolink(text, &p) { &text[p.open.1..p.close.0] } else { &text[p.close.0 + 2..p.close.1 - 1] };
+            (p, url.to_string())
+        })
 }
 
 /// An address given the scheme it was written without: `example.com` is
@@ -1495,7 +1573,16 @@ pub fn link_target(url: &str) -> String {
 pub fn set_link(text: &str, at: usize, url: &str) -> Option<String> {
     let (p, _) = link_at(text, at)?;
     let mut out = text.to_string();
-    out.replace_range(p.close.0 + 2..p.close.1 - 1, &link_target(url));
+    let target = link_target(url);
+    if is_autolink(text, &p) {
+        // Its words are its address: the new one, as an autolink still
+        // where it can be one, else as words and address both.
+        let link = format!("<{target}>");
+        let link = if autolink_end(&link, 0).is_some() { link } else { format!("[{target}]({target})") };
+        out.replace_range(p.open.0..p.close.1, &link);
+        return Some(out);
+    }
+    out.replace_range(p.close.0 + 2..p.close.1 - 1, &target);
     Some(out)
 }
 
@@ -2030,5 +2117,49 @@ mod tests {
             let took = t0.elapsed();
             assert!(took.as_millis() < 3000, "{took:?} for {}…", &line[..40]);
         }
+    }
+
+    /// The finding: `<https://…>` showed as written. A CommonMark
+    /// autolink to the web or a mail is a link, its address its words,
+    /// edited and opened as any link is; any other scheme stays as written.
+    #[test]
+    fn an_autolink_is_a_link_when_a_page_may_follow_it() {
+        let t = "see <https://example.com/a_b_c> or <mailto:me@example.com>.";
+        let v = Visible::of(t);
+        assert_eq!(v.text(t), "see https://example.com/a_b_c or mailto:me@example.com.");
+        assert!(styles(t)[6].link && !styles(t)[6].italic, "its words a link, no `_` read as marks");
+        assert_eq!(link_at(t, 10).map(|l| l.1).as_deref(), Some("https://example.com/a_b_c"));
+        assert_eq!(link_at(t, 40).map(|l| l.1).as_deref(), Some("mailto:me@example.com"));
+        for not in ["<javascript:alert(1)>", "<file:///etc/passwd>", "<https://a b>", "<notalink>", "<x:y>", "<mark>a</mark>"] {
+            assert!(!styles(not).iter().any(|s| s.link), "{not}");
+        }
+        // Given another address: an autolink to it, its words the new
+        // address; one that can't be, words and address both. Taken off:
+        // the address as words.
+        assert_eq!(set_link(t, 10, "example.org").unwrap(), "see <https://example.org> or <mailto:me@example.com>.");
+        assert_eq!(set_link("<https://a.com>", 3, "#top").unwrap(), "[#top](#top)");
+        assert_eq!(unlink("<https://a.com>", 3).unwrap(), "https://a.com");
+        // A letter taken out of its words is taken out of its address.
+        assert_eq!(delete("<https://ab.com>", 10, 11).0, "<https://a.com>");
+    }
+
+    /// The finding: `[abc\u{202E}txt.exe](…) end.` read `abc.dne exe.txt`.
+    /// A link's words are drawn without bidi controls — the file keeps
+    /// them — and an address is shown without them.
+    #[test]
+    fn a_links_words_are_drawn_without_bidi_controls() {
+        let t = "Bidi [abc\u{202E}txt.exe](https://example.com/y) end.";
+        let v = Visible::of(t);
+        assert_eq!(v.text(t), "Bidi abctxt.exe end.");
+        assert_eq!(plain(t), "Bidi abctxt.exe end.");
+        assert!(styles(t)[6].link);
+        for c in ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'] {
+            let t = format!("[a{c}b](x)");
+            assert_eq!(Visible::of(&t).text(&t), "ab", "{c:?}");
+        }
+        assert_eq!(without_bidi("https://x\u{202E}.com\u{2066}"), "https://x.com");
+        // Elsewhere the words are as written.
+        let t = "plain \u{202B}words";
+        assert_eq!(Visible::of(t).text(t), t);
     }
 }

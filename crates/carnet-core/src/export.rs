@@ -441,4 +441,20 @@ mod tests {
         let h = html(md, |s, _| s.to_string());
         assert!(h.contains("<table border=\"1\" cellspacing=\"0\" cellpadding=\"6\"><tr><th>Day</th>") && !h.contains("class=\"table\""), "{h}");
     }
+
+    /// Autolinks are links in the reader, only to the web or a mail; a
+    /// link's words come out without bidi controls, so none turns round
+    /// the words after it (the finding: `abc.dne exe.txt`).
+    #[test]
+    fn autolinks_and_bidi_controls_in_a_links_words() {
+        let v = viewer("<https://example.com/x> and <mailto:a@b.c>, not <javascript:x>", |s, _| Picture::Url(s.into()));
+        assert!(v.contains("<a href=\"https://example.com/x\">https://example.com/x</a>"), "{v}");
+        assert!(v.contains("<a href=\"mailto:a@b.c\">mailto:a@b.c</a>"), "{v}");
+        assert!(v.contains("not &lt;javascript:x&gt;"), "{v}");
+        let v = viewer("Bidi [abc\u{202E}txt.exe](https://example.com/y) end.", |s, _| Picture::Url(s.into()));
+        let words: String = v.split('<').map(|p| p.split_once('>').map_or(p, |(_, w)| w)).collect();
+        assert_eq!(words, "Bidi abctxt.exe end.", "{v}");
+        assert!(v.contains("<a href=\"https://example.com/y\">txt.exe</a> end."), "{v}");
+        assert!(!v.contains('\u{202E}'), "{v}");
+    }
 }
