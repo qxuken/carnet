@@ -1,5 +1,7 @@
 //! Inline styles: `**bold**`, `*italic*`, `~~struck~~`, `` `code` ``,
-//! `[links](url)` and colour — `==highlighted==` as Obsidian writes it,
+//! `<u>underlined</u>` (Markdown has no underline: HTML's tag, which
+//! Obsidian, GitHub and most viewers show; `<ins>` read as one too, and
+//! kept as written), `[links](url)` and colour — `==highlighted==` as Obsidian writes it,
 //! `<mark style="background: …">` for another highlighter and
 //! `<span style="color: …; background: …">` for coloured words, as HTML any
 //! Markdown viewer shows — kept in the text as the Markdown they are. A
@@ -69,6 +71,7 @@ pub struct Style {
     pub bold: bool,
     pub italic: bool,
     pub strike: bool,
+    pub underline: bool,
     pub code: bool,
     pub link: bool,
     /// A highlighter behind the words, 0xRRGGBBAA; `HIGHLIGHT` for the
@@ -95,6 +98,8 @@ pub enum Kind {
     Bold,
     Italic,
     Strike,
+    /// `<u>…</u>`, or `<ins>…</ins>` as another app wrote it.
+    Underline,
     Code,
     Link,
     Tint,
@@ -104,14 +109,21 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// The marks a style is written with.
+    /// The mark a style is opened with (and, but for underline's tag,
+    /// closed with too).
     pub fn marker(self) -> &'static str {
+        self.marks().0
+    }
+
+    /// The marks a style is written with: the opening one, the closing.
+    pub fn marks(self) -> (&'static str, &'static str) {
         match self {
-            Kind::Bold => "**",
-            Kind::Italic => "*",
-            Kind::Strike => "~~",
-            Kind::Code => "`",
-            Kind::Link | Kind::Tint | Kind::Picture => "",
+            Kind::Bold => ("**", "**"),
+            Kind::Italic => ("*", "*"),
+            Kind::Strike => ("~~", "~~"),
+            Kind::Underline => ("<u>", "</u>"),
+            Kind::Code => ("`", "`"),
+            Kind::Link | Kind::Tint | Kind::Picture => ("", ""),
         }
     }
 
@@ -121,6 +133,7 @@ impl Kind {
             Kind::Bold => s.bold,
             Kind::Italic => s.italic,
             Kind::Strike => s.strike,
+            Kind::Underline => s.underline,
             Kind::Code => s.code,
             Kind::Link => s.link,
             Kind::Tint => s.ink != 0 || s.mark != 0,
@@ -363,11 +376,13 @@ fn read_counting(text: &str, count: Count) -> Read {
     }
 
     // Colour: `<mark …>…</mark>` and `<span style="…">…</span>`, nested
-    // as HTML nests; then `==…==`.
+    // as HTML nests, and underline's `<u>…</u>` (`<ins>…</ins>`) among
+    // them; then `==…==`.
     // A tag is checked against what is quiet in a count kept beside the
     // line, and against the closing tags already taken, so a long tag
     // that fails is not walked again for every `<` inside it.
     let mut found: Vec<Tint> = Vec::new();
+    let mut unders: Vec<Pair> = Vec::new();
     let tags = Tags::of(text);
     let mut was_quiet = vec![0usize; b.len() + 1];
     for k in 0..b.len() {
@@ -382,7 +397,7 @@ fn read_counting(text: &str, count: Count) -> Read {
             i += 1;
             continue;
         }
-        let Some((open_end, close)) = tags.closed(text, i) else {
+        let Some((name, open_end, close)) = tags.closed(text, i) else {
             i += 1;
             continue;
         };
@@ -396,9 +411,30 @@ fn read_counting(text: &str, count: Count) -> Read {
             quiet[k] = true;
         }
         taken.insert(close.0, close.1);
-        let (ink, mark) = tag_colors(&text[i..open_end]);
-        found.push(Tint { ink, mark, open, close });
+        if matches!(name, "u" | "ins") {
+            unders.push(Pair { kind: Kind::Underline, open, close });
+        } else {
+            let (ink, mark) = tag_colors(&text[i..open_end]);
+            found.push(Tint { ink, mark, open, close });
+        }
         i = open_end;
+    }
+    // Underlined: the words inside any pair of the tags, however deep, in
+    // one pass along the line.
+    if !unders.is_empty() {
+        let mut depth = vec![0i32; b.len() + 1];
+        for p in &unders {
+            depth[p.open.1] += 1;
+            depth[p.close.0] -= 1;
+        }
+        let mut level = 0;
+        for (k, s) in st.iter_mut().enumerate() {
+            level += depth[k];
+            if level > 0 {
+                s.underline = true;
+            }
+        }
+        pairs.extend(unders);
     }
     let mut open: Option<usize> = None;
     let mut i = 0;
@@ -654,13 +690,14 @@ pub fn without_bidi(s: &str) -> String {
     s.chars().filter(|&c| !is_bidi_control(c)).collect()
 }
 
-/// Where a line's colour tags open and close: every `<mark`, `</mark>`,
-/// `<span` and `</span>`, and every `>`, found once, so each opening tag
-/// finds the tag that closes it without reading the line again.
+/// Where a line's tags open and close: every `<mark`, `</mark>`,
+/// `<span`, `</span>`, `<u`, `</u>`, `<ins` and `</ins>`, and every `>`,
+/// found once, so each opening tag finds the tag that closes it without
+/// reading the line again.
 struct Tags {
     gts: Vec<usize>,
-    mark: Nesting,
-    span: Nesting,
+    /// By name: `mark`, `span`, `u`, `ins`.
+    names: [(&'static str, Nesting); 4],
 }
 
 /// One tag name's opening and closing tags, in order, and for each place
@@ -676,7 +713,9 @@ struct Nesting {
 impl Nesting {
     fn of(text: &str, name: &str) -> Nesting {
         let (opener, closer) = (format!("<{name}"), format!("</{name}>"));
-        let mut at: Vec<(usize, bool)> = text.match_indices(&opener).map(|(k, _)| (k, false)).collect();
+        // Only the tag itself, its name ended: `<ul>` is no `<u>`.
+        let named = |k: usize| text.as_bytes().get(k + opener.len()).is_some_and(|&c| c == b'>' || c.is_ascii_whitespace());
+        let mut at: Vec<(usize, bool)> = text.match_indices(&opener).filter(|&(k, _)| named(k)).map(|(k, _)| (k, false)).collect();
         at.extend(text.match_indices(&closer).map(|(k, _)| (k, true)));
         at.sort_unstable();
         // Closing tags less opening ones before each place, and for each
@@ -708,18 +747,16 @@ impl Nesting {
 impl Tags {
     fn of(text: &str) -> Tags {
         let gts = if text.contains('<') { text.match_indices('>').map(|(k, _)| k).collect() } else { Vec::new() };
-        Tags { gts, mark: Nesting::of(text, "mark"), span: Nesting::of(text, "span") }
+        let names = ["mark", "span", "u", "ins"].map(|n| (n, Nesting::of(text, n)));
+        Tags { gts, names }
     }
 
-    /// An HTML colour tag opening at `at` — `<mark>`, `<mark style="…">`
-    /// or `<span style="…">` — and the tag that closes it, nesting
-    /// counted: where the opening tag ends, and where the closing one is.
-    fn closed(&self, text: &str, at: usize) -> Option<(usize, (usize, usize))> {
-        let (name, nesting) = match self.mark.at.binary_search(&(at, false)) {
-            Ok(_) => ("mark", &self.mark),
-            Err(_) if self.span.at.binary_search(&(at, false)).is_ok() => ("span", &self.span),
-            Err(_) => return None,
-        };
+    /// An HTML tag opening at `at` — `<mark>`, `<mark style="…">`,
+    /// `<span style="…">`, `<u>` or `<ins>` — and the tag that closes it,
+    /// nesting counted: its name, where the opening tag ends, and where
+    /// the closing one is.
+    fn closed(&self, text: &str, at: usize) -> Option<(&'static str, usize, (usize, usize))> {
+        let (name, nesting) = self.names.iter().find(|(_, n)| n.at.binary_search(&(at, false)).is_ok()).map(|(name, n)| (*name, n))?;
         let gt = *self.gts.get(self.gts.partition_point(|&k| k < at))?;
         // Past the name, a space or the tag's end: `<marker>` is no mark.
         let after = at + 1 + name.len();
@@ -727,7 +764,7 @@ impl Tags {
             return None;
         }
         let close = nesting.close(gt + 1)?;
-        Some((gt + 1, (close, close + name.len() + 3)))
+        Some((name, gt + 1, (close, close + name.len() + 3)))
     }
 }
 
@@ -1438,7 +1475,7 @@ fn wrap(text: &str, at: (usize, usize), open: &str, close: &str) -> String {
     format!("{}{open}{}{close}{}", &text[..at.0], &text[at.0..at.1], &text[at.1..])
 }
 
-/// Bold, italic, struck or code on `a..b`: off where all of it has it
+/// Bold, italic, struck, underlined or code on `a..b`: off where all of it has it
 /// already, else on for all of it. `None` when there are no words there,
 /// or no marks that say it (see `edit_range`).
 pub fn emphasis(text: &str, a: usize, b: usize, kind: Kind) -> Option<(String, usize, usize)> {
@@ -1469,7 +1506,8 @@ pub fn emphasis(text: &str, a: usize, b: usize, kind: Kind) -> Option<(String, u
             let (o, c) = code_marks(&m);
             return format!("{o}{m}{c}");
         }
-        wrap(&m, innermost(&m), kind.marker(), kind.marker())
+        let (open, close) = kind.marks();
+        wrap(&m, innermost(&m), open, close)
     })
 }
 
@@ -1669,7 +1707,7 @@ pub fn switch_at(text: &str, at: usize, kind: Kind) -> (String, String) {
         .max_by_key(|p| p.open.0);
     match inside {
         Some(p) => (text[p.close.0..p.close.1].to_string(), text[p.open.0..p.open.1].to_string()),
-        None => (kind.marker().to_string(), kind.marker().to_string()),
+        None => (kind.marks().0.to_string(), kind.marks().1.to_string()),
     }
 }
 
@@ -2234,5 +2272,118 @@ mod tests {
         // Elsewhere the words are as written.
         let t = "plain \u{202B}words";
         assert_eq!(Visible::of(t).text(t), t);
+    }
+
+    /// Each byte as underline sees it: `m` a mark, `u` underlined words,
+    /// `.` the rest.
+    fn under(text: &str) -> String {
+        styles(text).iter().map(|s| if s.marker { 'm' } else if s.underline { 'u' } else { '.' }).collect()
+    }
+
+    /// Underline is HTML's `<u>` (Markdown has none), read wherever it
+    /// pairs, inside or around the other styles, and `<ins>` as another
+    /// app writes it; an unclosed tag, or one in code, is words.
+    #[test]
+    fn underline_is_read_from_its_tags() {
+        assert_eq!(under("a <u>b</u> c"), "..mmmummmm..");
+        assert_eq!(under("<ins>x</ins>"), "mmmmmummmmmm");
+        assert_eq!(under("<u>a <u>b</u> c</u>!"), "mmmuummmummmmuummmm.");
+        // With the other styles, either way round.
+        for (text, word) in [
+            ("**<u>w</u>**", 5),
+            ("<u>**w**</u>", 5),
+            ("*<u>w</u>*", 4),
+            ("<u>*w*</u>", 4),
+            ("~~<u>w</u>~~", 5),
+            ("<u>~~w~~</u>", 5),
+            ("==<u>w</u>==", 5),
+            ("<u>==w==</u>", 5),
+            ("<span style=\"color: #C0553F\"><u>w</u></span>", 32),
+            ("<u><span style=\"color: #C0553F\">w</span></u>", 32),
+            ("<mark style=\"background: #A3D9FF\"><u>w</u></mark>", 37),
+            ("[<u>w</u>](http://x)", 4),
+            ("<u>[w](http://x)</u>", 4),
+        ] {
+            let s = styles(text)[word];
+            assert!(!s.marker && s.underline, "{text}: {s:?}");
+            assert_eq!(plain(text), "w", "{text}");
+            let other = s.bold || s.italic || s.strike || s.mark != 0 || s.ink != 0 || s.link;
+            assert!(other, "{text}: the other style too");
+        }
+        // Over a line break inside a paragraph.
+        assert_eq!(under("a <u>b\nc</u> d"), "..mmmuuummmm..");
+        // Not a pair: words, as written.
+        for text in ["a <u>b", "a</u> b", "<ul>x</u>", "<uu>x</uu>", "`<u>x</u>`", "\\<u>x</u>"] {
+            assert!(styles(text).iter().all(|s| !s.underline), "{text}");
+        }
+        assert_eq!(plain("a <u>b"), "a <u>b");
+        assert_eq!(plain("`<u>x</u>`"), "<u>x</u>");
+        // With attributes, as an app might write it.
+        assert_eq!(plain("<u class=\"x\">w</u>"), "w");
+    }
+
+    /// Words underlined by the selection, whole or in part, across other
+    /// styles, and the same again taking it off; `<ins>` is left as it was
+    /// written, and taken off as `<u>` is.
+    #[test]
+    fn underline_goes_on_and_off_the_selection() {
+        let on = |t: &str, a: usize, b: usize| {
+            let v = Visible::of(t);
+            emphasis(t, v.at(a), v.source(b - 1) + 1, Kind::Underline).map(|r| r.0)
+        };
+        assert_eq!(on("make this loud", 10, 14).unwrap(), "make this <u>loud</u>");
+        assert_eq!(on("make this <u>loud</u>", 10, 14).unwrap(), "make this loud");
+        // Part of a run: the rest stays underlined.
+        assert_eq!(on("<u>loud words</u>", 0, 4).unwrap(), "loud<u> words</u>");
+        assert_eq!(on("<u>loud words</u>", 5, 10).unwrap(), "<u>loud </u>words");
+        // Part underlined already: all of it on.
+        assert_eq!(on("one <u>two</u> three", 0, 13).unwrap(), "<u>one two three</u>");
+        // Across styles: nested in them, each kept.
+        let out = on("plain **bold** *it*", 0, 14).unwrap();
+        assert_eq!(plain(&out), "plain bold it");
+        assert!(styles(&out).iter().zip(out.bytes()).filter(|(s, c)| !s.marker && *c != b' ').all(|(s, _)| s.underline), "{out}");
+        assert_eq!(out, "<u>plain **bold** *it*</u>");
+        assert_eq!(on(&out, 0, 14).unwrap(), "plain **bold** *it*");
+        // Inside a bold run: nested in it.
+        assert_eq!(on("**all of it**", 4, 6).unwrap(), "**all <u>of</u> it**");
+        // A link's words, and a coloured run's.
+        assert_eq!(on("see [docs](http://a)", 4, 8).unwrap(), "see [<u>docs</u>](http://a)");
+        assert_eq!(on("<span style=\"color: #C0553F\">red</span>", 0, 3).unwrap(), "<span style=\"color: #C0553F\"><u>red</u></span>");
+        // Bold on underlined words, and over part of them.
+        let t = "<u>under</u>";
+        let v = Visible::of(t);
+        assert_eq!(emphasis(t, v.at(0), v.at(5), Kind::Bold).unwrap().0, "<u>**under**</u>");
+        assert_eq!(emphasis(t, v.at(0), v.at(2), Kind::Bold).unwrap().0, "<u>**un**der</u>");
+        // Another app's `<ins>`: kept, and taken off.
+        assert_eq!(on("<ins>kept</ins> new", 5, 8).unwrap(), "<ins>kept</ins> <u>new</u>");
+        assert_eq!(on("<ins>kept</ins>", 0, 4).unwrap(), "kept");
+        assert_eq!(on("<ins>kept words</ins>", 0, 4).unwrap(), "kept<ins> words</ins>");
+        // Spaces chosen at the ends stay outside, as with the others.
+        assert_eq!(emphasis("a word ", 2, 7, Kind::Underline).unwrap().0, "a <u>word</u> ");
+    }
+
+    /// Underline switched on with nothing selected is typed inside its
+    /// tags; inside a run, off for what is typed.
+    #[test]
+    fn underline_switches_for_what_is_typed() {
+        assert_eq!(switch_at("plain", 5, Kind::Underline), ("<u>".into(), "</u>".into()));
+        let t = "<u>under</u>";
+        assert_eq!(switch_at(t, 8, Kind::Underline), ("</u>".into(), "<u>".into()));
+        assert_eq!(insert_styled("plain", 5, "x", "<u>", "</u>"), ("plain<u>x</u>".into(), 9));
+        // At the run's end, off: past its closing tag.
+        assert_eq!(insert_styled(t, 8, "x", "</u>", "<u>").0, "<u>under</u>x");
+        // Typed next to a run of it: joined to it.
+        assert_eq!(insert_styled("<u>a</u>b", 8, "c", "<u>", "</u>").0, "<u>ac</u>b");
+    }
+
+    /// A line cut, joined and split keeps underline's tags whole.
+    #[test]
+    fn underline_survives_cuts_and_joins() {
+        assert_eq!(split("<u>one two</u>", 6), ("<u>one</u>".into(), "<u> two</u>".into()));
+        assert_eq!(join("<u>one</u>", "<u> two</u>"), "<u>one two</u>");
+        assert_eq!(slice("x <u>one two</u>", 5, 8), "<u>one</u>");
+        let (out, _) = delete("<u>one</u> mid <u>two</u>", 10, 18);
+        assert_eq!(out, "<u>onetwo</u>");
+        assert_eq!(merge("<u>a</u><u>b</u>"), "<u>ab</u>");
     }
 }

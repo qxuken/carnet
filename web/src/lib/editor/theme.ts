@@ -65,13 +65,21 @@ export const theme = EditorView.theme({
   // one line, or being measured, as the rest of its words.
   '.cm-initial.drop2::first-letter': { fontSize: '3.6em' },
   '.cm-initial.drop-none::first-letter, .cm-initial.drop-measure::first-letter': { float: 'none', font: 'inherit', margin: '0', color: 'inherit' },
-  '.cm-code, .cm-front': { font: '14px/1.6 ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', paddingLeft: '12px !important', paddingRight: '12px !important' },
+  '.cm-code, .cm-front': { font: '14px/1.6 var(--mono)', backgroundColor: 'var(--sunken)', paddingLeft: '12px !important', paddingRight: '12px !important' },
   '.cm-front': { color: 'var(--muted)' },
   '.cm-b': { fontWeight: '700' },
   '.cm-i': { fontStyle: 'italic' },
   '.cm-s': { textDecoration: 'line-through' },
-  '.cm-c': { font: '0.85em ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', borderRadius: '4px', padding: '1px 4px' },
+  '.cm-c': { font: '0.85em var(--mono)', backgroundColor: 'var(--sunken)', borderRadius: '4px', padding: '1px 4px' },
+  // Over a link a press would open (links.ts): a hand.
+  '&.cm-link-hand .cm-content': { cursor: 'pointer' },
   '.cm-l': { color: 'var(--accent-ink)', textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, var(--accent-ink) 40%, transparent)' },
+  // Underlined words: a line in their own ink, a little below the
+  // letters. A link underlined is still the one line a link has; struck
+  // too, both lines.
+  '.cm-u': { textDecorationLine: 'underline', textUnderlineOffset: '0.18em' },
+  '.cm-u.cm-s': { textDecorationLine: 'underline line-through' },
+  '.cm-l.cm-u': { textUnderlineOffset: 'auto' },
   '.cm-marked': { borderRadius: '3px' },
   // A divider as the desktop draws it by default (settings `divider =
   // dots`): three dots 3px round, 15px apart, faint, with the desktop's
@@ -168,6 +176,9 @@ export const theme = EditorView.theme({
   '.cm-grip-left, .cm-grip-right': { top: '50%', width: '8px', height: 'min(30px, 50%)', transform: 'translateY(-50%)', cursor: 'ew-resize' },
   '.cm-grip-left': { left: '-9px' },
   '.cm-grip-right': { right: '-9px' },
+  // A resize lined up with a picture beside it (picture.ts): a thin line
+  // under them, as the desktop draws it.
+  '.cm-snap-guide': { position: 'absolute', height: '1.5px', background: 'var(--accent)', pointerEvents: 'none', zIndex: '4' },
   '.cm-grip-corner': { right: '-10px', bottom: '-10px', width: '14px', height: '14px', cursor: 'nwse-resize' },
   '.cm-picked.right .cm-grip-corner': { right: 'auto', left: '-10px', cursor: 'nesw-resize' },
   '@media (pointer: coarse)': {

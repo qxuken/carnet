@@ -451,7 +451,8 @@ impl Editor {
         })
     }
 
-    /// Bold, italic, struck or code (`inline::Kind`) on the selection; with
+    /// Bold, italic, struck, underlined or code (`inline::Kind`) on the
+    /// selection; with
     /// nothing selected, or a picture or divider chosen, on (or off) for
     /// what is typed next.
     pub fn style(&mut self, kind: inline::Kind) -> bool {
@@ -492,6 +493,7 @@ impl Editor {
                     "Bold" => s.bold = !s.bold,
                     "Italic" => s.italic = !s.italic,
                     "Strike" => s.strike = !s.strike,
+                    "Underline" => s.underline = !s.underline,
                     "Code" => s.code = !s.code,
                     "mark" => s.mark = self.typing.pending_tint(self.caret, false).unwrap_or(s.mark),
                     _ => {}
@@ -773,6 +775,19 @@ impl Editor {
     /// link is edited and taken off like any, but not opened.
     pub fn link_to_open(&self) -> Option<String> {
         self.link_here().as_deref().and_then(carnet_core::export::safe_href)
+    }
+
+    /// The address a press at CodeMirror's `line` and `col` opens, links
+    /// opening `how` (`page::LinkOpen::key`; ⌘-click if it's none of
+    /// them): the link whose words are there, if a page may follow it
+    /// ([`page::link_under`]). What the pointer is a hand over, too.
+    pub fn link_under(&self, line: usize, col: usize, how: &str) -> Option<String> {
+        if line == 0 {
+            return None;
+        }
+        let pos = self.pos(line, col)?;
+        let url = page::link_under(&self.doc, pos, page::LinkOpen::from_key(how).unwrap_or_default())?;
+        carnet_core::export::safe_href(&inline::without_bidi(&url))
     }
 
     /// The link the caret is in given address `url`, or taken off its
@@ -1219,6 +1234,32 @@ mod tests {
         assert_eq!(e.lines()[1].text, "one two three");
     }
 
+    /// Underline as the desktop has it: `<u>` in the note, never among
+    /// the words CodeMirror has; on the selection, and for what is typed
+    /// with none; off again the same way; a copy's HTML `<u>`.
+    #[test]
+    fn underline_on_the_selection_and_for_what_is_typed() {
+        let mut e = Editor::open("# T\n\none two three\n");
+        e.select(1, 4, 1, 7);
+        assert!(e.style(inline::Kind::Underline));
+        assert!(e.markdown().contains("one <u>two</u> three"), "{}", e.markdown());
+        assert_eq!(e.lines()[1].text, "one two three");
+        assert!(e.look(1).runs.iter().any(|(a, b, s)| (*a, *b) == (4, 7) && s.underline), "drawn underlined");
+        assert!(e.style_here().underline);
+        let html = e.copy_for_html().map(|md| carnet_core::export::html(&md, |s, _| s.to_string()));
+        assert_eq!(html.as_deref(), Some("<p><u>two</u></p>"));
+        e.select(1, 4, 1, 7);
+        e.style(inline::Kind::Underline);
+        assert!(e.markdown().contains("one two three"), "{}", e.markdown());
+        // Nothing selected: on for what is typed, the toolbar's state too.
+        e.select(1, 13, 1, 13);
+        assert!(e.style(inline::Kind::Underline));
+        assert!(e.style_here().underline);
+        e.input(" four");
+        assert!(e.markdown().contains("one two three <u>four</u>"), "{}", e.markdown());
+        assert_eq!(e.lines()[1].text, "one two three four");
+    }
+
     #[test]
     fn backspace_undoes_structure_first_then_joins() {
         let mut e = Editor::open("# T\n\nfirst\n\n- [ ] milk\n");
@@ -1442,6 +1483,23 @@ mod tests {
             assert!(e.link_here().is_some(), "{url}: {}", e.markdown());
             assert_eq!(e.link_to_open().as_deref(), opens, "{url}");
         }
+    }
+
+    /// The link under a press, as the editor's pointer asks: inside its
+    /// words; at their end only when a click doesn't open it; never one
+    /// a page may not follow; never in the title.
+    #[test]
+    fn the_link_under_a_press() {
+        let mut e = Editor::open("# T\n\nsee [docs](https://a.test) [run](javascript:x)\n");
+        assert_eq!(e.link_under(1, 6, "click").as_deref(), Some("https://a.test"));
+        assert_eq!(e.link_under(1, 8, "click"), None, "at the words' end");
+        assert_eq!(e.link_under(1, 8, "cmd-click").as_deref(), Some("https://a.test"));
+        assert_eq!(e.link_under(1, 6, "double-click").as_deref(), Some("https://a.test"));
+        assert_eq!(e.link_under(1, 2, "click"), None);
+        assert_eq!(e.link_under(1, 11, "click"), None, "a script's link");
+        assert_eq!(e.link_under(0, 1, "click"), None, "the title");
+        e.select(1, 0, 1, 0);
+        assert_eq!(e.link_under(1, 6, "nonsense").as_deref(), Some("https://a.test"), "⌘-click when unknown");
     }
 
     /// A picture carried into a table's cell, along to another, and out
@@ -1752,6 +1810,35 @@ mod tests {
         assert!(e.cell_select(1, 1, 1, 0, 0));
         assert!(e.paste("![sea|right|160](q.png)"));
         assert!(e.markdown().contains("| azb | ![sea](q.png) |"), "{}", e.markdown());
+    }
+
+    /// As on the desktop: a line of an exported paragraph (Apple Notes'
+    /// lines end in line breaks) turned alone, the rest of the file as it
+    /// was; a selection over three lines, three items.
+    #[test]
+    fn a_line_of_an_exported_paragraph_is_turned_alone() {
+        const EXPORT: &str = include_str!("../../carnet-core/tests/fixtures/apple-notes.md");
+        let mut e = Editor::open(EXPORT);
+        assert_eq!(e.markdown(), EXPORT);
+        assert_eq!(e.lines()[1].text, "путь: жильё   ");
+        e.select(1, 3, 1, 3);
+        e.turn(page::TURN_BULLET);
+        assert_eq!(e.markdown(), EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n", 1));
+        assert!(e.turned_to(page::TURN_BULLET));
+        assert_eq!(e.caret_lc(), (1, 3, 1, 3));
+        assert!(e.undo());
+        assert_eq!(e.markdown(), EXPORT);
+        let n = e.lines().iter().position(|l| l.text == "полка для книг в коридоре  ").unwrap();
+        e.select(n, 2, n + 2, 4);
+        e.turn(page::TURN_TODO);
+        assert_eq!(
+            e.markdown(),
+            EXPORT.replacen(
+                "мысли  \nполка для книг в коридоре  \npicture rail  \nskylight window  \npocket",
+                "мысли  \n\n- [ ] полка для книг в коридоре\n- [ ] picture rail\n- [ ] skylight window\n\npocket",
+                1
+            )
+        );
     }
 
     #[test]

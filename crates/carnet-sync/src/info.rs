@@ -60,6 +60,9 @@ impl ServerInfo {
 pub enum Problem {
     /// Nothing answered: a wrong address, or no connection.
     Unreachable,
+    /// The DNS has no address for the server's name (its host): mistyped,
+    /// or new and not seen everywhere yet.
+    DomainNotFound(String),
     /// Something answered, but not a Carnet server.
     NotCarnet,
     /// A Carnet server this build and it can't talk.
@@ -68,11 +71,12 @@ pub enum Problem {
 
 impl Problem {
     /// What's said of it, to the person holding the app.
-    pub fn words(&self) -> &'static str {
+    pub fn words(&self) -> String {
         match self {
-            Problem::Unreachable => "Couldn't reach that server. Check the address and your connection.",
-            Problem::NotCarnet => "Something answers at that address, but it isn't a Carnet server.",
-            Problem::Refused(fit) => fit.refusal().unwrap_or("Carnet can't sync with this server."),
+            Problem::Unreachable => "Couldn't reach that server. Check the address and your connection.".into(),
+            Problem::DomainNotFound(host) => format!("Domain not found: {host}. Check the address; a new name can take a few minutes to appear."),
+            Problem::NotCarnet => "Something answers at that address, but it isn't a Carnet server.".into(),
+            Problem::Refused(fit) => fit.refusal().unwrap_or("Carnet can't sync with this server.").into(),
         }
     }
 }
@@ -107,9 +111,15 @@ pub fn read(answer: &Answer) -> Result<ServerInfo, Problem> {
     }
 }
 
-/// [`read`], for an answer that may not have come.
+/// [`read`], for an answer that may not have come: a name with no
+/// address is told apart from a server that didn't answer.
 pub fn checked(answer: Result<Answer, String>) -> Result<ServerInfo, Problem> {
-    answer.map_err(|_| Problem::Unreachable).and_then(|a| read(&a))
+    answer
+        .map_err(|why| match crate::http::domain_not_found(&why) {
+            Some(host) => Problem::DomainNotFound(host.to_string()),
+            None => Problem::Unreachable,
+        })
+        .and_then(|a| read(&a))
 }
 
 #[cfg(test)]
@@ -118,7 +128,7 @@ mod tests {
     use crate::compat::{OLDEST, PROTOCOL};
 
     fn answer(status: u16, body: &str) -> Answer {
-        Answer { status, body: body.as_bytes().to_vec() }
+        Answer { status, body: body.as_bytes().to_vec(), ..Answer::default() }
     }
 
     #[test]
@@ -147,7 +157,12 @@ mod tests {
         let later = format!(r#"{{"server":"carnet-server","protocol":{0},"oldest":{0},"deprecated":{0}}}"#, PROTOCOL + 1);
         assert_eq!(read(&answer(200, &later)), Err(Problem::Refused(Fit::AppTooOld)));
         assert_eq!(checked(Err("refused".into())), Err(Problem::Unreachable));
-        for p in [Problem::Unreachable, Problem::NotCarnet, Problem::Refused(Fit::ServerTooOld)] {
+        assert_eq!(checked(Err("timed out".into())), Err(Problem::Unreachable));
+        let unknown = crate::http::ask("http://carnet-test.invalid/v1/info".into(), None, || {}).unwrap().recv().unwrap();
+        let p = checked(unknown).unwrap_err();
+        assert_eq!(p, Problem::DomainNotFound("carnet-test.invalid".into()));
+        assert_eq!(p.words(), "Domain not found: carnet-test.invalid. Check the address; a new name can take a few minutes to appear.");
+        for p in [Problem::Unreachable, Problem::DomainNotFound("x.example".into()), Problem::NotCarnet, Problem::Refused(Fit::ServerTooOld)] {
             assert!(p.words().ends_with('.'), "{p:?}");
         }
     }

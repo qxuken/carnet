@@ -3,6 +3,7 @@
 //! `key = value` lines in the OS's config folder, read once at start and
 //! written on every change.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -125,6 +126,10 @@ pub struct Settings {
     pub font: String,
     /// The title's and headings' face; empty for the built-in serif.
     pub heading_font: String,
+    /// Code's face, a block of it or a word: a monospaced family by name;
+    /// empty for the system's own monospace (SF Mono or Menlo, Cascadia
+    /// Mono or Consolas, DejaVu Sans Mono…).
+    pub code_font: String,
     /// The body's size in px; headings and tables scale with it.
     pub size: u32,
     pub width: Width,
@@ -157,12 +162,25 @@ pub struct Settings {
     /// The line being written is held near the middle of the window, the
     /// page scrolling under it, as on a typewriter.
     pub typewriter: bool,
+    /// How a link in a note opens while it's written in: ⌘-click (Ctrl
+    /// elsewhere), a click, or a double-click.
+    pub link_open: carnet_core::page::LinkOpen,
     /// The library shows beside the page; hidden, the page has the
     /// window.
     pub sidebar: bool,
+    /// The folders whose subfolders the library hides, by path: this
+    /// device's view of them, not the notes'. One `collapsed = path` line
+    /// each.
+    pub collapsed: BTreeSet<String>,
     /// Colours given lately, newest first (0xRRGGBBAA): the picker's
     /// recent row.
     pub colors: Vec<u32>,
+    /// Once a day, GitHub asked whether a newer Carnet is out
+    /// (src/update.rs).
+    pub check_updates: bool,
+    /// The newest version the app has said is out, so it's said once;
+    /// empty for none.
+    pub told_update: String,
     /// Where the notes live; `None` for `~/Documents/Carnet`.
     pub dir: Option<PathBuf>,
     /// The file they are kept in; `None` keeps them in memory (tests).
@@ -177,6 +195,7 @@ impl Default for Settings {
             density: Density::Comfortable,
             font: String::new(),
             heading_font: String::new(),
+            code_font: String::new(),
             size: 16,
             width: Width::Medium,
             sort: Sort::Edited,
@@ -190,8 +209,12 @@ impl Default for Settings {
             fade_tools: true,
             focus: false,
             typewriter: false,
+            link_open: carnet_core::page::LinkOpen::ModClick,
             sidebar: true,
+            collapsed: BTreeSet::new(),
             colors: Vec::new(),
+            check_updates: true,
+            told_update: String::new(),
             dir: None,
             file: None,
         }
@@ -236,6 +259,7 @@ impl Settings {
                 "density" => s.density = Density::from_key(v).unwrap_or(Density::Comfortable),
                 "font" => s.font = v.to_string(),
                 "heading_font" => s.heading_font = v.to_string(),
+                "code_font" => s.code_font = v.to_string(),
                 "size" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.size = n.clamp(*SIZES.start(), *SIZES.end());
@@ -273,10 +297,16 @@ impl Settings {
                 "toolbar" => s.fade_tools = v != "stays",
                 "focus" => s.focus = v == "on",
                 "typewriter" => s.typewriter = v == "on",
+                "links" => s.link_open = carnet_core::page::LinkOpen::from_key(v).unwrap_or_default(),
                 "sidebar" => s.sidebar = v != "hidden",
+                "collapsed" if !v.is_empty() => {
+                    s.collapsed.insert(v.to_string());
+                }
                 "colors" => {
                     s.colors = v.split(',').filter_map(carnet_core::inline::parse_color).take(10).collect();
                 }
+                "check_updates" => s.check_updates = v != "off",
+                "told_update" => s.told_update = v.to_string(),
                 "dir" if !v.is_empty() => s.dir = Some(PathBuf::from(v)),
                 _ => {}
             }
@@ -301,12 +331,14 @@ impl Settings {
             Sort::Created => "created",
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
+        let collapsed: String = self.collapsed.iter().map(|f| format!("collapsed = {f}\n")).collect();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\ncode_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nlinks = {}\nsidebar = {}\n{collapsed}colors = {}\ncheck_updates = {}\ntold_update = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
             self.heading_font,
+            self.code_font,
             self.size,
             if self.dates_created { "created" } else { "edited" },
             self.divider.key(),
@@ -318,8 +350,11 @@ impl Settings {
             if self.fade_tools { "fades" } else { "stays" },
             if self.focus { "on" } else { "off" },
             if self.typewriter { "on" } else { "off" },
+            self.link_open.key(),
             if self.sidebar { "shown" } else { "hidden" },
             self.colors.iter().map(|&c| carnet_core::inline::css_color(c)).collect::<Vec<_>>().join(","),
+            if self.check_updates { "on" } else { "off" },
+            self.told_update,
         )
     }
 
@@ -327,14 +362,18 @@ impl Settings {
     /// colours, faces, size, width, the letter and dividers, the window
     /// (solid or translucent, taken at the next start), and the writing
     /// aids. Not the notes folder, the library (its order, dates, width,
-    /// whether it shows), nor the colours given lately.
+    /// whether it shows), the colours given lately, nor the check for
+    /// updates.
     pub fn reset_look(&mut self) {
         *self = Settings {
             sort: self.sort,
             dates_created: self.dates_created,
             library_w: self.library_w,
             sidebar: self.sidebar,
+            collapsed: std::mem::take(&mut self.collapsed),
             colors: std::mem::take(&mut self.colors),
+            check_updates: self.check_updates,
+            told_update: std::mem::take(&mut self.told_update),
             dir: self.dir.take(),
             file: self.file.take(),
             ..Settings::default()
@@ -389,6 +428,7 @@ mod tests {
             density: Density::Airy,
             font: "Georgia".into(),
             heading_font: "Inter".into(),
+            code_font: "JetBrains Mono".into(),
             size: 18,
             width: Width::Wide,
             sort: Sort::Title,
@@ -402,8 +442,12 @@ mod tests {
             fade_tools: false,
             focus: true,
             typewriter: true,
+            link_open: carnet_core::page::LinkOpen::DoubleClick,
             sidebar: false,
+            collapsed: ["Work".to_string(), "Work/Old, kept = 2".to_string()].into(),
             colors: vec![0xc0504dff, 0x12345680],
+            check_updates: false,
+            told_update: "0.1.2".into(),
             dir: Some(PathBuf::from("D:\\My notes")),
             file: None,
         };
@@ -421,13 +465,33 @@ mod tests {
         assert!(!old.to_text().contains("initial ="));
         assert_eq!(Settings::parse("initial_lines = 9\n").initial_lines, 4);
         assert_eq!(Settings::parse("initial_lines = 1\n").initial_lines, 2);
+        // How links open: by its word; one not known, ⌘-click.
+        assert_eq!(Settings::parse("links = click\n").link_open, carnet_core::page::LinkOpen::Click);
+        assert_eq!(Settings::parse("links = triple\n").link_open, carnet_core::page::LinkOpen::ModClick);
+    }
+
+    /// The check for updates is on unless the file says off: a file from
+    /// before it checks; one an older app wrote back (dropping the key)
+    /// checks again.
+    #[test]
+    fn the_check_for_updates_is_on_unless_turned_off() {
+        assert!(Settings::default().check_updates);
+        assert!(Settings::parse("theme = dark\n").check_updates, "a file from before it");
+        let off = Settings::parse("check_updates = off\ntold_update = 0.1.2\n");
+        assert!(!off.check_updates);
+        assert_eq!(off.told_update, "0.1.2");
+        assert!(off.to_text().contains("check_updates = off\n"));
+        assert!(Settings::parse(&Settings::default().to_text()).check_updates);
+        let mut s = Settings { check_updates: false, size: 20, ..Settings::default() };
+        s.reset_look();
+        assert!(!s.check_updates, "not part of the look");
     }
 
     #[test]
     fn a_reset_puts_back_the_look_and_keeps_the_rest() {
         let mut s = Settings::parse(
-            "theme = dark\npalette = sage\nfont = Georgia\nsize = 20\nwidth = wide\ninitial_lines = 4\nfocus = on\n\
-             window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncolors = #c0504d\ndir = /notes\n",
+            "theme = dark\npalette = sage\nfont = Georgia\ncode_font = Menlo\nsize = 20\nwidth = wide\ninitial_lines = 4\nfocus = on\n\
+             window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncollapsed = Work\ncolors = #c0504d\ndir = /notes\n",
         );
         s.file = Some(PathBuf::from("/c/settings.txt"));
         assert!(!s.look_is_default());
@@ -436,8 +500,10 @@ mod tests {
         let d = Settings::default();
         assert_eq!((s.theme, s.palette, s.font.as_str(), s.size, s.width), (d.theme, d.palette, "", 16, Width::Medium));
         assert_eq!((s.initial_lines, s.focus), (3, false));
+        assert_eq!(s.code_font, "", "code in the system's monospace again");
         assert_eq!(s.translucent, d.translucent, "the window as at first");
         assert_eq!((s.sort, s.dates_created, s.library_w, s.sidebar), (Sort::Title, true, 300, false));
+        assert!(s.collapsed.contains("Work"), "the folders folded stay folded");
         assert_eq!(s.colors, vec![0xc0504dff]);
         assert_eq!(s.dir.as_deref(), Some(Path::new("/notes")));
         assert_eq!(s.file.as_deref(), Some(Path::new("/c/settings.txt")));

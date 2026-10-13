@@ -72,6 +72,14 @@ impl Carnet {
             Msg::SetToolbar { to } => s.fade_tools = to == 1,
             Msg::SetFocus { to } => s.focus = to == 1,
             Msg::SetTypewriter { to } => s.typewriter = to == 1,
+            Msg::SetLinkOpen { to } => s.link_open = page::LinkOpen::ALL[(to as usize).min(page::LinkOpen::ALL.len() - 1)],
+            Msg::SetCheckUpdates { to } => s.check_updates = to == 1,
+            Msg::OpenRelease => {
+                if let Some(page) = self.updates.newer().map(crate::update::Release::page) {
+                    self.open_url(&page);
+                }
+                return;
+            }
             // From zen, the library's switch shows it: zen is over.
             Msg::ToggleSidebar if self.zen => {
                 self.zen = false;
@@ -136,6 +144,7 @@ impl Carnet {
                 match which {
                     0 => s.font = name,
                     1 => s.heading_font = name,
+                    3 => s.code_font = name,
                     _ => s.initial_font = name,
                 }
                 self.font_pick = None;
@@ -184,6 +193,26 @@ impl Carnet {
             self.sync_reset_fields = true;
             self.sync.error = None;
             self.focus_req = Some(Field::SyncCode);
+        }
+    }
+
+    /// Whether a newer Carnet is out, its turn: asked of GitHub when it's
+    /// time, while the check is on. A version found is said once, in a
+    /// notice, when no other is showing; Settings → About says it while
+    /// it's out.
+    pub(super) fn updates_tick(&mut self) {
+        if let Some(found) = self.updates.tick(self.settings.check_updates, Instant::now()) {
+            let v = found.version.to_string();
+            if self.settings.told_update != v {
+                self.update_to_tell = Some(v);
+            }
+        }
+        if self.notice.is_none()
+            && let Some(v) = self.update_to_tell.take()
+        {
+            self.notify(format!("Carnet {v} is out: Settings has the download"), None);
+            self.settings.told_update = v;
+            self.save_settings();
         }
     }
 
@@ -434,6 +463,14 @@ impl Carnet {
                 if self.font_pick == Some(1) {
                     self.font_list(ui, l, 1, &s.heading_font);
                 }
+                // Code, a block or a word of it: a monospaced face.
+                let code_name = if s.code_font.is_empty() { default_font_name(3).to_string() } else { s.code_font.clone() };
+                sub_setting(ui, l, "Code", |ui| {
+                    font_pill(ui, l, "font-code", &code_name, l.code, self.font_pick == Some(3), Msg::FontMenu { which: 3 });
+                });
+                if self.font_pick == Some(3) {
+                    self.font_list(ui, l, 3, &s.code_font);
+                }
             });
         });
         // What a note will look like, at the size and in the faces chosen.
@@ -464,8 +501,16 @@ impl Carnet {
                 // paragraph's from the toolbar.
                 let (cap, rest) = words.split_at(1);
                 let ink = if s.initial_accent { l.c.accent_ink } else { t.fg };
+                // And a word of code, in its face, as the page draws one.
+                let (before, after) = rest.split_once("Markdown").unwrap_or((rest, ""));
+                let code = Span::new(if after.is_empty() { "" } else { "Markdown" })
+                    .family(l.code)
+                    .size((body.size * 0.875).round())
+                    .color(l.c.accent_ink)
+                    .bg(t.fg.with_alpha(0.09))
+                    .bg_radius(4.0);
                 ui.rich_text(
-                    &[Span::new(cap).family(l.initial).color(ink), Span::new(rest)],
+                    &[Span::new(cap).family(l.initial).color(ink), Span::new(before), code, Span::new(after)],
                     body.initial_letter(s.initial_lines),
                 );
             },
@@ -487,6 +532,12 @@ impl Carnet {
             setting(ui, l, "Typewriter", Some("The line you write stays near the middle of the window"), |ui| {
                 let cur = if s.typewriter { 1 } else { 0 };
                 segmented(ui, l, "typewriter", &["Off", "On"], cur, |to| Msg::SetTypewriter { to });
+            });
+            rule(ui, l);
+            setting(ui, l, "Open links with", Some("How a link in a note opens while you write"), |ui| {
+                let cur = page::LinkOpen::ALL.iter().position(|h| *h == s.link_open).unwrap_or(0);
+                let cmd = if cfg!(target_os = "macos") { "\u{2318}-click" } else { "Ctrl-click" };
+                segmented(ui, l, "links", &[cmd, "Click", "Double-click"], cur, |to| Msg::SetLinkOpen { to });
             });
         });
         // Both cards above as they first were; asked first.
@@ -601,6 +652,40 @@ impl Carnet {
                 TextStyle::new(Type::SMALL.size).color(t.muted),
             );
         }
+
+        // -- this version, and whether a newer one is out
+        section(ui, l, "About");
+        let newer = self.updates.newer().map(|r| r.version.to_string());
+        let up_to_date = self.updates.checked() && newer.is_none();
+        let check = self.settings.check_updates;
+        card(ui, l, "card-about", |ui| {
+            ui.with(
+                NodeSpec::row().grow_width().min_height(54.0).pad_xy(18.0, 8.0).gap(12.0).cross_align(Align::Center).wrap(),
+                |ui| {
+                    ui.with(NodeSpec::column().grow_width().min_width(120.0).gap(2.0).selectable(), |ui| {
+                        ui.text(&format!("Carnet {}", env!("CARGO_PKG_VERSION")), TextStyle::new(Type::STRONG.size).color(t.fg));
+                        let line = match &newer {
+                            Some(v) => Some((Icon::Download, t.accent, format!("Carnet {v} is out"))),
+                            None if up_to_date => Some((Icon::Check, t.muted, "Up to date".to_string())),
+                            None => None,
+                        };
+                        if let Some((g, ink, words)) = line {
+                            ui.with_keyed("about-update", NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center).live(kui_native::Live::Polite), |ui| {
+                                crate::icons::icon(ui, g, ink, 14.0, false);
+                                ui.text_in(NodeSpec::row().grow_width().min_width(0.0), &words, TextStyle::new(Type::SMALL.size).color(ink));
+                            });
+                        }
+                    });
+                    if newer.is_some() {
+                        pill_button(ui, l, "update-download", "Download", true, true, Msg::OpenRelease);
+                    }
+                },
+            );
+            rule(ui, l);
+            setting(ui, l, "Check for updates", Some("Once a day, Carnet asks GitHub for its newest version. Nothing else is sent, and nothing is installed."), |ui| {
+                segmented(ui, l, "check-updates", &["Off", "On"], usize::from(check), |to| Msg::SetCheckUpdates { to });
+            });
+        });
     }
 
     /// Settings → Sync (docs/SYNC.md §5, §7): off, the way in chosen and
@@ -858,7 +943,7 @@ impl Carnet {
                     }
                 });
                 if let Some(p) = &self.connect.problem {
-                    said(ui, "sync-problem", Icon::Warning, t.danger, p.words());
+                    said(ui, "sync-problem", Icon::Warning, t.danger, &p.words());
                     ui.leaf(NodeSpec::row().height(12.0).role(Role::None));
                 }
             }
@@ -1628,6 +1713,15 @@ impl Carnet {
                 first
             })
             .clone();
+        // Code's: only the families whose every face is monospaced.
+        let families = if which == 3 {
+            let mono = self.mono_families.get_or_insert_with(|| {
+                ui.core().system_fonts().into_iter().filter(|f| f.monospaced).map(|f| f.family).collect()
+            });
+            families.into_iter().filter(|f| mono.contains(f)).collect()
+        } else {
+            families
+        };
         let q = self.font_query.trim().to_lowercase();
         // The built-in face once, as the default: installed under its own
         // name it is the same face.
@@ -1697,6 +1791,7 @@ impl Carnet {
                 let fallback = match which {
                     0 => Self::face_of(&mut self.font_faces, ui, look::BODY_FACE),
                     1 => Self::face_of(&mut self.font_faces, ui, look::HEADING_FACE),
+                    3 => FontFamily::Mono,
                     _ => l.serif,
                 };
                 row(ui, u64::MAX - 1, default_name, fallback, is_built_in(which, current), Msg::SetFont { which, index: ALL });
@@ -1714,7 +1809,7 @@ impl Carnet {
                 }
                 widgets::uniform_list_with(
                     ui,
-                    ["fonts-body", "fonts-head", "fonts-initial"][(which as usize).min(2)],
+                    ["fonts-body", "fonts-head", "fonts-initial", "fonts-code"][(which as usize).min(3)],
                     NodeSpec::column()
                         .grow_width()
                         .height((rows.len() as f32 * FONT_ROW_H).min(FONT_ROW_H * 7.0))
@@ -1737,7 +1832,7 @@ impl Carnet {
 
 /// The face a font list's default row stands for, by its family name:
 /// the text's and the headings' are shipped; the letter's is the
-/// headings', whatever they are.
+/// headings', whatever they are; code's, the system's monospace.
 fn built_in(which: u64) -> Option<&'static str> {
     match which {
         0 => Some(look::BODY_FACE),
@@ -1751,6 +1846,7 @@ fn default_font_name(which: u64) -> &'static str {
     match which {
         0 => "Inter (built in)",
         1 => "Source Serif 4 (built in)",
+        3 => "System monospace",
         _ => "Same as headings",
     }
 }

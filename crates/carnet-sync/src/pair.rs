@@ -245,10 +245,16 @@ impl Opener {
 }
 
 /// Why the server (or a device through it) says a joining ended, shown
-/// as its words: but for [`NO_SLOT`], which the apps know and say
-/// themselves.
+/// as its words: but for [`NO_SLOT`] and an invite run out
+/// ([`invite::RUN_OUT`](crate::invite::RUN_OUT),
+/// [`invite::RUN_OUT_FIRST`](crate::invite::RUN_OUT_FIRST)), which the
+/// apps know and say themselves.
 fn theirs(reason: &str) -> String {
-    if reason == NO_SLOT { reason.into() } else { crate::session::server_says(reason) }
+    if [NO_SLOT, crate::invite::RUN_OUT, crate::invite::RUN_OUT_FIRST].contains(&reason) {
+        reason.into()
+    } else {
+        crate::session::server_says(reason)
+    }
 }
 
 /// The pairing closed, at the server too, for `reason`.

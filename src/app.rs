@@ -117,7 +117,8 @@ pub enum Msg {
     ClearSearch,
     FocusTitle,
     FocusSearch,
-    /// Bold, italic, struck or code (`STYLES[which]`) on the selection.
+    /// Bold, italic, struck, code or underlined (`STYLES[which]`) on the
+    /// selection.
     Style { which: u64 },
     /// A narrow window's way back from a note to the list of notes.
     ShowList,
@@ -128,6 +129,10 @@ pub enum Msg {
     NewFolder,
     /// Opens the settings, or closes them.
     ShowSettings,
+    /// GitHub asked once a day whether a newer Carnet is out: 0 no, 1 yes.
+    SetCheckUpdates { to: u64 },
+    /// The newer Carnet's release page, in the browser.
+    OpenRelease,
     /// 0 system, 1 light, 2 dark.
     SetTheme { to: u64 },
     /// `design::Palette::ALL[to]`.
@@ -154,6 +159,8 @@ pub enum Msg {
     SetFocus { to: u64 },
     /// The caret's line: 0 wherever it is, 1 held near the middle.
     SetTypewriter { to: u64 },
+    /// How links open: `page::LinkOpen::ALL`'s index.
+    SetLinkOpen { to: u64 },
     /// Shows the library beside the page, or hides it.
     ToggleSidebar,
     /// The library shows the Deleted folder: what is in the trash.
@@ -312,6 +319,9 @@ pub enum Msg {
     /// A press or drag on a folder's row (by its index): a click shows it,
     /// a drag carries it into another folder, or to the top level.
     FolderDrag { index: u64 },
+    /// A folder's chevron (by its index): its subfolders hidden, or shown
+    /// again; with ⌥ (Alt), every folder inside it too.
+    FoldFolder { index: u64 },
     /// The library's edge dragged: its width follows; a double-click puts
     /// it back.
     LibraryDrag,
@@ -328,8 +338,13 @@ pub enum Msg {
 pub const ALL: u64 = i64::MAX as u64;
 
 /// The inline styles, as `Msg::Style` names them.
-pub const STYLES: [carnet_core::inline::Kind; 4] =
-    [carnet_core::inline::Kind::Bold, carnet_core::inline::Kind::Italic, carnet_core::inline::Kind::Strike, carnet_core::inline::Kind::Code];
+pub const STYLES: [carnet_core::inline::Kind; 5] = [
+    carnet_core::inline::Kind::Bold,
+    carnet_core::inline::Kind::Italic,
+    carnet_core::inline::Kind::Strike,
+    carnet_core::inline::Kind::Code,
+    carnet_core::inline::Kind::Underline,
+];
 
 /// What a context menu is about.
 #[derive(Clone, Debug, PartialEq)]
@@ -499,6 +514,11 @@ pub struct Carnet {
     histories: HashMap<u64, History>,
     /// When the pictures no note shows are next looked for.
     next_sweep: Instant,
+    /// Whether a newer Carnet is out, asked of GitHub now and then
+    /// (update.rs); never in the tests.
+    pub(super) updates: crate::update::Updates,
+    /// A newer version found, to be said once no other notice shows.
+    update_to_tell: Option<String>,
     /// The notes folder watched for what other apps do to it
     /// (watch.rs): started with the first frame, and again for a folder
     /// chosen in Settings.
@@ -634,12 +654,14 @@ pub struct Carnet {
     /// What the font list is narrowed to.
     font_query: String,
     /// The font list open in the settings: for the body (0), the headings
-    /// (1), the dropped letter (2).
+    /// (1), the dropped letter (2), code (3).
     font_pick: Option<u64>,
     /// The font list's rows as last drawn: what `Msg::SetFont` indexes.
     font_rows: Vec<String>,
     /// Every installed family, read once when the list first opens.
     families: Option<Vec<String>>,
+    /// The monospaced ones among them, for code's list.
+    mono_families: Option<std::collections::HashSet<String>>,
     /// Faces by name, for drawing each font's name in itself.
     font_faces: HashMap<String, kui_native::FontFamily>,
     /// Ask for a folder on the next frame.
@@ -694,6 +716,15 @@ pub struct Carnet {
     /// Each picture's width as last drawn, by block id, and the widths it
     /// would have with none given and at the most.
     pic_w: HashMap<u64, (f32, f32, f32)>,
+    /// Each picture in a row at an edge as last drawn, by block id: the
+    /// row's (its first picture's id), its height, and its shape (height
+    /// over width). A resize snaps to the heights beside it.
+    pic_rows: HashMap<u64, (u64, f32, f32)>,
+    /// While a row of floated pictures is drawn: its first picture's id.
+    float_row: u64,
+    /// A press on a link that opens once let go where it was pressed
+    /// (links opening with a click).
+    link_press: Option<LinkPress>,
     /// While a row of floated pictures is drawn: how many share it, and
     /// the row's width.
     float_count: usize,
@@ -894,6 +925,9 @@ struct RowDrag {
     moved: bool,
     /// The folder row under the pointer.
     target: Option<String>,
+    /// A folded folder it has rested on, and since when: held there long
+    /// enough, it unfolds, to go deeper.
+    rest: Option<(String, Instant)>,
 }
 
 /// Files over the window.
@@ -916,6 +950,16 @@ struct Resize {
     w: f32,
     /// A handle on the left edge: going left widens.
     left: bool,
+    /// The height of a picture beside it that it snapped to.
+    snap: Option<f32>,
+}
+
+/// A press on a link that opens it once let go where it was pressed: the
+/// address, where it was pressed, and the caret before, put back.
+struct LinkPress {
+    url: String,
+    at: Vec2,
+    caret: Caret,
 }
 
 /// A drag region of the custom titlebar, except while a menu is up.
@@ -948,6 +992,8 @@ impl Carnet {
             editing: false,
             histories: HashMap::new(),
             next_sweep: Instant::now() + SWEEP_FIRST,
+            updates: if cfg!(test) { crate::update::Updates::with(None) } else { crate::update::Updates::github() },
+            update_to_tell: None,
             watch: None,
             waker: None,
             rescans: 0,
@@ -1007,6 +1053,7 @@ impl Carnet {
             font_pick: None,
             font_rows: Vec::new(),
             families: None,
+            mono_families: None,
             font_faces: HashMap::new(),
             pick_dir: false,
             dir_change: None,
@@ -1029,6 +1076,9 @@ impl Carnet {
             scroll_key: None,
             resizing: None,
             pic_w: HashMap::new(),
+            pic_rows: HashMap::new(),
+            float_row: 0,
+            link_press: None,
             float_count: 0,
             float_room: 0.0,
             float_ends: HashMap::new(),
@@ -2074,7 +2124,10 @@ impl Carnet {
         // The open note as it was before another device's change reloaded
         // it: what the caret is carried through.
         let mut before = std::mem::take(&mut self.store.before_remote);
-        if remote.is_empty() && !moved {
+        // The account's notes all here (not just the first of them come):
+        // the empty stand-in goes, and the top of the list opens.
+        let here = self.sync_stand_in.is_some() && self.store.notes.len() > 1 && self.sync.caught_up();
+        if remote.is_empty() && !moved && !here {
             return;
         }
         for r in &remote {
@@ -2107,17 +2160,15 @@ impl Carnet {
         if remote.iter().any(|r| matches!(r, store::Remote::Layout)) {
             self.refresh_trash();
         }
-        // The account's notes are here: the empty stand-in goes, if
-        // nobody wrote in it.
-        if !remote.is_empty()
+        // The stand-in goes, if nobody wrote in it; written in, it's a note
+        // like the rest.
+        if here
             && let Some(id) = self.sync_stand_in.take()
             && let Some(i) = self.store.notes.iter().position(|n| n.id == id)
         {
             let n = &self.store.notes[i];
-            if self.store.notes.len() > 1 && n.is_blank() && n.path.is_none() {
+            if n.is_blank() && n.path.is_none() {
                 self.store.notes.remove(i);
-            } else {
-                self.sync_stand_in = Some(id);
             }
         }
         if self.store.notes.is_empty() {
@@ -2283,7 +2334,7 @@ impl Carnet {
         let at = Vec2::new(num("x"), num("y"));
         match p.get_str("phase") {
             Some("start") => {
-                self.row_drag = Some(RowDrag { what, from: at, at, moved: false, target: None });
+                self.row_drag = Some(RowDrag { what, from: at, at, moved: false, target: None, rest: None });
             }
             Some("move") => {
                 let target = self
@@ -2489,6 +2540,12 @@ impl Carnet {
     /// New folder is as good as a click away from the first.
     fn name_folder(&mut self, parent: &str) {
         self.finish_naming(true, false);
+        // Its field goes under its parent's row: that row, and the field
+        // under it, in sight.
+        if !parent.is_empty() {
+            self.unfold_to(parent);
+            self.fold(parent, true, false);
+        }
         self.namings += 1;
         self.naming = Some(Naming { parent: parent.to_string(), name: String::new(), nth: self.namings, key: None, rename: None });
         self.focus(Field::Folder);
@@ -2583,7 +2640,133 @@ impl Carnet {
         if let Some(shown) = self.folder.as_deref().filter(|f| *f == folder || f.starts_with(&under)) {
             self.folder = Some(format!("{to}{}", &shown[folder.len()..]));
         }
+        // Folded as it was, and the folders inside it too.
+        let moved: Vec<String> = self.settings.collapsed.iter().filter(|f| *f == folder || f.starts_with(&under)).cloned().collect();
+        if !moved.is_empty() {
+            for f in moved {
+                self.settings.collapsed.remove(&f);
+                self.settings.collapsed.insert(format!("{to}{}", &f[folder.len()..]));
+            }
+            self.save_folds();
+        }
         self.reorder();
+    }
+
+    /// Whether folder `f` has folders inside it.
+    pub(super) fn has_subfolders(&self, f: &str) -> bool {
+        let under = format!("{f}/");
+        self.store.folders.iter().any(|g| g.starts_with(&under))
+    }
+
+    /// Whether folder `f`'s row is out of sight: a folder it is inside is
+    /// folded.
+    pub(super) fn folder_hidden(&self, f: &str) -> bool {
+        let c = &self.settings.collapsed;
+        !c.is_empty() && f.match_indices('/').any(|(i, _)| c.contains(&f[..i]))
+    }
+
+    /// The folders as the library lists them now: those folded away left
+    /// out. What ⇧↑, ⇧↓ and a ⇧-click's range run over.
+    pub(super) fn folders_in_sight(&self) -> Vec<String> {
+        self.store.folders.iter().filter(|f| !self.folder_hidden(f)).cloned().collect()
+    }
+
+    /// Folds folder `f` — its subfolders hidden — or unfolds it (`open`);
+    /// with `deep`, every folder inside it the same. A folder shown that
+    /// folding hides gives way to `f`: the folder shown is never out of
+    /// sight. Kept in this device's settings.
+    pub(super) fn fold(&mut self, f: &str, open: bool, deep: bool) {
+        let under = format!("{f}/");
+        let mut these = vec![f.to_string()];
+        if deep {
+            these.extend(self.store.folders.iter().filter(|g| g.starts_with(&under)).cloned());
+        }
+        let mut changed = false;
+        for g in these {
+            changed |= if open {
+                self.settings.collapsed.remove(&g)
+            } else {
+                // Only a folder with folders in it has anything to fold.
+                self.has_subfolders(&g) && self.settings.collapsed.insert(g)
+            };
+        }
+        if !open && !self.deleted && self.folder.as_deref().is_some_and(|s| s.starts_with(&under)) {
+            self.show_folder(Some(f.to_string()));
+        }
+        if changed {
+            self.save_folds();
+        }
+    }
+
+    /// A folder's chevron: folded, it unfolds; unfolded, it folds — with
+    /// `deep` (⌥-click), every folder inside it with it.
+    pub(super) fn toggle_fold(&mut self, f: &str, deep: bool) {
+        let open = self.settings.collapsed.contains(f);
+        self.fold(f, open, deep);
+    }
+
+    /// The folders `f` is inside unfolded, so its row is in sight.
+    pub(super) fn unfold_to(&mut self, f: &str) {
+        let c = &mut self.settings.collapsed;
+        let mut changed = false;
+        for (i, _) in f.match_indices('/') {
+            changed |= c.remove(&f[..i]);
+        }
+        if changed {
+            self.save_folds();
+        }
+    }
+
+    fn save_folds(&mut self) {
+        if let Err(e) = self.settings.save() {
+            self.error = Some(format!("Couldn't save the settings: {e}"));
+        }
+    }
+
+    /// While a note or a folder is carried: a folded folder it rests on
+    /// for a moment unfolds, its subfolders in sight to go deeper, as
+    /// Finder's do.
+    pub(super) fn spring_folder(&mut self, ui: &mut Ui<'_>) {
+        let Some(d) = self.row_drag.as_mut() else { return };
+        let folded = d.target.clone().filter(|t| self.settings.collapsed.contains(t));
+        let open = match (folded, &d.rest) {
+            (Some(t), Some((r, since))) if *r == t => {
+                let held = since.elapsed();
+                if held >= SPRING {
+                    d.rest = None;
+                    Some(t)
+                } else {
+                    ui.request_frame_at(ui.now() + (SPRING - held).as_secs_f64());
+                    None
+                }
+            }
+            (Some(t), _) => {
+                d.rest = Some((t, Instant::now()));
+                ui.request_frame_at(ui.now() + SPRING.as_secs_f64());
+                None
+            }
+            (None, _) => {
+                d.rest = None;
+                None
+            }
+        };
+        if let Some(t) = open {
+            self.fold(&t, true, false);
+        }
+    }
+
+    /// The folder shown, in sight: the folders it is inside unfolded —
+    /// however it came to be shown (a search, a move, a new folder, a
+    /// link followed).
+    pub(super) fn reveal_shown(&mut self) {
+        if self.deleted {
+            return;
+        }
+        if let Some(f) = self.folder.clone()
+            && self.folder_hidden(&f)
+        {
+            self.unfold_to(&f);
+        }
     }
 
     /// A key pressed on a row of the folder list: F2 renames it, Delete
@@ -2602,9 +2785,39 @@ impl Carnet {
             && matches!(k.code, KeyCode::Up | KeyCode::Down)
             && let FolderRow::Folder(f) = row
         {
-            let rows: Vec<Pick> = self.store.folders.iter().cloned().map(Pick::Folder).collect();
+            let rows: Vec<Pick> = self.folders_in_sight().into_iter().map(Pick::Folder).collect();
             if let Some(Pick::Folder(head)) = self.pick_step(k.code == KeyCode::Up, Pick::Folder(f.clone()), &rows) {
                 self.focus_row = Some(FolderRow::Folder(head));
+            }
+            return true;
+        }
+        // → unfolds a folder (⌥: and every folder inside it), or, open
+        // already, goes to the first inside it; ← folds it, or, folded or
+        // with nothing to fold, goes to the folder it is in — as a tree's
+        // rows do in Finder.
+        if !(m.shift || m.ctrl || m.super_key)
+            && matches!(k.code, KeyCode::Left | KeyCode::Right)
+            && let FolderRow::Folder(f) = row
+        {
+            let f = f.clone();
+            let folded = self.settings.collapsed.contains(&f);
+            let parent = self.has_subfolders(&f);
+            match k.code {
+                KeyCode::Right if parent && (folded || m.alt) => self.fold(&f, true, m.alt),
+                KeyCode::Right if parent => {
+                    let under = format!("{f}/");
+                    if let Some(first) = self.store.folders.iter().find(|g| g.starts_with(&under)).cloned() {
+                        self.go_to_row(FolderRow::Folder(first));
+                    }
+                }
+                KeyCode::Left if parent && (!folded || m.alt) => self.fold(&f, false, m.alt),
+                KeyCode::Left if f.contains('/') => self.go_to_row(FolderRow::Folder(parent_of(&f).to_string())),
+                _ => {}
+            }
+            // The keyboard stays on the row (a folded one's subfolder that
+            // had it is gone from sight).
+            if self.focus_row.is_none() {
+                self.focus_row = Some(FolderRow::Folder(f));
             }
             return true;
         }
@@ -2635,30 +2848,36 @@ impl Carnet {
                 self.folder_action(&f.clone(), "delete");
             }
             KeyCode::Up | KeyCode::Down if !m.ctrl && !m.super_key => {
+                // The rows drawn: a folded folder's subfolders are not.
                 let next = at.and_then(|i| if k.code == KeyCode::Up { i.checked_sub(1) } else { Some(i + 1) });
                 if let Some((_, r)) = next.and_then(|i| self.folder_rows.get(i)).cloned() {
-                    // What was chosen is let go of; a range starts here.
-                    self.picked.clear();
-                    self.pick_head = None;
-                    self.pick_anchor = match &r {
-                        FolderRow::Folder(f) => Some(Pick::Folder(f.clone())),
-                        _ => None,
-                    };
-                    match &r {
-                        FolderRow::All => self.on_plain(Msg::SelectFolder { index: ALL }),
-                        FolderRow::Folder(f) => {
-                            if let Some(i) = self.store.folders.iter().position(|x| x == f) {
-                                self.on_plain(Msg::SelectFolder { index: i as u64 });
-                            }
-                        }
-                        FolderRow::Deleted => self.on_plain(Msg::ShowDeleted),
-                    }
-                    self.focus_row = Some(r);
+                    self.go_to_row(r);
                 }
             }
             _ => return false,
         }
         true
+    }
+
+    /// The keyboard to folder row `r`, which is shown, as ↑ and ↓ go:
+    /// what was chosen let go of, a range starting there.
+    fn go_to_row(&mut self, r: FolderRow) {
+        self.picked.clear();
+        self.pick_head = None;
+        self.pick_anchor = match &r {
+            FolderRow::Folder(f) => Some(Pick::Folder(f.clone())),
+            _ => None,
+        };
+        match &r {
+            FolderRow::All => self.on_plain(Msg::SelectFolder { index: ALL }),
+            FolderRow::Folder(f) => {
+                if let Some(i) = self.store.folders.iter().position(|x| x == f) {
+                    self.on_plain(Msg::SelectFolder { index: i as u64 });
+                }
+            }
+            FolderRow::Deleted => self.on_plain(Msg::ShowDeleted),
+        }
+        self.focus_row = Some(r);
     }
 
     /// Ends naming a folder: made or renamed from its name when `make` and
@@ -2941,6 +3160,11 @@ impl Carnet {
                 }
             }
             Msg::LibraryDrag => self.library_drag(ev),
+            Msg::FoldFolder { index } => {
+                if let Some(f) = self.store.folders.get(index as usize).cloned() {
+                    self.toggle_fold(&f, core.modifiers().alt);
+                }
+            }
             other => self.on_plain(other),
         }
     }
@@ -3393,6 +3617,11 @@ impl Carnet {
                 }
             }
             Msg::Slash { index } => self.run_slash(index as usize),
+            Msg::FoldFolder { index } => {
+                if let Some(f) = self.store.folders.get(index as usize).cloned() {
+                    self.toggle_fold(&f, false);
+                }
+            }
             Msg::ResizePicture { .. } | Msg::CardDrag { .. } | Msg::FolderDrag { .. } | Msg::PictureDrag { .. } | Msg::LibraryDrag => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {
@@ -3409,6 +3638,8 @@ impl Carnet {
                 }
             },
             Msg::ShowSettings
+            | Msg::SetCheckUpdates { .. }
+            | Msg::OpenRelease
             | Msg::SetTheme { .. }
             | Msg::SetPalette { .. }
             | Msg::SetDensity { .. }
@@ -3422,6 +3653,7 @@ impl Carnet {
             | Msg::SetToolbar { .. }
             | Msg::SetFocus { .. }
             | Msg::SetTypewriter { .. }
+            | Msg::SetLinkOpen { .. }
             | Msg::ToggleSidebar
             | Msg::SetSize { .. }
             | Msg::SetDivider { .. }
@@ -3578,8 +3810,9 @@ impl Carnet {
             return;
         }
         // ↑ and ↓ after a click on a folder, the keyboard on nothing in
-        // particular: from the row shown, as if the keyboard were on it.
-        if matches!(k.code, KeyCode::Up | KeyCode::Down)
+        // particular: from the row shown, as if the keyboard were on it;
+        // ← and → fold and unfold it.
+        if matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right)
             && self.folders_clicked
             && core.focus().is_none_or(|f| f == Key::ROOT)
         {
@@ -3994,6 +4227,8 @@ impl App for Carnet {
         self.signup.set_wake(move || wake.wake());
         let wake = waker.clone();
         self.connect.set_wake(move || wake.wake());
+        let wake = waker.clone();
+        self.updates.set_wake(move || wake.wake());
         self.images.set_waker(waker);
     }
 
@@ -4005,6 +4240,7 @@ impl App for Carnet {
         self.watch_tick();
         self.sync_tick();
         self.connect_tick();
+        self.updates_tick();
         if self.joined_said && !self.settings_open {
             self.joined_said = false;
             self.sync.joined = None;
@@ -4045,6 +4281,7 @@ impl App for Carnet {
         // on the server asked again; and the inspector's "Checked …" kept
         // true while it shows.
         due.extend(self.sync.due());
+        due.extend(self.updates.due(self.settings.check_updates, Instant::now()));
         if self.settings_open && self.sync_inspector && self.sync.inspected_at.is_some() {
             due.push(INSPECTED_EVERY);
         }

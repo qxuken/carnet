@@ -596,6 +596,65 @@ fn ctrl_b_wraps_the_selection_and_again_unwraps_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Thin solid lines drawn across the page's line at `slot`: what
+/// underlines (or strikes through) its words.
+fn lines_across(app: &mut Carnet, d: &mut Drive, slot: Slot) -> Vec<kui_native::Rect> {
+    d.core.set_inspect(true);
+    d.frame(app);
+    let k = *app.slot_keys.get(&slot).unwrap();
+    let row = d.core.nodes().iter().find(|n| n.key == k).map(|n| n.rect).unwrap();
+    let (dl, _) = d.core.output();
+    dl.quads
+        .iter()
+        .filter(|q| q.kind == kui_native::QuadKind::Solid && q.rect.h <= 3.0 && q.rect.w >= 8.0)
+        .filter(|q| q.rect.y >= row.y && q.rect.y <= row.y + row.h && q.rect.x >= row.x - 1.0)
+        .map(|q| q.rect)
+        .collect()
+}
+
+/// ⌘U (Ctrl+U) underlines the selection: the file keeps `<u>…</u>`, the
+/// page draws a line under the words, never the tags, and the toolbar's
+/// Underline is on there; again, and it is all as it was.
+#[test]
+fn cmd_u_underlines_the_selection_in_the_file_and_on_the_page() {
+    let (mut app, mut d, dir) = body("underline");
+    type_in(&mut app, &mut d, "make this loud");
+    let slot = app.caret.head.slot;
+    for _ in 0..4 {
+        key_with(&mut app, &mut d, "left", SHIFT);
+    }
+    let before = lines_across(&mut app, &mut d, slot).len();
+    key_with(&mut app, &mut d, "u", CTRL);
+    assert_eq!(texts(&app)[0], "make this <u>loud</u>");
+    d.frame(&mut app);
+    let tool = |d: &mut Drive| d.core.access_tree().nodes.iter().find(|n| n.name.as_deref() == Some("Underline")).and_then(|n| n.checked);
+    assert_eq!(tool(&mut d), Some(true), "the toolbar's Underline is on");
+    let lines = lines_across(&mut app, &mut d, slot);
+    assert_eq!(lines.len(), before + 1, "a line under the word: {lines:?}");
+    let word = (app.rect_at(&d.core, slot, "make this <u>".len()).unwrap(), app.rect_at(&d.core, slot, "make this <u>loud".len()).unwrap());
+    let line = lines.iter().find(|r| (r.x - word.0.x).abs() < 2.0).copied().expect("under \"loud\"");
+    assert!((line.x + line.w - word.1.x).abs() < 2.0, "as wide as the word: {line:?} {word:?}");
+    assert!(line.y > word.0.y + word.0.h * 0.6, "under it, not through it: {line:?} {word:?}");
+    assert!(page::style_at(app.doc(), app.caret).underline);
+    app.save_current();
+    let md = std::fs::read_to_string(app.store.notes[app.current].path.clone().unwrap()).unwrap();
+    assert!(md.ends_with("make this <u>loud</u>\n"), "{md}");
+    // Off again, the toolbar with it.
+    key_with(&mut app, &mut d, "u", CTRL);
+    assert_eq!(texts(&app)[0], "make this loud");
+    d.frame(&mut app);
+    assert_eq!(tool(&mut d), Some(false));
+    assert_eq!(lines_across(&mut app, &mut d, slot).len(), before);
+    // Nothing selected: on for what is typed, the toolbar's too.
+    key(&mut app, &mut d, "end");
+    key_with(&mut app, &mut d, "u", CTRL);
+    d.frame(&mut app);
+    assert_eq!(tool(&mut d), Some(true), "on for what is typed");
+    type_in(&mut app, &mut d, " now");
+    assert_eq!(texts(&app)[0], "make this loud <u>now</u>");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn folders_hold_notes_and_the_library_shows_one_at_a_time() {
     let (mut app, mut d, dir) = fresh("folders");
@@ -1476,6 +1535,62 @@ fn a_picture_resizes_from_its_corner_and_keeps_its_shape() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Pictures side by side at an edge: one resized by its handle takes the
+/// height of the one beside it when it comes within a few pixels, so the
+/// row lines up — a thin line under both says so while dragged — and its
+/// width follows its shape. Further off, it's as dragged.
+#[test]
+fn a_picture_resized_in_a_row_snaps_to_its_neighbours_height() {
+    let (mut app, mut d, dir) = library("pic-snap", &[("Row", "![a|left|200](attachments/a.png)\n\n![b|left|160](attachments/b.png)\n\nWords beside them")]);
+    png_file(&dir.join("attachments"), "a.png");
+    let square: Vec<u8> = (0..16).flat_map(|_| [94u8, 124, 164, 255]).collect();
+    std::fs::write(dir.join("attachments").join("b.png"), crate::images::encode_png(4, 4, &square).unwrap()).unwrap();
+    app.store.index_files();
+    app.images.retry_failed();
+    app.open(app.store.notes.iter().position(|n| n.title == "Row").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    let width_of = |app: &Carnet, alt: &str| {
+        app.doc().blocks().iter().find_map(|b| match &b.kind {
+            Kind::Image { alt: a, width, .. } if a == alt => Some(*width),
+            _ => None,
+        })
+    };
+    let pick_b = |app: &mut Carnet, d: &mut Drive| {
+        let i = app.doc().blocks().iter().position(|b| matches!(&b.kind, Kind::Image { alt, .. } if alt == "b")).unwrap();
+        app.caret = page::select_blocks(app.doc(), i, i);
+        app.editing = true;
+        d_frame_twice(app, d);
+    };
+    // a is 200 × 150; b, square, 160 × 160. b dragged 7 narrower, 153
+    // tall, is 3 off a's height: it takes it, 150 wide.
+    pick_b(&mut app, &mut d);
+    let handle = d.key_of("resize-r").expect("b's handle");
+    let from = d.core.nodes().iter().find(|n| n.key == handle).map(|n| n.rect.center()).unwrap();
+    d.input(&mut app, InputEvent::CursorMoved(from));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(from.x - 20.0, from.y)));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(from.x - 7.0, from.y)));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.resizing.map(|r| (r.w, r.snap)), Some((150.0, Some(150.0))));
+    assert!(d.key_of("snap").is_some(), "the line under them while dragged");
+    d.input(&mut app, InputEvent::mouse_up());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(width_of(&app, "b"), Some(Some(150)));
+    assert_eq!(width_of(&app, "a"), Some(Some(200)), "the other as it was");
+    assert!(d.key_of("snap").is_none(), "the line gone once let go");
+    // Each picture's node and its row's: both pictures 150 tall.
+    let heights: Vec<f32> = d.core.nodes().iter().filter(|n| n.role == Some(Role::Image)).map(|n| n.rect.h).filter(|h| *h < 170.0).collect();
+    assert!(heights.len() == 2 && heights.iter().all(|h| (h - 150.0).abs() < 1.0), "lined up: {heights:?}");
+    // Further off than the snap: as dragged.
+    pick_b(&mut app, &mut d);
+    let handle = d.key_of("resize-r").unwrap();
+    let from = d.core.nodes().iter().find(|n| n.key == handle).map(|n| n.rect.center()).unwrap();
+    d.drag(&mut app, from, Vec2::new(from.x + 30.0, from.y));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(width_of(&app, "b"), Some(Some(180)));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn dropped_pictures_go_where_the_line_is() {
     let (mut app, mut d, dir) = body("drop-line");
@@ -1971,6 +2086,120 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
     assert_eq!(opened(), ["https://x.test/a"], "and a web one opens from the menu");
     let _ = std::fs::remove_dir_all(dir);
 }
+/// Links open as Settings says: ⌘-click (Ctrl elsewhere, the default),
+/// a click, or a double-click. The press that opens one leaves the caret
+/// where it was; any other places it, so a link's words can always be
+/// edited: with a click opening, a drag or a Shift-click selects, a
+/// ⌘-click places the caret, and so does a click at the words' end. A
+/// link that would run opens by none. The pointer is a hand over a link
+/// just when a press there would open it.
+#[test]
+fn links_open_as_the_settings_say() {
+    use page::LinkOpen;
+    let (mut app, mut d, dir) = body("link-modes");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "see [docs](https://x.test/d) end [run](javascript:alert(1))");
+    let slot = app.caret.head.slot;
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "below");
+    let below = app.caret;
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take);
+    let with = |app: &mut Carnet, d: &mut Drive, mods: KeyMods, f: &dyn Fn(&mut Carnet, &mut Drive)| {
+        d.input(app, InputEvent::Modifiers(mods));
+        f(app, d);
+        d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+        d.frame(app);
+    };
+    let point = |app: &Carnet, d: &Drive, at: usize| {
+        let r = d.core.caret_rect(*app.slot_keys.get(&slot).unwrap(), at).unwrap();
+        Vec2::new(r.x + 1.0, r.y + r.h / 2.0)
+    };
+    let in_link = |app: &Carnet| page::link_at(app.doc(), app.caret).is_some();
+    let hand = |app: &mut Carnet, d: &mut Drive, at: usize, mods: KeyMods| {
+        let p = point(app, d, at);
+        d.input(app, InputEvent::Modifiers(mods));
+        d.move_to(app, p.x, p.y);
+        d.frame(app);
+        let shape = d.core.cursor_shape();
+        d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+        d.frame(app);
+        shape == kui_native::CursorShape::Pointer
+    };
+
+    // ⌘-click, as ever: a plain click places the caret in the link.
+    assert_eq!(app.settings.link_open, LinkOpen::ModClick);
+    click_drawn(&mut app, &mut d, slot, 6);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(in_link(&app));
+    with(&mut app, &mut d, CTRL, &|app, d| click_drawn(app, d, slot, 6));
+    assert_eq!(opened(), ["https://x.test/d"]);
+    assert!(!hand(&mut app, &mut d, 6, KeyMods::NONE), "no hand with no key held");
+    assert!(hand(&mut app, &mut d, 6, CTRL), "a hand while it's held");
+    assert!(!hand(&mut app, &mut d, 2, CTRL), "not over plain words");
+
+    // A click.
+    app.settings.link_open = LinkOpen::Click;
+    app.caret = below;
+    d.frame(&mut app);
+    click_drawn(&mut app, &mut d, slot, 6);
+    assert_eq!(opened(), ["https://x.test/d"]);
+    assert_eq!(app.caret, below, "the caret left where it was");
+    assert_eq!(app.error, None);
+    // ⌘-click places the caret in it, to edit its words.
+    with(&mut app, &mut d, CTRL, &|app, d| click_drawn(app, d, slot, 6));
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(in_link(&app) && app.caret.is_empty());
+    assert_eq!(drawn_caret(&app), 6);
+    // A click at its words' end places the caret there.
+    click_drawn(&mut app, &mut d, slot, 8);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert_eq!(drawn_caret(&app), 8);
+    // A drag across it selects.
+    let (a, b) = (point(&app, &d, 5), point(&app, &d, 7));
+    d.drag(&mut app, a, b);
+    d.frame(&mut app);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(!app.caret.is_empty(), "a selection");
+    // Shift-click: the selection to it.
+    app.caret = Caret::at(Pos { slot, byte: 0 });
+    d.frame(&mut app);
+    with(&mut app, &mut d, SHIFT, &|app, d| click_drawn(app, d, slot, 6));
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(!app.caret.is_empty());
+    // One that would run: a click places the caret, and says nothing.
+    let run = "see docs end r".len();
+    click_drawn(&mut app, &mut d, slot, run);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert_eq!(app.error, None);
+    assert!(in_link(&app));
+    assert!(hand(&mut app, &mut d, 6, KeyMods::NONE), "a hand over a link");
+    assert!(!hand(&mut app, &mut d, 6, CTRL), "not with ⌘, which places the caret");
+    assert!(!hand(&mut app, &mut d, 8, KeyMods::NONE), "not at its end");
+    assert!(!hand(&mut app, &mut d, run, KeyMods::NONE), "not over one that won't open");
+
+    // A double-click, in place of choosing the word; one click places
+    // the caret.
+    app.settings.link_open = LinkOpen::DoubleClick;
+    app.caret = below;
+    d.frame(&mut app);
+    click_drawn(&mut app, &mut d, slot, 6);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(in_link(&app));
+    let p = point(&app, &d, 6);
+    d.double_click(&mut app, p.x, p.y);
+    d.frame(&mut app);
+    assert_eq!(opened(), ["https://x.test/d"]);
+    assert!(app.caret.is_empty(), "no word chosen");
+    // Elsewhere two clicks still choose a word.
+    let p = point(&app, &d, 1);
+    d.double_click(&mut app, p.x, p.y);
+    d.frame(&mut app);
+    assert_eq!(opened(), Vec::<String>::new());
+    assert!(!app.caret.is_empty());
+    assert!(hand(&mut app, &mut d, 6, KeyMods::NONE));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_colour_picker_colours_the_selection() {
     let (mut app, mut d, dir) = body("tint");
@@ -3530,6 +3759,303 @@ fn up_and_down_after_a_click_on_a_folder_walk_from_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// ------------------------------------------------------------ folding folders
+
+/// A folder's chevron: the one in its row.
+fn chevron(d: &mut Drive, app: &mut Carnet, f: &str) -> Option<Key> {
+    d.core.set_inspect(true);
+    d.frame(app);
+    let row = app.folder_rects.iter().find(|(r, _)| r == f)?.1;
+    d.core.nodes().iter().filter(|n| n.label.as_deref() == Some("fold")).map(|n| n.key).find(|&k| {
+        d.rect_of(k).is_some_and(|r| {
+            let c = r.center();
+            c.y >= row.y && c.y <= row.y + row.h
+        })
+    })
+}
+
+/// Whether a reader hears folder row `name` as open, shut, or neither.
+fn heard_open(d: &mut Drive, name: &str) -> Option<bool> {
+    d.core.access_tree().nodes.iter().find(|n| n.name.as_deref() == Some(name)).and_then(|n| n.expanded)
+}
+
+fn click_chevron(app: &mut Carnet, d: &mut Drive, f: &str, mods: KeyMods) {
+    let k = chevron(d, app, f).unwrap_or_else(|| panic!("a chevron for {f}"));
+    let r = d.rect_of(k).unwrap();
+    d.input(app, InputEvent::Modifiers(mods));
+    d.click(app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+    d_frame_twice(app, d);
+}
+
+/// The folder rows drawn, top to bottom.
+fn rows_drawn(app: &Carnet) -> Vec<String> {
+    app.folder_rows
+        .iter()
+        .filter_map(|(_, r)| match r {
+            FolderRow::Folder(f) => Some(f.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn folded(app: &Carnet) -> Vec<&str> {
+    app.settings.collapsed.iter().map(String::as_str).collect()
+}
+
+/// A folder with folders inside has a chevron; a click on it hides them
+/// and shows them again, the folder shown staying as it was and its count
+/// as it was. A folder with none inside has no chevron.
+#[test]
+fn a_folders_chevron_folds_its_subfolders_away_and_back() {
+    let (mut app, mut d, dir) = on_folder_row("fold-click", &["A", "A/Sub", "A/Sub/Deep", "B"]);
+    app.show_folder(Some("B".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "B"]);
+    assert!(chevron(&mut d, &mut app, "B").is_none(), "nothing inside B: no chevron");
+    assert!(chevron(&mut d, &mut app, "A/Sub/Deep").is_none());
+    assert!(chevron(&mut d, &mut app, "A").is_some());
+    assert_eq!(heard_open(&mut d, "A"), Some(true), "a reader hears it open");
+    assert_eq!(heard_open(&mut d, "B"), None);
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    assert_eq!(folded(&app), ["A"]);
+    assert_eq!(app.folder.as_deref(), Some("B"), "the chevron only folds: the folder shown stays");
+    assert!(app.folder_rects.iter().all(|(f, _)| !f.starts_with("A/")), "nor rows for a drag");
+    assert_eq!(heard_open(&mut d, "A"), Some(false), "and shut now");
+    // The keyboard is not held in the chevron.
+    assert!(d.core.focus().is_none_or(|k| k == Key::ROOT), "{:?}", d.core.focus());
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "B"]);
+    assert!(folded(&app).is_empty());
+    // A click on the folder's name still shows it, and folds nothing.
+    let at = folder_row(&app, "A");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.folder.as_deref(), Some("A"));
+    assert!(folded(&app).is_empty());
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ⌥-click (Alt) on a chevron folds the folder and every folder inside
+/// it, and unfolds them all again.
+#[test]
+fn an_option_click_folds_every_folder_inside() {
+    let (mut app, mut d, dir) = on_folder_row("fold-alt", &["A", "A/Sub", "A/Sub/Deep", "A/Two", "A/Two/More", "B"]);
+    click_chevron(&mut app, &mut d, "A", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub", "A/Two"], "only folders with folders inside");
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    // Unfolded alone: what is inside stays folded.
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Two", "B"]);
+    click_chevron(&mut app, &mut d, "A", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub", "A/Two"]);
+    click_chevron(&mut app, &mut d, "A", ALT);
+    assert!(folded(&app).is_empty());
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "A/Two", "A/Two/More", "B"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ← and → on a folder's row, as in Finder: → unfolds, then goes in; ←
+/// folds, then goes up to the folder it is in. ⌥ with them, every folder
+/// inside too.
+#[test]
+fn left_and_right_fold_unfold_and_walk_the_tree() {
+    let (mut app, mut d, dir) = on_folder_row("fold-keys", &["A", "A/Sub", "A/Sub/Deep", "B"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["A"]);
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    assert_eq!(focused_row(&app, &d), Some(folder("A")), "the keyboard stays on it");
+    // Folded, at the top: ← goes nowhere.
+    key(&mut app, &mut d, "left");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    key(&mut app, &mut d, "right");
+    assert!(folded(&app).is_empty());
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    // Open: → goes to the first folder inside, and shows it.
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub")));
+    assert_eq!(app.folder.as_deref(), Some("A/Sub"));
+    key(&mut app, &mut d, "right");
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub/Deep")));
+    // Nothing inside: → does nothing; ← goes up.
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub/Deep")));
+    key(&mut app, &mut d, "left");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub")));
+    assert_eq!(app.folder.as_deref(), Some("A/Sub"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["A/Sub"]);
+    key(&mut app, &mut d, "left");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    // ⌥←: A and all inside it folded; ⌥→: all open.
+    key_with(&mut app, &mut d, "right", ALT);
+    assert!(folded(&app).is_empty(), "{:?}", folded(&app));
+    key_with(&mut app, &mut d, "left", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub"]);
+    // After a click on the folder, the keyboard on nothing in
+    // particular: the same, from the folder shown.
+    let at = folder_row(&app, "A");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "right");
+    assert_eq!(folded(&app), ["A/Sub"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ↑ and ↓ walk only the rows in sight, and ⇧ with them (and a ⇧-click's
+/// range) chooses only those: a folded folder's subfolders are passed.
+#[test]
+fn the_arrows_and_a_range_pass_folded_folders_by() {
+    let (mut app, mut d, dir) = on_folder_row("fold-arrows", &["A", "A/Sub", "B", "C"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key(&mut app, &mut d, "left");
+    focus_row(&mut app, &mut d, FolderRow::All);
+    key(&mut app, &mut d, "down");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    key(&mut app, &mut d, "down");
+    assert_eq!(focused_row(&app, &d), Some(folder("B")), "past A/Sub, folded away");
+    key(&mut app, &mut d, "up");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(app.picked, [Pick::Folder("A".into()), Pick::Folder("B".into())]);
+    // A ⇧-click from A to C: A, B and C, not what A hides.
+    app.picked.clear();
+    let (a, c) = (folder_row(&app, "A"), folder_row(&app, "C"));
+    d.click(&mut app, a.x, a.y);
+    d.input(&mut app, InputEvent::Modifiers(SHIFT));
+    d.click(&mut app, c.x, c.y);
+    d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+    d.frame(&mut app);
+    assert_eq!(app.picked, ["A", "B", "C"].map(|f| Pick::Folder(f.into())));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The folder shown is never out of sight: shown however it came to be
+/// (a search's note, a move, a link, by hand), the folders it is in
+/// unfold; one folded with the folder shown inside it is shown instead;
+/// a new folder named inside a folded one unfolds it.
+#[test]
+fn the_folder_shown_is_never_folded_away() {
+    let (mut app, mut d, dir) = on_folder_row("fold-reveal", &["A", "A/Sub", "A/Sub/Deep", "B", "B/In"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key_with(&mut app, &mut d, "left", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub"]);
+    app.show_folder(Some("A/Sub/Deep".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert!(folded(&app).is_empty(), "{:?}", folded(&app));
+    assert!(rows_drawn(&app).contains(&"A/Sub/Deep".to_string()));
+    // Folding a folder the one shown is inside: that one is shown.
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(app.folder.as_deref(), Some("A"));
+    assert_eq!(folded(&app), ["A"]);
+    // A new folder inside a folded one: its field in sight, and it shown
+    // once made.
+    click_chevron(&mut app, &mut d, "B", KeyMods::NONE);
+    assert_eq!(folded(&app), ["A", "B"]);
+    app.name_folder("B/In");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["A"], "B unfolded for the field");
+    type_in(&mut app, &mut d, "New");
+    key(&mut app, &mut d, "enter");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.folder.as_deref(), Some("B/In/New"));
+    assert!(rows_drawn(&app).contains(&"B/In/New".to_string()), "{:?}", rows_drawn(&app));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A folder renamed or moved stays folded, and the folders inside it.
+#[test]
+fn a_folder_renamed_or_moved_stays_folded() {
+    let (mut app, mut d, dir) = on_folder_row("fold-rename", &["A", "A/Sub", "A/Sub/Deep", "B"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key_with(&mut app, &mut d, "left", ALT);
+    app.rename_folder("A", "Z");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["Z", "Z/Sub"]);
+    app.move_folder("Z", "B");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["B/Z", "B/Z/Sub"]);
+    assert_eq!(rows_drawn(&app), ["B", "B/Z"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// What is folded is this device's: kept in its settings file, read back
+/// at the next start; a file from before it reads as all open.
+#[test]
+fn folded_folders_stay_folded_after_a_restart() {
+    let (store, dir) = temp_store("fold-restart");
+    let file = dir.with_extension("settings.txt");
+    let _ = std::fs::remove_file(&file);
+    let mut app = Carnet::with_settings(store, Settings { file: Some(file.clone()), ..Settings::default() });
+    for f in ["A", "A/Sub", "B"] {
+        let (parent, leaf) = f.rsplit_once('/').unwrap_or(("", f));
+        app.store.create_folder(parent, leaf).unwrap();
+    }
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d_frame_twice(&mut app, &mut d);
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("collapsed = A\n"), "{text}");
+    drop(app);
+    // The next start: the same notes, the settings read back.
+    let mut app = Carnet::with_settings(Store::open(dir.clone()).unwrap(), Settings { file: Some(file.clone()), ..Settings::parse(&text) });
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("collapsed"));
+    assert!(Settings::parse("theme = dark\n").collapsed.is_empty(), "an older file: all open");
+    let _ = std::fs::remove_file(file);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A note or folder carried over a folded folder, held there a moment:
+/// it unfolds, and what is carried can go deeper. Passing over does not.
+#[test]
+fn a_folded_folder_springs_open_under_a_drag() {
+    let (mut app, mut d, dir) = library("fold-spring", &[("Work/Plan", "q3"), ("Home/Sub/Deep", "x"), ("Home/Pantry", "rice")]);
+    focus_row(&mut app, &mut d, folder("Home"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["Home"]);
+    let (work, home) = (folder_row(&app, "Work"), folder_row(&app, "Home"));
+    d.input(&mut app, InputEvent::CursorMoved(work));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.move_to(&mut app, home.x, home.y);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["Home"], "not at once");
+    std::thread::sleep(SPRING + Duration::from_millis(50));
+    d_frame_twice(&mut app, &mut d);
+    assert!(folded(&app).is_empty(), "held there, it opens");
+    let sub = folder_row(&app, "Home/Sub");
+    d.move_to(&mut app, sub.x, sub.y);
+    d_frame_twice(&mut app, &mut d);
+    d.input(&mut app, InputEvent::mouse_up());
+    d_frame_twice(&mut app, &mut d);
+    assert!(dir.join("Home/Sub/Work/Plan.md").exists(), "dropped deeper: {:?}", app.store.folders);
+    // Only passing over a folded folder: it stays folded.
+    focus_row(&mut app, &mut d, folder("Home/Sub"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["Home/Sub"]);
+    let (pantry, sub) = (folder_row(&app, ""), folder_row(&app, "Home/Sub"));
+    d.input(&mut app, InputEvent::CursorMoved(pantry));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.move_to(&mut app, sub.x, sub.y);
+    d_frame_twice(&mut app, &mut d);
+    d.move_to(&mut app, pantry.x, pantry.y + 2.0);
+    d_frame_twice(&mut app, &mut d);
+    std::thread::sleep(SPRING + Duration::from_millis(50));
+    d_frame_twice(&mut app, &mut d);
+    d.input(&mut app, InputEvent::mouse_up());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["Home/Sub"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// What a server says of itself, listing these features.
 fn server_info(features: &[&str]) -> carnet_sync::info::ServerInfo {
     carnet_sync::info::ServerInfo { greeting: carnet_sync::compat::Greeting::ours(features.iter().map(|f| f.to_string()).collect()), ..Default::default() }
@@ -4928,11 +5454,15 @@ fn a_server_that_takes_only_codes_goes_straight_to_the_code() {
     check_server(&mut a, &mut d, "http://127.0.0.1:1");
     assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::Unreachable));
     assert_eq!(a.connect.step(), crate::connect::Step::Server);
-    assert!(drawn(&mut d, &mut a, carnet_sync::info::Problem::Unreachable.words()));
+    assert!(drawn(&mut d, &mut a, &carnet_sync::info::Problem::Unreachable.words()));
+    // A name the DNS has no address for: said so, by its name.
+    check_server(&mut a, &mut d, "https://carnet-test.invalid");
+    assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::DomainNotFound("carnet-test.invalid".into())));
+    assert!(drawn(&mut d, &mut a, "Domain not found: carnet-test.invalid. Check the address; a new name can take a few minutes to appear."));
     // Something answers, not Carnet (the server, under a path it hasn't).
     check_server(&mut a, &mut d, &format!("{origin}/elsewhere"));
     assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::NotCarnet));
-    assert!(drawn(&mut d, &mut a, carnet_sync::info::Problem::NotCarnet.words()));
+    assert!(drawn(&mut d, &mut a, &carnet_sync::info::Problem::NotCarnet.words()));
     assert!(drawn(&mut d, &mut a, "Cloud sync setup"), "still on the first step");
 
     // Codes only: the code's form, straight away.
@@ -5119,7 +5649,7 @@ fn settings_sync_draws_a_servers_impossible_times() {
     a.on_plain(Msg::SyncStart);
     until("online", &mut a, &mut d, &|x| x.sync.status == crate::sync::Status::Online);
     a.settings_open = true;
-    until("listed", &mut a, &mut d, &|x| x.sync.devices.is_some() && x.sync.usage.is_some() && x.sync.invites.is_some());
+    until("listed", &mut a, &mut d, &|x| x.sync.devices.is_some() && x.sync.usage_settled() && x.sync.invites.is_some());
     let far = u64::MAX;
     let mut devices = a.sync.devices.clone().unwrap();
     devices.push(DeviceInfo { id: vec![9; 16], name: Some("Old phone".into()), seen: far, you: false, online: false });
@@ -5662,8 +6192,10 @@ fn two_apps_sync_through_a_server() {
     // laptop (asked twice): the laptop finds itself out and forgets its
     // keys; the tablet takes the new key and goes on syncing.
     a.settings_open = true;
+    // What the account keeps is asked with them: answered too, or the
+    // answer would take the place of the plan put in below.
     until("A lists three devices", &mut [(&mut a, &mut da), (&mut b, &mut db), (&mut c, &mut dc)], &|x| {
-        x[0].0.sync.devices.as_ref().is_some_and(|l| l.len() == 3 && l.iter().all(|d| d.name.is_some()))
+        x[0].0.sync.devices.as_ref().is_some_and(|l| l.len() == 3 && l.iter().all(|d| d.name.is_some())) && x[0].0.sync.usage_settled()
     });
     let list = a.sync.devices.clone().unwrap();
     let mut names: Vec<(String, bool)> = list.iter().map(|d| (d.name.clone().unwrap(), d.you)).collect();
@@ -6445,6 +6977,110 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A note come from another device while its picture is still on its
+/// way (the found: "Picture not found" until it came) shows a quiet box
+/// saying it's downloading, the picture's place; then the picture once
+/// it lands. One that's nowhere is still "Picture not found".
+#[test]
+fn a_picture_on_its_way_by_sync_says_so_then_shows() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-coming-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&mut [(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+
+    // A: a note with a picture of Carnet's, on the server.
+    let (mut a, mut da, dir_a) = fresh("coming-a");
+    a.sync_server = origin.clone();
+    a.sync_how = 0;
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Harbour");
+    key(&mut a, &mut da, "enter");
+    let rgba: Vec<u8> = (0..400 * 300).flat_map(|_| [90u8, 140, 170, 255]).collect();
+    a.paste_picture(400, 300, &rgba);
+    type_in(&mut a, &mut da, "The boats");
+    a.save_current();
+    until("A's picture on the server", &mut [(&mut a, &mut da)], &|x| {
+        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty()) && x[0].0.sync.pictures_waiting() == 0
+    });
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+
+    // B comes in, its pictures held on the way.
+    let (mut b, mut db, dir_b) = fresh("coming-b");
+    b.sync.hold_fetches = true;
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    until("B has the note, its picture asked for", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
+        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty())
+    });
+    let i = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
+    b.open(i);
+    db.core.set_inspect(true);
+    until("B says it's on its way", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, super::page_view::DOWNLOADING));
+    assert!(!shown(&db, "Picture not found"));
+    // In the box the picture takes: a picture's height at least.
+    let words = db.core.nodes().iter().find(|n| n.text.as_deref() == Some(super::page_view::DOWNLOADING)).unwrap().rect;
+    let card = db
+        .core
+        .nodes()
+        .iter()
+        .map(|n| n.rect)
+        .filter(|r| r.x <= words.x && r.y <= words.y && r.x + r.w >= words.x + words.w && r.y + r.h >= words.y + words.h && r.h >= 100.0)
+        .min_by(|p, q| (p.w * p.h).total_cmp(&(q.w * q.h)));
+    assert!(card.is_some_and(|c| c.h >= 120.0), "{card:?}");
+
+    // Let through: the picture.
+    b.sync.hold_fetches = false;
+    until("B shows the picture", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
+        let (app, d) = (&mut *x[1].0, &mut *x[1].1);
+        !shown(d, super::page_view::DOWNLOADING)
+            && app.store.notes[app.current].doc.blocks().iter().any(|bl| match &bl.kind {
+                Kind::Image { src, wiki, .. } => {
+                    let f = app.page_folder();
+                    app.store.picture_file(&f, src, *wiki).is_some_and(|p| app.images.is_ready(&p))
+                }
+                _ => false,
+            })
+    });
+    assert!(!shown(&db, "Picture not found"));
+
+    // One the vault doesn't name, nowhere at all: not found, as ever.
+    let n = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
+    b.store.notes[n].doc.push(Block::new(Kind::Image { src: "attachments/nowhere.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false }));
+    b.store.notes[n].touch();
+    until("B says the other is nowhere", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, "Picture not found"));
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop((a, b));
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 #[test]
 fn the_highlighter_and_code_shortcuts_take_off_what_they_put_on() {
     let (mut app, mut d, dir) = body("toggles");
@@ -7216,6 +7852,111 @@ fn a_built_in_face_is_listed_once() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Code is drawn in a monospaced face, a block of it and a word of it:
+/// ten i's as wide as ten M's, where the text's face makes them far
+/// apart. The face is the system's monospace until one is chosen; a
+/// chosen one draws the code, and the text stays in its own.
+#[test]
+fn code_is_drawn_in_the_code_face() {
+    let (store, dir) = temp_store("code-face");
+    drop(store);
+    let (i, m) = ("iiiiiiiiii", "MMMMMMMMMM");
+    std::fs::write(dir.join("Code.md"), format!("# Code\n\n```\n{i}\n```\n\n```\n{m}\n```\n\n`{i}`\n\n`{m}`\n\n{i}\n\n{m}\n")).unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 900.0).framing();
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    let n = app.store.notes.iter().position(|n| n.title == "Code").unwrap();
+    app.open(n);
+    // The widths drawn, top to bottom: the blocks, the words, the text.
+    let widths = |app: &mut Carnet, d: &mut Drive| -> Vec<f32> {
+        for _ in 0..3 {
+            d.frame(app);
+        }
+        let mut found: Vec<(f32, f32)> = d
+            .core
+            .nodes()
+            .iter()
+            .filter(|n| n.rect.x > 268.0 && (n.text.as_deref() == Some(i) || n.text.as_deref() == Some(m)))
+            .map(|n| (n.rect.y, n.rect.w))
+            .collect();
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.into_iter().map(|f| f.1).collect()
+    };
+    let w = widths(&mut app, &mut d);
+    assert_eq!(w.len(), 6, "{w:?}");
+    assert!((w[0] - w[1]).abs() < 0.5, "a block of code is monospaced: {w:?}");
+    assert!((w[2] - w[3]).abs() < 0.5, "a word of code is monospaced: {w:?}");
+    assert!(w[5] > w[4] * 1.5, "the text is not: {w:?}");
+    // The system's monospace, at code's size (whole px, as the page has it).
+    let style = TextStyle::new(Type::CODE.size.round()).family(kui_native::FontFamily::Mono);
+    let mono = d.core.measure_text(m, &style, None).width;
+    assert!((w[1] - mono).abs() < 0.5, "{} drawn, {mono} measured", w[1]);
+
+    // Another monospaced face installed, one that draws wider or narrower:
+    // chosen, it draws the code.
+    let other = d.core.system_fonts().into_iter().filter(|f| f.monospaced && !f.family.starts_with('.')).find_map(|f| {
+        let id = d.core.add_system_font(&f.family)?;
+        let wide = d.core.measure_text(m, &style.family(kui_native::FontFamily::Custom(id)), None).width;
+        ((wide - mono).abs() > 2.0).then_some((f.family, wide))
+    });
+    if let Some((name, wide)) = other {
+        app.settings.code_font = name.clone();
+        let w = widths(&mut app, &mut d);
+        assert!((w[1] - wide).abs() < 0.5, "{name}: {} drawn, {wide} measured", w[1]);
+        assert!((w[0] - w[1]).abs() < 0.5 && (w[2] - w[3]).abs() < 0.5, "{w:?}");
+        assert!(w[5] > w[4] * 1.5, "the text in its own face still: {w:?}");
+    } else {
+        eprintln!("skipped: no second monospaced face installed");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Settings → Fonts → Code: its list holds the monospaced families only,
+/// the system's own first; a click chooses one, its pill says so, and
+/// Reset puts the system's back.
+#[test]
+fn the_code_font_is_chosen_from_monospaced_families() {
+    let (store, dir) = temp_store("code-font");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(d.texts_under("font-code"), ["System monospace"]);
+    app.on_settings(Msg::FontMenu { which: 3 });
+    d_frame_twice(&mut app, &mut d);
+    let mono: std::collections::HashSet<String> =
+        d.core.system_fonts().into_iter().filter(|f| f.monospaced).map(|f| f.family).collect();
+    assert!(app.font_rows.iter().all(|f| mono.contains(f)), "monospaced only: {:?}", app.font_rows);
+    assert!(!app.font_rows.iter().any(|f| f == "Inter" || f == "Source Serif 4"));
+    assert!(d.key_named("System monospace").is_some(), "the default row");
+    let Some(name) = app.font_rows.first().cloned() else {
+        eprintln!("skipped: no monospaced family installed");
+        let _ = std::fs::remove_dir_all(dir);
+        return;
+    };
+    let r = d.core.nodes().iter().find(|n| n.text.as_deref() == Some(name.as_str())).map(|n| n.rect).unwrap();
+    d.click(&mut app, r.x + 20.0, r.y + r.h / 2.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!((app.settings.code_font.as_str(), app.font_pick), (name.as_str(), None));
+    assert_eq!(d.texts_under("font-code"), [name.as_str()]);
+    assert!(app.settings.to_text().contains(&format!("code_font = {name}\n")));
+    // Searched, the list narrows as the others do.
+    app.on_settings(Msg::FontMenu { which: 3 });
+    app.font_query = "no such face".into();
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.font_rows.is_empty());
+    app.on_settings(Msg::FontMenu { which: 3 });
+    // Reset: the system's again.
+    app.on_settings(Msg::ResetLook);
+    app.on_settings(Msg::ResetLook);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.code_font, "");
+    assert_eq!(d.texts_under("font-code"), ["System monospace"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A font list opens afresh: its search empty and every font listed,
 /// whatever was searched for the last time.
 #[test]
@@ -7524,6 +8265,77 @@ fn five_quick_clicks_on_the_settings_title_turn_the_debug_information_on_and_off
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A newer Carnet, as GitHub says: told once in a notice (and kept told
+/// in the settings, so a later start doesn't say it again); Settings →
+/// About says it while it's out, its Download opens the release's page.
+/// Checking off is saved, and nothing is asked.
+#[test]
+fn a_newer_version_is_told_once_and_settings_offer_its_download() {
+    use carnet_sync::http::Answer;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::mpsc;
+    type Answers = Rc<RefCell<Vec<mpsc::Sender<Result<Answer, String>>>>>;
+    let github = |answers: &Answers| {
+        let a = answers.clone();
+        crate::update::Updates::with(Some(Box::new(move |_, _| {
+            let (tx, rx) = mpsc::channel();
+            a.borrow_mut().push(tx);
+            Some(rx)
+        })))
+    };
+    let release = include_str!("../assets/fixtures/github-release.json").replace("\"v0.1.2\"", "\"v999.0.0\"");
+    let answer = || Ok(Answer { status: 200, body: release.as_bytes().to_vec(), ..Answer::default() });
+    let told = "Carnet 999.0.0 is out: Settings has the download";
+
+    // Settings open, the window tall enough to show them whole.
+    let (mut app, mut d, dir) = tall("updates");
+    let answers = Answers::default();
+    app.updates = github(&answers);
+    d.frame(&mut app);
+    assert_eq!(answers.borrow().len(), 1, "asked at start");
+    answers.borrow()[0].send(answer()).unwrap();
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some(told));
+    assert_eq!(app.settings.told_update, "999.0.0");
+    app.notice = None;
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_none(), "told once");
+    assert_eq!(answers.borrow().len(), 1, "not asked again today");
+
+    assert!(drawn(&mut d, &mut app, &format!("Carnet {}", env!("CARGO_PKG_VERSION"))));
+    assert!(drawn(&mut d, &mut app, "Carnet 999.0.0 is out"));
+    assert!(drawn(&mut d, &mut app, "Check for updates"));
+    store::OPENED.with_borrow_mut(std::mem::take);
+    let download = d.key_of("update-download").expect("Download");
+    d.click_key(&mut app, download);
+    assert_eq!(store::OPENED.with_borrow_mut(std::mem::take), ["https://github.com/qxuken/carnet/releases/tag/v999.0.0"]);
+
+    // A later start, the same release found: not told again.
+    let settings = app.settings.clone();
+    let (store2, dir2) = temp_store("updates-later");
+    let mut later = Carnet::with_settings(store2, settings);
+    let mut d2 = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    let answers = Answers::default();
+    later.updates = github(&answers);
+    d2.frame(&mut later);
+    answers.borrow()[0].send(answer()).unwrap();
+    d_frame_twice(&mut later, &mut d2);
+    assert!(later.notice.is_none(), "told before");
+    assert!(later.updates.newer().is_some());
+
+    // Off: saved so, and nothing asked.
+    app.on_settings(Msg::SetCheckUpdates { to: 0 });
+    assert!(app.settings.to_text().contains("check_updates = off\n"));
+    let answers = Answers::default();
+    app.updates = github(&answers);
+    d_frame_twice(&mut app, &mut d);
+    assert!(answers.borrow().is_empty());
+    assert!(!drawn(&mut d, &mut app, "Carnet 999.0.0 is out"), "nothing known");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(dir2);
+}
+
 /// A selection over several lines: the toolbar's list tools and their
 /// shortcuts make every one of them an item; again, every one back into
 /// a paragraph. A mix is made all one kind first. Headings and quotes
@@ -7607,6 +8419,64 @@ fn list_tools_turn_every_selected_line_and_back() {
     key_with(&mut app, &mut d, "5", CTRL_ALT);
     key_with(&mut app, &mut d, "z", CTRL);
     assert_eq!(kinds(&app), ["text"; 3]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A note from Apple Notes' export, its lines ended by line breaks: a
+/// click on its first line and the toolbar's Bulleted list make that line
+/// an item, and the rest of the file stays as it was, byte for byte; the
+/// shortcut takes it back to a paragraph of its own, and Ctrl+Z to the
+/// file as it came. ⌥⌘6 numbers a line in the middle of a paragraph.
+#[test]
+fn an_exported_notes_line_is_turned_alone() {
+    const EXPORT: &str = include_str!("../crates/carnet-core/tests/fixtures/apple-notes.md");
+    let (store, dir) = temp_store("export-lines");
+    drop(store);
+    std::fs::write(dir.join("поездки.md"), EXPORT).unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    let i = app.store.notes.iter().position(|n| n.title == "поездки").unwrap();
+    app.open(i);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let written = |app: &mut Carnet| {
+        app.save_current();
+        std::fs::read_to_string(dir.join("поездки.md")).unwrap()
+    };
+    assert_eq!(written(&mut app), EXPORT);
+    // On the page (not the note's card in the library): the paragraph.
+    let first = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("путь: жильё   \nhostel / ryokan  ")).expect("the first paragraph").rect;
+    d.click(&mut app, first.x + 30.0, first.y + 8.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(page::touched(app.doc(), app.caret), 0..=0);
+    let tool = d.key_of("t-bullet").expect("the toolbar's Bulleted list");
+    d.click_key(&mut app, tool);
+    d_frame_twice(&mut app, &mut d);
+    let one = EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n", 1);
+    assert_eq!(written(&mut app), one);
+    assert!(page::turned_to(app.doc(), app.caret, TURN_BULLET), "the tool shows on");
+    key_with(&mut app, &mut d, "5", CTRL_ALT);
+    let back = EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "**путь:** жильё\n\nhostel / ryokan  \n", 1);
+    assert_eq!(written(&mut app), back);
+    key_with(&mut app, &mut d, "z", CTRL);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(written(&mut app), EXPORT, "undone, the file as it came");
+
+    // A line in the middle of the longest paragraph, by the keyboard.
+    let big = app.doc().blocks().iter().position(|b| b.text_ref().is_some_and(|t| t.starts_with("**дом:** мысли"))).unwrap();
+    let slot = Slot::block(app.doc().blocks()[big].id);
+    let at = page::text(app.doc(), slot).find("picture").unwrap();
+    app.caret = Caret::at(Pos { slot, byte: at + 3 });
+    key_with(&mut app, &mut d, "6", CTRL_ALT);
+    assert_eq!(
+        written(&mut app),
+        EXPORT.replacen("коридоре  \npicture rail  \nskylight", "коридоре  \n\n1. picture rail\n\nskylight", 1)
+    );
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 

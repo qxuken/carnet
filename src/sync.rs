@@ -383,6 +383,13 @@ const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 const INSPECT_QUIET: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct Sync {
+    /// Pictures asked for are held here, not fetched, while this is on (a
+    /// test of what a picture on its way looks like); fetched once it's
+    /// off again.
+    #[cfg(test)]
+    pub hold_fetches: bool,
+    #[cfg(test)]
+    held_fetches: Vec<session::Transfer>,
     phase: Phase,
     /// Where `sync.txt` is; `None`: kept nowhere (the tests').
     config_path: Option<PathBuf>,
@@ -558,6 +565,10 @@ impl Sync {
             pending: None,
             http: None,
             saved_cursor: 0,
+            #[cfg(test)]
+            hold_fetches: false,
+            #[cfg(test)]
+            held_fetches: Vec::new(),
         }
     }
 
@@ -936,10 +947,42 @@ impl Sync {
         self.pictures.as_ref().map_or(0, Pictures::waiting)
     }
 
+    /// Whether the picture at `path` (a file in the notes folder, not
+    /// there) is on its way here by sync: Carnet's own, with sync on, and
+    /// either the account's pictures not known yet (its vault not come),
+    /// or named in it and asked for, not given up on. Drawn as coming,
+    /// not as missing.
+    pub fn picture_coming(&self, store: &Store, path: &Path) -> bool {
+        let Phase::On { session, .. } = &self.phase else { return false };
+        let Ok(rel) = path.strip_prefix(&store.dir) else { return false };
+        let rel: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        let rel = rel.join("/");
+        if !crate::pictures::syncs(&rel) {
+            return false;
+        }
+        if !session.has_joined(vault::ROOM) {
+            return true;
+        }
+        self.pictures.as_ref().is_some_and(|p| p.coming(&rel))
+    }
+
     /// Why they wait, when trying again won't mend it: the server's
     /// picture storage turned them away.
     pub fn pictures_held(&self) -> Option<&'static str> {
         self.pictures.as_ref().and_then(Pictures::held_why)
+    }
+
+    /// Logged in, and all the server holds of every note has come: the
+    /// account's notes are here, not just the first of them.
+    pub fn caught_up(&self) -> bool {
+        matches!(&self.phase, Phase::On { session, .. } if session.has_caught_up())
+    }
+
+    /// What the account keeps is known, as of its notes now, and not
+    /// asked again: no answer on its way to take its place.
+    #[cfg(test)]
+    pub fn usage_settled(&self) -> bool {
+        matches!(&self.phase, Phase::On { session, .. } if self.usage.is_some() && !self.asked_usage && session.moves() == self.usage_moves)
     }
 
     /// Logged in, every room joined, everything sent acknowledged.
@@ -1485,7 +1528,17 @@ impl Sync {
                 // Pictures to put or fetch: over HTTP, by their links.
                 if let Some(http) = &self.http {
                     let peer = link.as_ref().and_then(Link::peer);
-                    for t in session.take_transfers() {
+                    #[allow(unused_mut)]
+                    let mut transfers = session.take_transfers();
+                    #[cfg(test)]
+                    if self.hold_fetches {
+                        let (gets, puts): (Vec<_>, Vec<_>) = transfers.into_iter().partition(|t| matches!(t, session::Transfer::Get { .. }));
+                        self.held_fetches.extend(gets);
+                        transfers = puts;
+                    } else {
+                        transfers.extend(std::mem::take(&mut self.held_fetches));
+                    }
+                    for t in transfers {
                         http.send_for(&config.origin, peer, t);
                     }
                 }

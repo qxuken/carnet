@@ -24,6 +24,10 @@
   --highlight: #fcefa1;
   --serif: 'Source Serif 4', Georgia, serif;
   --sans: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  /* Code, a block or a word of it: the system's own monospace, as the
+     desktop's (kui's Mono: SF Mono or Menlo, Cascadia Mono or Consolas,
+     DejaVu Sans Mono or Liberation Mono). */
+  --mono: ui-monospace, 'SF Mono', Menlo, Monaco, 'Cascadia Mono', Consolas, 'DejaVu Sans Mono', 'Liberation Mono', monospace;
   --radius: 8px; --radius-card: 12px;
   color-scheme: light dark;
 }
@@ -90,7 +94,7 @@ button { font: inherit; color: inherit; }
 }
 .note blockquote { margin: 0 0 12px; padding-left: 14px; border-left: 3px solid var(--border-strong); color: var(--muted); font-family: var(--serif); }
 .note blockquote > p:last-child { margin-bottom: 0; }
-.note code { font: 14px/1.5 ui-monospace, Menlo, monospace; background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
+.note code { font: 14px/1.5 var(--mono); background: var(--sunken); padding: 1px 5px; border-radius: 4px; }
 .note pre { background: var(--sunken); padding: 12px 14px; border-radius: var(--radius); overflow-x: auto; }
 .note pre code { background: none; padding: 0; }
 /* A table as the desktop draws it (the editor's the same, theme.ts): the
@@ -118,6 +122,10 @@ button { font: inherit; color: inherit; }
   background: radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x;
 }
 .note a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent-ink) 40%, transparent); }
+/* Underlined words, a little below the letters; a link's words underlined
+   keep the link's one line. */
+.note u { text-decoration-line: underline; text-underline-offset: 0.18em; }
+.note a u { text-decoration: none; }
 .note img { max-width: 100%; height: auto; border-radius: var(--radius); background: var(--sunken); }
 /* A picture among a table cell's words: its own width, never wider than
    its cell, the columns being fixed shares of the table, as the desktop

@@ -1167,6 +1167,13 @@ impl Storage for Sharded {
             .unwrap_or_default()
     }
 
+    fn find_invite(&self, hash: [u8; 32]) -> Option<(bool, u64)> {
+        self.directory
+            .query_row("SELECT owner, expires FROM invites WHERE hash = ?1", params![hash.as_slice()], |r| Ok((r.get::<_, bool>(0)?, r.get::<_, i64>(1)?)))
+            .ok()
+            .map(|(owner, expires)| (owner, uint(expires)))
+    }
+
     fn drop_invite(&mut self, hash: [u8; 32]) -> Result<bool, Failed> {
         self.directory.execute("DELETE FROM invites WHERE hash = ?1", params![hash.as_slice()]).map(|n| n > 0).map_err(failed)
     }

@@ -46,7 +46,7 @@ And what it leaves out, on purpose:
 - **Edits made in other apps are merged.** A note changed in Obsidian, VS Code or a sync client while it has edits here keeps both sets of edits.
 - **History.** Every version a note has been, with what each one added and took away. Restore any of them, or restore one as a copy.
 - **Pictures** pasted or dropped in, resized, and placed on their own line or beside the text.
-- **Copy that keeps formatting.** A selection copies as Markdown with an HTML version beside it, so a paste into Mail, Word or Google Docs keeps headings, lists, checkboxes, tables, bold and links.
+- **Copy that keeps formatting.** A selection copies as Markdown with an HTML version beside it, so a paste into Mail, Word or Google Docs keeps headings, lists, checkboxes, tables, bold, underline and links.
 - **A trash you can restore from.** Deleted notes and folders go to a trash folder inside your notes folder, and each one goes back where it came from.
 - **Calm, readable design.** Five palettes, each light and dark, three densities, font pairings, page widths, text sizes from 12 to 24 px, focus and typewriter modes, and a zen mode that leaves only the note.
 - **Sync** between your devices, end-to-end encrypted, through a server you can run yourself, and a **web app** that installs on a phone and works offline.
@@ -96,11 +96,12 @@ On a Mac every shortcut below is the same with ⌘ for Ctrl and ⌥ for Alt; too
 | Backspace at a list item's start | undo its structure (outdent, then plain text), then join the line above |
 | Ctrl+Enter | tick or untick a checklist item |
 | Ctrl+B / Ctrl+I / Ctrl+Shift+X / Ctrl+E | bold / italic / strikethrough / code |
+| Ctrl+U | underline, written `<u>like this</u>`: Markdown has none, and most viewers show the HTML tag |
 | Ctrl+Shift+H | highlight, written `==like this==` as Obsidian does |
 | Ctrl+K | add, change or remove a link |
-| Ctrl+click a link | open it |
+| Ctrl+click a link | open it (or a click, or a double-click: Settings → Writing → Open links with) |
 
-The toolbar's highlighter and text-colour buttons offer ten calm hues. They are written as HTML any Markdown viewer shows (`<span style="color: #C0553F">`, `<mark style="background: #F8EBA6CC">`), and Carnet draws each hue in the current theme's own colours.
+The toolbar's highlighter and text-colour buttons offer ten calm hues. They are written as HTML any Markdown viewer shows (`<span style="color: #C0553F">`, `<mark style="background: #F8EBA6CC">`), and Carnet draws each hue in the current theme's own colours. Underline is HTML too, `<u>…</u>`; one written `<ins>…</ins>` in another app is read as underline and kept as it was written.
 
 ### Moving around and editing blocks
 
@@ -121,7 +122,7 @@ The toolbar's highlighter and text-colour buttons offer ten calm hues. They are 
 | drag in the margin | select whole blocks |
 | right-click on the page | cut, copy, paste, styles, and what the toolbar does for the block |
 
-The toolbar acts on the blocks the caret touches: turn them into another kind, drop a paragraph's first letter, indent them, move them, remove them. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
+The toolbar acts on the blocks the caret touches: turn them into another kind, drop a paragraph's first letter, indent them, move them, remove them. A paragraph's lines turn one at a time, as a paragraph per line typed here would: in a note whose lines end in line breaks (as Apple Notes exports them), the caret's line becomes the item or heading and the lines around it stay as they were; select several lines to turn them all, one item each. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
 
 ### Notes and folders
 
@@ -135,7 +136,8 @@ The toolbar acts on the blocks the caret touches: turn them into another kind, d
 | Ctrl+. | zen mode: only the note |
 | Ctrl+, | settings |
 | F2, Delete or Backspace on a folder in the list | rename it in place, delete it (one with notes goes to Deleted whole, and Undo brings it back) |
-| drag a note or a folder onto a folder | move it there ("All notes" takes it to the top level); a folder takes its notes and folders with it |
+| the chevron before a folder, or ← / → on its row | hide or show the folders inside it (Alt: and every folder inside those); → on an open folder goes into it, ← on a closed one goes up to the folder it's in. Which are hidden is kept on each device |
+| drag a note or a folder onto a folder | move it there ("All notes" takes it to the top level); a folder takes its notes and folders with it; held a moment over a folder whose folders are hidden, it opens to let you go deeper |
 | Shift+click / Ctrl+click in the list | choose several notes and folders, to delete or move together |
 | Shift+↑ / ↓ in the list | choose from the folder you're on, or, after a click on a note's card, from that note |
 | right-click a note in the list | open, its history, pin, show in Explorer or Finder, copy its path, move to a folder, move to Deleted |
@@ -165,7 +167,7 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 
 - **Colors**: Linen (the default), Sage, Harbor, Blossom or Graphite, each light and dark; **Theme**: System, Light or Dark.
 - **Density**: Compact, Comfortable or Airy.
-- **Fonts**: a pairing (Book, Modern, Classic, System); under it, **Text** and **Headings**: any installed family, searchable, each name shown in its own face.
+- **Fonts**: a pairing (Book, Modern, Classic, System); under it, **Text** and **Headings**: any installed family, searchable, each name shown in its own face; and **Code**, for code blocks and `code` words: the system's monospace (SF Mono or Menlo on a Mac, Cascadia Mono or Consolas on Windows, DejaVu Sans Mono or Liberation Mono on Linux), or any installed monospaced family. The web draws code in the browser's system monospace.
 - **Page width**: Narrow, Medium or Wide; **Text size**: 12 to 24 px.
 - **Dividers**: three dots, a short line, three stars, stars in a triangle, a flourish, a printer's leaf (❧), three diamonds, a diamond between lines, or a wave. Only the look changes: the file still says `---`.
 - **Dropped letters**: a paragraph drops its first letter only when you ask, with the toolbar's **Drop the first letter** (Ctrl+Alt+8): a large letter, the first lines beside it, as tall as the paragraph's lines up to a limit: a two-line paragraph drops two, a one-line one none. The file keeps it as `<span class="initial">O</span>nce`, which other Markdown apps show as a plain letter. For every dropped letter: **Up to** (two, three or four lines), **Font** (the heading face, or any other) and **Colour** (the accent's or the text's; a letter given a colour of its own with the text-colour tool keeps it). The settings' preview shows one.
@@ -175,8 +177,9 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 - **Dates**: on the page and the cards, when a note was last edited or when it was created: how long ago within a day ("3 hours ago"), the day after that ("Created 9 October", the year too when it is not this one).
 - **Notes folder**: change it, show it, copy its path, or go back to `Documents/Carnet`.
 - **Sync**: see below.
+- **About**: this version, and, when GitHub has a newer release, "Carnet 0.1.2 is out" with **Download**, which opens the release's page (nothing is installed; a notice says so once, too). **Check for updates** (on by default) asks GitHub once a day, at start and then every 24 hours while Carnet runs: one request to `api.github.com` for the latest release, with nothing sent but the request itself (no account, no id, nothing about your notes). Off, nothing is asked. A check that fails says nothing, and offline it simply waits.
 
-Carnet sets its pages in fonts it ships, so they look the same on every machine: **Source Serif 4** for titles and headings and **Inter** for the text, both under the SIL Open Font License.
+Carnet sets its pages in fonts it ships, so they look the same on every machine: **Source Serif 4** for titles and headings and **Inter** for the text, both under the SIL Open Font License. Code is set in the system's own monospace, which every machine has.
 
 ## Sync and self-hosting
 
@@ -186,7 +189,7 @@ Sync is end-to-end encrypted. Your notes, their titles, folder names and picture
 
 To start, you need a sync server and an invite code from it:
 
-1. **Run `carnet-server`**, from the released image (`qxuken/carnet-server` on Docker Hub, or `ghcr.io/qxuken/carnet-server`) or built from this repository. On its first start it prints an invite code for the first account. [crates/carnet-server/README.md](crates/carnet-server/README.md) is the full self-hosting guide: running it, TLS, backups, monitoring, and moving to Postgres and S3.
+1. **Run `carnet-server`**, from the released image (`qxuken/carnet-server` on Docker Hub, or `ghcr.io/qxuken/carnet-server`) or built from this repository. On its first start it prints an invite code for the first account, good for a day (restart the server for a new one). [crates/carnet-server/README.md](crates/carnet-server/README.md) is the full self-hosting guide: running it, TLS, backups, monitoring, and moving to Postgres and S3.
 2. **In Carnet, open Settings → Sync**, type the server's address, choose **Enter the code**, and type the invite code.
 3. **Add your other devices** from **Settings → Sync → Add a device**: it shows a code (and a QR code) that the new device types or scans. The server only relays the two devices' messages and cannot read what passes between them.
 4. **Keep a way back in.** Twelve recovery words let a new device in when none of yours is left; they are shown once and kept nowhere. A password (and, in the web app, a passkey) does the same and can be changed at any time; the server never learns the password.

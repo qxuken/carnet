@@ -32,6 +32,9 @@ const THEIRS_OPACITY: f32 = 0.45;
 /// What the card in place of the user's own picture says when it isn't on
 /// this device (another device's file, which doesn't sync): the web's words.
 pub(super) const ELSEWHERE: &str = "Not on this device";
+/// What stands in for a picture of Carnet's that sync is bringing here
+/// (another device's, not come yet): the web's words.
+pub(super) const DOWNLOADING: &str = "Downloading\u{2026}";
 /// How long the writing pauses, in seconds, before an empty line says
 /// what can go on it.
 const HINT_AFTER: f64 = 1.2;
@@ -221,20 +224,19 @@ impl Carnet {
                         // container too: blocks are keyed by id, and an id
                         // must not meet a sibling's auto key (its index).
                         self.page_key = Some(ui.child_key("body"));
-                        ui.with_keyed(
-                            "body",
-                            NodeSpec::column()
-                                .grow_width()
-                                .on_key(Msg::Page)
-                                // A press in the text is the editor's own,
-                                // as kui sends it; the scroller above takes
-                                // one beside it.
-                                .on_drag(Msg::PageDrag)
-                                .on_context_menu(Msg::Page)
-                                .role(Role::MultilineTextInput)
-                                .label("Note"),
-                            |ui| self.blocks(ui, l),
-                        );
+                        let body = NodeSpec::column()
+                            .grow_width()
+                            .on_key(Msg::Page)
+                            // A press in the text is the editor's own,
+                            // as kui sends it; the scroller above takes
+                            // one beside it.
+                            .on_drag(Msg::PageDrag)
+                            .on_context_menu(Msg::Page)
+                            .role(Role::MultilineTextInput)
+                            .label("Note");
+                        // Over a link a press would open, a hand.
+                        let body = if self.link_hand(ui) { body.cursor(kui_native::CursorShape::Pointer) } else { body };
+                        ui.with_keyed("body", body, |ui| self.blocks(ui, l));
                         // Room below the last block — on a typewriter, enough
                         // for the last line to come up to the middle. A
                         // click here is the page's (`Msg::PageDrag`): it
@@ -568,6 +570,10 @@ impl Carnet {
     ) {
         let right = matches!(blocks[i].kind, Kind::Image { float: Float::Right, .. });
         self.float_count = k - i;
+        self.float_row = blocks[i].id;
+        // Its pictures say their heights again as they're drawn: none
+        // gone from it is snapped to.
+        self.pic_rows.retain(|_, (row, ..)| *row != blocks[i].id);
         let key = format!("float-{}", blocks[i].id);
         // The row's own width as last laid out: what its pictures share,
         // measured, so they never crowd each other however the page's
@@ -778,7 +784,7 @@ impl Carnet {
             Kind::Raw(text) => {
                 let front = text.starts_with("---\n");
                 let style = l.page_type(Type::CODE)
-                    .mono()
+                    .family(l.code)
                     .color(if front { t.muted } else { t.fg });
                 ui.with(NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0)), |ui| {
                     ui.with(
@@ -851,14 +857,15 @@ impl Carnet {
                     // another device's own picture, below). No text in
                     // it to select: a press selects it as it would the
                     // picture, to be moved or deleted.
-                    let (glyph, why) = self.unshown_why(entry.as_ref(), theirs, src, wiki);
+                    let (glyph, why) = self.unshown_why(entry.as_ref(), file.as_deref(), theirs, src, wiki);
                     let path = store::decode_src(src);
                     let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-                    // Another device's own picture stands in the box the
-                    // picture takes there, as the web draws it: the width
-                    // the note gives it, or the text's (under half of it at
-                    // an edge), and a picture's height at least.
-                    let elsewhere = why == ELSEWHERE;
+                    // Another device's own picture, or one on its way here,
+                    // stands in the box the picture takes there, as the web
+                    // draws it: the width the note gives it, or the text's
+                    // (under half of it at an edge), and a picture's height
+                    // at least.
+                    let elsewhere = why == ELSEWHERE || why == DOWNLOADING;
                     let box_w = width.map_or(if floated { (self.text_w * 0.45).max(BESIDE_MIN) } else { max_w }, |w| w as f32).clamp(48.0, max_w);
                     let card = if elsewhere {
                         NodeSpec::row().min_width(box_w).max_width(box_w).min_height(120.0).center()
@@ -884,6 +891,15 @@ impl Carnet {
                 let dw = resizing.map_or(drawn, |r| r.w.clamp(page::PICTURE_MIN.min(nw), max_w));
                 let dh = dw * nh / nw;
                 self.pic_w.insert(id, (dw, fit, max_w));
+                if floated && self.float_count > 1 {
+                    self.pic_rows.insert(id, (self.float_row, dh, nh / nw));
+                } else {
+                    self.pic_rows.remove(&id);
+                }
+                // Lined up with the one being resized: a thin line in the
+                // accent under each, across the gap between them.
+                let snap = self.resizing.and_then(|r| r.snap.filter(|_| floated && self.pic_rows.get(&r.id).is_some_and(|(row, ..)| *row == self.float_row)));
+                let lined = snap.is_some_and(|h| (h - dh).abs() < 0.75);
                 // The picture on the text's own edge; its ring an overlay
                 // 5px out, so selecting it moves nothing.
                 ui.with(NodeSpec::row().size(dw, dh), |ui| {
@@ -954,6 +970,16 @@ impl Carnet {
                         let shown = matches!(entry, Some(images::Entry::Ready { .. }));
                         self.theirs_mark(ui, l, shown && selected && self.editing && !self.reading(), float == Float::Right);
                     }
+                    if lined {
+                        ui.leaf_keyed(
+                            "snap",
+                            NodeSpec::row()
+                                .size(dw + PICTURE_GAP, 1.5)
+                                .bg(t.accent)
+                                .role(Role::None)
+                                .float(FloatConfig::parent().inside(Align::Start, Align::End).offset(-PICTURE_GAP / 2.0, 9.0).clipped()),
+                        );
+                    }
                     if resizing.is_some() {
                         ui.text_in(
                             NodeSpec::row()
@@ -973,8 +999,13 @@ impl Carnet {
     /// Why a picture isn't shown, by what reading it said (`None`: it was
     /// never looked for), and the glyph that goes with it: a block's card
     /// and a cell's say the same.
-    fn unshown_why(&self, entry: Option<&images::Entry>, theirs: bool, src: &str, wiki: bool) -> (Glyph, &'static str) {
+    fn unshown_why(&self, entry: Option<&images::Entry>, file: Option<&std::path::Path>, theirs: bool, src: &str, wiki: bool) -> (Glyph, &'static str) {
         match entry {
+            // Carnet's own, not here yet: sync is bringing it from the
+            // server (pictures.rs). Missing only once it's given up on.
+            Some(images::Entry::Failed(e)) if e == "not found" && !theirs && file.is_some_and(|f| self.sync.picture_coming(&self.store, f)) => {
+                (Glyph::Cloud, DOWNLOADING)
+            }
             // The user's own picture, not here: with sync on, it's on the
             // device the note was written on, and pictures outside
             // Carnet's attachments don't sync (docs/SYNC.md §4). Said as
@@ -1225,7 +1256,7 @@ impl Carnet {
         let (now, fit, max_w) = self.pic_w.get(&id).copied().unwrap_or((full, full, full));
         match p.get_str("phase") {
             Some("start") => {
-                self.resizing = Some(Resize { id, w0: now, x0: x, w: now, left });
+                self.resizing = Some(Resize { id, w0: now, x0: x, w: now, left, snap: None });
                 if let Some(i) = self.doc().index_of(id) {
                     let c = page::select_blocks(self.doc(), i, i);
                     self.move_to(c);
@@ -1234,9 +1265,16 @@ impl Carnet {
                 self.editing = true;
             }
             Some("move") => {
+                // Near the height of a picture beside it in its row, it
+                // takes that height: the row lines up.
+                let row = self.pic_rows.get(&id).copied();
+                let heights: Vec<f32> = row
+                    .map(|(r, ..)| self.pic_rows.iter().filter(|(o, (or, ..))| **o != id && *or == r).map(|(_, (_, h, _))| *h).collect())
+                    .unwrap_or_default();
                 if let Some(r) = self.resizing.as_mut() {
                     let dx = if r.left { r.x0 - x } else { x - r.x0 };
-                    r.w = page::dragged_width(r.w0, dx, max_w);
+                    let w = page::dragged_width(r.w0, dx, max_w);
+                    (r.w, r.snap) = page::snapped_width(w, row.map_or(0.0, |(.., a)| a), &heights, max_w);
                 }
             }
             _ => {
@@ -1439,7 +1477,7 @@ impl Carnet {
                 .role(Role::None)
         };
         let Some((nw, nh)) = natural else {
-            let (glyph, why) = self.unshown_why(entry.as_ref(), theirs, &p.src, p.wiki);
+            let (glyph, why) = self.unshown_why(entry.as_ref(), file.as_deref(), theirs, &p.src, p.wiki);
             let path = store::decode_src(&p.src);
             let name = path.rsplit('/').next().unwrap_or(&path).to_string();
             let w = room;
@@ -1695,10 +1733,22 @@ impl Carnet {
                         if s.strike || strike {
                             sp = sp.strikethrough();
                         }
+                        // In the words' own ink, as a link's is in its:
+                        // a link underlined is still one line.
+                        if s.underline {
+                            sp = sp.underline();
+                        }
                         if s.code {
-                            // Code reads as code: its own ink on a wash of
-                            // the text's colour, clear in either theme.
-                            sp = sp.color(l.c.accent_ink).bg(t.fg.with_alpha(0.09)).bg_radius(4.0);
+                            // Code reads as code: in the code's face, a size
+                            // down as on the web (14px in 16), its own ink on
+                            // a wash of the text's colour, clear in either
+                            // theme.
+                            sp = sp
+                                .family(l.code)
+                                .size((style.size * 0.875).round())
+                                .color(l.c.accent_ink)
+                                .bg(t.fg.with_alpha(0.09))
+                                .bg_radius(4.0);
                         }
                         if s.link {
                             sp = sp.color(t.focus_ring).underline();
@@ -2008,6 +2058,7 @@ impl Carnet {
             item("Bold", "style:0").accel("mod+b"),
             item("Italic", "style:1").accel("mod+i"),
             item("Strikethrough", "style:2").accel("mod+shift+x"),
+            item("Underline", "style:4").accel(keys::UNDERLINE),
             item("Code", "style:3").accel("mod+e"),
             item(if page::link_at(doc, self.caret).is_some() { "Edit link\u{2026}" } else { "Link\u{2026}" }, "link")
                 .accel("mod+k"),
@@ -2378,6 +2429,7 @@ impl Carnet {
             KeyCode::Char('k') if chord && shift => self.on_plain(Msg::DeleteBlock),
             KeyCode::Char('b') | KeyCode::Char('B') if chord => self.page_action("style:0"),
             KeyCode::Char('i') | KeyCode::Char('I') if chord => self.page_action("style:1"),
+            KeyCode::Char('u') | KeyCode::Char('U') if chord => self.page_action("style:4"),
             // With Shift too: ⌘⇧E is code as well, as hands that know it
             // from elsewhere press it.
             KeyCode::Char('e') | KeyCode::Char('E') if chord => self.page_action("style:3"),
@@ -3005,16 +3057,33 @@ impl Carnet {
                 self.preedit = None;
                 self.writing.moved();
                 self.history().seal();
-                // Ctrl+click (⌘ on a Mac) on a link opens it.
+                // A link opens as the settings say: Ctrl+click (⌘ on a
+                // Mac), a click once let go, or a double-click. A ⌘-click
+                // on one that won't open says why; a click or two on it
+                // do what they do anywhere.
                 let m = core.modifiers();
-                if clicks == 1
-                    && (m.ctrl || m.super_key)
-                    && let Some(pos) = self.hit(core, x, y).filter(|_| !self.in_margin(x, y))
-                    && let Some((_, _, url)) = page::link_at(self.doc(), Caret::at(pos))
-                {
-                    self.drag = None;
-                    self.open_url(&url);
-                    return;
+                let cmd = m.ctrl || m.super_key;
+                let how = self.settings.link_open;
+                self.link_press = None;
+                let pos = self.hit(core, x, y).filter(|_| !self.in_margin(x, y));
+                let url = |doc: &Doc| match pos {
+                    Some(pos) if cmd => page::link_at(doc, Caret::at(pos)).map(|l| l.2),
+                    Some(pos) => page::link_under(doc, pos, how),
+                    None => None,
+                };
+                match how.opens(clicks.max(0) as u32, cmd, m.shift) {
+                    Some(page::OpensOn::Press) => {
+                        if let Some(url) = url(self.doc()) {
+                            self.drag = None;
+                            self.open_url(&url);
+                            return;
+                        }
+                    }
+                    Some(page::OpensOn::Release) => {
+                        let caret = self.caret;
+                        self.link_press = url(self.doc()).map(|url| LinkPress { url, at: Vec2::new(x, y), caret });
+                    }
+                    None => {}
                 }
                 // A press on a picture among a cell's words chooses it,
                 // whole; a drag carries it, as one on its own line.
@@ -3051,10 +3120,25 @@ impl Carnet {
                 if let Some((at, _, _)) = self.drag_at.as_mut() {
                     *at = Vec2::new(x, y);
                 }
+                // Dragged from a link: a selection, not a click on it.
+                if self.link_press.as_ref().is_some_and(|lp| (lp.at.x - x).hypot(lp.at.y - y) >= 4.0) {
+                    self.link_press = None;
+                }
                 self.drag_to(core, x, y);
             }
             _ => {
                 self.drag_at = None;
+                // A click on a link, let go where it was pressed: opened,
+                // and the caret left where it was.
+                if let Some(lp) = self.link_press.take()
+                    && (lp.at.x - x).hypot(lp.at.y - y) < 4.0
+                {
+                    self.caret = lp.caret;
+                    self.drag = None;
+                    self.reveal = false;
+                    self.open_url(&lp.url);
+                    return;
+                }
                 if let Some(Drag::Margin { y0, moved: false, .. }) = self.drag {
                     // A click in the margin: the caret into the block
                     // beside it, at its end; below them all, the last.
@@ -3134,6 +3218,21 @@ impl Carnet {
         let core = ui.core();
         self.drag_to(core, at.x, at.y);
         ui.request_frame();
+    }
+
+    /// Whether the pointer is over a link that a press there, with the keys
+    /// held now, would open (the settings' way links open): it's a hand.
+    pub(super) fn link_hand(&self, ui: &mut Ui<'_>) -> bool {
+        let core = ui.core();
+        let (Some(p), m) = (core.cursor(), core.modifiers()) else { return false };
+        let how = self.settings.link_open;
+        if self.drag.is_some() || self.resizing.is_some() || !how.hand(m.ctrl || m.super_key, m.shift) {
+            return false;
+        }
+        self.hit(core, p.x, p.y)
+            .filter(|_| !self.in_margin(p.x, p.y))
+            .and_then(|pos| page::link_under(self.doc(), pos, how))
+            .is_some()
     }
 
     /// Whether a point is in the page's margin: beside the blocks' rows,

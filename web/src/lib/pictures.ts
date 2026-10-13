@@ -5,9 +5,12 @@
 //
 // Until a picture comes, its place is a box the size it will be laid out
 // at (the page's width, or the width the note gives it), the same box in
-// the reader and the editor, before and after a reload. One that doesn't
-// come says so in that same box, and is asked for again when the notes
-// change: a device may have sent it since. One on the web isn't loaded
+// the reader and the editor, before and after a reload; one a while
+// coming (fetched from the server) says it's downloading, as the desktop
+// does. One that doesn't come says so in that same box, and is asked for
+// again when the notes change: a device may have sent it since. Carnet's
+// own, before the account's vault has come, is still on its way: "not
+// found" only once the server says it hasn't it. One on the web isn't loaded
 // (as the desktop doesn't, and the page's CSP wouldn't): its box says so.
 
 import { NOTES_CHANGED, NOT_ON_SERVER, sync } from './sync.svelte';
@@ -18,6 +21,12 @@ import picture from '../icons/picture.svg?raw';
 
 /// Why a picture on the web isn't asked for: it isn't loaded.
 export const ON_THE_WEB = 'on the web';
+/// What a picture's box says while it's on its way here (the desktop's
+/// words).
+export const DOWNLOADING = 'Downloading…';
+/// How long a picture is asked for before its box says it's on its way:
+/// one kept here comes sooner, and is never announced.
+export const SAY_COMING = 300;
 const onTheWeb = (src: string) => /^https?:/i.test(src.trim());
 
 export function pictures(box: HTMLElement) {
@@ -45,7 +54,16 @@ export function show(img: HTMLImageElement, name: string, ask: () => Promise<str
     if (place.isConnected) place.replaceWith(img);
   };
   const asked = changes;
-  ask().then(shown, (e: unknown) => {
+  let settled = false;
+  const coming = setTimeout(() => {
+    if (!settled && place.isConnected) fill(place, DOWNLOADING, name, true, cloud);
+  }, SAY_COMING);
+  const done = () => {
+    settled = true;
+    clearTimeout(coming);
+  };
+  ask().then((url) => (done(), shown(url)), (e: unknown) => {
+    done();
     if (!place.isConnected) return;
     const [said, icon] = why(e, name);
     fill(place, said, name, true, icon);
@@ -67,7 +85,11 @@ function why(e: unknown, path: string): [string, string] {
   if (e instanceof Error && e.message === ON_THE_WEB) return ['A picture on the web, not loaded', picture];
   // A path from the notes folder (the reader's), or as the note writes it
   // (the editor's: `../attachments/…` from a folder).
-  if (/^(\.\.\/)*attachments\//i.test(path)) return ['This picture hasn’t reached the server yet', cloud];
+  if (/^(\.\.\/)*attachments\//i.test(path)) {
+    // The account's vault not come yet: it may well name it.
+    if (sync.vaultPending?.()) return [DOWNLOADING, cloud];
+    return ['This picture hasn’t reached the server yet', cloud];
+  }
   return ['Not on this device', cloudOff];
 }
 

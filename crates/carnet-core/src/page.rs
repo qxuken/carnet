@@ -1685,38 +1685,128 @@ pub fn move_blocks(doc: &mut Doc, c: Caret, by: i64) -> bool {
     true
 }
 
-/// Every block the caret touches turned into kind `to` — a paragraph of
-/// several lines into a block per line. The caret keeps to the turned
-/// blocks.
+/// Every block the caret touches turned into kind `to`. A paragraph's
+/// lines are lines to the reader, each its own as a block is (an
+/// export's — Apple Notes' — paragraphs are lines ended by line breaks,
+/// where one typed here is a paragraph a line): only the lines the caret
+/// touches are turned, a block each, the lines before and after them
+/// staying a paragraph as they were. A caret on one line turns that
+/// line; a selection, every line it takes. The caret keeps to the turned
+/// blocks: inside the one its line became, or over them all.
 pub fn turn(doc: &mut Doc, c: &mut Caret, to: u64) -> bool {
     let r = touched(doc, *c);
-    let single = c.is_empty() || r.start() == r.end();
-    let (start_i, mut end_i) = (*r.start(), *r.end());
+    let (a, z) = ordered(doc, *c);
+    // Blocks put in so far, above the one being turned.
+    let mut grown = 0;
+    // The turned blocks' first and last index, as the note is after.
+    let mut span: Option<(usize, usize)> = None;
+    // Where the caret goes when both its ends were on the one line turned.
+    let mut moved: Option<Caret> = None;
     let mut changed = false;
-    for i in r.rev() {
-        if let Some(kinds) = turned_lines(&doc.blocks()[i].kind, to)
-            && (kinds.len() != 1 || doc.blocks()[i].kind != kinds[0])
-        {
-            let n = kinds.len();
-            let id = doc.blocks()[i].id;
-            let mut blocks: Vec<Block> = kinds.into_iter().map(Block::new).collect();
-            // The first keeps the id, so a caret in it stays in it.
-            blocks[0].id = id;
-            doc.splice(i..i + 1, blocks);
-            end_i += n - 1;
+    for i0 in r {
+        let i = i0 + grown;
+        let b = (*doc.blocks()[i]).clone();
+        let mut pieces: Vec<Block> = Vec::new();
+        let (mut first, mut n) = (i, 1);
+        let lines = match &b.kind {
+            Kind::Text(t) if to != TURN_TEXT && t.contains('\n') => touched_lines(t, b.id, *c, a, z),
+            _ => None,
+        };
+        match (lines, &b.kind) {
+            (Some((lo, hi)), Kind::Text(t)) => {
+                let all: Vec<&str> = t.split('\n').collect();
+                // A line's spaces at its end are the export's line break
+                // (`  `), which means nothing at the end of an item or a
+                // heading: they go.
+                let mid: Vec<&str> = all[lo..=hi]
+                    .iter()
+                    .map(|l| if to == TURN_QUOTE { l } else { l.trim_end_matches([' ', '\t']) })
+                    .collect();
+                let kinds = match mid.as_slice() {
+                    [one] => turned(&Kind::Text(one.to_string()), to).map(|k| vec![k]),
+                    _ => turned_lines(&Kind::Text(mid.join("\n")), to),
+                };
+                if let Some(kinds) = kinds {
+                    if lo > 0 {
+                        // The lines above keep the paragraph: its id, its
+                        // dropped letter.
+                        let mut before = b.clone();
+                        before.kind = Kind::Text(all[..lo].join("\n"));
+                        pieces.push(before);
+                    }
+                    n = kinds.len();
+                    first = i + pieces.len();
+                    pieces.extend(kinds.into_iter().map(Block::new));
+                    if lo == 0 {
+                        pieces[0].id = b.id;
+                    }
+                    if hi + 1 < all.len() {
+                        pieces.push(Block::text(all[hi + 1..].join("\n")));
+                    }
+                    // Both ends on the line turned, alone: the caret in
+                    // its block, where it was in its words.
+                    let line_start = all[..lo].iter().map(|l| l.len() + 1).sum::<usize>();
+                    if lo == hi && a.slot.block == b.id && z.slot.block == b.id {
+                        let slot = Slot::block(pieces[first - i].id);
+                        let at = |p: Pos| Pos { slot, byte: p.byte.saturating_sub(line_start) };
+                        moved = Some(Caret { anchor: at(c.anchor), head: at(c.head) });
+                    }
+                }
+            }
+            _ => {
+                if let Some(kinds) = turned_lines(&b.kind, to)
+                    && (kinds.len() != 1 || b.kind != kinds[0])
+                {
+                    n = kinds.len();
+                    pieces = kinds.into_iter().map(Block::new).collect();
+                    // The first keeps the id, so a caret in it stays in it.
+                    pieces[0].id = b.id;
+                    if n == 1 && a.slot.block == b.id && z.slot.block == b.id {
+                        moved = Some(*c);
+                    }
+                }
+            }
+        }
+        if !pieces.is_empty() {
+            grown += pieces.len() - 1;
+            doc.splice(i..i + 1, pieces);
             changed = true;
         }
+        let last = first + n - 1;
+        span = Some(span.map_or((first, last), |(f, _)| (f, last)));
     }
     if !changed {
         return false;
     }
-    if single && end_i == start_i {
-        *c = fix(doc, *c);
-    } else {
-        *c = select_blocks(doc, start_i, end_i);
-    }
+    let (f, l) = span.unwrap_or((0, 0));
+    *c = match moved {
+        Some(m) if f == l => fix(doc, m),
+        _ => select_blocks(doc, f, l),
+    };
     doc.ensure_tail();
     true
+}
+
+/// The first and last line of paragraph `t` (block `id`) that a caret
+/// from `a` to `z` touches. As [`touched`] has it for blocks, a selection
+/// that only reaches the very start of a line takes nothing of it, nor
+/// one that leaves from the very end of a line with words in it.
+fn touched_lines(t: &str, id: u64, c: Caret, a: Pos, z: Pos) -> Option<(usize, usize)> {
+    let starts: Vec<usize> = std::iter::once(0).chain(t.match_indices('\n').map(|(k, _)| k + 1)).collect();
+    let last = starts.len() - 1;
+    let line_of = |byte: usize| starts.iter().rposition(|&s| s <= byte).unwrap_or(0);
+    let end_of = |k: usize| if k == last { t.len() } else { starts[k + 1] - 1 };
+    let mut lo = if a.slot.block == id { line_of(a.byte) } else { 0 };
+    let mut hi = if z.slot.block == id { line_of(z.byte) } else { last };
+    if !c.is_empty() {
+        if hi > lo && z.slot.block == id && z.byte == starts[hi] {
+            hi -= 1;
+        }
+        if lo < hi && a.slot.block == id && a.byte == end_of(lo) && a.byte > starts[lo] {
+            lo += 1;
+        }
+    }
+    (lo <= hi).then_some((lo, hi))
 }
 
 /// A toolbar's turn: every block the caret touches made `to`; or, when
@@ -1944,6 +2034,31 @@ pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
 pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
     let w = w.round();
     ((w - fit).abs() >= 2.0).then_some(w as u32)
+}
+
+/// How near (in px) a picture being resized comes to the height of one
+/// beside it in its row before it takes that height, so the row lines up.
+pub const PICTURE_SNAP: f32 = 6.0;
+
+/// A picture being resized to `w`, `aspect` its height over its width,
+/// in a row beside pictures `heights` tall: the width it takes, and the
+/// height it snapped to. Within [`PICTURE_SNAP`] of the nearest of those
+/// heights, the width that gives exactly that height, if it is within
+/// [`PICTURE_MIN`] and `max`; else `w` as it is, snapped to none.
+pub fn snapped_width(w: f32, aspect: f32, heights: &[f32], max: f32) -> (f32, Option<f32>) {
+    if !(aspect > 0.0 && aspect.is_finite()) {
+        return (w, None);
+    }
+    let h = w * aspect;
+    let near = heights
+        .iter()
+        .copied()
+        .filter(|t| t.is_finite() && (t - h).abs() <= PICTURE_SNAP)
+        .min_by(|a, b| (a - h).abs().total_cmp(&(b - h).abs()));
+    match near.map(|t| (t / aspect, t)) {
+        Some((sw, t)) if (PICTURE_MIN..=max.max(PICTURE_MIN)).contains(&sw) => (sw, Some(t)),
+        _ => (w, None),
+    }
 }
 
 /// Where a shortcut for `to` puts a picture that is at `now`: there, or
@@ -2335,8 +2450,8 @@ pub fn style_at(doc: &Doc, c: Caret) -> inline::Style {
     }
 }
 
-/// Bold, italic, struck or code on the selection's words: off where they
-/// all have it, else on for all of them.
+/// Bold, italic, struck, underlined or code on the selection's words: off
+/// where they all have it, else on for all of them.
 pub fn style(doc: &mut Doc, c: &mut Caret, kind: inline::Kind) -> bool {
     edit_ranges(doc, c, |t, a, b| inline::emphasis(t, a, b, kind))
 }
@@ -2356,6 +2471,89 @@ pub fn link_at(doc: &Doc, c: Caret) -> Option<(Slot, usize, String)> {
     }
     let _r = reading(p.slot);
     inline::link_at(text(doc, p.slot), p.byte).map(|(_, url)| (p.slot, p.byte, url))
+}
+
+/// How a link in a note opens while it is written in (the reader opens
+/// one on a plain click whatever this says). The press that opens a link
+/// never places the caret; every other still does, so its words can
+/// always be edited.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LinkOpen {
+    /// ⌘-click (Ctrl-click elsewhere); a plain click places the caret.
+    #[default]
+    ModClick,
+    /// A plain click, let go where it was pressed. A drag or a
+    /// Shift-click selects; a ⌘-click places the caret; so does a click
+    /// at the link's very end, or beside it.
+    Click,
+    /// A double-click, in place of choosing the word; a ⌘-click too.
+    DoubleClick,
+}
+
+/// When a press opens the link under it: at once, or once let go where it
+/// was pressed (a drag from there selects instead).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpensOn {
+    Press,
+    Release,
+}
+
+impl LinkOpen {
+    pub const ALL: [LinkOpen; 3] = [LinkOpen::ModClick, LinkOpen::Click, LinkOpen::DoubleClick];
+
+    /// As a settings file writes it.
+    pub fn key(self) -> &'static str {
+        match self {
+            LinkOpen::ModClick => "cmd-click",
+            LinkOpen::Click => "click",
+            LinkOpen::DoubleClick => "double-click",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|h| h.key() == s.trim())
+    }
+
+    /// Whether a press opens the link under it, `clicks` of them in a row
+    /// with ⌘ (Ctrl elsewhere: `cmd`) or Shift held; and when.
+    pub fn opens(self, clicks: u32, cmd: bool, shift: bool) -> Option<OpensOn> {
+        match self {
+            _ if shift => None,
+            LinkOpen::ModClick | LinkOpen::DoubleClick if cmd && clicks == 1 => Some(OpensOn::Press),
+            LinkOpen::Click if !cmd && clicks == 1 => Some(OpensOn::Release),
+            LinkOpen::DoubleClick if !cmd && clicks == 2 => Some(OpensOn::Press),
+            _ => None,
+        }
+    }
+
+    /// Whether the pointer is a hand over a link with these keys held: a
+    /// press (or two, as it opens) there would open it.
+    pub fn hand(self, cmd: bool, shift: bool) -> bool {
+        match self {
+            _ if shift => false,
+            LinkOpen::ModClick => cmd,
+            LinkOpen::Click => !cmd,
+            LinkOpen::DoubleClick => true,
+        }
+    }
+}
+
+/// The address a press at `pos` opens, links opening `how`: the link
+/// whose words hold it, if it's one a note may follow
+/// ([`crate::export::safe_href`]; never a `javascript:` one). On a plain
+/// click, only inside its words: one at their very end (a press on the
+/// last letter's far half, or just past it) places the caret there, which
+/// is how a link's words are reached to be added to.
+pub fn link_under(doc: &Doc, pos: Pos, how: LinkOpen) -> Option<String> {
+    if !styled(doc, pos.slot) {
+        return None;
+    }
+    let _r = reading(pos.slot);
+    let (pair, url) = inline::link_at(text(doc, pos.slot), pos.byte)?;
+    if how == LinkOpen::Click && !(pair.open.1 < pos.byte && pos.byte < pair.close.0) {
+        return None;
+    }
+    crate::export::safe_href(&url).map(|_| url)
 }
 
 /// The link at `at` in `slot` given address `url`, or taken off its words
@@ -2689,7 +2887,8 @@ impl Typing {
     /// switched on with it chosen still on for the words. What an input
     /// method about to compose over a chosen one needs first, the words
     /// then composed there ([`Typing::type_text`] does it for words typed
-    /// at once). Words in one paragraph, all bold (italic, struck, code):
+    /// at once). Words in one paragraph, all bold (italic, struck,
+    /// underlined, code):
     /// what takes their place is too, as an input method composing has it
     /// when it changes a letter it typed (`k` made `か`).
     pub fn make_room(&mut self, doc: &mut Doc, c: &mut Caret) -> bool {
@@ -2700,7 +2899,9 @@ impl Typing {
         let (a, b) = ordered(doc, *c);
         let had = (a.slot == b.slot && kept.is_none()).then(|| {
             let (first, last) = (style_at(doc, *c), style_at(doc, Caret::at(b)));
-            [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Code].into_iter().filter(move |&k| k.on(&first) && k.on(&last))
+            [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Underline, inline::Kind::Code]
+                .into_iter()
+                .filter(move |&k| k.on(&first) && k.on(&last))
         });
         let had: Vec<inline::Kind> = had.into_iter().flatten().collect();
         self.pending = None;
@@ -3732,6 +3933,78 @@ mod tests {
         assert_eq!(text(&d, s), "make this bold");
     }
 
+    /// Underline on the selection, as Bold is: the file keeps `<u>`, a
+    /// note read back has it, the same again takes it off; across two
+    /// paragraphs, each its own pair, never one across them.
+    #[test]
+    fn underline_wraps_and_unwraps_the_selection() {
+        let mut d = doc(vec![Block::text("make this loud")]);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot: s, byte: 10 }, head: Pos { slot: s, byte: 14 } };
+        assert!(style(&mut d, &mut c, inline::Kind::Underline));
+        assert_eq!(text(&d, s), "make this <u>loud</u>");
+        assert_eq!((c.anchor.byte, c.head.byte), (13, 17), "still selects the word");
+        assert!(style_at(&d, c).underline);
+        let md = crate::doc::to_markdown(Some("T"), &d);
+        assert_eq!(md, "# T\n\nmake this <u>loud</u>\n");
+        let (_, back) = crate::doc::from_markdown(&md);
+        assert_eq!(crate::doc::to_markdown(Some("T"), &back), md, "read back as written");
+        style(&mut d, &mut c, inline::Kind::Underline);
+        assert_eq!(text(&d, s), "make this loud");
+        // Across blocks: each paragraph its own.
+        let mut d = doc(vec![Block::text("one two"), Block::text("three four")]);
+        let (s0, s1) = (Slot::block(d.blocks()[0].id), Slot::block(d.blocks()[1].id));
+        let mut c = Caret { anchor: Pos { slot: s0, byte: 4 }, head: Pos { slot: s1, byte: 5 } };
+        assert!(style(&mut d, &mut c, inline::Kind::Underline));
+        assert_eq!(texts(&d), ["Text:one <u>two</u>", "Text:<u>three</u> four"]);
+        // A paragraph's line break inside it: one pair over it.
+        let mut d = doc(vec![Block::text("a\nb")]);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot: s, byte: 0 }, head: Pos { slot: s, byte: 3 } };
+        assert!(style(&mut d, &mut c, inline::Kind::Underline));
+        assert_eq!(text(&d, s), "<u>a\nb</u>");
+        let md = crate::doc::to_markdown(None, &d);
+        let (_, back) = crate::doc::from_markdown(&md);
+        assert_eq!(crate::doc::to_markdown(None, &back), md, "{md:?}");
+    }
+
+    /// Underline switched on with nothing selected is on for what is typed
+    /// (and the spaces in it), off again inside a run of it; with a
+    /// picture chosen, on for the words typed in its place; and words all
+    /// underlined, typed over, are replaced by underlined ones.
+    #[test]
+    fn underline_is_typed_as_bold_is() {
+        let under = |t: &mut Typing, d: &Doc, c: Caret| {
+            let (pre, post) = t.switch(d, c, inline::Kind::Underline);
+            t.pend(c, "Underline", pre, post);
+        };
+        let (mut d, mut c) = para("plain", 5);
+        let s = c.head.slot;
+        let mut t = Typing::default();
+        under(&mut t, &d, c);
+        keys(&mut t, &mut d, &mut c, " two words");
+        assert_eq!(text(&d, s), "plain <u>two words</u>");
+        under(&mut t, &d, c);
+        keys(&mut t, &mut d, &mut c, " after");
+        assert_eq!(text(&d, s), "plain <u>two words</u> after");
+        // Over a chosen picture.
+        let pic = Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false });
+        let mut d = doc(vec![Block::text("Plan"), pic, Block::text("")]);
+        let mut c = select_blocks(&d, 1, 1);
+        assert!(styles_typing(&d, c));
+        let mut t = Typing::default();
+        under(&mut t, &d, c);
+        t.type_text(&mut d, &mut c, "replaced");
+        assert_eq!(texts(&d), ["Text:Plan", "Text:<u>replaced</u>", "Text:"]);
+        // Typed over: still underlined.
+        let mut d = doc(vec![Block::text("<u>k</u>")]);
+        let slot = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot, byte: 3 }, head: Pos { slot, byte: 4 } };
+        let mut t = Typing::default();
+        t.type_text(&mut d, &mut c, "か");
+        assert_eq!(text(&d, slot), "<u>か</u>");
+    }
+
     #[test]
     fn tab_indents_items_and_walks_cells() {
         let mut d = doc(vec![Block::new(Kind::item(ListStyle::Bullet, 0, "a"))]);
@@ -4148,6 +4421,75 @@ mod tests {
         let (mut d, mut c) = para("[docs](u)", 2);
         t.type_text(&mut d, &mut c, "x");
         assert_eq!(text(&d, c.head.slot), "[doxcs](u)");
+    }
+
+    /// How a link opens, by the setting: ⌘-click (the default), a click,
+    /// or a double-click. The press that opens it never places the caret;
+    /// every other does, so the link's words can still be edited: with a
+    /// plain click opening, a drag or a Shift-click selects, a ⌘-click
+    /// places the caret, and so does a click at the words' very end.
+    #[test]
+    fn how_links_open() {
+        use LinkOpen::*;
+        assert_eq!(LinkOpen::default(), ModClick);
+        for h in LinkOpen::ALL {
+            assert_eq!(LinkOpen::from_key(h.key()), Some(h));
+        }
+        assert_eq!(LinkOpen::from_key("triple"), None);
+        // ⌘-click: a ⌘-click, at the press; a plain click places the caret.
+        assert_eq!(ModClick.opens(1, true, false), Some(OpensOn::Press));
+        assert_eq!(ModClick.opens(1, false, false), None);
+        assert_eq!(ModClick.opens(2, false, false), None, "two choose the word");
+        assert!(ModClick.hand(true, false) && !ModClick.hand(false, false));
+        // A click: once let go, so a drag selects; ⌘ places the caret.
+        assert_eq!(Click.opens(1, false, false), Some(OpensOn::Release));
+        assert_eq!(Click.opens(1, true, false), None);
+        assert_eq!(Click.opens(1, false, true), None, "Shift-click selects");
+        assert_eq!(Click.opens(2, false, false), None);
+        assert!(Click.hand(false, false) && !Click.hand(true, false) && !Click.hand(false, true));
+        // A double-click, in place of the word; ⌘-click too.
+        assert_eq!(DoubleClick.opens(1, false, false), None, "one places the caret");
+        assert_eq!(DoubleClick.opens(2, false, false), Some(OpensOn::Press));
+        assert_eq!(DoubleClick.opens(1, true, false), Some(OpensOn::Press));
+        assert!(DoubleClick.hand(false, false) && DoubleClick.hand(true, false) && !DoubleClick.hand(false, true));
+
+        // Which link a press is on: inside its words; at their very end
+        // only when a click doesn't open it.
+        let d = doc(vec![Block::text("see [docs](https://a.test) and [run](javascript:alert(1))")]);
+        let p = |byte| at(&d, 0, byte).head;
+        assert_eq!(link_under(&d, p(6), Click).as_deref(), Some("https://a.test"));
+        assert_eq!(link_under(&d, p(6), ModClick).as_deref(), Some("https://a.test"));
+        assert_eq!(link_under(&d, p(9), Click), None, "at the words' end: the caret goes there");
+        assert_eq!(link_under(&d, p(5), Click), None, "nor at their start");
+        assert_eq!(link_under(&d, p(9), ModClick).as_deref(), Some("https://a.test"));
+        assert_eq!(link_under(&d, p(2), Click), None, "no link");
+        // One that would run never opens, however.
+        let run = text(&d, p(0).slot).find("run").unwrap() + 1;
+        assert!(link_at(&d, at(&d, 0, run)).is_some());
+        for h in LinkOpen::ALL {
+            assert_eq!(link_under(&d, p(run), h), None, "{h:?}");
+        }
+    }
+
+    /// A picture resized beside others takes a neighbour's height when it
+    /// comes within a few px of it, so the row lines up; its width
+    /// follows its shape. Not past its bounds.
+    #[test]
+    fn a_resized_picture_snaps_to_its_neighbours_height() {
+        // 2:1 (height half the width), beside ones 100 and 150 tall.
+        assert_eq!(snapped_width(204.0, 0.5, &[100.0, 150.0], 600.0), (200.0, Some(100.0)));
+        assert_eq!(snapped_width(196.0, 0.5, &[100.0, 150.0], 600.0), (200.0, Some(100.0)));
+        assert_eq!(snapped_width(296.0, 0.5, &[100.0, 150.0], 600.0), (300.0, Some(150.0)));
+        // Further than the snap: as dragged.
+        assert_eq!(snapped_width(220.0, 0.5, &[100.0, 150.0], 600.0), (220.0, None));
+        // The nearest of two within reach.
+        assert_eq!(snapped_width(200.0, 1.0, &[196.0, 203.0], 600.0), (203.0, Some(203.0)));
+        // Not past the room, nor under the least.
+        assert_eq!(snapped_width(298.0, 1.0, &[302.0], 300.0), (298.0, None));
+        assert_eq!(snapped_width(50.0, 1.0, &[44.0], 600.0), (50.0, None));
+        // Alone, or with no shape: as dragged.
+        assert_eq!(snapped_width(200.0, 0.5, &[], 600.0), (200.0, None));
+        assert_eq!(snapped_width(200.0, 0.0, &[0.0], 600.0), (200.0, None));
     }
 
     /// Marks typed by hand that close a style leave the caret past them:
@@ -4844,4 +5186,109 @@ mod tests {
     fn set_cell(d: &mut Doc, slot: Slot, to: &str) {
         *text_mut(d, slot).unwrap() = to.to_string();
     }
+
+    /// A note from Apple Notes' export: paragraphs whose lines end in a
+    /// line break (two spaces or more), the way its lines are written.
+    const EXPORT: &str = include_str!("../tests/fixtures/apple-notes.md");
+
+    /// A caret's place in paragraph `i`: `line`, `col` bytes in.
+    fn on_line(d: &Doc, i: usize, line: usize, col: usize) -> Pos {
+        let s = block_slots(&d.blocks()[i])[0];
+        let t = text(d, s);
+        let start: usize = t.split('\n').take(line).map(|l| l.len() + 1).sum();
+        Pos { slot: s, byte: start + col }
+    }
+
+    /// The export with its paragraph `from` written as `to`: everything
+    /// else in the file as it was, byte for byte.
+    fn export_with(from: &str, to: &str) -> String {
+        assert!(EXPORT.contains(from), "{from:?}");
+        EXPORT.replacen(from, to, 1)
+    }
+
+    /// The reader's lines are lines, as they would be typed here a
+    /// paragraph each: the list tools turn the line the caret is on, not
+    /// its whole paragraph, and the note's other words stay as they were
+    /// in the file. Each line a list makes is an item of its own, without
+    /// the spaces that broke it from the next.
+    #[test]
+    fn a_line_of_an_exported_paragraph_is_turned_alone() {
+        let (title, d0) = crate::doc::from_markdown(EXPORT);
+        let md = |d: &Doc| crate::doc::to_markdown(title.as_deref(), d);
+        assert_eq!(md(&d0), EXPORT, "the export reads and writes back as it is");
+
+        // The bullets on the first line: that line, and nothing else.
+        let mut d = d0.clone();
+        let mut c = Caret::at(on_line(&d, 0, 0, 6));
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(texts(&d)[..3], ["[ ]**путь:** жильё", "Text:hostel / ryokan  ", "Text:**путь:** осака  \ndotonbori glico sign — фото на мосту ночью  "]);
+        assert_eq!(md(&d), export_with("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n"));
+        assert_eq!(c, Caret::at(Pos { slot: Slot::block(d.blocks()[0].id), byte: 6 }), "the caret where it was in the words");
+        // Again: a paragraph of its own, as Enter makes a line here.
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(md(&d), export_with("**путь:** жильё   \nhostel / ryokan  \n", "**путь:** жильё\n\nhostel / ryokan  \n"));
+
+        // A line in the middle: the lines above and below stay one
+        // paragraph each. Numbers, a checklist, a heading the same way.
+        let big = d0.blocks().iter().position(|b| b.text_ref().is_some_and(|t| t.starts_with("**дом:** мысли"))).unwrap();
+        for (to, written) in [(TURN_BULLET, "- picture rail"), (TURN_NUMBER, "1. picture rail"), (TURN_TODO, "- [ ] picture rail"), (TURN_H2, "## picture rail")] {
+            let mut d = d0.clone();
+            let mut c = Caret::at(on_line(&d, big, 2, 3));
+            assert!(toggle_turn(&mut d, &mut c, to));
+            assert_eq!(
+                md(&d),
+                export_with(
+                    "полка для книг в коридоре  \npicture rail  \nskylight window  \n",
+                    &format!("полка для книг в коридоре  \n\n{written}\n\nskylight window  \n"),
+                ),
+                "{to}",
+            );
+            assert_eq!(c.head.slot.block, d.blocks()[big + 1].id);
+            assert_eq!((c.head.byte, c.is_empty()), (3, true));
+        }
+
+        // A selection from the second line into the fourth: three items,
+        // all of them selected.
+        let mut d = d0.clone();
+        let mut c = Caret { anchor: on_line(&d, big, 1, 4), head: on_line(&d, big, 3, 2) };
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(
+            md(&d),
+            export_with(
+                "**дом:** мысли  \nполка для книг в коридоре  \npicture rail  \nskylight window  \npocket door  \n",
+                "**дом:** мысли  \n\n- полка для книг в коридоре\n- picture rail\n- skylight window\n\npocket door  \n",
+            )
+        );
+        assert_eq!(touched(&d, c), big + 1..=big + 3);
+        // And back: a paragraph a line.
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(texts(&d)[big + 1..big + 4], ["Text:полка для книг в коридоре", "Text:picture rail", "Text:skylight window"]);
+
+        // A selection that only reaches a line's start takes nothing of it.
+        let mut d = d0.clone();
+        let mut c = Caret { anchor: on_line(&d, big, 1, 0), head: on_line(&d, big, 2, 0) };
+        assert!(toggle_turn(&mut d, &mut c, TURN_TODO));
+        assert_eq!(texts(&d)[big..big + 3], ["Text:**дом:** мысли  ", "[ ]полка для книг в коридоре", "Text:picture rail  \nskylight window  \npocket door  \nстол: дуб снизу, светлый верх  \nплитка: терракота с матовой глазурью  "]);
+
+        // Across paragraphs: the first's lines from the selection's on,
+        // the next's up to it.
+        let mut d = d0.clone();
+        let mut c = Caret { anchor: on_line(&d, 1, 1, 3), head: on_line(&d, 2, 0, 3) };
+        assert!(toggle_turn(&mut d, &mut c, TURN_NUMBER));
+        assert_eq!(
+            md(&d),
+            export_with(
+                "**путь:** осака  \ndotonbori glico sign — фото на мосту ночью  \n\n**путь:**  \ncash",
+                "**путь:** осака  \n\n1. dotonbori glico sign — фото на мосту ночью\n2. **путь:**\n\ncash",
+            )
+        );
+
+        // The whole paragraph selected: an item a line.
+        let mut d = d0.clone();
+        let mut c = select_blocks(&d, 0, 0);
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(md(&d), export_with("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n- hostel / ryokan\n"));
+        assert_eq!(touched(&d, c), 0..=1);
+    }
+
 }

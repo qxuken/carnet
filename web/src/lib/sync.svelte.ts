@@ -862,6 +862,12 @@ class Sync {
     return new Set(this.vault?.search(query) ?? []);
   }
 
+  /// Whether a picture of Carnet's the vault doesn't name may still be on
+  /// its way here: the account's vault hasn't come yet this session.
+  vaultPending(): boolean {
+    return !!this.vault && !this.vault.vault_come();
+  }
+
   /// Where a picture a note in `folder` shows is, as a path from the
   /// notes folder: its `src`, and whether an Obsidian embed names it.
   picturePath(folder: string, src: string, wiki: boolean): string | undefined {

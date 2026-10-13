@@ -11,6 +11,15 @@ use sha2::{Digest, Sha256};
 
 use crate::crypto::Random;
 
+/// What a server says to a device enrolling by the first account's invite
+/// once it has run out (a day after the server printed it): word for word,
+/// so the apps say it as their own (`pair::theirs`). A server before
+/// 0.1.1 says only that the invite isn't good.
+pub const RUN_OUT_FIRST: &str = "That invite has run out. If it was the server's first, restart the server for a new one.";
+
+/// The same for any other invite, run out a week after it was made.
+pub const RUN_OUT: &str = "That invite has run out. Ask whoever sent it for a new one.";
+
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -22,6 +22,7 @@ pub const DIVIDER: &str = "mod+alt+-";
 pub const BOLD: &str = "mod+b";
 pub const ITALIC: &str = "mod+i";
 pub const STRIKE: &str = "mod+shift+x";
+pub const UNDERLINE: &str = "mod+u";
 pub const CODE: &str = "mod+e";
 pub const LINK: &str = "mod+k";
 pub const HIGHLIGHT: &str = "mod+shift+h";
@@ -58,7 +59,7 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 43] = [
+pub const ALL: [(&str, &str); 44] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
     ("Rename folder", RENAME_FOLDER),
@@ -96,6 +97,7 @@ pub const ALL: [(&str, &str); 43] = [
     ("Bold", BOLD),
     ("Italic", ITALIC),
     ("Strikethrough", STRIKE),
+    ("Underline", UNDERLINE),
     ("Code", CODE),
     ("Link", LINK),
     ("Highlight", HIGHLIGHT),

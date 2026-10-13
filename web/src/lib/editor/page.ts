@@ -19,6 +19,7 @@ import { TableWidget, mark, place, type Cell, type TableContext } from './table'
 import { pictureCarry, pictureRoom, pictureTools } from './picture';
 import * as arrows from './arrows';
 import { markRange } from './ranges';
+import { STYLES } from './styles';
 import type { Lines } from './arrows';
 
 /// How a line is drawn (`PageEditor.looks`).
@@ -509,6 +510,7 @@ function build(view: EditorView, toggle: (line: number) => void, tables: TableCo
         if (flags & 4) c.push('cm-s');
         if (flags & 8) c.push('cm-c');
         if (flags & 16) c.push('cm-l');
+        if (flags & 64) c.push('cm-u');
         let style = '';
         if (ink) style += `color:${inkCss(ink)};`;
         if (mark) style += `background-color:${washCss(mark)};`;
@@ -719,10 +721,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
       { key: 'Alt-Delete', run: run(() => pe.delete(true)) },
       { key: 'Tab', run: run(() => pe.tab(false)) },
       { key: 'Shift-Tab', run: run(() => pe.tab(true)) },
-      { key: 'Mod-b', run: run(() => pe.style(0)) },
-      { key: 'Mod-i', run: run(() => pe.style(1)) },
-      { key: 'Shift-Mod-x', run: run(() => pe.style(2)) },
-      { key: 'Mod-e', run: run(() => pe.style(3)) },
+      ...STYLES.map((s) => ({ key: s.key, run: run(() => pe.style(s.which)) })),
       { key: 'Shift-Mod-h', run: run(() => pe.tint(false, HIGHLIGHT)) },
       { key: 'Mod-z', run: run(() => pe.undo()) },
       { key: 'Shift-Mod-z', run: run(() => pe.redo()) },

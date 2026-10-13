@@ -267,6 +267,12 @@ impl Vault {
         self.notes.session.is_ready()
     }
 
+    /// Whether the account's vault has come this session: until it has,
+    /// a picture of Carnet's it doesn't name yet may still be on its way.
+    pub fn vault_come(&self) -> bool {
+        self.notes.session.has_joined(carnet_sync::vault::ROOM)
+    }
+
     /// How many changes (a note's, or the library's) the server isn't
     /// known to keep yet: offline, read only, or on their way.
     pub fn waiting(&self) -> u32 {
@@ -858,7 +864,7 @@ impl PageEditor {
     /// of its words}]], hd: a table's first row its header, ini: a
     /// paragraph's first line whose first letter drops, 1, or 2 when the
     /// letter has a colour of its own}]`. Flags: 1 bold, 2 italic, 4
-    /// struck, 8 code, 16 link, 32 a cell's picture; colours 0xRRGGBBAA,
+    /// struck, 8 code, 16 link, 32 a cell's picture, 64 underlined; colours 0xRRGGBBAA,
     /// a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
         let n = self.e.lines().len();
@@ -869,7 +875,12 @@ impl PageEditor {
                     .runs
                     .iter()
                     .map(|(a, b, s)| {
-                        let flags = u8::from(s.bold) | u8::from(s.italic) << 1 | u8::from(s.strike) << 2 | u8::from(s.code) << 3 | u8::from(s.link) << 4;
+                        let flags = u8::from(s.bold)
+                            | u8::from(s.italic) << 1
+                            | u8::from(s.strike) << 2
+                            | u8::from(s.code) << 3
+                            | u8::from(s.link) << 4
+                            | u8::from(s.underline) << 6;
                         format!("[{a},{b},{flags},{},{}]", s.mark, s.ink)
                     })
                     .collect();
@@ -889,7 +900,8 @@ impl PageEditor {
                                             | u8::from(s.strike) << 2
                                             | u8::from(s.code) << 3
                                             | u8::from(s.link) << 4
-                                            | u8::from(s.picture) << 5;
+                                            | u8::from(s.picture) << 5
+                                            | u8::from(s.underline) << 6;
                                         format!("[{a},{b},{flags},{},{}]", s.mark, s.ink)
                                     })
                                     .collect();
@@ -971,9 +983,10 @@ impl PageEditor {
         self.e.turned_to(u64::from(to))
     }
 
-    /// 0 bold, 1 italic, 2 struck, 3 code.
+    /// 0 bold, 1 italic, 2 struck, 3 code, 4 underlined.
     pub fn style(&mut self, which: u32) -> bool {
-        let kind = [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Code][(which as usize).min(3)];
+        let kinds = [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Code, inline::Kind::Underline];
+        let kind = kinds[(which as usize).min(kinds.len() - 1)];
         self.e.style(kind)
     }
 
@@ -986,7 +999,13 @@ impl PageEditor {
     /// 32 for highlighted.
     pub fn style_here(&self) -> u32 {
         let s = self.e.style_here();
-        u32::from(s.bold) | u32::from(s.italic) << 1 | u32::from(s.strike) << 2 | u32::from(s.code) << 3 | u32::from(s.link) << 4 | u32::from(s.mark != 0) << 5
+        u32::from(s.bold)
+            | u32::from(s.italic) << 1
+            | u32::from(s.strike) << 2
+            | u32::from(s.code) << 3
+            | u32::from(s.link) << 4
+            | u32::from(s.mark != 0) << 5
+            | u32::from(s.underline) << 6
     }
 
     pub fn toggle(&mut self, line: u32) -> bool {
@@ -1002,6 +1021,13 @@ impl PageEditor {
     /// follow (`javascript:` and the like).
     pub fn link_to_open(&self) -> Option<String> {
         self.e.link_to_open()
+    }
+
+    /// The address a press at CodeMirror's `line` and `col` opens, links
+    /// opening `how` (`cmd-click`, `click`, `double-click`): what the
+    /// pointer is a hand over too.
+    pub fn link_under(&self, line: usize, col: usize, how: &str) -> Option<String> {
+        self.e.link_under(line, col, how)
     }
 
     /// The caret put in a table's cell: CodeMirror's line, the row, the
@@ -1197,6 +1223,34 @@ pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
 #[wasm_bindgen]
 pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
     page::resized_width(w, fit)
+}
+
+/// A picture being resized to `w` (`aspect` its height over its width)
+/// beside pictures `heights` tall ([`page::snapped_width`]): `[width,
+/// the height it snapped to]`, the height 0 when it snapped to none.
+#[wasm_bindgen]
+pub fn snapped_width(w: f32, aspect: f32, heights: Vec<f32>, max: f32) -> Vec<f32> {
+    let (w, h) = page::snapped_width(w, aspect, &heights, max);
+    vec![w, h.unwrap_or(0.0)]
+}
+
+/// Whether a press opens the link under it, links opening `how`
+/// ([`page::LinkOpen::opens`]): 0 not, 1 at once, 2 once let go where it
+/// was pressed.
+#[wasm_bindgen]
+pub fn link_opens(how: &str, clicks: u32, cmd: bool, shift: bool) -> u8 {
+    match page::LinkOpen::from_key(how).unwrap_or_default().opens(clicks, cmd, shift) {
+        None => 0,
+        Some(page::OpensOn::Press) => 1,
+        Some(page::OpensOn::Release) => 2,
+    }
+}
+
+/// Whether the pointer is a hand over a link with these keys held
+/// ([`page::LinkOpen::hand`]).
+#[wasm_bindgen]
+pub fn link_hand(how: &str, cmd: bool, shift: bool) -> bool {
+    page::LinkOpen::from_key(how).unwrap_or_default().hand(cmd, shift)
 }
 
 /// The widths a picture is given from a menu, as JSON: `[[name, percent

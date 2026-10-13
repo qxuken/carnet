@@ -235,6 +235,38 @@ fn an_accounts_many_notes_come_in_logins_one_after_another() {
     assert_eq!(notes.doc(&asked[0]).text(), "a note");
 }
 
+/// Caught up with the account once what the server holds of every room
+/// named has come, not when each join is answered: the words come after,
+/// one room after another. A room it holds nothing of has come at once.
+#[test]
+fn caught_up_once_every_rooms_words_have_come() {
+    let mut notes = Notes(BTreeMap::new());
+    let ring = Ring::new(VaultKey::generate(&mut OsRandom));
+    let mut s = logged_in_as(&mut notes, ring.clone());
+    let rooms = [vault::ROOM.to_string(), key(1), key(2), key(3)];
+    s.receive(&changed(rooms.iter().enumerate().map(|(i, r)| (r.clone(), i as u64 + 1)).collect()), &mut notes, &mut OsRandom);
+    assert_eq!(joins(&mut s).len(), 4);
+    assert!(!s.has_caught_up(), "asked, not answered");
+    let (epoch, vault) = ring.current();
+    let doc = NoteDoc::new(9);
+    doc.record("a note", Origin::Save);
+    let end = doc.counter(9);
+    for room in &rooms[..3] {
+        s.receive(&joined(room, &[(9, end)]), &mut notes, &mut OsRandom);
+    }
+    s.receive(&joined(&rooms[3], &[]), &mut notes, &mut OsRandom);
+    assert!(s.has_joined(vault::ROOM));
+    assert!(!s.has_caught_up(), "every join answered, the words not come");
+    for (i, room) in rooms[..3].iter().enumerate() {
+        let record = elo::seal(vault, room, &Header::Delta { peer: 9, start: 0, end, epoch }, &doc.updates(), &mut OsRandom);
+        s.receive(&update(room, &[record]), &mut notes, &mut OsRandom);
+        assert_eq!(s.has_caught_up(), i == 2, "caught up once the last has come");
+    }
+    // Gone again: not caught up until the next login has.
+    s.disconnected();
+    assert!(!s.has_caught_up());
+}
+
 /// What the server calls the account's plan is its own words: shown on
 /// one line, nothing in it that hides letters or turns them around.
 #[test]

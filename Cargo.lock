@@ -884,6 +884,7 @@ dependencies = [
  "notify",
  "proptest",
  "qrcode",
+ "serde_json",
  "tokio",
 ]
 

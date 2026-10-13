@@ -140,7 +140,7 @@ mod tests {
     const O: &str = "https://x.co";
 
     fn answer(status: u16, body: &str) -> Answer {
-        Answer { status, body: body.as_bytes().to_vec() }
+        Answer { status, body: body.as_bytes().to_vec(), ..Answer::default() }
     }
 
     #[test]

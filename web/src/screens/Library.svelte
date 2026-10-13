@@ -7,13 +7,36 @@
   // A note goes into a folder by a drag onto it, or its menu's "Move to";
   // the menus are the way on a touch screen and from the keyboard. Every
   // change goes through the vault (sync.svelte.ts), the rules with it.
+  // A folder with folders inside folds them away by its chevron (Alt:
+  // every folder inside too), or ← and → on its row; which are folded is
+  // this browser's, kept in localStorage.
   import { tick } from 'svelte';
   import { sync, type FolderGone, type Note } from '../lib/sync.svelte';
   import Icon from '../lib/Icon.svelte';
   import Menu from '../lib/Menu.svelte';
   import type { MenuItem } from '../lib/menu';
   import { moveNote, noteMenu } from '../lib/noteMenu';
-  import { afterDelete, deleteLabel, deletedWords, folderTargets, followed, leaf, mayDrop, movedWords, namingAfter, type Drag } from '../lib/folders';
+  import {
+    afterDelete,
+    arrow,
+    deleteLabel,
+    deletedWords,
+    fold,
+    foldsFollow,
+    folderTargets,
+    followed,
+    hidden,
+    keepFolded,
+    leaf,
+    mayDrop,
+    movedWords,
+    namingAfter,
+    readFolded,
+    shownAfterFold,
+    unfoldTo,
+    withSubfolders,
+    type Drag,
+  } from '../lib/folders';
   import { focusNow } from '../lib/focus';
   import { shortAgo } from '../lib/time';
 
@@ -59,6 +82,24 @@
   $effect(() => {
     if (folder !== null && !sync.folders.includes(folder)) folder = null;
   });
+
+  // ---- folding
+
+  let folded = $state<Set<string>>(readFolded());
+  const parents = $derived(withSubfolders(sync.folders));
+  $effect(() => keepFolded(folded));
+  // The folder shown is never out of sight: however it came to be shown
+  // (a new folder, a move, a rename), the folders it's in unfold.
+  $effect(() => {
+    if (folder !== null && !trash && hidden(folder, folded)) folded = unfoldTo(folded, folder);
+  });
+
+  /// `f` folded or unfolded (`deep`: every folder inside it too). A folder
+  /// shown inside one folded gives way to it.
+  function setFold(f: string, open: boolean, deep: boolean) {
+    folded = fold(folded, sync.folders, f, open, deep);
+    if (!open && !trash) folder = shownAfterFold(folder, f);
+  }
 
   // What went wrong with a folder, said under the folders until the next
   // try.
@@ -110,6 +151,8 @@
   function startNaming(parent: string) {
     finishNaming(true, false);
     problem = null;
+    // Its field goes under its parent's row: both in sight.
+    if (parent) folded = fold(unfoldTo(folded, parent), sync.folders, parent, true);
     naming = { parent, rename: null, name: '' };
   }
 
@@ -133,6 +176,7 @@
         if ('why' in done) problem = `Couldn’t rename the folder: ${done.why}.`;
         else {
           folder = followed(folder, n.rename, done.to);
+          folded = foldsFollow(folded, n.rename, done.to);
           focusFolder(done.to);
           return;
         }
@@ -180,6 +224,7 @@
       return;
     }
     folder = followed(folder, f, done.to);
+    folded = foldsFollow(folded, f, done.to);
     sync.say(movedWords(leaf(f), to));
   }
 
@@ -194,12 +239,19 @@
     sync.say(deletedWords(f, bare, gone.notes.length), bare ? null : () => sync.putBackFolder(gone));
   }
 
-  /// F2 renames a folder, Delete or Backspace deletes it: the desktop's
-  /// keys on a folder's row.
+  /// F2 renames a folder, Delete or Backspace deletes it, ← and → fold
+  /// and unfold it or go up and in: the desktop's keys on a folder's row.
   function folderKey(e: KeyboardEvent, f: string) {
     if (e.key === 'F2') startRename(f);
     else if (e.key === 'Delete' || e.key === 'Backspace') deleteFolder(f);
-    else return;
+    else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && !(e.shiftKey || e.ctrlKey || e.metaKey)) {
+      const does = arrow(e.key, e.altKey, f, sync.folders, folded);
+      if (does && 'go' in does) {
+        folder = does.go;
+        trash = false;
+        focusFolder(does.go);
+      } else if (does) setFold(f, !does.fold, does.deep);
+    } else return;
     e.preventDefault();
   }
 
@@ -207,6 +259,23 @@
 
   let drag = $state<Drag | null>(null);
   let over = $state<string | null>(null);
+  // A folded folder a drag rests on unfolds after a moment, to go deeper.
+  const SPRING = 700;
+  let spring: { f: string; timer: ReturnType<typeof setTimeout> } | null = null;
+
+  function springOver(f: string | null) {
+    if (spring?.f === f) return;
+    if (spring) clearTimeout(spring.timer);
+    spring = null;
+    if (f === null || !folded.has(f)) return;
+    spring = {
+      f,
+      timer: setTimeout(() => {
+        spring = null;
+        if (drag) setFold(f, true, false);
+      }, SPRING),
+    };
+  }
 
   function dragStart(e: DragEvent, d: Drag, words: string) {
     drag = d;
@@ -220,10 +289,14 @@
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
     over = to;
+    springOver(to);
   }
 
   function dragLeave(e: DragEvent, to: string) {
-    if (over === to && !(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) over = null;
+    if (over === to && !(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
+      over = null;
+      springOver(null);
+    }
   }
 
   function drop(e: DragEvent, to: string) {
@@ -240,6 +313,7 @@
   function dragEnd() {
     drag = null;
     over = null;
+    springOver(null);
   }
 </script>
 
@@ -271,7 +345,10 @@
       {#if fieldAfter === -1}{@render field('', 1)}{/if}
       {#each sync.folders as f, i (f)}
         {@const depth = f.split('/').length}
-        {#if naming?.rename === f}
+        {@const open = !folded.has(f)}
+        {#if hidden(f, folded)}
+          <!-- Inside a folded folder: out of sight. -->
+        {:else if naming?.rename === f}
           {@render field(f, depth)}
         {:else}
           <!-- Dragged by its row (a button alone isn't, in every browser). -->
@@ -288,10 +365,23 @@
             ondragleave={(e) => dragLeave(e, f)}
             ondrop={(e) => drop(e, f)}
           >
+            <!-- The chevron in the indent: the folder's icon where it would
+                 be without one. -->
+            {#if parents.has(f)}
+              <button
+                class="chevron"
+                class:open
+                style:margin-left="{14 * depth - 12}px"
+                aria-expanded={open}
+                aria-label="{open ? 'Hide' : 'Show'} the folders inside “{leaf(f)}”"
+                title="{open ? 'Hide' : 'Show'} the folders inside (Alt: and all inside them)"
+                onclick={(e) => setFold(f, !open, e.altKey)}
+              ><Icon name="chevron-right" size={14} /></button>
+            {/if}
             <button
               class="fold"
               data-folder={f}
-              style:padding-left="{14 + 14 * depth}px"
+              style:padding-left={parents.has(f) ? '4px' : `${14 + 14 * depth}px`}
               title={f}
               onclick={() => { folder = f; trash = false; }}
               onkeydown={(e) => folderKey(e, f)}
@@ -397,6 +487,12 @@
   /* What a drag would go into, lit; what is carried, faint. */
   .frow.drop { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); }
   .carried { opacity: 0.5; }
+  /* A folder's chevron: turned a quarter, its folders shown. */
+  .chevron { flex: none; display: inline-flex; width: 22px; height: 26px; margin-right: 0; padding: 0; align-items: center; justify-content: center; border: 0; background: none; color: var(--muted); border-radius: var(--radius); cursor: pointer; }
+  .chevron:hover { background: var(--pressed); color: var(--ink); }
+  .chevron :global(svg) { transition: transform 0.12s ease; }
+  .chevron.open :global(svg) { transform: rotate(90deg); }
+  @media (prefers-reduced-motion: reduce) { .chevron :global(svg) { transition: none; } }
   .fold { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 14px; border: 0; background: none; border-radius: var(--radius); cursor: pointer; text-align: left; color: var(--ink); }
   nav .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   nav .count { flex: none; color: var(--faint); font-size: 13px; }
