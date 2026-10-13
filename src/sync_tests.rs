@@ -1517,3 +1517,68 @@ fn an_invites_code_is_known_on_every_device_until_done_with() {
         assert_eq!(two.sides[side].store.invite_code(&three.hash()), None, "gone from {side}'s vault");
     }
 }
+
+/// The browser's folder changes, written into the vault as it writes them
+/// (carnet-sync's `make_folder`, `rename_folder`, `move_folder`,
+/// `move_note`, `set_pinned`, `trash_folder`), with no file moved: each
+/// desktop's files follow. Here B writes them so, as the browser would
+/// beside it, and both desktops end alike.
+#[test]
+fn the_browsers_folder_changes_reach_the_files() {
+    let mut two = Two::new("web-folders");
+    two.make(0, "Work", "Plan", "q3");
+    two.make(0, "", "Loose", "ends");
+    for _ in 0..2 {
+        two.pump();
+    }
+    let key = |two: &Two, title: &str| two.sides[0].store.notes.iter().find(|n| n.title == title).and_then(|n| n.key).unwrap();
+    let loose = key(&two, "Loose");
+    let browser = |two: &mut Two, write: &dyn Fn(&carnet_sync::NoteDoc)| {
+        let s = &mut two.sides[1];
+        let r = s.store.replica.as_mut().unwrap();
+        write(r.vault());
+        s.store.vault_changed().unwrap();
+        let r = s.store.replica.as_mut().unwrap();
+        s.session.saved(vault::ROOM, r, &mut OsRandom);
+        for _ in 0..3 {
+            two.pump();
+        }
+    };
+
+    browser(&mut two, &|v| {
+        v.make_folder("", "Ideas").unwrap();
+        v.rename_folder("Work", "Job").unwrap();
+    });
+    for side in 0..2 {
+        let dir = &two.sides[side].dir;
+        assert!(dir.join("Job/Plan.md").exists() && dir.join("Ideas").is_dir(), "on {side}: {:?}", two.shape(side));
+        assert!(!dir.join("Work").exists(), "on {side}: the old one gone, empty");
+    }
+    assert_eq!(two.shape(0), two.shape(1));
+
+    browser(&mut two, &|v| {
+        v.move_folder("Job", "Ideas").unwrap();
+        v.move_note(loose, "Ideas").unwrap();
+        v.set_pinned(loose, true);
+        assert_eq!(v.move_folder("Ideas", "Ideas/Job"), Err(vault::FolderRefusal::IntoItself));
+    });
+    for side in 0..2 {
+        let dir = &two.sides[side].dir;
+        assert!(dir.join("Ideas/Job/Plan.md").exists() && dir.join("Ideas/Loose.md").exists(), "on {side}: {:?}", two.shape(side));
+        assert!(two.sides[side].store.notes.iter().find(|n| n.title == "Loose").is_some_and(|n| n.pinned), "pinned on {side}");
+    }
+    assert_eq!(two.shape(0), two.shape(1));
+
+    // Deleted with its notes: to the trash on each, the folder gone.
+    browser(&mut two, &|v| {
+        let gone = v.trash_folder("Ideas");
+        assert_eq!(gone.notes.len(), 2);
+    });
+    for side in 0..2 {
+        let (notes, folders, trash) = two.shape(side);
+        assert!(notes.iter().all(|(_, f, _)| f != "Plan.md" && f != "Loose.md"), "on {side}: {notes:?}");
+        assert_eq!(trash, ["Loose", "Plan"], "on {side}");
+        assert!(!folders.iter().any(|f| f.starts_with("Ideas")), "on {side}: {folders:?}");
+        assert!(!two.sides[side].dir.join("Ideas").exists(), "on {side}");
+    }
+}

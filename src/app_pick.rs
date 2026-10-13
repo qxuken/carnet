@@ -222,7 +222,7 @@ impl Carnet {
         self.pick_head = None;
         let mut moved_f = 0;
         for f in folders {
-            if parent_of(&f) == to || to == f || to.starts_with(&format!("{f}/")) {
+            if !carnet_sync::vault::may_go(&f, to) {
                 continue;
             }
             if self.move_folder(&f, to).is_some() {

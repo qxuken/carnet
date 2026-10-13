@@ -144,6 +144,16 @@ impl NoteDoc {
     /// another device's. True if anything was. One not
     /// [plain](Place::is_plain) isn't written.
     pub fn set_place(&self, key: Key, place: &Place) -> bool {
+        let wrote = self.put_place(key, place);
+        if wrote {
+            self.loro().commit();
+        }
+        wrote
+    }
+
+    /// [`set_place`](NoteDoc::set_place) without the commit: one of
+    /// several changes made as one.
+    fn put_place(&self, key: Key, place: &Place) -> bool {
         if !place.is_plain() {
             return false;
         }
@@ -167,9 +177,6 @@ impl NoteDoc {
         }
         if now.as_ref().is_none_or(|p| p.trashed != place.trashed) {
             put("trashed", place.trashed.into());
-        }
-        if wrote {
-            self.loro().commit();
         }
         wrote
     }
@@ -359,13 +366,278 @@ impl NoteDoc {
 
     /// A folder there, or not. True if that changed.
     pub fn set_folder(&self, folder: &str, there: bool) -> bool {
-        if !is_plain_path(folder) || self.layout().folders.contains(folder) == there {
+        let wrote = self.put_folder(folder, there);
+        if wrote {
+            self.loro().commit();
+        }
+        wrote
+    }
+
+    /// [`set_folder`](NoteDoc::set_folder) without the commit.
+    fn put_folder(&self, folder: &str, there: bool) -> bool {
+        if !is_plain_path(folder) || self.folders().contains(folder) == there {
             return false;
         }
         let _ = self.folders_map().insert(folder, there);
-        self.loro().commit();
         true
     }
+
+    /// A new folder named `name` ([`folder_name`]) inside `parent` (""
+    /// for the top), and the folders above it, should one have gone
+    /// meanwhile. One of that name there already, case aside, is that
+    /// one. Its path.
+    pub fn make_folder(&self, parent: &str, name: &str) -> Result<String, FolderRefusal> {
+        let name = folder_name(name)?;
+        if !parent.is_empty() && !is_plain_path(parent) {
+            return Err(FolderRefusal::Gone);
+        }
+        let path = join(parent, &name);
+        let low = path.to_lowercase();
+        if let Some(f) = self.folders().into_iter().find(|f| f.to_lowercase() == low) {
+            return Ok(f);
+        }
+        let mut wrote = false;
+        for f in with_parents(&path) {
+            wrote |= self.put_folder(&f, true);
+        }
+        if wrote {
+            self.loro().commit();
+        }
+        Ok(path)
+    }
+
+    /// `folder` renamed `name` ([`folder_name`]) where it is, the folders
+    /// and notes inside it going with it ([`relocate`](Self::relocate)).
+    /// The same name but for case is the same folder, renamed; a name
+    /// another folder there has is refused.
+    pub fn rename_folder(&self, folder: &str, name: &str) -> Result<Relocated, FolderRefusal> {
+        let name = folder_name(name)?;
+        self.relocate(folder, &join(parent_of(folder), &name))
+    }
+
+    /// `folder` into `parent` ("" for the top) under its own name, the
+    /// folders and notes inside it going with it. Never into itself or a
+    /// folder inside it ([`may_go`]), nor into a folder gone, nor where a
+    /// folder of its name is.
+    pub fn move_folder(&self, folder: &str, parent: &str) -> Result<Relocated, FolderRefusal> {
+        if is_inside(parent, folder) {
+            return Err(FolderRefusal::IntoItself);
+        }
+        if !parent.is_empty() && !self.folders().contains(parent) {
+            return Err(FolderRefusal::Gone);
+        }
+        self.relocate(folder, &join(parent, leaf_of(folder)))
+    }
+
+    /// `folder` to `to`, as one change: it and each folder inside it, and
+    /// every note in them. A note in Deleted keeps the place it goes back
+    /// to, as the desktop's trash keeps where a note came from.
+    fn relocate(&self, folder: &str, to: &str) -> Result<Relocated, FolderRefusal> {
+        let folders = self.folders();
+        if !folders.contains(folder) {
+            return Err(FolderRefusal::Gone);
+        }
+        if to == folder {
+            return Ok(Relocated { to: to.to_string(), notes: Vec::new() });
+        }
+        if !is_plain_path(to) {
+            return Err(FolderRefusal::Gone);
+        }
+        let low = to.to_lowercase();
+        if folders.iter().any(|f| f.to_lowercase() == low && f != folder) {
+            return Err(FolderRefusal::Taken(leaf_of(to).to_string()));
+        }
+        for f in &folders {
+            if let Some(new) = relocated(f, folder, to) {
+                self.put_folder(f, false);
+                self.put_folder(&new, true);
+            }
+        }
+        let mut notes = Vec::new();
+        for (key, p) in self.layout().notes {
+            if p.trashed {
+                continue;
+            }
+            if let Some(new) = relocated(&p.folder, folder, to) {
+                self.put_place(key, &Place { folder: new, ..p.clone() });
+                notes.push((key, p.folder));
+            }
+        }
+        self.loro().commit();
+        Ok(Relocated { to: to.to_string(), notes })
+    }
+
+    /// Whether `folder` has nothing in it or under it: no note (one in
+    /// Deleted is the trash's), no picture the vault names. Only such a
+    /// one is just deleted; any other goes to Deleted, whole.
+    pub fn folder_is_bare(&self, folder: &str) -> bool {
+        let layout = self.layout();
+        !layout.notes.values().any(|p| !p.trashed && is_inside(&p.folder, folder)) && !self.pictures().keys().any(|p| is_inside(parent_of(p), folder))
+    }
+
+    /// `folder` and each folder inside it gone, and the notes in them to
+    /// Deleted, unpinned, as the desktop's trash takes a folder whole: each
+    /// goes back to the folder it was in. What went, for
+    /// [`put_back_folder`](Self::put_back_folder).
+    pub fn trash_folder(&self, folder: &str) -> TrashedFolder {
+        let mut gone = TrashedFolder::default();
+        for f in self.folders() {
+            if is_inside(&f, folder) && self.put_folder(&f, false) {
+                gone.folders.push(f);
+            }
+        }
+        for (key, p) in self.layout().notes {
+            if !p.trashed && is_inside(&p.folder, folder) && self.put_place(key, &Place { trashed: true, pinned: false, ..p }) {
+                gone.notes.push(key);
+            }
+        }
+        if !gone.folders.is_empty() || !gone.notes.is_empty() {
+            self.loro().commit();
+        }
+        gone
+    }
+
+    /// A folder [trashed](Self::trash_folder) put back: its folders, and
+    /// its notes out of Deleted. True if anything was.
+    pub fn put_back_folder(&self, gone: &TrashedFolder) -> bool {
+        let mut wrote = false;
+        for f in &gone.folders {
+            wrote |= self.put_folder(f, true);
+        }
+        for key in &gone.notes {
+            if let Some(p) = self.place(*key).filter(|p| p.trashed) {
+                wrote |= self.put_place(*key, &Place { trashed: false, ..p });
+            }
+        }
+        if wrote {
+            self.loro().commit();
+        }
+        wrote
+    }
+
+    /// Note `key` into `folder` ("" for the top): its folder before, or
+    /// `None` if it's in Deleted, not here, there already, or the folder
+    /// is gone.
+    pub fn move_note(&self, key: Key, folder: &str) -> Option<String> {
+        let p = self.place(key).filter(|p| !p.trashed && p.folder != folder)?;
+        if !folder.is_empty() && !self.folders().contains(folder) {
+            return None;
+        }
+        let from = p.folder.clone();
+        self.set_place(key, &Place { folder: folder.to_string(), ..p }).then_some(from)
+    }
+
+    /// Note `key` pinned, or not. True if that changed.
+    pub fn set_pinned(&self, key: Key, pinned: bool) -> bool {
+        match self.place(key) {
+            Some(p) if p.pinned != pinned => self.set_place(key, &Place { pinned, ..p }),
+            _ => false,
+        }
+    }
+}
+
+/// The folder pictures are kept in, at the top of the notes folder: no
+/// folder of notes may be called so, at any depth (made, it would be read
+/// as one of pictures, its notes not listed).
+pub const ATTACHMENTS: &str = "attachments";
+
+/// Why a folder wasn't made, renamed or moved, in the desktop's words.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FolderRefusal {
+    /// Into itself, or a folder inside it.
+    IntoItself,
+    /// It, or the folder it was to go into, isn't there any more.
+    Gone,
+    /// A folder of that name (this one) is there already.
+    Taken(String),
+    /// The name pictures' folder has ([`ATTACHMENTS`]).
+    ForPictures,
+}
+
+impl std::fmt::Display for FolderRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FolderRefusal::IntoItself => f.write_str("a folder can't go inside itself"),
+            FolderRefusal::Gone => f.write_str("that folder isn't there any more"),
+            FolderRefusal::Taken(name) => write!(f, "there is a folder called \u{201c}{name}\u{201d} there already"),
+            FolderRefusal::ForPictures => f.write_str("that name is kept for pictures; choose another"),
+        }
+    }
+}
+
+impl std::error::Error for FolderRefusal {}
+
+/// A folder renamed or moved: its new path, and the notes that went with
+/// it, each with the folder it was in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Relocated {
+    pub to: String,
+    pub notes: Vec<(Key, String)>,
+}
+
+/// A folder moved to Deleted whole: the folders gone, and the notes put
+/// in Deleted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrashedFolder {
+    pub folders: Vec<String>,
+    pub notes: Vec<Key>,
+}
+
+/// A folder's name as typed, as it is kept: one plain name, made so as a
+/// title is ([`slug`](carnet_core::name::slug)). The pictures' folder's
+/// name is refused.
+pub fn folder_name(typed: &str) -> Result<String, FolderRefusal> {
+    let name = carnet_core::name::slug(typed);
+    if name.eq_ignore_ascii_case(ATTACHMENTS) {
+        return Err(FolderRefusal::ForPictures);
+    }
+    Ok(name)
+}
+
+/// The folder `folder` is in ("" for the top).
+pub fn parent_of(folder: &str) -> &str {
+    folder.rsplit_once('/').map_or("", |(p, _)| p)
+}
+
+/// A folder's own name: the last part of its path.
+pub fn leaf_of(folder: &str) -> &str {
+    folder.rsplit('/').next().unwrap_or(folder)
+}
+
+/// Whether `path` is `folder` or inside it.
+pub fn is_inside(path: &str, folder: &str) -> bool {
+    !folder.is_empty() && (path == folder || path.strip_prefix(folder).is_some_and(|rest| rest.starts_with('/')))
+}
+
+/// Whether `folder` may go into `to` ("" the top): never into itself or a
+/// folder inside it, and not where it is already.
+pub fn may_go(folder: &str, to: &str) -> bool {
+    !is_inside(to, folder) && parent_of(folder) != to
+}
+
+/// `path` (a folder, or a note's) after `folder` went to `to`; `None` if
+/// it isn't `folder` or inside it.
+pub fn relocated(path: &str, folder: &str, to: &str) -> Option<String> {
+    if !is_inside(path, folder) {
+        return None;
+    }
+    Some(format!("{to}{}", &path[folder.len()..]))
+}
+
+fn join(parent: &str, name: &str) -> String {
+    if parent.is_empty() { name.to_string() } else { format!("{parent}/{name}") }
+}
+
+/// `path` and each folder above it, the topmost first.
+fn with_parents(path: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in path.split('/') {
+        out.push(match out.last() {
+            Some(above) => format!("{above}/{part}"),
+            None => part.to_string(),
+        });
+    }
+    out
 }
 
 fn hex(b: &[u8]) -> String {
@@ -458,6 +730,93 @@ mod tests {
         // As it was, before either.
         assert_eq!(a.layout_at(&before).notes[&k], place("Work", "Plan"));
         assert!(a.layout_at(&before).folders.contains("Work"));
+    }
+
+    /// Folders made, renamed, moved and moved to Deleted, each as one
+    /// change, as the desktop does them to its files: the folders and
+    /// notes inside go with them, never into itself, never onto a name
+    /// taken; a note in Deleted keeps where it goes back to.
+    #[test]
+    fn folders_take_what_is_in_them_along() {
+        let v = NoteDoc::new(1);
+        let folders = |v: &NoteDoc| v.folders().into_iter().collect::<Vec<_>>();
+        assert_eq!(v.make_folder("", "Work"), Ok("Work".into()));
+        assert_eq!(v.make_folder("Work", "Q4: plans"), Ok("Work/Q4- plans".into()), "a plain name, as a title's");
+        assert_eq!(v.make_folder("", "work"), Ok("Work".into()), "case aside, the one there");
+        assert_eq!(v.make_folder("Work", "Attachments"), Err(FolderRefusal::ForPictures));
+        assert_eq!(v.make_folder("Deep/Er", "X"), Ok("Deep/Er/X".into()), "the folders above it too");
+        assert_eq!(folders(&v), ["Deep", "Deep/Er", "Deep/Er/X", "Work", "Work/Q4- plans"]);
+
+        let (plan, q4, loose, old) = (Key::random(), Key::random(), Key::random(), Key::random());
+        v.set_place(plan, &Place { pinned: true, ..place("Work", "Plan") });
+        v.set_place(q4, &place("Work/Q4- plans", "Q4"));
+        v.set_place(loose, &place("", "Loose"));
+        v.set_place(old, &Place { trashed: true, ..place("Work", "Old") });
+
+        // Renamed: what's inside with it, in one change.
+        let before = v.version();
+        let r = v.rename_folder("Work", "Job").unwrap();
+        assert_eq!(r.to, "Job");
+        let mut moved = r.notes.clone();
+        moved.sort();
+        let mut want = vec![(plan, "Work".to_string()), (q4, "Work/Q4- plans".to_string())];
+        want.sort();
+        assert_eq!(moved, want);
+        assert_eq!(v.version().frontiers().len(), 1);
+        assert_ne!(v.version(), before);
+        assert_eq!(folders(&v), ["Deep", "Deep/Er", "Deep/Er/X", "Job", "Job/Q4- plans"]);
+        assert_eq!(v.place(plan), Some(Place { pinned: true, ..place("Job", "Plan") }), "pinned still");
+        assert_eq!(v.place(q4).unwrap().folder, "Job/Q4- plans");
+        assert_eq!(v.place(old).unwrap().folder, "Work", "in Deleted: goes back where it came from");
+        assert_eq!(v.rename_folder("Job", "job").unwrap().to, "job", "case alone: the same folder, renamed");
+        v.rename_folder("job", "Job").unwrap();
+
+        // Never into itself, or a folder inside it; never onto a name taken.
+        assert_eq!(v.move_folder("Job", "Job"), Err(FolderRefusal::IntoItself));
+        assert_eq!(v.move_folder("Job", "Job/Q4- plans"), Err(FolderRefusal::IntoItself));
+        v.make_folder("Deep", "job").unwrap();
+        assert_eq!(v.move_folder("Job", "Deep"), Err(FolderRefusal::Taken("Job".into())));
+        assert_eq!(v.rename_folder("Job", "DEEP"), Err(FolderRefusal::Taken("DEEP".into())));
+        assert_eq!(v.move_folder("Nowhere", ""), Err(FolderRefusal::Gone));
+        assert_eq!(v.move_folder("Job", "Nowhere"), Err(FolderRefusal::Gone));
+        assert_eq!(v.place(plan).unwrap().folder, "Job", "nothing moved");
+
+        // Moved, in and out again.
+        let r = v.move_folder("Job/Q4- plans", "Deep/Er").unwrap();
+        assert_eq!((r.to.as_str(), r.notes.as_slice()), ("Deep/Er/Q4- plans", &[(q4, "Job/Q4- plans".to_string())][..]));
+        assert_eq!(v.place(q4).unwrap().folder, "Deep/Er/Q4- plans");
+        assert_eq!(v.move_folder("Deep/Er/Q4- plans", "").unwrap().to, "Q4- plans");
+        assert_eq!(v.move_folder("Q4- plans", "").unwrap(), Relocated { to: "Q4- plans".into(), notes: vec![] }, "there already");
+        assert!(may_go("A", "B") && may_go("A/B", "") && may_go("Ab", "A") && may_go("A", "Ab"));
+        assert!(!may_go("A", "A") && !may_go("A", "A/B") && !may_go("A/B", "A") && !may_go("A", ""));
+
+        // A note moved, pinned.
+        assert_eq!(v.move_note(loose, "Job"), Some(String::new()));
+        assert_eq!(v.move_note(loose, "Job"), None, "there already");
+        assert_eq!(v.move_note(loose, "Nowhere"), None, "no such folder");
+        assert_eq!(v.move_note(old, ""), None, "in Deleted");
+        assert!(v.set_pinned(loose, true) && !v.set_pinned(loose, true));
+        assert!(v.place(loose).unwrap().pinned);
+
+        // To Deleted whole: its notes there, unpinned, each going back
+        // where it was; then put back.
+        assert!(!v.folder_is_bare("Job") && v.folder_is_bare("Deep/Er/X") && v.folder_is_bare("Deep/job"));
+        v.make_folder("Job", "Sub").unwrap();
+        let gone = v.trash_folder("Job");
+        assert_eq!(gone.folders, ["Job", "Job/Sub"]);
+        let mut keys = gone.notes.clone();
+        keys.sort();
+        let mut want = vec![plan, loose];
+        want.sort();
+        assert_eq!(keys, want);
+        assert_eq!(v.place(plan), Some(Place { trashed: true, ..place("Job", "Plan") }));
+        assert!(!v.folders().contains("Job") && !v.folders().contains("Job/Sub"));
+        assert!(v.put_back_folder(&gone) && !v.put_back_folder(&gone));
+        assert_eq!(v.place(plan), Some(place("Job", "Plan")));
+        assert!(v.folders().contains("Job/Sub"));
+        // A picture beside notes, as an older desktop kept them: not bare.
+        v.put_picture("Deep/Er/X/a.png", "aa");
+        assert!(!v.folder_is_bare("Deep"));
     }
 
     /// A picture put over another, or dropped: the one it held comes back

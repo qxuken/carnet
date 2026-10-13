@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carnet_core::doc::{self, Block, Doc, Kind, ListStyle, Table};
 use carnet_sync::invite::InviteCode;
-use carnet_sync::vault::{Layout, Place};
+use carnet_sync::vault::{self, FolderRefusal, Layout, Place};
 use carnet_sync::{Key, Newer, Origin, Replica, Revision, Version};
 
 #[path = "store_owned.rs"]
@@ -476,12 +476,9 @@ impl Store {
     /// A new folder named `name` inside `parent` ("" for the top level).
     /// Returns its relative path.
     pub fn create_folder(&mut self, parent: &str, name: &str) -> io::Result<String> {
-        let name = slug(name);
-        // A folder of that name holds pictures, at any depth: made here,
-        // it would not be listed.
-        if name.eq_ignore_ascii_case(ATTACHMENTS) {
-            return Err(io::Error::other("that name is kept for pictures; choose another"));
-        }
+        // A folder named as the pictures' holds pictures, at any depth:
+        // made here, it would not be listed. (The web's rule too.)
+        let name = vault::folder_name(name).map_err(io::Error::other)?;
         let rel = if parent.is_empty() {
             name
         } else {
@@ -513,11 +510,8 @@ impl Store {
     /// is the same folder, renamed. Returns the new relative path. The
     /// notes' edits must be saved first.
     pub fn rename_folder(&mut self, folder: &str, name: &str) -> io::Result<String> {
-        let name = slug(name);
-        let (parent, _) = folder.rsplit_once('/').unwrap_or(("", folder));
-        if name.eq_ignore_ascii_case(ATTACHMENTS) {
-            return Err(io::Error::other("that name is kept for pictures; choose another"));
-        }
+        let name = vault::folder_name(name).map_err(io::Error::other)?;
+        let parent = vault::parent_of(folder);
         let to = if parent.is_empty() { name } else { format!("{parent}/{name}") };
         if to == folder {
             return Ok(to);
@@ -540,19 +534,19 @@ impl Store {
     /// saved. Returns the new path and the notes rewritten. The notes'
     /// edits must be saved first.
     pub fn move_folder(&mut self, folder: &str, parent: &str) -> io::Result<(String, Vec<u64>)> {
-        if parent == folder || parent.starts_with(&format!("{folder}/")) {
-            return Err(io::Error::other("a folder can't go inside itself"));
+        if vault::is_inside(parent, folder) {
+            return Err(io::Error::other(FolderRefusal::IntoItself));
         }
         if !parent.is_empty() && !self.folders.iter().any(|f| f == parent) {
-            return Err(io::Error::other("that folder isn't there any more"));
+            return Err(io::Error::other(FolderRefusal::Gone));
         }
-        let leaf = folder.rsplit('/').next().unwrap_or(folder);
+        let leaf = vault::leaf_of(folder);
         let to = if parent.is_empty() { leaf.to_string() } else { format!("{parent}/{leaf}") };
         if to == folder {
             return Ok((to, Vec::new()));
         }
         if self.folder_dir(&to).exists() || self.folders.iter().any(|f| same_stem(f, &to)) {
-            return Err(io::Error::other(format!("there is a folder called \u{201c}{leaf}\u{201d} there already")));
+            return Err(io::Error::other(FolderRefusal::Taken(leaf.to_string())));
         }
         let depth = |f: &str| f.split('/').count();
         let deeper = depth(&to) != depth(folder);
@@ -644,14 +638,7 @@ impl Store {
     fn relocate_folder(&mut self, folder: &str, to: &str) -> io::Result<()> {
         let (from_dir, to_dir) = (self.inside(self.folder_dir(folder))?, self.inside(self.folder_dir(to))?);
         rename_retrying(&from_dir, &to_dir)?;
-        let under = format!("{folder}/");
-        let moved = |f: &str| -> Option<String> {
-            if f == folder {
-                Some(to.to_string())
-            } else {
-                f.strip_prefix(&under).map(|rest| format!("{to}/{rest}"))
-            }
-        };
+        let moved = |f: &str| vault::relocated(f, folder, to);
         for f in &mut self.folders {
             if let Some(new) = moved(f) {
                 *f = new;
