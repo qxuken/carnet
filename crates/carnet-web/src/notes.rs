@@ -249,6 +249,33 @@ pub struct Notes {
     /// Dropped pictures shown again, asked for by the id they had: the
     /// paths each is named at again when it comes.
     reviving: HashMap<BlobId, Vec<String>>,
+    /// Why the pictures put in here wait, when it's something trying
+    /// again won't mend by itself (the server's picture storage out of
+    /// reach, or turning them away): for the page to say. They're tried
+    /// again all the same; forgotten once one goes, or at a new login.
+    held: Option<&'static str>,
+}
+
+/// What a put that got no answer at all is said as ([`Notes::transferred`]),
+/// by a page that knows the server itself is reachable: the picture
+/// storage is out of this browser's reach (as one that doesn't let pages
+/// of another host put to it is).
+pub const UNREACHABLE: &str = "unreachable";
+
+/// Why pictures wait when the server's picture storage refuses them (an
+/// HTTP 4xx answer other than a timeout or "too many"): its keys, its
+/// clock, a bucket not there.
+pub const TURNED_AWAY: &str = "The server's picture storage turned new pictures away, so they stay on this device for now.";
+
+/// Why a put that failed (`error`, as [`Notes::transferred`] has it)
+/// won't go however often it's tried, in words; none for a failure that
+/// passes (offline, a timeout, the storage busy or down a while).
+fn lasting(error: &str) -> Option<&'static str> {
+    if error == UNREACHABLE {
+        return Some(carnet_sync::session::PICTURES_UNREACHABLE);
+    }
+    let code: u16 = error.strip_prefix("HTTP ")?.trim().parse().ok()?;
+    ((400..500).contains(&code) && code != 408 && code != 429).then_some(TURNED_AWAY)
 }
 
 impl Notes {
@@ -284,7 +311,7 @@ impl Notes {
             ring: me.ring.clone(),
             name: name.to_string(),
         };
-        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), reviving: HashMap::new() };
+        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), reviving: HashMap::new(), held: None };
         // Deleted forever, and pictures dropped, the server hasn't said
         // done: said again once in.
         for line in forgotten.lines() {
@@ -334,8 +361,13 @@ impl Notes {
         self.session.take_transfers()
     }
 
-    /// How a transfer went: a fetch's sealed bytes, or why not.
+    /// How a transfer went: a fetch's sealed bytes, or why not (`HTTP`
+    /// and the status, [`UNREACHABLE`], or anything else, as the page has
+    /// it). A put that won't go however often it's tried says why.
     pub fn transferred(&mut self, id: BlobId, put: bool, result: Result<Vec<u8>, String>, rng: &mut impl Random) {
+        if put && let Err(e) = &result {
+            self.held = lasting(e).or(self.held);
+        }
         self.session.transferred(id, put, result);
         self.take_events(rng);
     }
@@ -409,6 +441,10 @@ impl Notes {
                     }
                     self.errors.push(carnet_sync::session::refusal_words(&why));
                 }
+                // Why the pictures wait: said with them, not as an error.
+                Event::Failed(why) if why == carnet_sync::session::PICTURES_UNREACHABLE => {
+                    self.held = Some(carnet_sync::session::PICTURES_UNREACHABLE);
+                }
                 // This browser's own words: as they are.
                 Event::Failed(why) => self.errors.push(why),
                 Event::Usage(u) => {
@@ -436,6 +472,7 @@ impl Notes {
                 Event::PairFailed(why) => self.said.push(Said::PairFailed(why)),
                 Event::RecoverySet => self.said.push(Said::RecoverySet),
                 Event::LoggedIn => {
+                    self.held = None;
                     self.offered.clear();
                     self.sending.clear();
                     self.offer_again();
@@ -452,6 +489,7 @@ impl Notes {
                     self.offered.remove(&id);
                     self.sending.remove(&id);
                     if let Some((paths, _)) = self.uploads.remove(&id) {
+                        self.held = None;
                         let vault = self.rooms.doc(vault::ROOM);
                         let (mut changed, mut unused) = (false, Vec::<BlobId>::new());
                         for path in &paths {
@@ -880,6 +918,26 @@ impl Notes {
     /// How many pictures put in here the server hasn't got yet.
     pub fn pictures_waiting(&self) -> usize {
         self.uploads.len()
+    }
+
+    /// The pictures put in here the server hasn't got yet, by id in hex:
+    /// what the page's own list of them keeps.
+    pub fn uploading(&self) -> Vec<String> {
+        self.uploads.keys().map(|id| hex(id)).collect()
+    }
+
+    /// Why the pictures waiting wait, if it's something that won't mend
+    /// by itself: words to show. None while none waits.
+    pub fn pictures_held(&self) -> Option<&'static str> {
+        self.held.filter(|_| !self.uploads.is_empty())
+    }
+
+    /// The pictures waiting, offered again: a while after one didn't go.
+    /// Those offered and not answered too (a link not followed is never
+    /// answered).
+    pub fn retry_pictures(&mut self) {
+        self.offered.clear();
+        self.offer_again();
     }
 
     /// Every picture put in here and not on the server, but those being

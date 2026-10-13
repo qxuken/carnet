@@ -53,6 +53,8 @@ thread_local! {
         std::cell::RefCell::new(carnet_server::blobs::Worker::memory());
     /// The pictures the browser has put on the server, counted.
     static WEB_PUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How the browser's puts fail, while they do: as the page says it.
+    static WEB_PUT_FAILS: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 /// Everything delivered, both ways, until nothing moves.
@@ -75,7 +77,11 @@ fn pump_with(hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, joiner: &m
             moved = true;
             let put = matches!(t, carnet_sync::session::Transfer::Put { .. });
             WEB_PUTS.with(|p| p.set(p.get() + usize::from(put)));
-            web.transferred(t.id(), put, serve(&t), rng);
+            let result = match WEB_PUT_FAILS.get() {
+                Some(why) if put => Err(why.to_string()),
+                _ => serve(&t),
+            };
+            web.transferred(t.id(), put, result, rng);
         }
         let mut outs: Vec<Out> = Vec::new();
         for b in desk.session.take_out() {
@@ -940,6 +946,57 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
     assert_eq!(desk.docs[vault::ROOM].pictures().get(&pic), Some(&id));
     assert_eq!(web.pictures_waiting(), 0, "none waiting once it's there");
+}
+
+/// A picture the server's storage won't take from here: why is said (not
+/// as an error), it waits, and it's tried again, going once it can. One
+/// that fails a while (busy, offline) waits saying nothing.
+#[test]
+fn a_picture_the_storage_wont_take_says_why_and_waits() {
+    use carnet_web::notes::{TURNED_AWAY, UNREACHABLE};
+    let mut rng = Seeded(21);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let pic = web.picture_free("refused", "png");
+    let id = web.upload(&pic, vec![8; 900]).unwrap();
+    // Busy: nothing said.
+    WEB_PUT_FAILS.set(Some("HTTP 503"));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!((web.pictures_waiting(), web.pictures_held()), (1, None));
+    // A store without CORS (no answer while the server is up), then one
+    // that refuses: said, each in its words, and never as an error.
+    for (fails, said) in [(UNREACHABLE, carnet_sync::session::PICTURES_UNREACHABLE), ("HTTP 403", TURNED_AWAY)] {
+        WEB_PUT_FAILS.set(Some(fails));
+        web.retry_pictures();
+        pump(&mut hub, &mut desk, &mut web, &mut rng);
+        assert_eq!((web.pictures_waiting(), web.pictures_held()), (1, Some(said)));
+    }
+    // A passing failure after: what was said stays.
+    WEB_PUT_FAILS.set(Some("timed out"));
+    web.retry_pictures();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.pictures_held(), Some(TURNED_AWAY));
+    // Mended: it goes, and nothing is said.
+    WEB_PUT_FAILS.set(None);
+    web.retry_pictures();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
+    assert_eq!((web.pictures_waiting(), web.pictures_held()), (0, None));
+    assert_eq!(desk.docs[vault::ROOM].pictures().get(&pic), Some(&id));
+
+    // A link to put at that isn't followed (a host of this network not
+    // the server's): said, and the picture offered again when retried.
+    let pic = web.picture_free("inner", "png");
+    let id = web.upload(&pic, vec![9; 900]).unwrap();
+    let blob: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
+    let link = carnet_sync::wire::Frame::Carnet(carnet_sync::wire::Carnet::BlobLink { id: blob, put: true, url: "http://192.168.1.20:9000/b/x".into(), expires: 0 });
+    web.receive(&carnet_sync::wire::encode(&link), &mut rng);
+    assert_eq!(web.pictures_held(), Some(carnet_sync::session::PICTURES_UNREACHABLE));
+    assert!(web.errors.is_empty(), "{:?}", web.errors);
+    web.retry_pictures();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.said.contains(&Said::Uploaded(id.clone())), "offered again, and it went");
+    assert_eq!(web.pictures_held(), None);
+    assert!(web.errors.is_empty(), "{:?}", web.errors);
 }
 
 /// A browser opened on an account that already has many notes (more

@@ -14,12 +14,20 @@ export type Footer = {
   /// All of it sent a moment ago.
   allSent: boolean;
   readOnly: boolean;
+  /// Why the pictures wait, when it won't mend by itself (`sync.picturesHeld`).
+  held?: string | null;
 };
 
 /// The footer's line: up to date only when nothing waits to be sent;
 /// else how many changes and pictures wait, and, offline or read only,
-/// why. (The desktop's Settings says it in the same words.)
-export function footer(f: Footer): { ok: boolean; text: string } {
+/// why. (The desktop's Settings says it in the same words.) Pictures
+/// that can't go from here: why too, under it (`why`).
+export function footer(f: Footer): { ok: boolean; text: string; why?: string } {
+  const line = footerLine(f);
+  return f.held && f.pictures > 0 ? { ...line, why: f.held } : line;
+}
+
+function footerLine(f: Footer): { ok: boolean; text: string } {
   const parts = f.waitShown ? [count(f.changes, 'change'), count(f.pictures, 'picture')].filter((p) => p !== null) : [];
   const ok = f.status === 'Up to date';
   if (!parts.length && ok && f.allSent && !f.readOnly) return { ok: true, text: 'All sent' };

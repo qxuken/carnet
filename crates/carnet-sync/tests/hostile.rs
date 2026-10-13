@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use carnet_sync::compat::{self, Greeting};
 use carnet_sync::crypto::{DeviceKey, OsRandom, Ring, VaultKey};
 use carnet_sync::elo::{self, Header};
-use carnet_sync::session::{Docs, Event, Identity, MAX_NEW_ROOMS, Session, TOO_MANY_NEW};
+use carnet_sync::session::{Docs, Event, Identity, MAX_NEW_ROOMS, PICTURES_UNREACHABLE, Session, TOO_MANY_NEW};
 use carnet_sync::vault;
 use carnet_sync::wire::{self, Carnet, CrdtType, Frame, Permission};
 use carnet_sync::{Key, NoteDoc, Origin};
@@ -48,6 +48,32 @@ fn logged_in_as(notes: &mut Notes, ring: Ring) -> Session {
     s.take_out();
     s.take_events();
     s
+}
+
+/// A link to put a picture at that isn't followed (on a host of this
+/// network other than the server's, or plain http from an https server):
+/// nothing is put there, and why the picture waits is said, once a login.
+#[test]
+fn a_picture_store_out_of_reach_is_said_once_a_login() {
+    let mut notes = Notes(BTreeMap::new());
+    let mut s = logged_in(&mut notes);
+    let link = |id: u8, url: &str| wire::encode(&Frame::Carnet(Carnet::BlobLink { id: [id; 32], put: true, url: url.into(), expires: 0 }));
+    s.receive(&link(1, "https://10.0.0.5:9000/bucket/x"), &mut notes, &mut OsRandom);
+    s.receive(&link(2, "http://pictures.example/bucket/y"), &mut notes, &mut OsRandom);
+    assert_eq!(s.take_events(), [Event::Failed(PICTURES_UNREACHABLE.into())]);
+    assert!(s.take_transfers().is_empty());
+    // A link that is followed says nothing of it.
+    s.receive(&link(3, "https://pictures.example/bucket/z"), &mut notes, &mut OsRandom);
+    assert_eq!(s.take_events(), [Event::BlobWanted([3; 32])]);
+    // Logged in again: said again, if it's so still.
+    s.disconnected();
+    s.connected();
+    let server = Greeting { protocol: compat::PROTOCOL, oldest: compat::OLDEST, deprecated: compat::DEPRECATED, features: Vec::new() };
+    s.receive(&wire::encode(&Frame::Carnet(Carnet::Challenge { nonce: [3; 32], server })), &mut notes, &mut OsRandom);
+    s.receive(&wire::encode(&Frame::Carnet(Carnet::Welcome { seq: 0 })), &mut notes, &mut OsRandom);
+    s.take_events();
+    s.receive(&link(1, "https://10.0.0.5:9000/bucket/x"), &mut notes, &mut OsRandom);
+    assert_eq!(s.take_events(), [Event::Failed(PICTURES_UNREACHABLE.into())]);
 }
 
 fn changed(rooms: Vec<(String, u64)>) -> Vec<u8> {

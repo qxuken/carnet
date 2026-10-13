@@ -182,6 +182,7 @@
       allSent,
       // Read only: said here (and in Settings), not again as an error.
       readOnly: sync.readOnly || (sync.usage !== null && !sync.usage.writable),
+      held: sync.picturesHeld,
     }),
   );
 
@@ -230,6 +231,7 @@
           </span>
           <button class:on={route.kind === 'settings'} onclick={() => go('settings')} aria-label="Settings" title="Settings"><Icon name="settings" size={18} /></button>
         </footer>
+        {#if status.why}<p class="held" role="status"><Icon name="warning" size={14} /> {status.why}</p>{/if}
         {#if sync.error && route.kind !== 'settings'}<p class="error" role="alert">{sync.error}</p>{/if}
         {#if wide}
           <!-- Its edge: dragged, the library wider or narrower. A focusable
@@ -323,6 +325,8 @@
   .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
   .status.ok { color: var(--success); }
   .error { color: var(--danger); font-size: 13px; padding: 0 18px 10px; margin: 0; }
+  .held { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: 13px; line-height: 1.4; padding: 0 18px 10px; margin: 0; }
+  .held :global(.icon) { margin-top: 2px; }
   .notice {
     position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom)); transform: translateX(-50%); margin: 0;
     display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 999px;

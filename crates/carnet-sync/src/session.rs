@@ -196,6 +196,13 @@ pub const FULL: &str = "This account is full, so new pictures stay on this devic
 /// so they don't show this beside it.
 pub const READ_ONLY: &str = "This account is read only for now: changes stay on this device, and sync once it can write again.";
 
+/// What this device says ([`Event::Failed`], once a login) when the
+/// server gives a link to put a picture at that isn't followed
+/// ([`crate::link::fair`]): a picture store on a host of this network
+/// other than the server's own, say. The picture waits, offered again
+/// as any held back is.
+pub const PICTURES_UNREACHABLE: &str = "The server's picture storage can't be reached from here, so new pictures stay on this device for now.";
+
 /// The most letters of the server's own words shown at once.
 pub const SAID_MAX: usize = 200;
 
@@ -370,6 +377,8 @@ pub struct Session {
     announced: usize,
     /// Said [`TOO_MANY_NEW`] this login.
     too_many: bool,
+    /// Said [`PICTURES_UNREACHABLE`] this login.
+    unreachable: bool,
     /// Of those, the ones whose join isn't answered yet, and how many came
     /// back empty: an account's own notes come with words, a hostile
     /// server's names with nothing.
@@ -473,6 +482,7 @@ impl Session {
             fresh_empty: 0,
             more_later: false,
             too_many: false,
+            unreachable: false,
         }
     }
 
@@ -1100,6 +1110,7 @@ impl Session {
                 self.full.clear();
                 self.announced = 0;
                 self.too_many = false;
+                self.unreachable = false;
                 self.fresh.clear();
                 self.fresh_empty = 0;
                 self.more_later = false;
@@ -1262,10 +1273,14 @@ impl Session {
             // Pictures: where to put one the server wants, or fetch one
             // asked for; kept; or not there. A link not plainly the web's
             // (`link::fair`) is never followed: a put is offered again
-            // later, a fetch fails.
+            // later, and why it waits said; a fetch fails.
             Frame::Carnet(Carnet::BlobLink { id, put, url, .. }) if !crate::link::fair(&self.id.origin, &url) => {
                 if !put && self.fetching.remove(&id) {
                     self.events.push(Event::BlobFailed(id));
+                }
+                if put && !self.unreachable {
+                    self.unreachable = true;
+                    self.events.push(Event::Failed(PICTURES_UNREACHABLE.into()));
                 }
             }
             Frame::Carnet(Carnet::BlobLink { id, put: true, url, .. }) => {
