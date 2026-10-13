@@ -11,6 +11,7 @@ import { Shown } from './shown';
 import { type Entry, Uploads } from './uploads';
 import { type Entry as Typed, Pending, replay } from './pending';
 import { linkAction, numbered } from './words';
+import { pastedStem } from './stem';
 
 export type Note = {
   key: string;
@@ -388,11 +389,7 @@ class Sync {
   async addPicture(folder: string, file: File): Promise<string> {
     if (!this.vault) throw new Error('not open');
     const { bytes, ext, type } = await pictureFile(file);
-    const now = new Date();
-    const two = (n: number) => String(n).padStart(2, '0');
-    // As the desktop names a pasted picture: when, in UTC.
-    const stem = `pasted-${now.getUTCFullYear()}-${two(now.getUTCMonth() + 1)}-${two(now.getUTCDate())}-${two(now.getUTCHours())}${two(now.getUTCMinutes())}${two(now.getUTCSeconds())}`;
-    const path = this.vault.picture_free(stem, ext);
+    const path = this.vault.picture_free(pastedStem(new Date()), ext);
     const id = this.vault.upload(path, bytes);
     if (!id) throw new Error('That picture is over 32 MB, too big to sync.');
     // Kept as on its way before it's sent: a fast server's word that it's
