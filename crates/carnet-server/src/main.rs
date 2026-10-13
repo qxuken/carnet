@@ -86,6 +86,9 @@ usage:
   --s3-region R   the bucket's region         (CARNET_S3_REGION, us-east-1)
   --s3-virtual-host  the bucket as the host's first name, not the path's
                                                (CARNET_S3_VIRTUAL_HOST=1, off)
+  --s3-ca FILE    the CA (PEM) the bucket's certificate is signed by, for
+                  a bucket of one's own: trusted instead of the web's roots
+                                                        (CARNET_S3_CA, none)
 
   invite          print a new invite code: one account, good for a week
   backup DIR      copy every database into DIR (new, or empty), safely
@@ -131,6 +134,7 @@ struct Args {
     to_s3: Option<String>,
     s3_region: String,
     s3_virtual_host: bool,
+    s3_ca: Option<PathBuf>,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -154,6 +158,7 @@ fn args() -> Result<Args, String> {
         s3: env("CARNET_S3"),
         s3_region: env("CARNET_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
         s3_virtual_host: on("CARNET_S3_VIRTUAL_HOST"),
+        s3_ca: env("CARNET_S3_CA").map(PathBuf::from),
         ..Args::default()
     };
     if let Some(list) = env("CARNET_TRUSTED_PROXY") {
@@ -189,6 +194,7 @@ fn args() -> Result<Args, String> {
             "--s3" => a.s3 = Some(value("--s3")?),
             "--s3-region" => a.s3_region = value("--s3-region")?,
             "--s3-virtual-host" => a.s3_virtual_host = true,
+            "--s3-ca" => a.s3_ca = Some(value("--s3-ca")?.into()),
             "--to-postgres" => a.to_postgres = Some(value("--to-postgres")?),
             "--to-s3" => a.to_s3 = Some(value("--to-s3")?),
             "--verify-only" => a.verify_only = true,
@@ -211,7 +217,7 @@ fn args() -> Result<Args, String> {
 fn s3_config(url: &str, a: &Args) -> Result<carnet_server::s3::S3Config, String> {
     let key = env("CARNET_S3_ACCESS_KEY").or_else(|| env("AWS_ACCESS_KEY_ID")).ok_or("a bucket needs CARNET_S3_ACCESS_KEY (or AWS_ACCESS_KEY_ID)")?;
     let secret = env("CARNET_S3_SECRET_KEY").or_else(|| env("AWS_SECRET_ACCESS_KEY")).ok_or("a bucket needs CARNET_S3_SECRET_KEY (or AWS_SECRET_ACCESS_KEY)")?;
-    Ok(carnet_server::s3::S3Config { url: url.to_string(), region: a.s3_region.clone(), key, secret, virtual_host: a.s3_virtual_host })
+    Ok(carnet_server::s3::S3Config { url: url.to_string(), region: a.s3_region.clone(), key, secret, virtual_host: a.s3_virtual_host, ca: a.s3_ca.clone() })
 }
 
 /// The store the server runs on: Postgres if one is given.

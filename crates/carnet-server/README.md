@@ -276,6 +276,7 @@ cargo build --release -p carnet-server --features postgres,s3
 | `--s3 URL` | `CARNET_S3` | the pictures in a bucket: `https://host/bucket`, or `https://host/bucket/folder` to keep to a folder of it |
 | `--s3-region R` | `CARNET_S3_REGION` | the bucket's region (`us-east-1` by default; R2's is `auto`) |
 | `--s3-virtual-host` | `CARNET_S3_VIRTUAL_HOST=1` | the bucket as the host's first name (`bucket.host`), not the path's |
+| `--s3-ca FILE` | `CARNET_S3_CA` | the CA (PEM) the bucket's certificate is signed by, trusted for the server's own calls to it instead of the web's roots: a bucket of one's own with a private CA (devices must trust it too) |
 | | `CARNET_S3_ACCESS_KEY`, `CARNET_S3_SECRET_KEY` | the bucket's keys (or AWS's own `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`): only from the environment, never a flag |
 
 - **Postgres.** Every account in one schema, each row naming its account, gone with it. The tables are made on the first start and brought up to date on later ones; a database from a newer server is refused. The server keeps one connection, and makes it again if it drops. The URL holds a password: give it by the variable, not the flag, so `ps` doesn't show it.
@@ -286,7 +287,7 @@ cargo build --release -p carnet-server --features postgres,s3
     ```
   - **A put's size.** A device says how long each picture is, sealed, when it offers it, and its `PUT` link is signed with that `Content-Length`: the bucket refuses a put of any other length, so nothing past 32 MiB, or past what was offered, gets in. Within its five minutes a link may put its picture again, over the first: harmless (only the account's own device has the link, and a picture that isn't the one its id names opens on no device), so a conditional put isn't asked for, and CORS needs no more headers. The link is signed with `Content-Type: application/octet-stream` too, which both apps send, so nothing of another type (a page, a script) is kept on the bucket's origin; CORS lets `content-type` through, as above.
 - **What stays in the data folder:** `opaque.key` (every password depends on it) and `links.key`. Keep `--data` pointing at the folder, and keep it in backups. Postgres holds no secret.
-- **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only.
+- **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only. With the records in SQLite and the pictures in a bucket, it copies the databases and leaves the pictures to the bucket (`Sharded::backup_with(to, false)`, as a host's backup calls it).
 
 ## Moving to Postgres and a bucket
 
