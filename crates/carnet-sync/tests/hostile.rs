@@ -158,6 +158,20 @@ fn too_many(s: &mut Session, notes: &mut Notes) -> (u128, Vec<String>) {
     (many, asked)
 }
 
+/// The vault named with as many notes as a login takes: all of them
+/// taken, the vault not counted among them.
+#[test]
+fn the_vault_is_never_one_of_the_new_notes_a_login_takes() {
+    let mut notes = Notes(BTreeMap::new());
+    let mut s = logged_in(&mut notes);
+    let mut rooms: Vec<(String, u64)> = vec![(vault::ROOM.to_string(), 1)];
+    rooms.extend((1..=MAX_NEW_ROOMS as u128).map(|n| (key(n), n as u64 + 1)));
+    s.receive(&changed(rooms), &mut notes, &mut OsRandom);
+    assert_eq!(notes.0.len(), MAX_NEW_ROOMS + 1);
+    assert_eq!(s.cursor(), MAX_NEW_ROOMS as u64 + 1, "nothing left for the next login");
+    assert_eq!(joins(&mut s).len(), MAX_NEW_ROOMS + 1);
+}
+
 /// So many new rooms in a login and no more: the rest wait for the next,
 /// and if those taken came empty, that's said once.
 #[test]
