@@ -2,8 +2,9 @@
 //! device's identity, its session, and every doc it has: the notes and the
 //! vault. What lib.rs binds for the browser.
 
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use carnet_sync::crypto::BlobId;
 
@@ -103,6 +104,14 @@ pub struct Listed {
     pub todos: usize,
     /// Its last change, in seconds since 1970.
     pub modified: i64,
+}
+
+/// The vault's notes' places, and the notes deleted forever, as one
+/// version of it has them.
+#[derive(Default)]
+struct Placed {
+    notes: BTreeMap<Key, Place>,
+    gone: BTreeSet<Key>,
 }
 
 /// What happened beside the notes, for the page to show.
@@ -213,8 +222,20 @@ pub struct Notes {
     pub me: Me,
     pub session: Session,
     pub rooms: Rooms,
-    /// Rooms changed since last asked: the page draws them again.
-    pub changed: Vec<String>,
+    /// Rooms changed since last asked: the page draws them again
+    /// ([`Notes::take_changed`]).
+    changed: BTreeSet<String>,
+    /// The vault changed since the notes deleted forever elsewhere were
+    /// last looked for: looked for once the page asks what changed, not
+    /// at every frame, as reading the vault's every note is the length of
+    /// the library.
+    vault_moved: bool,
+    /// The vault's notes' places, and the notes deleted forever, read once
+    /// for each version of it.
+    layout: RefCell<Option<(Version, Rc<Placed>)>>,
+    /// How many times that was read: what taking notes in costs, which
+    /// stays a few reads however many come (tests/viewer.rs).
+    vault_reads: Cell<usize>,
     /// Pictures come, by id: the page shows them.
     pub pictures: Vec<([u8; 32], Vec<u8>)>,
     /// Pictures asked for that didn't come (the server hasn't one, or it
@@ -309,7 +330,7 @@ impl Notes {
             ring: me.ring.clone(),
             name: name.to_string(),
         };
-        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: Vec::new(), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), reviving: HashMap::new(), held: None };
+        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: BTreeSet::new(), vault_moved: false, layout: RefCell::new(None), vault_reads: Cell::new(0), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), reviving: HashMap::new(), held: None };
         // Deleted forever, and pictures dropped, the server hasn't said
         // done: said again once in.
         for line in forgotten.lines() {
@@ -325,6 +346,28 @@ impl Notes {
         }
         notes.forget_gone();
         Ok(notes)
+    }
+
+    /// Up to `most` docs changed since last kept made ready for
+    /// [`Notes::save`] now: a few at a time, the page drawn between, so
+    /// the save after ten thousand notes came doesn't do them all at once.
+    /// How many are still to do.
+    pub fn keep_some(&self, most: usize) -> usize {
+        let mut kept = self.kept.borrow_mut();
+        let (mut done, mut left) = (0, 0);
+        for (room, doc) in &self.rooms.docs {
+            let v = doc.version();
+            if kept.get(room).is_some_and(|(at, _)| *at == v) {
+                continue;
+            }
+            if done < most {
+                kept.insert(room.clone(), (v, doc.to_bytes()));
+                done += 1;
+            } else {
+                left += 1;
+            }
+        }
+        left
     }
 
     /// Everything kept: the cursor and every doc, after the header.
@@ -375,11 +418,9 @@ impl Notes {
             match e {
                 Event::Changed(room) => {
                     if room == vault::ROOM {
-                        self.forget_gone();
+                        self.vault_moved = true;
                     }
-                    if !self.changed.contains(&room) {
-                        self.changed.push(room);
-                    }
+                    self.changed.insert(room);
                 }
                 Event::BlobGot(id, bytes) => {
                     // Brought back: named again, for every device.
@@ -414,9 +455,7 @@ impl Notes {
                     let hashes: Vec<[u8; 32]> = invites.iter().map(|i| i.hash).collect();
                     if vault.forget_invites_but(&hashes, now_secs()) {
                         self.session.saved(vault::ROOM, &mut self.rooms, rng);
-                        if !self.changed.iter().any(|r| r == vault::ROOM) {
-                            self.changed.push(vault::ROOM.to_string());
-                        }
+                        self.changed.insert(vault::ROOM.to_string());
                     }
                     let vault = self.rooms.doc(vault::ROOM);
                     let waiting = invites
@@ -499,9 +538,7 @@ impl Notes {
                             self.session.saved(vault::ROOM, &mut self.rooms, rng);
                             // The page told: a note it shows with this
                             // picture "not on the server yet" asks again.
-                            if !self.changed.iter().any(|r| r == vault::ROOM) {
-                                self.changed.push(vault::ROOM.to_string());
-                            }
+                            self.changed.insert(vault::ROOM.to_string());
                         }
                         self.session.drop_blobs(&unused);
                         self.said.push(Said::Uploaded(hex(&id)));
@@ -520,6 +557,52 @@ impl Notes {
                 _ => {}
             }
         }
+    }
+
+    /// The rooms changed since last asked, for the page to draw again;
+    /// the notes another device deleted forever since, gone here first
+    /// (among them). However many frames came between, the vault is read
+    /// for them once.
+    pub fn take_changed(&mut self) -> Vec<String> {
+        self.gone_now();
+        std::mem::take(&mut self.changed).into_iter().collect()
+    }
+
+    /// The notes another device deleted forever, if the vault moved since
+    /// they were last looked for, gone here now: before a note is written
+    /// here, so nothing is sent to one gone.
+    fn gone_now(&mut self) {
+        if std::mem::take(&mut self.vault_moved) {
+            self.forget_gone();
+        }
+    }
+
+    /// How many times the vault's every note's place was read.
+    pub fn vault_reads(&self) -> usize {
+        self.vault_reads.get()
+    }
+
+    /// Whether anything changed since last asked.
+    pub fn has_changed(&self) -> bool {
+        !self.changed.is_empty()
+    }
+
+    /// The vault's notes' places, and those deleted forever: read again
+    /// only when the vault has moved since.
+    fn placed(&self) -> Rc<Placed> {
+        let Some(vault) = self.rooms.docs.get(vault::ROOM) else { return Rc::default() };
+        let v = vault.version();
+        let mut cache = self.layout.borrow_mut();
+        if let Some((at, placed)) = cache.as_ref()
+            && *at == v
+        {
+            return placed.clone();
+        }
+        self.vault_reads.set(self.vault_reads.get() + 1);
+        let (layout, gone) = vault.layout_and_gone();
+        let placed = Rc::new(Placed { notes: layout.notes, gone });
+        *cache = Some((v, placed.clone()));
+        placed
     }
 
     fn place(&self, key: &str) -> Option<Place> {
@@ -545,16 +628,17 @@ impl Notes {
     /// Every note this browser has: title, folder, pinned and so on, as the
     /// library lists them; those in the trash too, marked.
     pub fn notes(&self) -> Vec<Listed> {
-        let places = self.rooms.docs.get(vault::ROOM).map(|v| v.layout().notes).unwrap_or_default();
+        let placed = self.placed();
         let summaries = self.summaries();
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.rooms.docs.len());
         for room in self.rooms.docs.keys() {
             let Some(key) = Key::parse(room) else { continue };
             let s = &summaries[room].1;
-            if s.empty {
+            // Deleted forever elsewhere, not yet forgotten here.
+            if s.empty || placed.gone.contains(&key) {
                 continue;
             }
-            let place = places.get(&key).cloned().unwrap_or_default();
+            let place = placed.notes.get(&key).cloned().unwrap_or_default();
             let title = s.named(&place).unwrap_or("Untitled").to_string();
             out.push(Listed {
                 key: room.clone(),
@@ -662,6 +746,7 @@ impl Notes {
     /// The note's `n`th checkbox ticked or unticked: a one-character edit,
     /// sent at once.
     pub fn toggle_task(&mut self, key: &str, n: usize, rng: &mut impl Random) -> bool {
+        self.gone_now();
         let Some(d) = self.rooms.docs.get(key) else { return false };
         let Some(text) = doc::toggle_task(&d.text(), n) else { return false };
         d.record(&text, carnet_sync::Origin::Save);
@@ -675,14 +760,17 @@ impl Notes {
     /// words) and the words.
     pub fn search(&self, query: &str) -> Vec<String> {
         let q = query.to_lowercase();
-        let places = self.rooms.docs.get(vault::ROOM).map(|v| v.layout().notes).unwrap_or_default();
+        let placed = self.placed();
         let summaries = self.summaries();
         self.rooms
             .docs
             .iter()
             .filter(|(r, d)| {
                 let Some(key) = Key::parse(r) else { return false };
-                let place = places.get(&key).cloned().unwrap_or_default();
+                if placed.gone.contains(&key) {
+                    return false;
+                }
+                let place = placed.notes.get(&key).cloned().unwrap_or_default();
                 summaries[*r].1.named(&place).is_some_and(|t| t.to_lowercase().contains(&q)) || d.text().to_lowercase().contains(&q)
             })
             .map(|(r, _)| r.clone())
@@ -702,6 +790,7 @@ impl Notes {
     /// for the editor. Sent at once. A new title renames the note on every
     /// device; a new note goes into the vault with its first words.
     pub fn edit(&mut self, key: &str, base: &str, text: &str, rng: &mut impl Random) -> Option<(String, String)> {
+        self.gone_now();
         let k = Key::parse(key)?;
         let d = self.rooms.docs.get(key)?;
         let base = unhex(base).and_then(|b| Version::from_bytes(&b))?;
@@ -762,17 +851,15 @@ impl Notes {
 
     /// Notes another device deleted forever, gone here too.
     fn forget_gone(&mut self) {
-        let Some(vault) = self.rooms.docs.get(vault::ROOM) else { return };
-        for key in vault.gone() {
+        let gone = self.placed().gone.clone();
+        for key in gone {
             let room = key.to_string();
             if self.rooms.docs.remove(&room).is_some() {
                 self.summaries.borrow_mut().remove(&room);
                 self.kept.borrow_mut().remove(&room);
                 self.fresh.remove(&room);
                 self.session.remove_room(&room);
-                if !self.changed.contains(&room) {
-                    self.changed.push(room);
-                }
+                self.changed.insert(room);
             }
         }
     }
@@ -857,7 +944,7 @@ impl Notes {
         }
         self.session.drop_blobs(&unused);
         self.session.saved(vault::ROOM, &mut self.rooms, rng);
-        self.changed.push(key.to_string());
+        self.changed.insert(key.to_string());
         true
     }
 
@@ -1122,9 +1209,7 @@ impl Notes {
         }
         self.session.take_back_invites(&taken);
         self.session.saved(vault::ROOM, &mut self.rooms, rng);
-        if !self.changed.iter().any(|r| r == vault::ROOM) {
-            self.changed.push(vault::ROOM.to_string());
-        }
+        self.changed.insert(vault::ROOM.to_string());
         Ok(true)
     }
 
@@ -1223,6 +1308,7 @@ impl Notes {
     /// only grows), sent at once. False if it already was, or there is
     /// no such version.
     pub fn restore(&mut self, key: &str, version: &str, rng: &mut impl Random) -> bool {
+        self.gone_now();
         let Some(d) = self.rooms.docs.get(key) else { return false };
         let Some(v) = unhex(version).and_then(|b| Version::from_bytes(&b)) else { return false };
         if !matches!(d.restore(&v), Ok(true)) {

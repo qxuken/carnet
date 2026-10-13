@@ -1161,8 +1161,9 @@ impl Session {
                         continue;
                     }
                     // One not joined is new here (every doc this device
-                    // has is joined at login): so many and no more.
-                    if !self.joined.contains_key(&room) {
+                    // has is joined at login): so many notes and no more.
+                    // The vault's is one, and never counts among them.
+                    if !self.joined.contains_key(&room) && room != crate::vault::ROOM {
                         if self.announced >= MAX_NEW_ROOMS {
                             held_back = true;
                             continue;

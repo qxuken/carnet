@@ -6,6 +6,7 @@ import init, { Join, Vault, app_version, code_from_link, invite_from, max_sealed
 import * as sealed from './sealed';
 import * as db from './db';
 import * as passkey from './passkey';
+import { Coalesced } from './coalesce';
 import { Shown } from './shown';
 import { type Entry, Uploads } from './uploads';
 import { type Entry as Typed, Pending, replay } from './pending';
@@ -105,6 +106,9 @@ const PICTURE_RETRY_MOST = 300_000;
 /// The notes the server may not have as they are here (`Vault::unsent`),
 /// sealed: kept so a reload still knows, before the server says.
 const UNSENT = 'unsent';
+/// How many notes are made ready to keep at a time, the page drawn
+/// between (`keepSoon`): a few hundred small notes are some 20 ms.
+const KEEP_AT_ONCE = 300;
 /// The name this browser was given, if one was (sealed like the rest):
 /// the browser's own if not.
 const NAME = 'name';
@@ -226,6 +230,14 @@ class Sync {
   /// back from the server till it is (0: none).
   private edits = 0;
   private held = 0;
+  /// The notes listed again, and kept, after frames that changed some:
+  /// soon, but no more often than listing them allows. Ten thousand notes
+  /// coming one by one are listed a few times a second, each time from
+  /// one reading of the vault, not once a frame.
+  private lists = new Coalesced(() => {
+    this.refresh();
+    this.save();
+  });
   private pictures = new Shown();
   private wanted = new Map<string, { path: string; done: (url: string) => void; fail: (e: Error) => void }[]>();
   private pruneTimer: ReturnType<typeof setTimeout> | undefined;
@@ -498,10 +510,7 @@ class Sync {
   /// drawn again, what was said, pictures come, transfers begun.
   private after(v: Vault) {
     this.flush();
-    if (v.take_changed().length) {
-      this.refresh();
-      this.save();
-    }
+    if (v.has_changed()) this.lists.ask();
     for (const why of v.take_errors()) {
       this.error = sentence(why);
       // A passkey refused (one too many, say): not being added now.
@@ -649,6 +658,9 @@ class Sync {
 
   private refresh() {
     if (!this.vault) return;
+    // What changed is all drawn now (and notes deleted forever elsewhere
+    // forgotten first).
+    this.vault.take_changed();
     this.notes = JSON.parse(this.vault.notes());
     this.folders = this.vault.folders();
     this.version++;
@@ -673,8 +685,36 @@ class Sync {
 
   /// Kept a moment after the last change, sealed.
   private save(after = 1500) {
+    // An edit held back till it's kept (`held`): not put off by what
+    // comes after it, notes coming in by the thousand say.
+    const at = Date.now() + after;
+    if (this.held && this.saveTimer !== undefined && this.saveAt <= at) return;
     clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => void this.keepNow(), after);
+    this.saveTimer = undefined;
+    this.saveAt = at;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      void this.keepSoon();
+    }, after);
+  }
+
+  /// When the save waiting is due.
+  private saveAt = 0;
+
+  /// Saves begun, counted: a later one stops an earlier's slices.
+  private saveTurn = 0;
+
+  /// Kept, the docs changed since last kept made ready a few hundred at a
+  /// time first, the page drawn between (`Vault::keep_some`): after ten
+  /// thousand notes came, no one task does them all. Out of sight, all at
+  /// once: a hidden page's timers wait a second or more each.
+  private async keepSoon() {
+    const v = this.vault;
+    const turn = ++this.saveTurn;
+    while (v && this.vault === v && turn === this.saveTurn && !document.hidden && v.keep_some(KEEP_AT_ONCE) > 0) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    if (turn === this.saveTurn) await this.keepNow();
   }
 
   /// Comes into the account by a code shown on another device.
@@ -1110,6 +1150,7 @@ class Sync {
   /// perhaps for good).
   async keepNow() {
     clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
     // The words typed kept apart first, with the versions sent from them:
     // what's kept then never holds an edit they don't know was made.
     while (this.pending.busy()) await this.pending.settled();
@@ -1151,6 +1192,7 @@ class Sync {
     this.ws = null;
     ws?.close();
     clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
     clearTimeout(this.pruneTimer);
     clearTimeout(this.pictureTimer);
     this.pictureTimer = undefined;
@@ -1248,6 +1290,7 @@ class Sync {
 
   /// The vault let go of, its keys wiped from the wasm's memory.
   private dropVault() {
+    this.lists.cancel();
     const v = this.vault;
     this.vault = null;
     v?.free();
@@ -1268,6 +1311,7 @@ class Sync {
     ws?.close();
     clearTimeout(this.retryTimer);
     clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
     clearTimeout(this.pruneTimer);
     clearTimeout(this.pictureTimer);
     this.pictureTimer = undefined;

@@ -125,6 +125,12 @@ impl NoteDoc {
         read(&self.notes_map().get_deep_value(), &self.folders_map().get_deep_value())
     }
 
+    /// The layout, and the notes deleted forever ([`NoteDoc::gone`]), read
+    /// in one go.
+    pub fn layout_and_gone(&self) -> (Layout, BTreeSet<Key>) {
+        read_gone(&self.notes_map().get_deep_value(), &self.folders_map().get_deep_value())
+    }
+
     /// Just the folders, without reading every note's place.
     pub fn folders(&self) -> BTreeSet<String> {
         read(&LoroValue::Null, &self.folders_map().get_deep_value()).folders
@@ -650,6 +656,10 @@ fn live(id: &str) -> bool {
 }
 
 fn read(notes: &LoroValue, folders: &LoroValue) -> Layout {
+    read_gone(notes, folders).0
+}
+
+fn read_gone(notes: &LoroValue, folders: &LoroValue) -> (Layout, BTreeSet<Key>) {
     let mut out = Layout::default();
     let mut gone = BTreeSet::new();
     if let LoroValue::Map(m) = notes {
@@ -676,7 +686,7 @@ fn read(notes: &LoroValue, folders: &LoroValue) -> Layout {
     if let LoroValue::Map(m) = folders {
         out.folders = m.iter().filter(|(k, v)| matches!(v, LoroValue::Bool(true)) && is_plain_path(k)).map(|(k, _)| k.clone()).collect();
     }
-    out
+    (out, gone)
 }
 
 #[cfg(test)]
