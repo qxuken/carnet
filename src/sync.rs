@@ -397,6 +397,9 @@ pub struct Sync {
     pub offline_detail: Option<String>,
     /// The last thing that went wrong, for the settings to say.
     pub error: Option<String>,
+    /// Why the password typed wasn't taken (too short, not an email), for
+    /// the settings to say by its field: gone once it's edited or set.
+    pub password_error: Option<String>,
     /// A pairing code being shown.
     pub code: Option<String>,
     /// Recovery words just made, shown once, when the server has said it
@@ -516,6 +519,7 @@ impl Sync {
             status: Status::Off,
             offline_detail: None,
             error: None,
+            password_error: None,
             code: None,
             words: None,
             words_waiting: None,
@@ -784,12 +788,15 @@ impl Sync {
     }
 
     /// Sets (or changes) the account's password, signing in as `email`;
-    /// [`Sync::password_set`] when done, or `error` why not.
+    /// [`Sync::password_set`] when done, or `password_error` why not.
     pub fn set_password(&mut self, email: &str, password: &str) {
         if let Phase::On { session, link, .. } = &mut self.phase {
             match session.set_password(email, password, &mut OsRandom) {
-                Ok(()) => flush(session, link.as_ref()),
-                Err(e) => self.error = Some(sentence(&e)),
+                Ok(()) => {
+                    self.password_error = None;
+                    flush(session, link.as_ref());
+                }
+                Err(e) => self.password_error = Some(sentence(&e)),
             }
         }
     }
@@ -1296,6 +1303,7 @@ impl Sync {
                         }
                         Event::PasswordSet => {
                             self.password_set = true;
+                            self.password_error = None;
                             self.devices = None;
                         }
                         Event::Passkeys(list) => self.passkeys = list,

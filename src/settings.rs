@@ -324,13 +324,12 @@ impl Settings {
     }
 
     /// How the page looks and behaves back as they first were: the
-    /// colours, faces, size, width, the letter and dividers, and the
-    /// writing aids. Not the notes folder, the library (its order, dates,
-    /// width, whether it shows), the colours given lately, nor the window
-    /// (solid or translucent: the system's look, taken at the next start).
+    /// colours, faces, size, width, the letter and dividers, the window
+    /// (solid or translucent, taken at the next start), and the writing
+    /// aids. Not the notes folder, the library (its order, dates, width,
+    /// whether it shows), nor the colours given lately.
     pub fn reset_look(&mut self) {
         *self = Settings {
-            translucent: self.translucent,
             sort: self.sort,
             dates_created: self.dates_created,
             library_w: self.library_w,
@@ -437,7 +436,7 @@ mod tests {
         let d = Settings::default();
         assert_eq!((s.theme, s.palette, s.font.as_str(), s.size, s.width), (d.theme, d.palette, "", 16, Width::Medium));
         assert_eq!((s.initial_lines, s.focus), (3, false));
-        assert!(!s.translucent, "the window kept solid");
+        assert_eq!(s.translucent, d.translucent, "the window as at first");
         assert_eq!((s.sort, s.dates_created, s.library_w, s.sidebar), (Sort::Title, true, 300, false));
         assert_eq!(s.colors, vec![0xc0504dff]);
         assert_eq!(s.dir.as_deref(), Some(Path::new("/notes")));

@@ -20,6 +20,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carnet_core::doc::{self, Block, Doc, Kind, ListStyle, Table};
@@ -252,6 +253,8 @@ pub struct Store {
     /// the open one through the change ([`carnet_core::compare::carry`]).
     /// The first since last taken is kept.
     pub before_remote: HashMap<u64, Doc>,
+    /// The vault's layout as last read, and the vault's version then.
+    vault_read: Option<(Version, Arc<Layout>)>,
 }
 
 /// What sync has to tell the server of things gone (docs/SYNC.md §4): the
@@ -404,6 +407,7 @@ impl Store {
             from_remote: HashSet::new(),
             forgotten: Forgotten::default(),
             before_remote: HashMap::new(),
+            vault_read: None,
         };
         let pins = store.read_pins();
         let mut taken = HashSet::new();
@@ -426,7 +430,7 @@ impl Store {
         Ok(store)
     }
 
-    fn read_pins(&self) -> Vec<String> {
+    fn read_pins(&self) -> HashSet<String> {
         fs::read_to_string(self.dir.join(PINS))
             .unwrap_or_default()
             .lines()
@@ -1118,50 +1122,52 @@ impl Store {
     /// file comes in. Returns whether anything changed. What the app runs
     /// when its window comes back to the front.
     pub fn rescan(&mut self) -> bool {
-        let mut changed = false;
         // Notes whose files went: one may be back under another name,
         // changed on the way (a rename and an edit from another machine).
         let mut vanished: Vec<(Key, String)> = Vec::new();
-        let mut i = 0;
-        while i < self.notes.len() {
-            let note = &self.notes[i];
-            if note.dirty {
-                i += 1;
-                continue;
-            }
-            let Some(path) = note.path.clone() else {
-                i += 1;
-                continue;
-            };
-            match stamp(&path) {
+        let mut stale: HashSet<u64> = HashSet::new();
+        let before = self.notes.len();
+        self.notes.retain(|note| {
+            let Some(path) = note.path.as_deref().filter(|_| !note.dirty) else { return true };
+            match stamp(path) {
                 None => {
-                    let gone = self.notes.remove(i);
-                    if let Some(key) = gone.key {
-                        vanished.push((key, gone.markdown()));
+                    if let Some(key) = note.key {
+                        vanished.push((key, note.markdown()));
                     }
-                    changed = true;
-                    continue;
+                    false
                 }
-                Some(s) if Some(s) != note.disk => {
-                    if let Ok((fresh, text)) = note.reread(&path) {
-                        self.notes[i] = fresh;
-                        self.track(i, &text, Origin::OtherApp);
-                        changed = true;
+                Some(s) => {
+                    if Some(s) != note.disk {
+                        stale.insert(note.id);
                     }
+                    true
                 }
-                _ => {}
             }
-            i += 1;
+        });
+        let mut changed = self.notes.len() != before;
+        // The keys notes have, collected once: a folder of 10,000 notes
+        // looked at again is not 10,000 times 10,000.
+        let mut taken: HashSet<Key> = self.notes.iter().filter_map(|n| n.key).collect();
+        for i in 0..self.notes.len() {
+            let (note, Some(path)) = (&self.notes[i], self.notes[i].path.as_deref()) else { continue };
+            if !stale.contains(&note.id) {
+                continue;
+            }
+            if let Ok((fresh, text)) = note.reread(path) {
+                self.notes[i] = fresh;
+                self.bring_back(&self.notes[i].folder, &text);
+                self.track_in(i, &text, Origin::OtherApp, &mut taken);
+                changed = true;
+            }
         }
         let pins = self.read_pins();
         let folders_before = self.folders.clone();
         if let Ok(files) = self.note_files() {
+            // Each note's file looked up by its path, as a file system that
+            // ignores case sees it, not compared with every other one's.
+            let mut known: HashSet<String> = self.notes.iter().filter_map(|n| n.path.as_deref()).map(path_key).collect();
             for (path, folder) in files {
-                let known = self
-                    .notes
-                    .iter()
-                    .any(|n| n.path.as_deref().is_some_and(|p| same_path(p, &path)));
-                if known || self.skipped.contains(&file_name(&path)) {
+                if !known.insert(path_key(&path)) || self.skipped.contains(&file_name(&path)) {
                     continue;
                 }
                 if let Ok((mut note, text)) = Note::load_text(&path) {
@@ -1169,10 +1175,11 @@ impl Store {
                     note.folder = folder;
                     self.notes.push(note);
                     let i = self.notes.len() - 1;
-                    if self.known(i, &text).is_none() {
+                    if self.known_in(i, &text, &taken).is_none() {
                         self.notes[i].key = take_similar(&mut vanished, &text);
                     }
-                    self.track(i, &text, Origin::OtherApp);
+                    self.bring_back(&self.notes[i].folder, &text);
+                    self.track_in(i, &text, Origin::OtherApp, &mut taken);
                     changed = true;
                 }
             }
@@ -1314,10 +1321,9 @@ impl Store {
     }
 
     /// The key the replica has for note `i`'s file holding `text`: by its
-    /// path, or by its text at a path gone.
-    fn known(&self, i: usize, text: &str) -> Option<Key> {
+    /// path, or by its text at a path gone, and not one of `taken`.
+    fn known_in(&self, i: usize, text: &str, taken: &HashSet<Key>) -> Option<Key> {
         let rel = self.notes[i].rel_path()?;
-        let taken: HashSet<Key> = self.notes.iter().filter_map(|n| n.key).collect();
         self.replica
             .as_ref()?
             .key_for(&rel, text, |k| taken.contains(&k), |p| self.dir.join(p).exists())
@@ -1649,7 +1655,10 @@ impl Store {
     /// with edits not yet saved waits. `(changed, waiting)`.
     fn forget_gone(&mut self, known: &Layout) -> io::Result<(bool, bool)> {
         let Some(r) = self.replica.as_ref() else { return Ok((false, false)) };
-        let gone = r.vault().gone();
+        // Only those still here are looked for in the list: the vault
+        // keeps every note ever deleted forever.
+        let here: HashSet<Key> = self.notes.iter().filter_map(|n| n.key).collect();
+        let gone: Vec<Key> = r.vault().gone().into_iter().filter(|k| here.contains(k) || r.entry(*k).is_some()).collect();
         let (mut changed, mut waiting) = (false, false);
         for key in gone {
             if let Some(i) = self.notes.iter().position(|n| n.key == Some(key)) {
@@ -1720,9 +1729,10 @@ impl Store {
     /// A note with edits not yet saved waits, and with it the vault's
     /// version as applied. Returns whether anything changed here.
     pub fn reconcile(&mut self, send: bool) -> io::Result<bool> {
-        let Some(r) = self.replica.as_ref() else { return Ok(false) };
-        let vault = r.vault().layout();
-        let known = r.vault().layout_at(r.applied());
+        let Some(vault) = self.vault_layout() else { return Ok(false) };
+        let r = self.replica.as_ref().expect("checked");
+        // As last applied: most often the vault as it is, not read twice.
+        let known = if self.vault_read.as_ref().is_some_and(|(v, _)| v == r.applied()) { vault.clone() } else { Arc::new(r.vault().layout_at(r.applied())) };
         // Deleted forever elsewhere: first, so it isn't put back.
         let (mut changed, mut waiting) = self.forget_gone(&known)?;
         let local = self.layout(&vault);
@@ -1808,10 +1818,26 @@ impl Store {
             r.persist_vault()?;
             self.vault_changed = true;
         }
-        if !waiting {
+        if !waiting && r.applied() != &r.vault().version() {
             r.set_applied()?;
         }
         Ok(changed)
+    }
+
+    /// The vault's layout, read again only when the vault has changed
+    /// since: what sync compares the files with every second is not
+    /// 10,000 notes' places read anew each time.
+    fn vault_layout(&mut self) -> Option<Arc<Layout>> {
+        let vault = self.replica.as_ref()?.vault();
+        let now = vault.version();
+        match &self.vault_read {
+            Some((v, layout)) if *v == now => Some(layout.clone()),
+            _ => {
+                let layout = Arc::new(vault.layout());
+                self.vault_read = Some((now, layout.clone()));
+                Some(layout)
+            }
+        }
     }
 
     /// Notes that want one name in one folder get it the same way on every
@@ -1831,8 +1857,7 @@ impl Store {
     }
 
     fn settle_names_once(&mut self) -> io::Result<bool> {
-        let Some(r) = self.replica.as_ref() else { return Ok(false) };
-        let vault = r.vault().layout();
+        let Some(vault) = self.vault_layout() else { return Ok(false) };
         let mut groups: HashMap<(String, String), Vec<Key>> = HashMap::new();
         for (key, p) in vault.notes.iter().filter(|(_, p)| !p.trashed) {
             groups.entry((p.folder.to_lowercase(), p.name.to_lowercase())).or_default().push(*key);
@@ -1840,12 +1865,15 @@ impl Store {
         // A number never lands on a name another note wants outright.
         let plain: HashSet<(String, String)> = groups.keys().cloned().collect();
         let mut changed = false;
+        // Where each note is in the list, looked up once: renames here
+        // leave every note where it is in it.
+        let at: HashMap<Key, usize> = self.notes.iter().enumerate().filter_map(|(i, n)| Some((n.key?, i))).collect();
         for ((folder, name), keys) in groups.iter_mut() {
             keys.sort();
             let mut numbers = (2..).filter(|m| !plain.contains(&(folder.clone(), format!("{name} {m}"))));
             let wants: Vec<Option<usize>> = (0..keys.len()).map(|k| if k == 0 { None } else { numbers.next() }).collect();
             for (k, key) in keys.iter().enumerate() {
-                let Some(i) = self.notes.iter().position(|n| n.key == Some(*key)) else { continue };
+                let Some(&i) = at.get(key) else { continue };
                 let (Some(path), place) = (self.notes[i].path.clone(), &vault.notes[key]) else { continue };
                 if self.notes[i].dirty || self.notes[i].folder != place.folder {
                     continue;
@@ -2789,7 +2817,12 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// One file, as a file system that ignores case sees it.
 fn same_path(a: &Path, b: &Path) -> bool {
-    same_stem(&a.to_string_lossy(), &b.to_string_lossy())
+    path_key(a) == path_key(b)
+}
+
+/// A path as [`same_path`] compares it: what a set of paths is keyed by.
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy().to_lowercase()
 }
 
 /// How `.pinned` names a note: its path under the notes folder.
@@ -2838,7 +2871,13 @@ fn walk(dir: &Path, rel: &str, depth: usize, found: &mut Found) -> io::Result<(b
         if name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
+        // The type the folder's listing gives, with no look at the file
+        // itself (10,000 of them add up): a link's, where it leads.
+        let is_dir = match entry.file_type() {
+            Ok(t) if !t.is_symlink() => t.is_dir(),
+            _ => path.is_dir(),
+        };
+        if is_dir {
             let pictures = name.eq_ignore_ascii_case(ATTACHMENTS);
             // Pictures, not notes: the attachments folder; and one that
             // differs from it in case only, where case counts, is an
@@ -3361,7 +3400,7 @@ mod tests {
             let s = if replica {
                 Store::open(dir.clone()).unwrap()
             } else {
-                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default(), before_remote: HashMap::new() };
+                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default(), before_remote: HashMap::new(), vault_read: None };
                 for (path, _) in s.note_files().unwrap() {
                     s.notes.push(Note::load(&path).unwrap());
                 }
@@ -3615,6 +3654,54 @@ mod tests {
         assert!(s.rescan());
         assert_eq!(s.notes.len(), 1);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 10,000 notes (`CARNET_SCALE` to try another number): put in the
+    /// vault, compared with it again as sync does every second, and the
+    /// folder looked at again as when the window comes to the front, then
+    /// with files new to it. Each takes time as the notes grow, not as
+    /// their square: the bounds are many times what it takes, in a debug
+    /// build, and far below what the square of 10,000 took.
+    #[test]
+    fn ten_thousand_notes_stay_quick() {
+        let n: usize = std::env::var("CARNET_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+        let dir = temp_dir("scale");
+        fs::create_dir_all(dir.join("Bulk")).unwrap();
+        for i in 0..n {
+            fs::write(dir.join("Bulk").join(format!("Note {i}.md")), format!("# Note {i}\n\nWords of note {i}.\n")).unwrap();
+        }
+        let timed = |label: &str, f: &mut dyn FnMut()| {
+            let t0 = std::time::Instant::now();
+            f();
+            let took = t0.elapsed();
+            println!("{n} notes, {label}: {took:?}");
+            took
+        };
+        let mut s = None;
+        timed("open", &mut || s = Some(Store::open(dir.clone()).unwrap()));
+        let mut s = s.unwrap();
+        assert_eq!(s.notes.len(), n);
+        let first = timed("first reconcile, every place written", &mut || {
+            s.reconcile(true).unwrap();
+        });
+        assert_eq!(s.replica.as_ref().unwrap().vault().layout().notes.len(), n);
+        let again = timed("reconcile again, nothing new", &mut || {
+            assert!(!s.reconcile(true).unwrap());
+        });
+        let rescan = timed("rescan, nothing new", &mut || assert!(!s.rescan()));
+        for i in 0..40 {
+            fs::write(dir.join("Bulk").join(format!("New {i}.md")), format!("# New {i}\n")).unwrap();
+        }
+        let new = timed("rescan, 40 new", &mut || assert!(s.rescan()));
+        assert_eq!(s.notes.len(), n + 40);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        if n >= 10_000 {
+            let secs = Duration::from_secs;
+            assert!(first < secs(20), "first reconcile took {first:?}");
+            assert!(again < secs(3), "reconcile took {again:?}");
+            assert!(rescan < secs(2) && new < secs(2), "rescan took {rescan:?}, {new:?}");
+        }
     }
 
     #[test]
