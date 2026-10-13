@@ -1204,6 +1204,167 @@ fn down_from_codes_last_line_leaves_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A note of `kinds`, the caret at the end of the first block, its lines
+/// laid out with their text.
+fn note_of(name: &str, kinds: Vec<Kind>) -> (Carnet, Drive, std::path::PathBuf) {
+    let (mut app, mut d, dir) = body(name);
+    app.edit(Step::Other, |doc, c| {
+        *doc = carnet_core::doc::Doc::new(kinds.into_iter().map(Block::new).collect());
+        *c = Caret::at(page::end(doc, Slot::block(doc.blocks()[0].id)));
+        true
+    });
+    d.core.set_inspect(true);
+    for _ in 0..3 {
+        d.frame(&mut app);
+    }
+    (app, d, dir)
+}
+
+/// A press on the drawn words of `slot` at place `at`, counted as the
+/// `clicks`th (two a double click, three a triple).
+fn press_drawn(app: &mut Carnet, d: &mut Drive, slot: Slot, at: usize, clicks: u8) {
+    let k = *app.slot_keys.get(&slot).unwrap();
+    let r = d.core.caret_rect(k, at).unwrap();
+    d.input(app, InputEvent::CursorMoved(Vec2::new(r.x + 1.0, r.y + r.h / 2.0)));
+    d.input(app, InputEvent::MouseDown { button: kui_native::MouseButton::Primary, clicks });
+    d.input(app, InputEvent::MouseUp { button: kui_native::MouseButton::Primary });
+    d.frame(app);
+    d.frame(app);
+}
+
+/// A drag over the drawn words, from place `from` of one slot to place
+/// `to` of another.
+fn drag_drawn(app: &mut Carnet, d: &mut Drive, (s, from): (Slot, usize), (t, to): (Slot, usize)) {
+    let a = d.core.caret_rect(*app.slot_keys.get(&s).unwrap(), from).unwrap();
+    let b = d.core.caret_rect(*app.slot_keys.get(&t).unwrap(), to).unwrap();
+    d.drag(app, Vec2::new(a.x + 1.0, a.y + a.h / 2.0), Vec2::new(b.x + 1.0, b.y + b.h / 2.0));
+    d.frame(app);
+}
+
+fn raw(app: &Carnet, i: usize) -> String {
+    match &blocks(app)[i].kind {
+        Kind::Raw(t) => t.clone(),
+        k => panic!("no code: {k:?}"),
+    }
+}
+
+/// The finding: the desktop drew a code block as written, its fences and
+/// language and all, where the web shows only its lines: Markdown while
+/// writing. Only the lines between the fences are drawn, and a click, a
+/// double or triple click, a drag, Ctrl+A, a copy and typing over what is
+/// chosen all read them as the code's own bytes; the fences stay.
+#[test]
+fn a_code_block_is_drawn_without_its_fences() {
+    let code = "```rust\nlet x = 1;\nlet y = 2;\n```";
+    let lines = "let x = 1;\nlet y = 2;";
+    let (mut app, mut d, dir) = note_of("code-drawn", vec![Kind::Text("Above".into()), Kind::Raw(code.into()), Kind::Text("Below".into())]);
+    let slot = Slot::block(blocks(&app)[1].id);
+    let (above, below) = (Slot::block(blocks(&app)[0].id), Slot::block(blocks(&app)[2].id));
+    let drawn = drawn_text(&app, &d, slot);
+    assert_eq!(drawn, lines, "neither fence nor language drawn");
+    // A click at the first letter: the code's first byte; further in,
+    // the byte under it, and the caret drawn there.
+    press_drawn(&mut app, &mut d, slot, 0, 1);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 8 }));
+    press_drawn(&mut app, &mut d, slot, 15, 1);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 8 + 15 }));
+    let k = *app.slot_keys.get(&slot).unwrap();
+    assert_eq!(app.rect_at(&d.core, slot, 8 + 15), d.core.caret_rect(k, 15));
+    assert_eq!(app.rect_at(&d.core, slot, 0), d.core.caret_rect(k, 0), "a fence at the lines' nearer end");
+    type_in(&mut app, &mut d, "!");
+    assert_eq!(raw(&app, 1), "```rust\nlet x = 1;\nlet !y = 2;\n```");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(raw(&app, 1), code);
+    // Home and End: the drawn line's ends, never a fence.
+    press_drawn(&mut app, &mut d, slot, 2, 1);
+    key(&mut app, &mut d, "home");
+    assert_eq!(app.caret.head.byte, 8);
+    key(&mut app, &mut d, "end");
+    assert_eq!(app.caret.head.byte, 8 + "let x = 1;".len());
+    press_drawn(&mut app, &mut d, slot, 15, 1);
+    key(&mut app, &mut d, "end");
+    assert_eq!(app.caret.head.byte, 8 + lines.len());
+    // A double click: the word under it.
+    press_drawn(&mut app, &mut d, slot, 1, 1);
+    press_drawn(&mut app, &mut d, slot, 1, 2);
+    assert_eq!(page::copy(app.doc(), app.caret).as_deref(), Some("let"));
+    // A triple click, Ctrl+A and a drag end to end: the lines, no fence.
+    let whole = Caret { anchor: Pos { slot, byte: 8 }, head: Pos { slot, byte: 8 + lines.len() } };
+    press_drawn(&mut app, &mut d, slot, 4, 1);
+    press_drawn(&mut app, &mut d, slot, 4, 2);
+    press_drawn(&mut app, &mut d, slot, 4, 3);
+    assert_eq!(app.caret, whole, "a triple click");
+    press_drawn(&mut app, &mut d, slot, 4, 1);
+    key_with(&mut app, &mut d, "a", CTRL);
+    assert_eq!(app.caret, whole, "Ctrl+A");
+    press_drawn(&mut app, &mut d, slot, 0, 1);
+    drag_drawn(&mut app, &mut d, (slot, 0), (slot, lines.len()));
+    assert_eq!(app.caret, whole, "a drag");
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some(lines), "the lines alone");
+    // Typed over, the lines go and the fences stay.
+    type_in(&mut app, &mut d, "fn main() {}");
+    assert_eq!(raw(&app, 1), "```rust\nfn main() {}\n```");
+    assert_eq!(drawn_text(&app, &d, slot), "fn main() {}");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(raw(&app, 1), code);
+    // A drag from the code's first letter on past it copies it as code,
+    // fences and all; from part-way in, its fences round what it took.
+    drag_drawn(&mut app, &mut d, (slot, 0), (below, 2));
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("```rust\nlet x = 1;\nlet y = 2;\n```\n\nBe\n"));
+    drag_drawn(&mut app, &mut d, (above, 2), (slot, 3));
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("ove\n\n```rust\nlet\n```\n"));
+    // Taken out part-way, code keeps its fences: what is left after the
+    // selection joins its lines, below; code below stays code.
+    drag_drawn(&mut app, &mut d, (slot, 15), (below, 2));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(raw(&app, 1), "```rust\nlet x = 1;\nlet low\n```");
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 8 + 15 }));
+    key_with(&mut app, &mut d, "z", CTRL);
+    drag_drawn(&mut app, &mut d, (above, 2), (slot, 4));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app)[..2], ["Ab".to_string(), "```rust\nx = 1;\nlet y = 2;\n```".to_string()]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Code with nothing between its fences is drawn as one empty line, no
+/// fence; a click there puts the caret on it, and what is typed goes
+/// between the fences.
+#[test]
+fn an_empty_code_block_is_one_empty_line_to_write_in() {
+    for fence in ["```", "```rust"] {
+        let (mut app, mut d, dir) = note_of("code-empty", vec![Kind::Text("Above".into()), Kind::Raw(format!("{fence}\n```")), Kind::Text("Below".into())]);
+        let slot = Slot::block(blocks(&app)[1].id);
+        let drawn = drawn_text(&app, &d, slot);
+        assert!(drawn.trim_matches('\u{200B}').is_empty(), "{drawn:?}");
+        // A click on the line (nothing on it to measure a place by).
+        let k = *app.slot_keys.get(&slot).unwrap();
+        let line = d.core.nodes().iter().find(|n| n.key == k).map(|n| n.rect).unwrap();
+        d.click(&mut app, line.x + 2.0, line.y + line.h / 2.0);
+        d.frame(&mut app);
+        assert_eq!(app.caret, Caret::at(Pos { slot, byte: fence.len() + 1 }));
+        type_in(&mut app, &mut d, "let x;");
+        assert_eq!(raw(&app, 1), format!("{fence}\nlet x;\n```"));
+        assert_eq!(drawn_text(&app, &d, slot), "let x;");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Front matter is drawn as its lines, muted, without its `---`.
+#[test]
+fn front_matter_is_drawn_without_its_dashes() {
+    let (mut app, mut d, dir) = note_of("front-drawn", vec![Kind::Raw("---\ntitle: Hi\ntags: [a]\n---".into()), Kind::Text("Words".into())]);
+    let slot = Slot::block(blocks(&app)[0].id);
+    assert_eq!(drawn_text(&app, &d, slot), "title: Hi\ntags: [a]");
+    press_drawn(&mut app, &mut d, slot, 0, 1);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 4 }));
+    type_in(&mut app, &mut d, "x");
+    assert_eq!(raw(&app, 0), "---\nxtitle: Hi\ntags: [a]\n---");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The finding: Enter at the end of "> quoted words", then `/`: no menu,
 /// and `/h2` typed as words. Any line of a quote offers it.
 #[test]
