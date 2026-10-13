@@ -128,6 +128,10 @@ pub enum Msg {
     NewFolder,
     /// Opens the settings, or closes them.
     ShowSettings,
+    /// GitHub asked once a day whether a newer Carnet is out: 0 no, 1 yes.
+    SetCheckUpdates { to: u64 },
+    /// The newer Carnet's release page, in the browser.
+    OpenRelease,
     /// 0 system, 1 light, 2 dark.
     SetTheme { to: u64 },
     /// `design::Palette::ALL[to]`.
@@ -501,6 +505,11 @@ pub struct Carnet {
     histories: HashMap<u64, History>,
     /// When the pictures no note shows are next looked for.
     next_sweep: Instant,
+    /// Whether a newer Carnet is out, asked of GitHub now and then
+    /// (update.rs); never in the tests.
+    pub(super) updates: crate::update::Updates,
+    /// A newer version found, to be said once no other notice shows.
+    update_to_tell: Option<String>,
     /// The notes folder watched for what other apps do to it
     /// (watch.rs): started with the first frame, and again for a folder
     /// chosen in Settings.
@@ -972,6 +981,8 @@ impl Carnet {
             editing: false,
             histories: HashMap::new(),
             next_sweep: Instant::now() + SWEEP_FIRST,
+            updates: if cfg!(test) { crate::update::Updates::with(None) } else { crate::update::Updates::github() },
+            update_to_tell: None,
             watch: None,
             waker: None,
             rescans: 0,
@@ -3437,6 +3448,8 @@ impl Carnet {
                 }
             },
             Msg::ShowSettings
+            | Msg::SetCheckUpdates { .. }
+            | Msg::OpenRelease
             | Msg::SetTheme { .. }
             | Msg::SetPalette { .. }
             | Msg::SetDensity { .. }
@@ -4065,6 +4078,8 @@ impl App for Carnet {
         self.signup.set_wake(move || wake.wake());
         let wake = waker.clone();
         self.connect.set_wake(move || wake.wake());
+        let wake = waker.clone();
+        self.updates.set_wake(move || wake.wake());
         self.images.set_waker(waker);
     }
 
@@ -4076,6 +4091,7 @@ impl App for Carnet {
         self.watch_tick();
         self.sync_tick();
         self.connect_tick();
+        self.updates_tick();
         if self.joined_said && !self.settings_open {
             self.joined_said = false;
             self.sync.joined = None;
@@ -4116,6 +4132,7 @@ impl App for Carnet {
         // on the server asked again; and the inspector's "Checked …" kept
         // true while it shows.
         due.extend(self.sync.due());
+        due.extend(self.updates.due(self.settings.check_updates, Instant::now()));
         if self.settings_open && self.sync_inspector && self.sync.inspected_at.is_some() {
             due.push(INSPECTED_EVERY);
         }

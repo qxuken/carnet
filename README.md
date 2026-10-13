@@ -175,6 +175,7 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 - **Dates**: on the page and the cards, when a note was last edited or when it was created: how long ago within a day ("3 hours ago"), the day after that ("Created 9 October", the year too when it is not this one).
 - **Notes folder**: change it, show it, copy its path, or go back to `Documents/Carnet`.
 - **Sync**: see below.
+- **About**: this version, and, when GitHub has a newer release, "Carnet 0.1.2 is out" with **Download**, which opens the release's page (nothing is installed; a notice says so once, too). **Check for updates** (on by default) asks GitHub once a day, at start and then every 24 hours while Carnet runs: one request to `api.github.com` for the latest release, with nothing sent but the request itself (no account, no id, nothing about your notes). Off, nothing is asked. A check that fails says nothing, and offline it simply waits.
 
 Carnet sets its pages in fonts it ships, so they look the same on every machine: **Source Serif 4** for titles and headings and **Inter** for the text, both under the SIL Open Font License.
 
@@ -186,7 +187,7 @@ Sync is end-to-end encrypted. Your notes, their titles, folder names and picture
 
 To start, you need a sync server and an invite code from it:
 
-1. **Run `carnet-server`**, from the released image (`qxuken/carnet-server` on Docker Hub, or `ghcr.io/qxuken/carnet-server`) or built from this repository. On its first start it prints an invite code for the first account. [crates/carnet-server/README.md](crates/carnet-server/README.md) is the full self-hosting guide: running it, TLS, backups, monitoring, and moving to Postgres and S3.
+1. **Run `carnet-server`**, from the released image (`qxuken/carnet-server` on Docker Hub, or `ghcr.io/qxuken/carnet-server`) or built from this repository. On its first start it prints an invite code for the first account, good for a day (restart the server for a new one). [crates/carnet-server/README.md](crates/carnet-server/README.md) is the full self-hosting guide: running it, TLS, backups, monitoring, and moving to Postgres and S3.
 2. **In Carnet, open Settings → Sync**, type the server's address, choose **Enter the code**, and type the invite code.
 3. **Add your other devices** from **Settings → Sync → Add a device**: it shows a code (and a QR code) that the new device types or scans. The server only relays the two devices' messages and cannot read what passes between them.
 4. **Keep a way back in.** Twelve recovery words let a new device in when none of yours is left; they are shown once and kept nowhere. A password (and, in the web app, a passkey) does the same and can be changed at any time; the server never learns the password.

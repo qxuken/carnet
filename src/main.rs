@@ -19,6 +19,7 @@ mod slash;
 mod store;
 mod pictures;
 mod sync;
+mod update;
 mod watch;
 #[cfg(test)]
 mod sync_tests;

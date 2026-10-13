@@ -44,10 +44,10 @@ On a start with no accounts, it prints an invite code for the first account, the
 
 ```
 carnet-server: no accounts yet. Invite code for the first account (owner):
-    K7QF-2M9D-XW4H-P3TA   (single use, good for 7 days)
+    K7QF-2M9D-XW4H-P3TA   (single use, good for 1 day: if it has run out, restart the server for a new one)
 ```
 
-`docker logs carnet` shows it. It prints a new one on every start until an account exists. Type the server's address and this code in Carnet's **Settings → Sync** to make the account.
+`docker logs carnet` shows it. It prints a new one on every start until an account exists, and each is good for a day, so a code left in an old log lets no one in: if it has run out, restart the server (`docker restart carnet`) and use the new one. The app says so too when it's given one run out. Once the first account is made, the others are good no more. Type the server's address and this code in Carnet's **Settings → Sync** to make the account.
 
 ### Building it yourself
 
@@ -80,7 +80,7 @@ A binary built this way doesn't include the web app; [The web app](#the-web-app)
 | `--tls-client-ca FILE` | `CARNET_TLS_CLIENT_CA` | none | with TLS, only clients showing a certificate this CA signed (Cloudflare's Authenticated Origin Pulls) |
 | `--passwords` | `CARNET_PASSWORDS=1` | off | let devices set an email and password, and sign in with them (OPAQUE: the password never reaches the server). Off, codes and the recovery words are the ways in |
 | `--compact-after N` | `CARNET_COMPACT_AFTER` | `200` | a note kept as this many records is asked to be compacted into one |
-| `--beside-old-pictures` | `CARNET_BESIDE_OLD_PICTURES=1` | off | start with no accounts beside pictures of accounts this server has no record of (see [Restoring](#restoring)); the pictures are kept, unused |
+| `--keep-untracked-pictures` | `CARNET_KEEP_UNTRACKED_PICTURES=1` | off | start with no accounts beside pictures of accounts this server has no record of (see [Restoring](#restoring)); the pictures are kept, unused |
 
 `carnet-server --help` lists them all, with the commands below.
 
@@ -129,7 +129,7 @@ carnet-server invite --data ./data
 docker exec carnet carnet-server invite
 ```
 
-Each is single-use and good for a week. Only its hash is kept: an invite made in the app never reaches the server at all, only its hash does. The app keeps the code in the account's own end-to-end-encrypted vault, so the owner's devices can show it again; the server can't read it there.
+Each is single-use and good for a week (`carnet-server invite` with no account yet makes the owner's, good for a day, as the one printed at the start). One run out is said so when it's used, in the app too. Only its hash is kept: an invite made in the app never reaches the server at all, only its hash does. The app keeps the code in the account's own end-to-end-encrypted vault, so the owner's devices can show it again; the server can't read it there.
 
 ## TLS: a proxy in front
 
@@ -275,10 +275,10 @@ Stop the server, put the copy where `--data` points (or restore the Postgres dat
 A server with **no accounts** (a new data folder, an empty database) beside pictures of accounts it has no record of won't start: the records were likely not put back, and a new first account would be made beside another server's pictures. It says so and stops, before making anything:
 
 ```text
-carnet-server: The bucket holds pictures of 12 accounts, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on another bucket (or another folder in it). To start anyway, with those pictures kept and unused, give --beside-old-pictures (CARNET_BESIDE_OLD_PICTURES=1)
+carnet-server: The bucket holds pictures of 12 accounts, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on another bucket (or another folder in it). To start anyway, with those pictures kept and unused, give --keep-untracked-pictures (CARNET_KEEP_UNTRACKED_PICTURES=1)
 ```
 
-Put the records back, or point it at another bucket (or folder of one), or another data folder. `--beside-old-pictures` starts it anyway: nothing is deleted, the pictures stay there unused, and the flag matters no more once an account is made.
+Put the records back, or point it at another bucket (or folder of one), or another data folder. `--keep-untracked-pictures` starts it anyway: nothing is deleted, the pictures stay there unused, and the flag matters no more once an account is made.
 
 ## Upgrading
 

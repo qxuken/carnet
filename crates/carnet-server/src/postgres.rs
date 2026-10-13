@@ -1127,6 +1127,13 @@ impl Storage for Postgres {
         })
     }
 
+    fn find_invite(&self, hash: [u8; 32]) -> Option<(bool, u64)> {
+        self.read(None, |c| {
+            let st = c.st("SELECT owner, expires FROM invites WHERE hash = $1")?;
+            Ok(c.client.query_opt(&st, &[&hash.as_slice()]).map_err(failed)?.map(|r| (r.get::<_, bool>(0), uint(r.get(1)))))
+        })
+    }
+
     fn drop_invite(&mut self, hash: [u8; 32]) -> Result<bool, Failed> {
         self.exec("DELETE FROM invites WHERE hash = $1", &[&hash.as_slice()]).map(|n| n > 0)
     }

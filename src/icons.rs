@@ -75,6 +75,8 @@ pub enum Glyph {
     Undo,
     /// Sent up: an arrow out of a tray.
     Upload,
+    /// A new version to get: an arrow into a tray.
+    Download,
     /// Saves packed into one: three sheets stacked.
     Layers,
     /// Not yet: a clock.
@@ -241,6 +243,10 @@ impl Glyph {
                 "M12 15V4.5 M7.5 9L12 4.5 16.5 9 M4.5 14.5v3.5c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-3.5",
                 "",
             ),
+            Download => (
+                "M12 4.5V15 M7.5 10.5L12 15 16.5 10.5 M4.5 14.5v3.5c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-3.5",
+                "",
+            ),
             Layers => ("M12 4l8.5 4.5L12 13 3.5 8.5z M3.5 12.5L12 17l8.5-4.5 M3.5 16.5L12 21l8.5-4.5", ""),
             Clock => ("M12 3.8a8.2 8.2 0 1 0 0 16.4a8.2 8.2 0 1 0 0-16.4z M12 7.5V12l3 2", ""),
             Scan => (
@@ -289,7 +295,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 65] = [
+    pub const ALL: [Glyph; 66] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -297,7 +303,7 @@ impl Glyph {
         Glyph::Minus, Glyph::Folder, Glyph::FolderPlus, Glyph::Settings, Glyph::Search, Glyph::ChevronDown,
         Glyph::ChevronUp, Glyph::More, Glyph::Quote, Glyph::TextColor, Glyph::Highlight, Glyph::FloatLeft,
         Glyph::FloatRight, Glyph::Inline, Glyph::Sidebar, Glyph::Zen, Glyph::Check, Glyph::Undo, Glyph::Upload,
-        Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
+        Glyph::Download, Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
         Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
         Glyph::TableHeader,
     ];

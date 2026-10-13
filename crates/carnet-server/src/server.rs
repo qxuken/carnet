@@ -83,7 +83,7 @@ pub struct Config {
 /// Records a room keeps one by one before it's asked for as a snapshot.
 pub const COMPACT_AFTER: usize = 200;
 
-pub use crate::hub::INVITE_DAYS;
+pub use crate::hub::{INVITE_DAYS, OWNER_INVITE_DAYS};
 
 /// The largest frame a socket takes: past it, the socket closes.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -147,20 +147,29 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// A new invite, kept by its hash, good for a week. With no account yet,
-/// it makes the owner's.
+/// A new invite, kept by its hash. With no account yet, it makes the
+/// owner's, good for a day ([`OWNER_INVITE_DAYS`]); else, for a week.
 pub fn new_invite(store: &mut impl Storage) -> Result<InviteCode, Failed> {
     let owner = store.accounts() == 0;
     invite(store, owner)
 }
 
-/// An invite for an account of its own, good for [`INVITE_DAYS`]; the
+/// An invite for an account of its own, good for [`invite_days`]; the
 /// owner's, or not (a hosted service's signups never are).
 pub fn invite(store: &mut (impl Storage + ?Sized), owner: bool) -> Result<InviteCode, Failed> {
     let code = InviteCode::generate(&mut OsRandom);
-    store.add_invite(code.hash(), owner, now() + INVITE_DAYS * 24 * 3600)?;
+    store.add_invite(code.hash(), owner, now() + invite_days(owner) * 24 * 3600)?;
     Ok(code)
 }
+
+/// How many days an invite is good for: the owner's a day, any other a
+/// week.
+pub fn invite_days(owner: bool) -> u64 {
+    if owner { OWNER_INVITE_DAYS } else { INVITE_DAYS }
+}
+
+/// What the server says beside the owner's invite it prints.
+pub const OWNER_INVITE_NOTE: &str = "single use, good for 1 day: if it has run out, restart the server for a new one";
 
 /// What a socket or a request asks of the hub's thread.
 enum ToHub {
@@ -594,7 +603,7 @@ pub struct Start {
     /// an empty database) on pictures a server kept before. They're kept
     /// either way: the sweep takes only the pictures of accounts removed
     /// here (`blobs::Worker::sweep_unowned`).
-    pub beside_old_pictures: bool,
+    pub keep_untracked_pictures: bool,
 }
 
 /// [`serve_limited`], started as `start` says.
@@ -648,12 +657,12 @@ pub async fn serve_started(
                 Box::new(store)
             }
         };
-        if store.accounts() == 0 && !start.beside_old_pictures {
+        if store.accounts() == 0 && !start.keep_untracked_pictures {
             let strangers = crate::blobs::strangers(blobs.as_mut(), |a| store.has_account(a));
             if !strangers.is_empty() {
                 let (place, other) = if in_bucket { ("The bucket", "another bucket (or another folder in it)") } else { ("The data folder", "another data folder") };
                 return Err(std::io::Error::other(format!(
-                    "{place} holds pictures of {}, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on {other}. To start anyway, with those pictures kept and unused, give --beside-old-pictures (CARNET_BESIDE_OLD_PICTURES=1)",
+                    "{place} holds pictures of {}, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on {other}. To start anyway, with those pictures kept and unused, give --keep-untracked-pictures (CARNET_KEEP_UNTRACKED_PICTURES=1)",
                     accounts(strangers.len())
                 )));
             }
@@ -661,7 +670,7 @@ pub async fn serve_started(
         if first_invite && store.accounts() == 0 {
             let code = new_invite(&mut store).map_err(std::io::Error::other)?;
             println!("carnet-server: no accounts yet. Invite code for the first account (owner):");
-            println!("    {}   (single use, good for {INVITE_DAYS} days)", code.text());
+            println!("    {}   ({OWNER_INVITE_NOTE})", code.text());
         }
         Ok((store, blobs))
     })

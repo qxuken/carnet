@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use carnet_sync::compat::{self, Client, Greeting, feature};
 use carnet_sync::crypto::{Random, login_message, recovery_message, verify};
-use carnet_sync::invite::InviteCode;
+use carnet_sync::invite::{InviteCode, RUN_OUT, RUN_OUT_FIRST};
 use carnet_sync::pair::NO_SLOT;
 use carnet_sync::{passkey, password};
 use carnet_sync::elo::{self, Header, Pieces};
@@ -73,6 +73,11 @@ pub const NEW_ROOMS: u64 = 256;
 /// How long an invite is good for.
 pub const INVITE_DAYS: u64 = 7;
 
+/// How long the first account's (the owner's) invite is good for: a day.
+/// The server prints a new one on each start until that account is made,
+/// so one run out is a restart away; a code in an old log lets no one in.
+pub const OWNER_INVITE_DAYS: u64 = 1;
+
 /// The most invites waiting at once: the owner's device can't fill the
 /// directory.
 const MAX_INVITES: usize = 100;
@@ -97,8 +102,9 @@ const ACCOUNT_REMOVED: &str = "this account was removed from the server";
 /// A login that names an account not here, or a device not in it: the
 /// same either way, so a login tells nobody which accounts there are.
 const NOT_HERE: &str = "this account isn't on this server (removed, or never here), or this device isn't in it";
-/// An invite that can't make an account, whatever the reason.
-const BAD_INVITE: &str = "that invite is not good: used, past its week, or never made";
+/// An invite that can't make an account: used, or never made. One run
+/// out is said as such (`invite::RUN_OUT`, `invite::RUN_OUT_FIRST`).
+const BAD_INVITE: &str = "that invite is not good: used, run out, or never made";
 const DEVICE_REMOVED: &str = "this device was removed from the account";
 
 enum State {
@@ -565,8 +571,15 @@ impl<S: Storage> Hub<S> {
         if !self.admission.admit(&invite.hash()) {
             return Err(BAD_INVITE.into());
         }
+        // Looked at first, as taking it drops it: one run out is told so,
+        // with what gets a new one.
+        let known = self.store.find_invite(invite.hash());
         let taken = self.store.take_invite(invite.hash(), self.now);
-        let owner = self.kept(taken).map_err(|e| e.to_string())?.ok_or(BAD_INVITE)?;
+        let owner = self.kept(taken).map_err(|e| e.to_string())?.ok_or(match known {
+            Some((true, expires)) if expires <= self.now => RUN_OUT_FIRST,
+            Some((false, expires)) if expires <= self.now => RUN_OUT,
+            _ => BAD_INVITE,
+        })?;
         let account: [u8; 16] = rng.bytes();
         let added = self.store.add_account(&account, owner);
         self.kept(added).map_err(|e| e.to_string())?;
