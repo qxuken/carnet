@@ -4113,6 +4113,104 @@ fn a_remote_edit_leaves_the_caret_where_it_was() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A device nobody looks at (its window covered, minimized, hidden)
+/// draws no frames of its own: the app runs only when something wakes
+/// it. Sync's socket and its pictures' downloads wake it, so another
+/// device's edit reaches this one's file on disk with no frame other than
+/// those wakes, and no timer, asked for.
+#[test]
+fn another_devices_edit_lands_with_only_wakes_to_run_on() {
+    use carnet_server::server::{self, Config};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-woken-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&[(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let (mut a, mut da, dir_a) = fresh("woken-a");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Errands");
+    key(&mut a, &mut da, "enter");
+    type_in(&mut a, &mut da, "post office");
+    a.save_current();
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+    // B's wakes counted: what the shell's waker would turn into frames.
+    let (mut b, mut db, dir_b) = fresh("woken-b");
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let w = wakes.clone();
+    b.sync.set_wake(move || {
+        w.fetch_add(1, Ordering::Relaxed);
+    });
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    until("B has the note", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| x[1].0.store.notes.iter().any(|n| n.title == "Errands"));
+    a.settings_open = false;
+    // Settled: B's last frames done, its wakes since then what count.
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_millis(500) {
+        da.frame(&mut a);
+        db.frame(&mut b);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let path = b.store.notes.iter().find(|n| n.title == "Errands").and_then(|n| n.path.clone()).expect("B's file");
+
+    // Each edit on A; B framed only when woken.
+    for (round, words) in ["the bank", "the library", "the pharmacy"].into_iter().enumerate() {
+        let i = a.store.notes.iter().position(|n| n.title == "Errands").unwrap();
+        a.open(i);
+        da.frame(&mut a);
+        let note = &mut a.store.notes[a.current];
+        note.doc.insert(1, Block::text(words));
+        note.touch();
+        a.save_current();
+        let mut seen = wakes.load(Ordering::Relaxed);
+        let (mut frames, t0) = (0, Instant::now());
+        while !std::fs::read_to_string(&path).is_ok_and(|t| t.contains(words)) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "round {round}: B's file never had \"{words}\" ({frames} woken frames)");
+            da.frame(&mut a);
+            let now = wakes.load(Ordering::Relaxed);
+            if now != seen {
+                seen = now;
+                frames += 1;
+                db.frame(&mut b);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(frames > 0, "round {round}: woken");
+        assert!(b.store.notes.iter().any(|n| n.markdown().contains(words)), "round {round}: and in B's list");
+    }
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// A recovery code's words show once the server says it keeps them, not
 /// before; making another, when there is one, is asked first, as the
 /// words written down stop working. And keys kept in a file, not a
