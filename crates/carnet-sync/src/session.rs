@@ -79,6 +79,9 @@ pub struct PasskeyInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     LoggedIn,
+    /// More notes are new here than one login takes, and those taken came
+    /// with words: connect again now, for the rest.
+    MoreToCome,
     /// Turned away, and why, in words.
     Denied(String),
     /// Turned away for good: this device taken out of its account, or
@@ -367,6 +370,15 @@ pub struct Session {
     announced: usize,
     /// Said [`TOO_MANY_NEW`] this login.
     too_many: bool,
+    /// Of those, the ones whose join isn't answered yet, and how many came
+    /// back empty: an account's own notes come with words, a hostile
+    /// server's names with nothing.
+    fresh: HashSet<String>,
+    fresh_empty: usize,
+    /// More were named than this login takes: once those taken are in,
+    /// mostly with words, the next login brings the rest
+    /// ([`Event::MoreToCome`]).
+    more_later: bool,
 }
 
 /// The most rooms new to this device a server may name in one login
@@ -377,6 +389,27 @@ pub const MAX_NEW_ROOMS: usize = 10_000;
 /// What this device says ([`Event::Failed`]) when the server names more
 /// new notes than [`MAX_NEW_ROOMS`] in one login.
 pub const TOO_MANY_NEW: &str = "The server named more than 10,000 new notes at once. The rest come the next time Carnet connects.";
+
+impl Session {
+    /// Past [`MAX_NEW_ROOMS`] new rooms in a login, once every one taken
+    /// has answered: if they came with words this device could read, as
+    /// an account's own notes do, the next login is asked for at once to bring the rest
+    /// ([`Event::MoreToCome`]); if many came empty, as a hostile server's
+    /// names would, it's said, and the rest wait for a login of the
+    /// person's own making.
+    fn more_or_not(&mut self) {
+        if !self.more_later || !self.fresh.is_empty() {
+            return;
+        }
+        self.more_later = false;
+        if self.fresh_empty * 10 <= self.announced {
+            self.events.push(Event::MoreToCome);
+        } else if !self.too_many {
+            self.too_many = true;
+            self.events.push(Event::Failed(TOO_MANY_NEW.into()));
+        }
+    }
+}
 
 /// Whether `room` is one a server may name: a note's (its key, as hex in
 /// the one way a key is written), or the vault's. Anything else would only
@@ -436,6 +469,9 @@ impl Session {
             too_big: HashSet::new(),
             max_snapshot: elo::MAX_SNAPSHOT,
             announced: 0,
+            fresh: HashSet::new(),
+            fresh_empty: 0,
+            more_later: false,
             too_many: false,
         }
     }
@@ -1064,6 +1100,9 @@ impl Session {
                 self.full.clear();
                 self.announced = 0;
                 self.too_many = false;
+                self.fresh.clear();
+                self.fresh_empty = 0;
+                self.more_later = false;
                 self.events.push(Event::LoggedIn);
                 // Who this device is, for the others' lists: its name may
                 // have changed, and a new epoch wants it sealed anew.
@@ -1113,6 +1152,7 @@ impl Session {
                             continue;
                         }
                         self.announced += 1;
+                        self.fresh.insert(room.clone());
                     }
                     // A doc made for it now is a room this device will join
                     // on every login from here on: the cursor can pass it.
@@ -1122,11 +1162,10 @@ impl Session {
                     }
                 }
                 if held_back {
-                    // Named again next login: the cursor stays.
-                    if !self.too_many {
-                        self.too_many = true;
-                        self.events.push(Event::Failed(TOO_MANY_NEW.into()));
-                    }
+                    // Named again next login: the cursor stays. Whether
+                    // that login comes at once is for the joins to say.
+                    self.more_later = true;
+                    self.more_or_not();
                 } else {
                     self.cursor = newest;
                 }
@@ -1331,6 +1370,12 @@ impl Session {
             ProtocolMessage::JoinResponseOk { room_id, .. } if !self.joined.contains_key(&room_id) => {}
             ProtocolMessage::JoinResponseOk { room_id, version, permission, .. } => {
                 let held = wire::decode_vv(&version).unwrap_or_default();
+                // A new room the server holds nothing of came empty; one it
+                // holds something of is real once that's read here.
+                if held.is_empty() && self.fresh.remove(&room_id) {
+                    self.fresh_empty += 1;
+                    self.more_or_not();
+                }
                 self.held.insert(room_id.clone(), held.into_iter().collect());
                 self.joined.insert(room_id.clone(), Join::Joined);
                 // Read only (a plan lapsed): what's here waits here.
@@ -1358,6 +1403,10 @@ impl Session {
             }
             ProtocolMessage::JoinError { room_id, .. } => {
                 self.joined.remove(&room_id);
+                if self.fresh.remove(&room_id) {
+                    self.fresh_empty += 1;
+                    self.more_or_not();
+                }
             }
             ProtocolMessage::DocUpdate { room_id, updates, .. } => {
                 let mut took = false;
@@ -1404,6 +1453,14 @@ impl Session {
                 // has rolled it back by then, and sends what it stood for.
                 if again {
                     self.join(&room_id, docs);
+                }
+                // A new room real only by words that open with the vault's
+                // key, as no server can make up.
+                if self.fresh.remove(&room_id) {
+                    if !took {
+                        self.fresh_empty += 1;
+                    }
+                    self.more_or_not();
                 }
                 if took {
                     self.moves += 1;

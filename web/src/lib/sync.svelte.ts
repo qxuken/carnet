@@ -51,6 +51,7 @@ type Said =
   | { pairFailed: string }
   | { recoverySet: true }
   | { rekeyed: true }
+  | { moreToCome: true }
   | { removed: true; account: boolean }
   | { outdated: string; syncing: boolean }
   | { invites: Invites }
@@ -519,6 +520,12 @@ class Sync {
       this.wordsWaiting = null;
       // The list says the account has one now.
       this.listDevices();
+    } else if ('moreToCome' in s) {
+      // More notes new here than a login takes: connected again now, the
+      // next login bringing the rest. The old socket's close is not a drop.
+      this.wait = 1000;
+      clearTimeout(this.retryTimer);
+      this.connect();
     } else if ('rekeyed' in s) {
       // A device was removed: the new key kept at once, or a reload
       // would lose what it opens.

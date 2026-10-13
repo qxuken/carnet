@@ -121,6 +121,9 @@ pub enum Said {
     /// A new key came (a device was removed): the identity is to be kept
     /// again, or a reload would lose it.
     Rekeyed,
+    /// More notes are new here than a login takes, those taken real: the
+    /// page connects again now, for the rest.
+    MoreToCome,
     /// This browser was removed from the account, on another device; or
     /// (`account`) the whole account, by the server's owner.
     Removed { account: bool },
@@ -365,6 +368,7 @@ impl Notes {
                     self.me.ring = self.session.ring().clone();
                     self.said.push(Said::Rekeyed);
                 }
+                Event::MoreToCome => self.said.push(Said::MoreToCome),
                 // Taken out of the account elsewhere (as the desktop
                 // reads it): its keys are no use now.
                 Event::Removed { account } => self.said.push(Said::Removed { account }),

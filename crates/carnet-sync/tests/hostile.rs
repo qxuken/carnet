@@ -6,11 +6,12 @@ use std::collections::BTreeMap;
 
 use carnet_sync::compat::{self, Greeting};
 use carnet_sync::crypto::{DeviceKey, OsRandom, Ring, VaultKey};
+use carnet_sync::elo::{self, Header};
 use carnet_sync::session::{Docs, Event, Identity, MAX_NEW_ROOMS, Session, TOO_MANY_NEW};
 use carnet_sync::vault;
 use carnet_sync::wire::{self, Carnet, CrdtType, Frame, Permission};
-use carnet_sync::{Key, NoteDoc};
-use loro_protocol::ProtocolMessage;
+use carnet_sync::{Key, NoteDoc, Origin};
+use loro_protocol::{BatchId, ProtocolMessage};
 
 struct Notes(BTreeMap<String, NoteDoc>);
 
@@ -25,12 +26,17 @@ impl Docs for Notes {
 
 /// A device logged in to the server, its docs `notes`.
 fn logged_in(notes: &mut Notes) -> Session {
+    logged_in_as(notes, Ring::new(VaultKey::generate(&mut OsRandom)))
+}
+
+/// The same, its vault's keys `ring`.
+fn logged_in_as(notes: &mut Notes, ring: Ring) -> Session {
     let id = Identity {
         origin: "https://notes.example".into(),
         account: b"acct".to_vec(),
         device: b"desk".to_vec(),
         key: DeviceKey::generate(&mut OsRandom),
-        ring: Ring::new(VaultKey::generate(&mut OsRandom)),
+        ring,
         name: "Desk".into(),
     };
     let mut s = Session::new(id, 0);
@@ -91,17 +97,51 @@ fn an_answer_to_no_question_makes_nothing() {
     assert!(s.take_events().is_empty() && s.take_out().is_empty());
 }
 
+/// The rooms a device asked to join.
+fn joins(s: &mut Session) -> Vec<String> {
+    s.take_out()
+        .iter()
+        .filter_map(|b| match wire::decode(b) {
+            Ok(Frame::Room(ProtocolMessage::JoinRequest { room_id, .. })) => Some(room_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn joined(room: &str, held: &[(u64, u64)]) -> Vec<u8> {
+    let ok = ProtocolMessage::JoinResponseOk { crdt: CrdtType::Elo, room_id: room.into(), permission: Permission::Write, version: wire::encode_vv(held), extra: None };
+    wire::encode(&Frame::Room(ok))
+}
+
+fn update(room: &str, records: &[Vec<u8>]) -> Vec<u8> {
+    let m = ProtocolMessage::DocUpdate { crdt: CrdtType::Elo, room_id: room.into(), updates: vec![elo::container(records)], batch_id: BatchId([0; 8]) };
+    wire::encode(&Frame::Room(m))
+}
+
+/// More new rooms named than a login takes: [`MAX_NEW_ROOMS`] of them
+/// made and joined, the cursor where it was, nothing said yet.
+fn too_many(s: &mut Session, notes: &mut Notes) -> (u128, Vec<String>) {
+    let many = MAX_NEW_ROOMS as u128 + 5;
+    let rooms: Vec<(String, u64)> = (1..=many).map(|n| (key(n), n as u64)).collect();
+    s.receive(&changed(rooms), notes, &mut OsRandom);
+    assert_eq!(notes.0.len(), MAX_NEW_ROOMS);
+    assert_eq!(s.cursor(), 0, "the rest named again next login");
+    let asked = joins(s);
+    assert_eq!(asked.len(), MAX_NEW_ROOMS);
+    assert!(s.take_events().is_empty(), "nothing said before they answer");
+    (many, asked)
+}
+
 /// So many new rooms in a login and no more: the rest wait for the next,
-/// the cursor staying where it was, and that's said once.
+/// and if those taken came empty, that's said once.
 #[test]
 fn so_many_new_rooms_a_login_and_no_more() {
     let mut notes = Notes(BTreeMap::new());
     let mut s = logged_in(&mut notes);
-    let many = MAX_NEW_ROOMS as u128 + 5;
-    let rooms: Vec<(String, u64)> = (1..=many).map(|n| (key(n), n as u64)).collect();
-    s.receive(&changed(rooms), &mut notes, &mut OsRandom);
-    assert_eq!(notes.0.len(), MAX_NEW_ROOMS);
-    assert_eq!(s.cursor(), 0, "the rest named again next login");
+    let (many, asked) = too_many(&mut s, &mut notes);
+    for room in &asked {
+        s.receive(&joined(room, &[]), &mut notes, &mut OsRandom);
+    }
     assert_eq!(s.take_events(), [Event::Failed(TOO_MANY_NEW.into())]);
     // Named again, live: still no more, and not said again.
     s.receive(&changed(vec![(key(many + 1), many as u64 + 1)]), &mut notes, &mut OsRandom);
@@ -110,6 +150,49 @@ fn so_many_new_rooms_a_login_and_no_more() {
     // One already here, named again: taken, as nothing new is made.
     s.receive(&changed(vec![(key(1), many as u64 + 2)]), &mut notes, &mut OsRandom);
     assert_eq!(s.cursor(), many as u64 + 2);
+}
+
+/// A server saying it holds something of each, and sending what no key
+/// here opens, has named nothing real: said, not connected again for.
+#[test]
+fn rooms_said_to_hold_words_that_dont_open_are_empty() {
+    let mut notes = Notes(BTreeMap::new());
+    let mut s = logged_in(&mut notes);
+    let (_, asked) = too_many(&mut s, &mut notes);
+    let other = VaultKey::generate(&mut OsRandom);
+    let doc = NoteDoc::new(9);
+    doc.record("made up", Origin::Save);
+    for room in &asked {
+        s.receive(&joined(room, &[(9, 1)]), &mut notes, &mut OsRandom);
+        let record = elo::seal(&other, room, &Header::Delta { peer: 9, start: 0, end: doc.counter(9), epoch: 0 }, &doc.updates(), &mut OsRandom);
+        s.receive(&update(room, &[record]), &mut notes, &mut OsRandom);
+    }
+    let events = s.take_events();
+    assert!(!events.contains(&Event::MoreToCome));
+    assert_eq!(events.iter().filter(|e| **e == Event::Failed(TOO_MANY_NEW.into())).count(), 1);
+}
+
+/// An account's own notes, more than a login takes: once each taken has
+/// brought words the vault's key opens, the next login is asked for at
+/// once, to bring the rest, and nothing is said.
+#[test]
+fn an_accounts_many_notes_come_in_logins_one_after_another() {
+    let mut notes = Notes(BTreeMap::new());
+    let ring = Ring::new(VaultKey::generate(&mut OsRandom));
+    let mut s = logged_in_as(&mut notes, ring.clone());
+    let (_, asked) = too_many(&mut s, &mut notes);
+    let (epoch, vault) = ring.current();
+    let doc = NoteDoc::new(9);
+    doc.record("a note", Origin::Save);
+    let end = doc.counter(9);
+    for (i, room) in asked.iter().enumerate() {
+        s.receive(&joined(room, &[(9, end)]), &mut notes, &mut OsRandom);
+        let record = elo::seal(vault, room, &Header::Delta { peer: 9, start: 0, end, epoch }, &doc.updates(), &mut OsRandom);
+        s.receive(&update(room, &[record]), &mut notes, &mut OsRandom);
+        let more = s.take_events().contains(&Event::MoreToCome);
+        assert_eq!(more, i + 1 == asked.len(), "asked for once, when the last has come");
+    }
+    assert_eq!(notes.doc(&asked[0]).text(), "a note");
 }
 
 /// What the server calls the account's plan is its own words: shown on

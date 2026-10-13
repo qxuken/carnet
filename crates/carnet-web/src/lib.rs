@@ -531,6 +531,7 @@ impl Vault {
                 Said::PairFailed(why) => format!(r#"{{"pairFailed":{}}}"#, json(&why)),
                 Said::RecoverySet => r#"{"recoverySet":true}"#.into(),
                 Said::Rekeyed => r#"{"rekeyed":true}"#.into(),
+                Said::MoreToCome => r#"{"moreToCome":true}"#.into(),
                 Said::Removed { account } => format!(r#"{{"removed":true,"account":{account}}}"#),
                 Said::Outdated { message, syncing } => format!(r#"{{"outdated":{},"syncing":{syncing}}}"#, json(message)),
                 Said::Invites { owner, waiting, accounts } => {

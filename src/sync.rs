@@ -1201,6 +1201,12 @@ impl Sync {
                             self.invites = None;
                             self.asked_invites = false;
                         }
+                        // More notes new here than a login takes, those
+                        // taken real: connected again now, for the rest.
+                        Event::MoreToCome => {
+                            *link = None;
+                            session.disconnected();
+                        }
                         // Taken out of the account, here or on another
                         // device: its keys are no use now.
                         Event::Removed { account } => gone = Some(account),
