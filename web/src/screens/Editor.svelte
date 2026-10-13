@@ -14,6 +14,7 @@
   import { theme } from '../lib/editor/theme';
   import Icon from '../lib/Icon.svelte';
   import { overflow } from '../lib/words';
+  import { focusNow } from '../lib/focus';
   import { ON_THE_WEB } from '../lib/pictures';
   import { HUES, inkOf, inkCss, washCss } from '../lib/colors';
   import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
@@ -450,8 +451,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div role="dialog" aria-label="Link" tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
       <form class="sheet link" onsubmit={(e) => { e.preventDefault(); applyLink(url.trim() || null); }}>
-        <!-- svelte-ignore a11y_autofocus -->
-        <input bind:value={url} placeholder="example.com" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Address" autofocus />
+        <input bind:value={url} placeholder="example.com" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Address" use:focusNow />
         <div class="row">
           {#if opens}
             <a class="pill" href={opens} target="_blank" rel="noopener noreferrer">Open</a>

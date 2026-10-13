@@ -43,18 +43,62 @@ pub const COMMANDS: [Command; 11] = [
 ];
 
 /// The word being typed after a `/`, when the caret ends a line of text
-/// or a quote that holds only that: its block and the word.
+/// or a quote that holds only that — the whole block, or one line of it
+/// (a quote goes on a line at a time): its block and the word.
 pub fn query(doc: &Doc, c: Caret) -> Option<(u64, String)> {
+    let (b, (start, end)) = query_line(doc, c)?;
+    let t = b.text_ref()?;
+    Some((b.id, t[start + 1..end].to_lowercase()))
+}
+
+/// The block and the `/word` line of it the caret ends: where it is.
+fn query_line(doc: &Doc, c: Caret) -> Option<(&carnet_core::doc::Block, (usize, usize))> {
     if !c.is_empty() || c.head.slot.cell.is_some() {
         return None;
     }
     let b = doc.get(c.head.slot.block)?;
     let (Kind::Text(t) | Kind::Quote(t)) = &b.kind else { return None };
-    let word = t.strip_prefix('/')?;
-    if c.head.byte != t.len() || word.chars().any(char::is_whitespace) || word.len() > 24 {
+    let end = c.head.byte;
+    if end > t.len() || !t.is_char_boundary(end) || !(end == t.len() || t[end..].starts_with('\n')) {
         return None;
     }
-    Some((b.id, word.to_lowercase()))
+    let start = t[..end].rfind('\n').map_or(0, |n| n + 1);
+    let word = t[start..end].strip_prefix('/')?;
+    if word.chars().any(char::is_whitespace) || word.len() > 24 {
+        return None;
+    }
+    Some((b, (start, end)))
+}
+
+/// The `/word` line, when its block has more lines than it: made a
+/// block of its own, of its block's kind, the lines before and after
+/// it staying where they were. The caret in it.
+fn own_line(doc: &mut Doc, c: &mut Caret) {
+    let Some((b, (start, end))) = query_line(doc, *c) else { return };
+    let Some(t) = b.text_ref() else { return };
+    if start == 0 && end == t.len() {
+        return;
+    }
+    let quote = matches!(b.kind, Kind::Quote(_));
+    let (id, before, after) = (b.id, t[..start.saturating_sub(1)].to_string(), t.get(end + 1..).map(str::to_string));
+    let kind = |s: String| if quote { Kind::Quote(s) } else { Kind::Text(s) };
+    let Some(at) = doc.index_of(id) else { return };
+    let line = carnet_core::doc::Block::new(kind(t[start..end].to_string()));
+    let slot = page::Slot::block(line.id);
+    let mut blocks = Vec::new();
+    if start > 0 {
+        let mut first = (*doc.blocks()[at]).clone();
+        if let Some(t) = first.text_mut() {
+            *t = before;
+        }
+        blocks.push(first);
+    }
+    blocks.push(line);
+    if let Some(after) = after {
+        blocks.push(carnet_core::doc::Block::new(kind(after)));
+    }
+    doc.splice(at..at + 1, blocks);
+    *c = Caret::at(page::end(doc, slot));
 }
 
 /// The commands a word picks: those whose name starts with it (a word of
@@ -83,8 +127,9 @@ pub fn matches(word: &str) -> Vec<usize> {
 /// Makes the `/word` line what command `i` says. True when the note
 /// changed. A picture leaves the line empty for the files to come.
 pub fn apply(doc: &mut Doc, c: &mut Caret, i: usize) -> bool {
-    let Some((block, _)) = query(doc, *c) else { return false };
     let Some(cmd) = COMMANDS.get(i) else { return false };
+    own_line(doc, c);
+    let Some((block, _)) = query(doc, *c) else { return false };
     let Some(at) = doc.index_of(block) else { return false };
     if let Some(t) = doc.block_mut(at).text_mut() {
         t.clear();
@@ -168,5 +213,37 @@ mod tests {
         let (mut d, mut c) = quote("/h1");
         assert!(apply(&mut d, &mut c, 0));
         assert!(matches!(&d.blocks()[0].kind, Kind::Heading { level: 1, text } if text.is_empty()));
+    }
+
+    /// The finding: Enter at the end of "> quoted words" and `/` offered
+    /// nothing, `/h2` typed as words. A quote goes on a line at a time,
+    /// and any line of it offers the menu; its choice takes that line
+    /// alone, the quote's other lines staying a quote.
+    #[test]
+    fn a_quotes_later_line_offers_the_menu() {
+        let quote = |t: &str, at: usize| {
+            let d = Doc::new(vec![Block::new(Kind::Quote(t.into()))]);
+            let slot = Slot::block(d.blocks()[0].id);
+            (d, Caret::at(Pos { slot, byte: at }))
+        };
+        let (d, c) = quote("quoted words\n/h2", 16);
+        assert_eq!(query(&d, c), Some((d.blocks()[0].id, "h2".into())));
+        let (d, c) = quote("quoted words\n/h2", 15);
+        assert_eq!(query(&d, c), None, "not with the caret inside the word");
+        let (d, c) = quote("quoted words\na /h2", 18);
+        assert_eq!(query(&d, c), None, "only a line that is the command");
+        // Made a heading: after the quote, which keeps its words.
+        let (mut d, mut c) = quote("quoted words\n/h2", 16);
+        assert!(apply(&mut d, &mut c, 1));
+        assert!(matches!(&d.blocks()[0].kind, Kind::Quote(t) if t == "quoted words"), "{:?}", d.blocks()[0].kind);
+        assert!(matches!(&d.blocks()[1].kind, Kind::Heading { level: 2, text } if text.is_empty()), "{:?}", d.blocks()[1].kind);
+        assert_eq!(c.head.slot.block, d.blocks()[1].id);
+        // In the middle of a quote: code between its two halves.
+        let (mut d, mut c) = quote("one\n/code\ntwo", 9);
+        assert!(apply(&mut d, &mut c, matches("code")[0]));
+        let kinds: Vec<String> = d.blocks().iter().map(|b| format!("{:?}", b.kind)).collect();
+        assert!(matches!(&d.blocks()[0].kind, Kind::Quote(t) if t == "one"), "{kinds:?}");
+        assert!(matches!(&d.blocks()[1].kind, Kind::Raw(r) if r.starts_with("```")), "{kinds:?}");
+        assert!(matches!(&d.blocks()[2].kind, Kind::Quote(t) if t == "two"), "{kinds:?}");
     }
 }

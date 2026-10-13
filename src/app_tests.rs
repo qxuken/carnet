@@ -1181,6 +1181,50 @@ fn esc_closes_the_slash_menu_and_keeps_the_words() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding: `/code`, Enter, a line, ↓ and "after code" made the
+/// closing fence `` ```after code ``. ↓ from the code's last line leaves
+/// it for the line below, and ↑ from there comes back to that line, not
+/// to the fence.
+#[test]
+fn down_from_codes_last_line_leaves_it() {
+    let (mut app, mut d, dir) = body("code-down");
+    type_in(&mut app, &mut d, "/code");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "let x = 1;");
+    key(&mut app, &mut d, "down");
+    type_in(&mut app, &mut d, "after code");
+    assert!(matches!(&blocks(&app)[0].kind, Kind::Raw(r) if r == "```\nlet x = 1;\n```"), "{:?}", texts(&app));
+    assert_eq!(texts(&app)[1], "after code");
+    key(&mut app, &mut d, "up");
+    type_in(&mut app, &mut d, "!");
+    // On the code's line, under the caret's column; the fences whole.
+    let Kind::Raw(r) = &blocks(&app)[0].kind else { panic!("{:?}", texts(&app)) };
+    let lines: Vec<&str> = r.lines().collect();
+    assert!(lines.len() == 3 && lines[0] == "```" && lines[1].contains('!') && lines[2] == "```", "{r:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The finding: Enter at the end of "> quoted words", then `/`: no menu,
+/// and `/h2` typed as words. Any line of a quote offers it.
+#[test]
+fn the_slash_menu_works_on_a_quotes_next_line() {
+    let (mut app, mut d, dir) = body("slash-quote-line");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "> ");
+    type_in(&mut app, &mut d, "quoted words");
+    key(&mut app, &mut d, "enter");
+    for c in ["/", "h", "2"] {
+        key(&mut app, &mut d, c);
+    }
+    d.frame(&mut app);
+    assert!(app.slash_now().is_some(), "{:?}", texts(&app));
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("Heading 2")), "the menu shows");
+    key(&mut app, &mut d, "enter");
+    assert!(matches!(&blocks(&app)[0].kind, Kind::Quote(t) if t == "quoted words"), "{:?}", texts(&app));
+    assert!(matches!(&blocks(&app)[1].kind, Kind::Heading { level: 2, text } if text.is_empty()), "{:?}", texts(&app));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_shipped_faces_are_registered_and_used() {
     let (mut app, mut d, dir) = body("fonts");

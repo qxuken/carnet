@@ -720,12 +720,13 @@ impl Editor {
         self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Divider))
     }
 
-    /// The address of the link the caret is in.
+    /// The address of the link the caret is in, as the link sheet shows
+    /// it: no bidi control in it to turn it round.
     pub fn link_here(&self) -> Option<String> {
         if !matches!(self.focus, Focus::Body) {
             return None;
         }
-        page::link_at(&self.doc, self.caret).map(|(.., url)| url)
+        page::link_at(&self.doc, self.caret).map(|(.., url)| inline::without_bidi(&url))
     }
 
     /// The address the link the caret is in opens, if it's one a page
@@ -1402,6 +1403,53 @@ mod tests {
         assert!(e.insert_divider());
         assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nNext\n");
         assert_eq!(e.lines().iter().map(|l| l.text.as_str()).filter(|t| t.is_empty()).count(), 0, "no empty line made");
+    }
+
+    /// The finding: a picture chosen (→, or dropped out of a cell) with a
+    /// table after it, "Q" typed made the header cell "QA". As on the
+    /// desktop, the letter takes the picture's place; the table is kept.
+    #[test]
+    fn a_letter_typed_over_a_chosen_picture_takes_its_place() {
+        let mut e = Editor::open("# T\n\nAbove\n\n![](a.png)\n\n| A |\n| --- |\n| 1 |\n");
+        assert_eq!(e.lines()[2].text, OBJECT.to_string());
+        e.select(2, 0, 2, 1);
+        assert!(e.input("Q"));
+        assert_eq!(e.markdown(), "# T\n\nAbove\n\nQ\n\n| A |\n| --- |\n| 1 |\n");
+        let mut e = Editor::open("# T\n\n![](a.png)\n\nbelow words\n");
+        e.select(1, 1, 1, 0);
+        e.input("Q");
+        assert_eq!(e.markdown(), "# T\n\nQ\n\nbelow words\n");
+    }
+
+    /// The finding: the Divider button before a divider chose that one,
+    /// so the next key took it away. The caret stands past the new one,
+    /// and what is typed there is a line between them.
+    #[test]
+    fn a_divider_before_a_divider_chooses_neither() {
+        let mut e = Editor::open("# T\n\nIntro\n\n---\n\nNext\n");
+        e.select(1, 5, 1, 5);
+        assert!(e.insert_divider());
+        assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\n---\n\nNext\n");
+        let (al, ac, hl, hc) = e.caret_lc();
+        assert_eq!((al, ac), (hl, hc), "nothing chosen");
+        assert_eq!((hl, hc), (2, 1), "just past the new divider");
+        e.input("x");
+        assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nx\n\n---\n\nNext\n");
+    }
+
+    /// Autolinks are links in the editor; a link's words come without
+    /// bidi controls, and so does its address in the link sheet. The note
+    /// keeps them as written.
+    #[test]
+    fn autolinks_and_bidi_controls_in_links() {
+        let md = "# T\n\nsee <https://example.com> and [abc\u{202E}txt.exe](https://x.com/\u{202E}y) end.\n";
+        let mut e = Editor::open(md);
+        assert_eq!(e.lines()[1].text, "see https://example.com and abctxt.exe end.");
+        e.select(1, 8, 1, 8);
+        assert_eq!(e.link_here().as_deref(), Some("https://example.com"));
+        e.select(1, 30, 1, 30);
+        assert_eq!(e.link_here().as_deref(), Some("https://x.com/y"));
+        assert_eq!(e.markdown(), md);
     }
 
     #[test]

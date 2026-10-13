@@ -18,6 +18,7 @@ import { show, unshown } from '../pictures';
 import { TableWidget, mark, place, type Cell, type TableContext } from './table';
 import { pictureCarry, pictureRoom, pictureTools } from './picture';
 import * as arrows from './arrows';
+import { markRange } from './ranges';
 import type { Lines } from './arrows';
 
 /// How a line is drawn (`PageEditor.looks`).
@@ -481,7 +482,8 @@ function build(view: EditorView, toggle: (line: number) => void, tables: TableCo
         if (mark) c.push('cm-marked');
         const spec: { class: string; attributes?: Record<string, string> } = { class: c.join(' ') };
         if (style) spec.attributes = { style };
-        if (b > a) out.push(Decoration.mark(spec).range(line.from + a, line.from + Math.min(b, line.length)));
+        const at = markRange(line.from, line.length, a, b);
+        if (at) out.push(Decoration.mark(spec).range(at[0], at[1]));
       }
     }
   }
@@ -590,8 +592,11 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     const doc = v.state.doc;
     const plan = arrows.vertical(linesOf(v.state), { anchor: sel.anchor, head: sel.head }, down, extend);
     if (!plan) return false;
-    const go = (head: number, goal?: number) => {
-      const range = extend ? EditorSelection.range(sel.anchor, head, goal) : EditorSelection.cursor(head, 0, undefined, goal);
+    // On `row` (the one measured), the caret kept there: at the start of
+    // a wrapped row, not the end of the row above (arrows.ts `sideOn`).
+    const go = (head: number, goal?: number, row?: arrows.Row) => {
+      const side = row ? arrows.sideOn(head, row, (p, s) => v.coordsAtPos(p, s)) : 0;
+      const range = extend ? EditorSelection.range(sel.anchor, head, goal, undefined, side) : EditorSelection.cursor(head, side, undefined, goal);
       v.dispatch({ selection: EditorSelection.create([range]), scrollIntoView: true, userEvent: 'select' });
       return true;
     };
@@ -618,7 +623,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     const row = down ? v.coordsAtPos(Math.min(to.from + 1, to.to), to.length > 1 ? 1 : -1) : v.coordsAtPos(to.to, -1);
     if (!row) return go(down ? to.from : to.to, goal);
     const at = v.posAtCoords({ x: box.left + (goal ?? 0), y: (row.top + row.bottom) / 2 }, false);
-    return go(Math.max(to.from, Math.min(to.to, at)), goal);
+    return go(Math.max(to.from, Math.min(to.to, at)), goal, row);
   };
 
   /// ← and → over a divider or a picture (arrows.ts `across`): an arrow
