@@ -200,8 +200,9 @@ pub enum Msg {
     SyncPasskeyRemove { at: u64 },
     SyncPasskeyCancel,
     /// Remove the device at this place in Settings → Sync's list (asked
-    /// twice).
+    /// first: Cancel, or Yes, remove); or not.
     SyncRemove { at: u64 },
+    SyncRemoveCancel,
     /// The sync inspector opened or closed; asked again.
     SyncInspector,
     SyncInspectorRefresh,
@@ -233,8 +234,10 @@ pub enum Msg {
     SyncInviteDrop { at: u64 },
     /// The waiting invite at this place, its code on the clipboard.
     SyncInviteCopy { at: u64 },
-    /// Remove the account at this place in the owner's list (asked twice).
+    /// Remove the account at this place in the owner's list (asked
+    /// first); or not.
     SyncAccountRemove { at: u64 },
+    SyncAccountRemoveCancel,
     /// Make a recovery code, its words shown once (asked first when it
     /// would replace one).
     SyncRecovery,
@@ -242,8 +245,9 @@ pub enum Msg {
     SyncRecoveryCancel,
     /// The words written down: put away.
     SyncRecoveryDone,
-    /// Sync off on this device.
+    /// Sync off on this device (asked first); or not.
     SyncOff,
+    SyncOffCancel,
     /// The version the page shows, compared with the note as it is now,
     /// or (again) with the version before it.
     CompareWithNow,
@@ -791,7 +795,7 @@ pub struct Carnet {
     pub sync_words_armed: bool,
     /// Deleting the account was asked once.
     pub delete_account_armed: bool,
-    /// Turn off asked once: the second asks for real.
+    /// Turn off asked once: Cancel, or Yes, turn off.
     pub sync_off_armed: bool,
     /// The device whose Remove was asked once.
     pub sync_remove_armed: Option<Vec<u8>>,
@@ -2936,7 +2940,8 @@ impl Carnet {
     /// A message that needs nothing but itself: a click's, or one the
     /// page's menu and shortcuts send on.
     fn on_plain(&mut self, msg: Msg) {
-        // Turn off, and Remove, ask again after anything else is done.
+        // Turn off, and Remove, ask again after anything else is done
+        // (their Cancel among them).
         if !matches!(msg, Msg::SyncOff) {
             self.sync_off_armed = false;
         }
@@ -3225,7 +3230,8 @@ impl Carnet {
                     self.say = Some("Copied".into());
                 }
             }
-            // Asked twice: everything the account keeps on the server goes.
+            // Asked first: everything the account keeps on the server
+            // goes.
             Msg::SyncAccountRemove { at } => {
                 let Some(id) = self.sync.invites.as_ref().and_then(|i| i.accounts.get(at as usize)).map(|a| a.id.clone()) else { return };
                 if self.sync_account_armed.as_deref() == Some(id.as_slice()) {
@@ -3244,7 +3250,7 @@ impl Carnet {
             }
             Msg::SyncRecoveryCancel => self.sync_words_armed = false,
             Msg::SyncRecoveryDone => self.sync.words = None,
-            // Asked twice: off, this device needs a code or the words to
+            // Asked first: off, this device needs a code or the words to
             // come back, and the last device off leaves only the words.
             Msg::SyncRemove { at } => {
                 let Some(id) = self.sync.devices.as_ref().and_then(|l| l.get(at as usize)).map(|d| d.id.clone()) else { return };
@@ -3289,6 +3295,8 @@ impl Carnet {
                 self.sync.delete_account();
             }
             Msg::SyncDeleteAccountCancel => self.delete_account_armed = false,
+            // (Each disarmed above, as anything else does.)
+            Msg::SyncRemoveCancel | Msg::SyncAccountRemoveCancel | Msg::SyncOffCancel => {}
             Msg::SyncOff if !self.sync_off_armed => self.sync_off_armed = true,
             Msg::SyncOff => {
                 self.sync_off_armed = false;

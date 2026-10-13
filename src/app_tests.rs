@@ -5515,9 +5515,13 @@ fn two_apps_sync_through_a_server() {
         x[1].0.store.invite_code(&waiting.hash()).is_some() && x[0].0.sync.invites.as_ref().is_some_and(|i| i.waiting.len() == 1)
     });
     let at = list.iter().position(|d| d.name.as_deref() == Some("Laptop")).unwrap() as u64;
+    // Asked first: Cancel, or Yes, remove. Cancel keeps it.
     a.on_plain(Msg::SyncRemove { at });
     assert!(b.sync.is_on() && a.sync_remove_armed.is_some(), "asked once: not yet");
-    assert!(drawn(&mut da, &mut a, "Remove for real"));
+    assert!(drawn(&mut da, &mut a, "Cancel") && drawn(&mut da, &mut a, "Yes, remove"));
+    a.on_plain(Msg::SyncRemoveCancel);
+    assert!(a.sync_remove_armed.is_none() && !drawn(&mut da, &mut a, "Yes, remove"));
+    a.on_plain(Msg::SyncRemove { at });
     a.on_plain(Msg::SyncRemove { at });
     // The laptop had every waiting invite's code: each taken back, and
     // said so.
@@ -5614,9 +5618,14 @@ fn two_apps_sync_through_a_server() {
     a.on_plain(Msg::SyncInspector);
     a.settings_open = false;
 
-    // Turn off asks twice, and anything between disarms it.
+    // Turn off asks first, and anything between disarms it: Cancel too.
     a.on_plain(Msg::SyncOff);
     assert!(a.sync.is_on() && a.sync_off_armed);
+    a.settings_open = true;
+    assert!(drawn(&mut da, &mut a, "Yes, turn off") && drawn(&mut da, &mut a, "Cancel"));
+    a.on_plain(Msg::SyncOffCancel);
+    assert!(a.sync.is_on() && !a.sync_off_armed);
+    a.on_plain(Msg::SyncOff);
     a.on_plain(Msg::SyncHow { to: 0 });
     a.on_plain(Msg::SyncOff);
     assert!(a.sync.is_on(), "asked again after something else");
@@ -5724,7 +5733,10 @@ fn the_owner_invites_someone_and_removes_their_account() {
     assert!(drawn(&mut da, &mut a, "Other accounts on this server"));
     let at = a.sync.invites.as_ref().unwrap().accounts.iter().position(|x| !x.you).unwrap() as u64;
     a.on_plain(Msg::SyncAccountRemove { at });
-    assert!(a.sync_account_armed.is_some() && drawn(&mut da, &mut a, "Remove for real"), "asked once: not yet");
+    assert!(a.sync_account_armed.is_some() && drawn(&mut da, &mut a, "Yes, remove"), "asked once: not yet");
+    a.on_plain(Msg::SyncAccountRemoveCancel);
+    assert!(a.sync_account_armed.is_none(), "Cancel keeps it");
+    a.on_plain(Msg::SyncAccountRemove { at });
     a.on_plain(Msg::SyncAccountRemove { at });
     until("B's account is gone", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
         !x[1].0.sync.is_on() && x[0].0.sync.invites.as_ref().is_some_and(|i| i.accounts.len() == 1)
