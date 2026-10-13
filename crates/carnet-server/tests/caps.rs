@@ -10,7 +10,7 @@ mod common;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use carnet_server::hub::{MAX_ROOM_ID, MAX_ROOMS, QUIET};
+use carnet_server::hub::{MAX_ROOM_ID, MAX_ROOMS, NEW_ROOMS, QUIET, ROOM_BYTES, ROOM_RECORDS};
 use carnet_server::quota::{FULL, Limit, NOTES_FULL, Quota, ROOM_FULL};
 use carnet_server::{ConnId, Memory, Storage};
 use carnet_sync::crypto::{VaultKey, sealed_len};
@@ -138,6 +138,62 @@ fn a_long_room_id_is_refused() {
         }
         assert_eq!(net.hub.compaction_kept().1, 0, "no lease held");
         assert!(net.hub.store().rooms(ACCOUNT).is_empty());
+    }
+}
+
+/// Any room the account has may be joined, on any of its sockets; rooms
+/// that hold nothing, made-up ids among them, only so many, counted
+/// across the account's sockets: [`NEW_ROOMS`], or as many as it may
+/// still make if that's more (a first sync joins every note before it
+/// writes any). A join written to, left, or of a socket gone counts no
+/// more.
+#[test]
+fn rooms_that_hold_nothing_are_joined_only_so_many_for_an_account() {
+    for store in stores() {
+        let mut net = Net::new(95, store);
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        let b = net.pair(a, b"second", 2);
+        write_to(&mut net, a, ROOM, "kept\n");
+        let join = |room: &str| Frame::Room(ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id: room.into(), auth: Vec::new(), version: Vec::new() });
+        let leave = |room: &str| Frame::Room(ProtocolMessage::Leave { crdt: CrdtType::Elo, room_id: room.into() });
+        let ok = |said: &[Frame]| matches!(said, [Frame::Room(ProtocolMessage::JoinResponseOk { .. }), ..]);
+        let refused = |said: &[Frame]| matches!(said, [Frame::Room(ProtocolMessage::JoinError { .. })]);
+        let made_up = |n: u32| format!("{n:032x}");
+        // Written to: counted no more.
+        let out = net.hub.new_joins(ACCOUNT);
+        write_to(&mut net, a, &made_up(999_999), "new\n");
+        assert_eq!(net.hub.new_joins(ACCOUNT), out, "a new note, joined then written");
+        // As many as it may still make, past NEW_ROOMS.
+        net.hub.room_caps(ROOM_RECORDS, ROOM_BYTES, NEW_ROOMS + 50);
+        let may = NEW_ROOMS + 50 - net.hub.store().room_count(ACCOUNT);
+        assert!(may > NEW_ROOMS);
+        let mut n = 0;
+        while net.hub.new_joins(ACCOUNT) < may - 10 {
+            assert!(ok(&raw(&mut net, a, &join(&made_up(n)))), "join {n}");
+            n += 1;
+        }
+        // The rest on the other socket: the account's, all told.
+        for _ in 0..10 {
+            assert!(ok(&raw(&mut net, b, &join(&made_up(n)))), "join {n}");
+            n += 1;
+        }
+        assert_eq!(net.hub.new_joins(ACCOUNT), may);
+        assert!(refused(&raw(&mut net, b, &join(&made_up(n)))));
+        assert!(refused(&raw(&mut net, a, &join(&made_up(n + 1)))), "on either socket");
+        // One joined already, joined again: still it.
+        assert!(ok(&raw(&mut net, a, &join(&made_up(0)))));
+        // A room the account has: joined, however many.
+        assert!(ok(&raw(&mut net, b, &join(ROOM))));
+        // Left: room for one more.
+        raw(&mut net, a, &leave(&made_up(0)));
+        assert!(ok(&raw(&mut net, b, &join(&made_up(n)))));
+        assert!(refused(&raw(&mut net, b, &join(&made_up(n + 1)))));
+        // A socket gone takes its own with it.
+        net.disconnect(b);
+        assert_eq!(net.hub.new_joins(ACCOUNT), may - 11);
+        net.disconnect(a);
+        assert_eq!(net.hub.new_joins(ACCOUNT), 0);
     }
 }
 

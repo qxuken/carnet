@@ -9,7 +9,7 @@
 mod common;
 
 use carnet_server::blobs::{Blobs, Job, MAX, Worker};
-use carnet_server::s3::S3Blobs;
+use carnet_server::s3::{PUT_TYPE, S3Blobs};
 use carnet_server::Out;
 use carnet_sync::wire::{self, Carnet, Frame};
 use common::{bucket, empty};
@@ -46,13 +46,19 @@ fn a_picture_goes_straight_to_the_bucket_and_back() {
     let [Carnet::BlobLink { put: true, url: put, .. }] = &said(&mut w, offer.clone())[..] else { panic!("a put link") };
     assert!(put.starts_with(config.url.split("/roundtrip").next().unwrap()), "the bucket's own: {put}");
     for other in [&sealed[..sealed.len() - 1], &[sealed.as_slice(), b"x"].concat()] {
-        assert_eq!(agent().put(put).send(other).unwrap().status().as_u16(), 403, "another length puts nothing");
+        assert_eq!(agent().put(put).header("Content-Type", PUT_TYPE).send(other).unwrap().status().as_u16(), 403, "another length puts nothing");
     }
     let mut changed = put.clone();
     changed.pop();
     changed.push(if put.ends_with('0') { '1' } else { '0' });
-    assert_eq!(agent().put(&changed).send(&sealed[..]).unwrap().status().as_u16(), 403, "a changed link puts nothing");
-    let r = agent().put(put).header("Content-Type", "application/octet-stream").send(&sealed[..]).unwrap();
+    assert_eq!(agent().put(&changed).header("Content-Type", PUT_TYPE).send(&sealed[..]).unwrap().status().as_u16(), 403, "a changed link puts nothing");
+    // Only as sealed bytes: a page, or no type said, puts nothing.
+    for kind in ["text/html", "image/svg+xml", "application/octet-stream; x=1"] {
+        assert_eq!(agent().put(put).header("Content-Type", kind).send(&sealed[..]).unwrap().status().as_u16(), 403, "{kind} puts nothing");
+    }
+    assert_eq!(agent().put(put).send(&sealed[..]).unwrap().status().as_u16(), 403, "no type puts nothing");
+    assert!(s3.head(&s3.key(&acct, &[1; 32])).unwrap().is_none(), "nothing put");
+    let r = agent().put(put).header("Content-Type", PUT_TYPE).send(&sealed[..]).unwrap();
     assert!(r.status().is_success(), "{}", r.status());
     assert_eq!(said(&mut w, offer), [Carnet::BlobStored { id: [1; 32] }]);
     assert_eq!(w.blobs.usage(&acct), sealed.len() as u64);

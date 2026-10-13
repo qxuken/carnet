@@ -9,7 +9,10 @@
 //! server, before the upgrade), and tries that cost the server work or
 //! guess at something (the hub: a login that fails, an invite used, a
 //! pairing joined, a recovery). A login that succeeds costs nothing, so a
-//! device reconnecting never shuts itself out.
+//! device reconnecting never shuts itself out. A password sign-in is
+//! also counted by the email it names ([`PASSWORD_TRIES`]), from any
+//! address: guesses at one password don't grow with the addresses they
+//! come from.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -34,6 +37,16 @@ pub const TRIES: Rate = Rate { burst: 10.0, every: 6.0 };
 
 /// What a client turned away for trying too much is told.
 pub const TOO_MANY: &str = "too many tries from this address: wait a minute, then try again";
+
+/// Password sign-ins with one email, from any address: twenty at once,
+/// then one every three minutes (twenty an hour). A delay, not a lock: a
+/// guesser that spends them shuts the email's owner out of password
+/// sign-in for a few minutes at a time, never for good, and none of the
+/// account's devices, already in, at all.
+pub const PASSWORD_TRIES: Rate = Rate { burst: 20.0, every: 180.0 };
+
+/// What a password sign-in past [`PASSWORD_TRIES`] is told.
+pub const TOO_MANY_FOR_EMAIL: &str = "too many sign-ins with this email lately: wait a few minutes, then try again";
 
 /// Clients a [`Limiter`] keeps a bucket for at most: past it, the full
 /// ones are forgotten at once, and if none is, a client it doesn't know

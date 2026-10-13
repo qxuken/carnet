@@ -124,8 +124,9 @@ pub const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// API's, the web app's files, a host's routes. Past it, 408.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A picture's put or fetch by its link: its largest, 32 MiB, on a line
-/// as slow as 56 kB/s. (A socket, once upgraded, has its own limits.)
-pub const BLOB_TIMEOUT: Duration = Duration::from_secs(600);
+/// as slow as 56 kB/s. (A socket, once upgraded, has its own limits.) A
+/// put's room is held as long past its link's time (`links::PUT_TAKES`).
+pub const BLOB_TIMEOUT: Duration = Duration::from_secs(crate::links::PUT_TAKES);
 
 impl Default for SocketLimits {
     fn default() -> Self {
