@@ -596,6 +596,65 @@ fn ctrl_b_wraps_the_selection_and_again_unwraps_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Thin solid lines drawn across the page's line at `slot`: what
+/// underlines (or strikes through) its words.
+fn lines_across(app: &mut Carnet, d: &mut Drive, slot: Slot) -> Vec<kui_native::Rect> {
+    d.core.set_inspect(true);
+    d.frame(app);
+    let k = *app.slot_keys.get(&slot).unwrap();
+    let row = d.core.nodes().iter().find(|n| n.key == k).map(|n| n.rect).unwrap();
+    let (dl, _) = d.core.output();
+    dl.quads
+        .iter()
+        .filter(|q| q.kind == kui_native::QuadKind::Solid && q.rect.h <= 3.0 && q.rect.w >= 8.0)
+        .filter(|q| q.rect.y >= row.y && q.rect.y <= row.y + row.h && q.rect.x >= row.x - 1.0)
+        .map(|q| q.rect)
+        .collect()
+}
+
+/// ⌘U (Ctrl+U) underlines the selection: the file keeps `<u>…</u>`, the
+/// page draws a line under the words, never the tags, and the toolbar's
+/// Underline is on there; again, and it is all as it was.
+#[test]
+fn cmd_u_underlines_the_selection_in_the_file_and_on_the_page() {
+    let (mut app, mut d, dir) = body("underline");
+    type_in(&mut app, &mut d, "make this loud");
+    let slot = app.caret.head.slot;
+    for _ in 0..4 {
+        key_with(&mut app, &mut d, "left", SHIFT);
+    }
+    let before = lines_across(&mut app, &mut d, slot).len();
+    key_with(&mut app, &mut d, "u", CTRL);
+    assert_eq!(texts(&app)[0], "make this <u>loud</u>");
+    d.frame(&mut app);
+    let tool = |d: &mut Drive| d.core.access_tree().nodes.iter().find(|n| n.name.as_deref() == Some("Underline")).and_then(|n| n.checked);
+    assert_eq!(tool(&mut d), Some(true), "the toolbar's Underline is on");
+    let lines = lines_across(&mut app, &mut d, slot);
+    assert_eq!(lines.len(), before + 1, "a line under the word: {lines:?}");
+    let word = (app.rect_at(&d.core, slot, "make this <u>".len()).unwrap(), app.rect_at(&d.core, slot, "make this <u>loud".len()).unwrap());
+    let line = lines.iter().find(|r| (r.x - word.0.x).abs() < 2.0).copied().expect("under \"loud\"");
+    assert!((line.x + line.w - word.1.x).abs() < 2.0, "as wide as the word: {line:?} {word:?}");
+    assert!(line.y > word.0.y + word.0.h * 0.6, "under it, not through it: {line:?} {word:?}");
+    assert!(page::style_at(app.doc(), app.caret).underline);
+    app.save_current();
+    let md = std::fs::read_to_string(app.store.notes[app.current].path.clone().unwrap()).unwrap();
+    assert!(md.ends_with("make this <u>loud</u>\n"), "{md}");
+    // Off again, the toolbar with it.
+    key_with(&mut app, &mut d, "u", CTRL);
+    assert_eq!(texts(&app)[0], "make this loud");
+    d.frame(&mut app);
+    assert_eq!(tool(&mut d), Some(false));
+    assert_eq!(lines_across(&mut app, &mut d, slot).len(), before);
+    // Nothing selected: on for what is typed, the toolbar's too.
+    key(&mut app, &mut d, "end");
+    key_with(&mut app, &mut d, "u", CTRL);
+    d.frame(&mut app);
+    assert_eq!(tool(&mut d), Some(true), "on for what is typed");
+    type_in(&mut app, &mut d, " now");
+    assert_eq!(texts(&app)[0], "make this loud <u>now</u>");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn folders_hold_notes_and_the_library_shows_one_at_a_time() {
     let (mut app, mut d, dir) = fresh("folders");

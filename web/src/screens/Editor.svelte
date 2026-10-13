@@ -12,6 +12,7 @@
   import { sync } from '../lib/sync.svelte';
   import { pageEditor, HIGHLIGHT, TURN } from '../lib/editor/page';
   import { theme } from '../lib/editor/theme';
+  import { STYLES } from '../lib/editor/styles';
   import Icon from '../lib/Icon.svelte';
   import { overflow } from '../lib/words';
   import { focusNow } from '../lib/focus';
@@ -241,9 +242,7 @@
     { icon: () => 'table', label: 'Table', f: (pe) => pe.insert_table() },
     { icon: () => 'divider', label: 'Divider', f: (pe) => pe.insert_divider() },
     { icon: () => 'picture', label: 'Picture', f: () => (chooser?.click(), false) },
-    { icon: () => 'bold', label: 'Bold', f: (pe) => pe.style(0), on: () => !!(flags & 1), gap: true },
-    { icon: () => 'italic', label: 'Italic', f: (pe) => pe.style(1), on: () => !!(flags & 2) },
-    { icon: () => 'strike', label: 'Strikethrough', f: (pe) => pe.style(2), on: () => !!(flags & 4) },
+    ...STYLES.filter((s) => s.tool).map((s, i): Tool => ({ icon: () => s.icon, label: s.label, f: (pe) => pe.style(s.which), on: () => !!(flags & s.flag), gap: i === 0 })),
     { icon: () => 'highlight', label: 'Highlight', f: (pe) => pe.tint(false, flags & 32 ? 0 : HIGHLIGHT), on: () => !!(flags & 32) },
     { icon: () => 'text-color', label: 'Colour', f: () => ((sheet = sheet === 'color' ? null : 'color'), false), on: () => sheet === 'color' || !!tint[0] },
     { icon: () => 'link', label: 'Link', f: () => (sheet === 'link' ? (sheet = null) : openLink(), false), on: () => sheet === 'link' },

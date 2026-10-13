@@ -615,6 +615,18 @@ mod tests {
         assert!(t.iter().any(|s| s == &format!("{G}New here.</mark>")), "{t:?}");
     }
 
+    /// Words underlined since: the same words, marked changed, drawn as
+    /// words; no tag among them.
+    #[test]
+    fn words_underlined_since_are_the_same_words() {
+        let (_, d) = marked("# N\n\nA plain word.\n", "# N\n\nA <u>plain</u> word.\n");
+        let t = text_of(&d.blocks()[0].kind).unwrap();
+        assert_eq!(Visible::of(t).text(t), "A plain word.");
+        assert!(crate::inline::styles(t).iter().any(|s| s.underline && !s.marker), "{t}");
+        let t = texts("# N\n\nA plain word.\n", "# N\n\nA <u>plain</u> new word.\n");
+        assert_eq!(t, [format!("A <u>plain</u> {G}new</mark> word.")]);
+    }
+
     #[test]
     fn styled_words_keep_their_marks_and_tables_compare_by_cell() {
         let t = texts("# N\n\nA **bold** word.\n", "# N\n\nA **bold** new word.\n");

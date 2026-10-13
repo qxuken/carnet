@@ -2450,8 +2450,8 @@ pub fn style_at(doc: &Doc, c: Caret) -> inline::Style {
     }
 }
 
-/// Bold, italic, struck or code on the selection's words: off where they
-/// all have it, else on for all of them.
+/// Bold, italic, struck, underlined or code on the selection's words: off
+/// where they all have it, else on for all of them.
 pub fn style(doc: &mut Doc, c: &mut Caret, kind: inline::Kind) -> bool {
     edit_ranges(doc, c, |t, a, b| inline::emphasis(t, a, b, kind))
 }
@@ -2887,7 +2887,8 @@ impl Typing {
     /// switched on with it chosen still on for the words. What an input
     /// method about to compose over a chosen one needs first, the words
     /// then composed there ([`Typing::type_text`] does it for words typed
-    /// at once). Words in one paragraph, all bold (italic, struck, code):
+    /// at once). Words in one paragraph, all bold (italic, struck,
+    /// underlined, code):
     /// what takes their place is too, as an input method composing has it
     /// when it changes a letter it typed (`k` made `か`).
     pub fn make_room(&mut self, doc: &mut Doc, c: &mut Caret) -> bool {
@@ -2898,7 +2899,9 @@ impl Typing {
         let (a, b) = ordered(doc, *c);
         let had = (a.slot == b.slot && kept.is_none()).then(|| {
             let (first, last) = (style_at(doc, *c), style_at(doc, Caret::at(b)));
-            [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Code].into_iter().filter(move |&k| k.on(&first) && k.on(&last))
+            [inline::Kind::Bold, inline::Kind::Italic, inline::Kind::Strike, inline::Kind::Underline, inline::Kind::Code]
+                .into_iter()
+                .filter(move |&k| k.on(&first) && k.on(&last))
         });
         let had: Vec<inline::Kind> = had.into_iter().flatten().collect();
         self.pending = None;
@@ -3928,6 +3931,78 @@ mod tests {
         assert_eq!((c.anchor.byte, c.head.byte), (12, 16), "still selects the word");
         style(&mut d, &mut c, inline::Kind::Bold);
         assert_eq!(text(&d, s), "make this bold");
+    }
+
+    /// Underline on the selection, as Bold is: the file keeps `<u>`, a
+    /// note read back has it, the same again takes it off; across two
+    /// paragraphs, each its own pair, never one across them.
+    #[test]
+    fn underline_wraps_and_unwraps_the_selection() {
+        let mut d = doc(vec![Block::text("make this loud")]);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot: s, byte: 10 }, head: Pos { slot: s, byte: 14 } };
+        assert!(style(&mut d, &mut c, inline::Kind::Underline));
+        assert_eq!(text(&d, s), "make this <u>loud</u>");
+        assert_eq!((c.anchor.byte, c.head.byte), (13, 17), "still selects the word");
+        assert!(style_at(&d, c).underline);
+        let md = crate::doc::to_markdown(Some("T"), &d);
+        assert_eq!(md, "# T\n\nmake this <u>loud</u>\n");
+        let (_, back) = crate::doc::from_markdown(&md);
+        assert_eq!(crate::doc::to_markdown(Some("T"), &back), md, "read back as written");
+        style(&mut d, &mut c, inline::Kind::Underline);
+        assert_eq!(text(&d, s), "make this loud");
+        // Across blocks: each paragraph its own.
+        let mut d = doc(vec![Block::text("one two"), Block::text("three four")]);
+        let (s0, s1) = (Slot::block(d.blocks()[0].id), Slot::block(d.blocks()[1].id));
+        let mut c = Caret { anchor: Pos { slot: s0, byte: 4 }, head: Pos { slot: s1, byte: 5 } };
+        assert!(style(&mut d, &mut c, inline::Kind::Underline));
+        assert_eq!(texts(&d), ["Text:one <u>two</u>", "Text:<u>three</u> four"]);
+        // A paragraph's line break inside it: one pair over it.
+        let mut d = doc(vec![Block::text("a\nb")]);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot: s, byte: 0 }, head: Pos { slot: s, byte: 3 } };
+        assert!(style(&mut d, &mut c, inline::Kind::Underline));
+        assert_eq!(text(&d, s), "<u>a\nb</u>");
+        let md = crate::doc::to_markdown(None, &d);
+        let (_, back) = crate::doc::from_markdown(&md);
+        assert_eq!(crate::doc::to_markdown(None, &back), md, "{md:?}");
+    }
+
+    /// Underline switched on with nothing selected is on for what is typed
+    /// (and the spaces in it), off again inside a run of it; with a
+    /// picture chosen, on for the words typed in its place; and words all
+    /// underlined, typed over, are replaced by underlined ones.
+    #[test]
+    fn underline_is_typed_as_bold_is() {
+        let under = |t: &mut Typing, d: &Doc, c: Caret| {
+            let (pre, post) = t.switch(d, c, inline::Kind::Underline);
+            t.pend(c, "Underline", pre, post);
+        };
+        let (mut d, mut c) = para("plain", 5);
+        let s = c.head.slot;
+        let mut t = Typing::default();
+        under(&mut t, &d, c);
+        keys(&mut t, &mut d, &mut c, " two words");
+        assert_eq!(text(&d, s), "plain <u>two words</u>");
+        under(&mut t, &d, c);
+        keys(&mut t, &mut d, &mut c, " after");
+        assert_eq!(text(&d, s), "plain <u>two words</u> after");
+        // Over a chosen picture.
+        let pic = Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false });
+        let mut d = doc(vec![Block::text("Plan"), pic, Block::text("")]);
+        let mut c = select_blocks(&d, 1, 1);
+        assert!(styles_typing(&d, c));
+        let mut t = Typing::default();
+        under(&mut t, &d, c);
+        t.type_text(&mut d, &mut c, "replaced");
+        assert_eq!(texts(&d), ["Text:Plan", "Text:<u>replaced</u>", "Text:"]);
+        // Typed over: still underlined.
+        let mut d = doc(vec![Block::text("<u>k</u>")]);
+        let slot = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot, byte: 3 }, head: Pos { slot, byte: 4 } };
+        let mut t = Typing::default();
+        t.type_text(&mut d, &mut c, "か");
+        assert_eq!(text(&d, slot), "<u>か</u>");
     }
 
     #[test]

@@ -237,6 +237,9 @@ fn spans(text: &str, viewer: bool, image: Option<&Where<'_>>) -> String {
         if s.strike {
             piece = format!("<s>{piece}</s>");
         }
+        if s.underline {
+            piece = format!("<u>{piece}</u>");
+        }
         if viewer && s.ink != 0 {
             piece = format!("<span class=\"ink\" style=\"--ink:#{:08x}\">{piece}</span>", s.ink);
         }
@@ -488,5 +491,21 @@ mod tests {
         // In a copy's HTML too.
         let c = html("[x *y*](https://x.test)", |s, _| s.to_string());
         assert!(c.contains("<a href=\"https://x.test\">x <i>y</i></a>"), "{c}");
+    }
+
+    /// Underlined words come out as `<u>` in a copy and in the reader,
+    /// beside the other styles and in a link's words; `<ins>` as `<u>`.
+    #[test]
+    fn underline_comes_out_as_u() {
+        let md = "Some <u>under</u> and **<u>both</u>**, [<u>linked</u>](http://x), <ins>theirs</ins>.";
+        let h = html(md, |s, _| s.to_string());
+        assert_eq!(
+            h,
+            "<p>Some <u>under</u> and <u><b>both</b></u>, <a href=\"http://x\"><u>linked</u></a>, <u>theirs</u>.</p>"
+        );
+        let v = viewer("# T\n\n<span style=\"color: #C0553F\"><u>red</u></span>\n", |s, _| Picture::Url(s.to_string()));
+        assert!(v.contains("<span class=\"ink\" style=\"--ink:#c0553fff\"><u>red</u></span>"), "{v}");
+        // A tag left open is words, escaped.
+        assert_eq!(html("a <u>b", |s, _| s.to_string()), "<p>a &lt;u&gt;b</p>");
     }
 }

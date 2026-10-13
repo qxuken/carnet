@@ -117,7 +117,8 @@ pub enum Msg {
     ClearSearch,
     FocusTitle,
     FocusSearch,
-    /// Bold, italic, struck or code (`STYLES[which]`) on the selection.
+    /// Bold, italic, struck, code or underlined (`STYLES[which]`) on the
+    /// selection.
     Style { which: u64 },
     /// A narrow window's way back from a note to the list of notes.
     ShowList,
@@ -337,8 +338,13 @@ pub enum Msg {
 pub const ALL: u64 = i64::MAX as u64;
 
 /// The inline styles, as `Msg::Style` names them.
-pub const STYLES: [carnet_core::inline::Kind; 4] =
-    [carnet_core::inline::Kind::Bold, carnet_core::inline::Kind::Italic, carnet_core::inline::Kind::Strike, carnet_core::inline::Kind::Code];
+pub const STYLES: [carnet_core::inline::Kind; 5] = [
+    carnet_core::inline::Kind::Bold,
+    carnet_core::inline::Kind::Italic,
+    carnet_core::inline::Kind::Strike,
+    carnet_core::inline::Kind::Code,
+    carnet_core::inline::Kind::Underline,
+];
 
 /// What a context menu is about.
 #[derive(Clone, Debug, PartialEq)]

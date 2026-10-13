@@ -74,6 +74,12 @@ export const theme = EditorView.theme({
   // Over a link a press would open (links.ts): a hand.
   '&.cm-link-hand .cm-content': { cursor: 'pointer' },
   '.cm-l': { color: 'var(--accent-ink)', textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, var(--accent-ink) 40%, transparent)' },
+  // Underlined words: a line in their own ink, a little below the
+  // letters. A link underlined is still the one line a link has; struck
+  // too, both lines.
+  '.cm-u': { textDecorationLine: 'underline', textUnderlineOffset: '0.18em' },
+  '.cm-u.cm-s': { textDecorationLine: 'underline line-through' },
+  '.cm-l.cm-u': { textUnderlineOffset: 'auto' },
   '.cm-marked': { borderRadius: '3px' },
   // A divider as the desktop draws it by default (settings `divider =
   // dots`): three dots 3px round, 15px apart, faint, with the desktop's

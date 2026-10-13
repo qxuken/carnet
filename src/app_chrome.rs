@@ -972,6 +972,7 @@ impl Carnet {
             ("t-bold", Icon::Bold, "Bold", keys::BOLD, 0),
             ("t-italic", Icon::Italic, "Italic", keys::ITALIC, 1),
             ("t-strike", Icon::Strike, "Strikethrough", keys::STRIKE, 2),
+            ("t-underline", Icon::Underline, "Underline", keys::UNDERLINE, 4),
             ("t-code", Icon::Code, "Code", keys::CODE, 3),
         ] {
             let mut d = def(key, icon, name, keys::hint(name, spec), Msg::Style { which });

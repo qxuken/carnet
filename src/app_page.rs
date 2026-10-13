@@ -1733,6 +1733,11 @@ impl Carnet {
                         if s.strike || strike {
                             sp = sp.strikethrough();
                         }
+                        // In the words' own ink, as a link's is in its:
+                        // a link underlined is still one line.
+                        if s.underline {
+                            sp = sp.underline();
+                        }
                         if s.code {
                             // Code reads as code: in the code's face, a size
                             // down as on the web (14px in 16), its own ink on
@@ -2053,6 +2058,7 @@ impl Carnet {
             item("Bold", "style:0").accel("mod+b"),
             item("Italic", "style:1").accel("mod+i"),
             item("Strikethrough", "style:2").accel("mod+shift+x"),
+            item("Underline", "style:4").accel(keys::UNDERLINE),
             item("Code", "style:3").accel("mod+e"),
             item(if page::link_at(doc, self.caret).is_some() { "Edit link\u{2026}" } else { "Link\u{2026}" }, "link")
                 .accel("mod+k"),
@@ -2423,6 +2429,7 @@ impl Carnet {
             KeyCode::Char('k') if chord && shift => self.on_plain(Msg::DeleteBlock),
             KeyCode::Char('b') | KeyCode::Char('B') if chord => self.page_action("style:0"),
             KeyCode::Char('i') | KeyCode::Char('I') if chord => self.page_action("style:1"),
+            KeyCode::Char('u') | KeyCode::Char('U') if chord => self.page_action("style:4"),
             // With Shift too: ⌘⇧E is code as well, as hands that know it
             // from elsewhere press it.
             KeyCode::Char('e') | KeyCode::Char('E') if chord => self.page_action("style:3"),
