@@ -64,7 +64,9 @@ fn write_received(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("tmp-carnet");
     fs::write(&tmp, bytes)?;
     quarantine(&tmp);
-    fs::rename(&tmp, path)
+    fs::rename(&tmp, path)?;
+    crate::store::mark_own(path);
+    Ok(())
 }
 
 /// Marks a file as come from elsewhere (macOS's `com.apple.quarantine`,
@@ -104,6 +106,27 @@ const RETRY: Duration = Duration::from_secs(30);
 /// Said there's room ([`Pictures::retry`]), it's offered at once.
 const HELD_AGAIN: Duration = Duration::from_secs(5 * 60);
 
+/// A picture whose sending failed is offered again after a wait: this
+/// long the first time, twice as long each time after, up to
+/// [`PUT_WAIT_MOST`]; back to the first once one goes.
+const PUT_WAIT_FIRST: Duration = Duration::from_secs(15);
+const PUT_WAIT_MOST: Duration = Duration::from_secs(5 * 60);
+
+/// Why pictures wait when the server's picture storage refuses them (an
+/// HTTP 4xx answer other than a timeout or "too many"): its keys, its
+/// clock, a bucket not there. The web viewer's words (carnet-web
+/// `notes::TURNED_AWAY`), for one account to read the same everywhere.
+pub const TURNED_AWAY: &str = "The server's picture storage turned new pictures away, so they stay on this device for now.";
+
+/// Whether a failed send (`error`, as the transfer has it: `HTTP` and the
+/// status, or other words) won't go however often it's tried: then why,
+/// in words. None for a failure that passes (offline, a timeout, the
+/// storage busy or down a while).
+fn lasting(error: &str) -> Option<&'static str> {
+    let code: u16 = error.strip_prefix("HTTP ")?.trim().parse().ok()?;
+    ((400..500).contains(&code) && code != 408 && code != 429).then_some(TURNED_AWAY)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Known {
     size: u64,
@@ -131,6 +154,15 @@ pub struct Pictures {
     held: HashMap<BlobId, Instant>,
     /// Asked for, and when.
     asked: HashMap<BlobId, Instant>,
+    /// Sent and failed: offered again once [`Pictures::put_after`].
+    failed: HashSet<BlobId>,
+    /// When those are offered again, and how long the wait was.
+    put_after: Option<Instant>,
+    put_wait: Duration,
+    /// Why the pictures waiting wait, when it won't mend by itself
+    /// ([`TURNED_AWAY`]): for Settings to say. Forgotten once one goes, or
+    /// at a new login.
+    held_why: Option<&'static str>,
     /// Dropped pictures a note shows again (a version brought back),
     /// asked for by the id they had: the paths each goes back to.
     reviving: HashMap<BlobId, Vec<String>>,
@@ -228,13 +260,55 @@ impl Pictures {
         let mut ids: HashSet<&BlobId> = self.offered.keys().collect();
         ids.extend(&self.sending);
         ids.extend(self.held.keys());
+        ids.extend(&self.failed);
         ids.len()
+    }
+
+    /// Why the pictures waiting wait, when it's something that won't mend
+    /// by itself, in words; none while none waits.
+    pub fn held_why(&self) -> Option<&'static str> {
+        self.held_why.filter(|_| self.waiting() > 0)
+    }
+
+    /// How a send or a fetch over HTTP went, before the session hears of
+    /// it: a send that failed waits before it's offered again, longer
+    /// each time; and why, if trying again won't mend it.
+    pub fn transferred(&mut self, id: BlobId, put: bool, result: &Result<Vec<u8>, String>) {
+        let (true, Err(error)) = (put, result) else { return };
+        let now = Instant::now();
+        self.failed.insert(id);
+        // Pictures failing together are one failure: the wait grows once.
+        if self.put_after.is_none_or(|at| now >= at) {
+            self.put_wait = if self.put_wait.is_zero() { PUT_WAIT_FIRST } else { (self.put_wait * 2).min(PUT_WAIT_MOST) };
+            self.put_after = Some(now + self.put_wait);
+        }
+        self.held_why = lasting(error).or(self.held_why);
+    }
+
+    /// One went: the others needn't wait, nor the next failure long.
+    fn put_went(&mut self) {
+        self.failed.clear();
+        self.put_after = None;
+        self.put_wait = Duration::ZERO;
+        self.held_why = None;
+    }
+
+    /// The wait before failed pictures are offered again, as if over.
+    #[cfg(test)]
+    pub fn wait_over(&mut self) {
+        self.put_after = Some(Instant::now());
+    }
+
+    /// The wait the last failure set.
+    #[cfg(test)]
+    pub fn put_wait(&self) -> Duration {
+        self.put_wait
     }
 
     /// The pictures being sent, held back, or wanted back: paths from the
     /// notes folder.
     pub fn busy_paths(&self) -> BTreeSet<String> {
-        let going = |id: &BlobId| self.offered.contains_key(id) || self.sending.contains(id) || self.held.contains_key(id);
+        let going = |id: &BlobId| self.offered.contains_key(id) || self.sending.contains(id) || self.held.contains_key(id) || self.failed.contains(id);
         let mut out: BTreeSet<String> = self.index.iter().filter(|(_, k)| going(&k.id)).map(|(p, _)| p.clone()).collect();
         out.extend(self.reviving.values().flatten().cloned());
         out
@@ -256,6 +330,7 @@ impl Pictures {
     pub fn retry(&mut self) {
         self.held.clear();
         self.offered.clear();
+        self.put_went();
     }
 
     /// Whether any picture is held back by the server.
@@ -285,6 +360,7 @@ impl Pictures {
         self.held.clear();
         self.asked.clear();
         self.reviving.clear();
+        self.put_went();
         self.under = Some(mark);
         self.keep();
     }
@@ -352,6 +428,9 @@ impl Pictures {
         let now = Instant::now();
         self.offered.retain(|_, at| now.duration_since(*at) < RETRY);
         self.held.retain(|_, at| now.duration_since(*at) < HELD_AGAIN);
+        if self.put_after.is_some_and(|at| now >= at) {
+            self.failed.clear();
+        }
         let mut offer = Vec::new();
         for (rel, k) in &self.index {
             if vault.get(rel).is_some_and(|v| *v == hex(&k.id)) {
@@ -359,7 +438,7 @@ impl Pictures {
             }
             if k.stored {
                 wrote |= store.set_picture(rel, &hex(&k.id));
-            } else if !self.offered.contains_key(&k.id) && !self.sending.contains(&k.id) && !self.held.contains_key(&k.id) && !offer.iter().any(|(id, _)| *id == k.id) {
+            } else if !self.offered.contains_key(&k.id) && !self.sending.contains(&k.id) && !self.held.contains_key(&k.id) && !self.failed.contains(&k.id) && !offer.iter().any(|(id, _)| *id == k.id) {
                 offer.push((k.id, k.size as usize));
             }
         }
@@ -428,6 +507,7 @@ impl Pictures {
                 self.offered.remove(id);
                 self.sending.remove(id);
                 self.held.remove(id);
+                self.put_went();
                 let mut wrote = false;
                 let mut changed = false;
                 for (rel, k) in self.index.iter_mut().filter(|(_, k)| k.id == *id) {
@@ -479,6 +559,23 @@ impl Pictures {
                 Ok(false)
             }
             _ => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 4xx from the picture storage won't mend by itself; a timeout,
+    /// "too many", a 5xx or no answer at all will.
+    #[test]
+    fn only_a_refusal_is_lasting() {
+        for e in ["HTTP 400", "HTTP 401", "HTTP 403", "HTTP 404", "HTTP 413"] {
+            assert_eq!(lasting(e), Some(TURNED_AWAY), "{e}");
+        }
+        for e in ["HTTP 408", "HTTP 429", "HTTP 500", "HTTP 503", "connection refused", "timed out", "HTTP x"] {
+            assert_eq!(lasting(e), None, "{e}");
         }
     }
 }
