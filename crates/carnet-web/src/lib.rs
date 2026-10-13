@@ -939,6 +939,11 @@ impl PageEditor {
         self.e.input(s)
     }
 
+    /// A chosen picture or divider made room for an input method's words.
+    pub fn make_room(&mut self) -> bool {
+        self.e.make_room()
+    }
+
     pub fn enter(&mut self, soft: bool) -> bool {
         self.e.enter(soft)
     }
@@ -1147,7 +1152,7 @@ impl PageEditor {
 
     /// The selection as HTML, for pasting into other apps.
     pub fn copy_html(&self) -> Option<String> {
-        self.e.copy().map(|md| carnet_core::export::html(&md, |s, _| s.to_string()))
+        self.e.copy_for_html().map(|md| carnet_core::export::html(&md, |s, _| s.to_string()))
     }
 
     pub fn paste(&mut self, s: &str) -> bool {

@@ -2684,6 +2684,24 @@ impl Typing {
         Some((t[run.close.0..run.close.1].to_string(), t[run.open.0..run.open.1].to_string(), other))
     }
 
+    /// The selection taken out for words to take its place: a chosen
+    /// picture or divider made an empty paragraph where it was, a style
+    /// switched on with it chosen still on for the words. What an input
+    /// method about to compose over a chosen one needs first, the words
+    /// then composed there ([`Typing::type_text`] does it for words typed
+    /// at once).
+    pub fn make_room(&mut self, doc: &mut Doc, c: &mut Caret) -> bool {
+        if c.is_empty() {
+            return false;
+        }
+        let kept = chosen_atom(doc, *c).and(self.pending.take().filter(|q| q.caret == *c));
+        self.pending = None;
+        self.carry = None;
+        let changed = replace_selection(doc, c);
+        self.pending = kept.map(|q| Pending { caret: *c, ..q });
+        changed
+    }
+
     /// `s` typed over the selection, or at the caret: inside the styles
     /// switched on for it, if any. Spaces and words go in a run at a time,
     /// so a space never stands where a run's marks can't have it: at a
@@ -2694,16 +2712,12 @@ impl Typing {
     pub fn type_text(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
         let mut changed = false;
         if !c.is_empty() {
-            // A style switched on over a chosen picture or divider is on
-            // for the words that take its place.
-            let kept = chosen_atom(doc, *c).and(self.pending.take().filter(|q| q.caret == *c));
-            self.pending = None;
-            self.carry = None;
             if s.is_empty() {
+                self.pending = None;
+                self.carry = None;
                 return delete_selection(doc, c);
             }
-            changed = replace_selection(doc, c);
-            self.pending = kept.map(|q| Pending { caret: *c, ..q });
+            changed = self.make_room(doc, c);
         }
         if let Some(p) = past_link(doc, *c).filter(|_| !s.is_empty() && self.carry_at(doc, *c).is_none()) {
             if let Some(q) = self.pending.as_mut().filter(|q| q.caret == *c) {
@@ -4712,6 +4726,28 @@ mod tests {
             assert_eq!(texts(&d), ["Text:Plan", "Text:**replaced**", written, "Text:"]);
             assert_eq!(c, at(&d, 1, 10));
         }
+    }
+
+    /// An input method composing over a chosen picture composes in its
+    /// place: room made first, an empty paragraph where it was, the words
+    /// then typed there, bold if Bold was switched on with it chosen.
+    #[test]
+    fn room_made_over_a_chosen_picture_for_words_to_come() {
+        let pic = || Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: None, float: Float::Left, wiki: false });
+        let mut d = doc(vec![Block::text("Above."), pic(), Block::text("Below.")]);
+        let mut c = select_blocks(&d, 1, 1);
+        let mut w = Typing::default();
+        let (pre, post) = w.switch(&d, c, inline::Kind::Bold);
+        w.pend(c, "bold", pre, post);
+        assert!(w.make_room(&mut d, &mut c));
+        assert_eq!(texts(&d), ["Text:Above.", "Text:", "Text:Below."]);
+        assert_eq!(c, at(&d, 1, 0));
+        w.type_text(&mut d, &mut c, "Typed");
+        assert_eq!(texts(&d), ["Text:Above.", "Text:**Typed**", "Text:Below."]);
+        // Nothing chosen: no room to make.
+        let mut c = at(&d, 2, 2);
+        assert!(!Typing::default().make_room(&mut d, &mut c));
+        assert_eq!(texts(&d), ["Text:Above.", "Text:**Typed**", "Text:Below."]);
     }
 
     /// The finding: a picture dragged out of a cell to below a table that

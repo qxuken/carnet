@@ -786,12 +786,13 @@ class Sync {
 
   /// The picture at `path` (from the notes folder), as a URL to show:
   /// one kept while it's on screen, else made again from the copy kept
-  /// for offline, else fetched.
+  /// for offline, else fetched. One put in here and not yet on the
+  /// server (the vault names it once it is), from the copy kept here.
   picture(path: string): Promise<string> {
     const have = this.pictures.get(path);
     if (have) return Promise.resolve(have);
     const id = this.vault?.picture_id(path);
-    if (!id) return Promise.reject(new Error('not in the vault'));
+    if (!id) return this.ownPicture(path);
     return sealed.get(PICTURE + id).then(
       (kept) =>
         new Promise((done, fail) => {
@@ -805,6 +806,15 @@ class Sync {
           this.wanted.set(id, list);
         }),
     );
+  }
+
+  /// A picture put in here, on its way to the server (since before a
+  /// reload, say), shown from the copy kept here.
+  private async ownPicture(path: string): Promise<string> {
+    const id = await this.uploads.going(path);
+    const kept = id ? await sealed.get(PICTURE + id) : null;
+    if (!kept) throw new Error('not in the vault');
+    return this.pictures.add(path, new Blob([kept]));
   }
 
   /// The account's devices, asked for (and again as they change, while

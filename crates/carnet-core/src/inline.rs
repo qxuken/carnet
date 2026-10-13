@@ -1349,14 +1349,20 @@ pub fn delete(text: &str, a: usize, b: usize) -> (String, usize) {
 /// italic, in `*w*o*rd`), the edit is made again with the strays escaped;
 /// where that changes the words too, there are no marks that say it
 /// (bold on the `*` of `a*b`: `a**\***b` does not open), and it is `None`.
+///
+/// A link's words are drawn without bidi controls ([`styles`]): words
+/// with one in, made a link, are the same words less it, as drawn; the
+/// file keeps it.
 fn edit_range(text: &str, a: usize, b: usize, kind: Kind, f: impl Fn(&str) -> String) -> Option<(String, usize, usize)> {
+    let words = |t: &str| if kind == Kind::Link { without_bidi(&plain(t)) } else { plain(t) };
+    let was = words(text);
     let once = edit_once(text, a, b, kind, &f)?;
-    if plain(&once.0) == plain(text) {
+    if words(&once.0) == was {
         return Some(once);
     }
     let (escaped, at) = escape_strays(text);
     let again = edit_once(&escaped, at[a.min(text.len())], at[b.min(text.len())], kind, &f)?;
-    (plain(&again.0) == plain(text)).then_some(again)
+    (words(&again.0) == was).then_some(again)
 }
 
 /// Marks that are no pair's — a stray `*`, `_`, `~`, `=`, `` ` ``, `[`,
@@ -1394,7 +1400,10 @@ fn edit_once(text: &str, a: usize, b: usize, kind: Kind, f: &impl Fn(&str) -> St
     let out = merge(&join(&join(&t[..na], &mid), &t[nb..]));
     let w = Visible::of(&out);
     let start = if da == 0 { w.at(0) } else { w.source(da) };
-    Some((out.clone(), start.min(out.len()), w.at(db).max(start)))
+    // Drawn shorter by what the edit hides in the range: a link's words'
+    // bidi controls.
+    let hidden = v.text(text).len().saturating_sub(w.text(&out).len());
+    Some((out.clone(), start.min(out.len()), w.at(db.saturating_sub(hidden)).max(start)))
 }
 
 /// The marks of every pair of `kind` in `text` taken out.
@@ -2188,6 +2197,23 @@ mod tests {
         // Given another address, it's an autolink to that.
         assert_eq!(set_link(t, 12, "you@example.org").unwrap(), "write to <mailto:you@example.org> today");
         assert_eq!(unlink("<me@x.com>", 3).unwrap(), "me@x.com");
+    }
+
+    /// The finding: words with a bidi control in, selected and given an
+    /// address, silently made no link: drawn without the control as a
+    /// link's words are, they didn't read as the same words. They are a
+    /// link now, the control kept in the file.
+    #[test]
+    fn words_with_a_bidi_control_in_are_made_a_link() {
+        let t = "see abc\u{202E}txt here";
+        let (a, b) = (4, 4 + "abc\u{202E}txt".len());
+        let (out, x, y) = make_link(t, a, b, "https://example.com").expect("made");
+        assert_eq!(out, "see [abc\u{202E}txt](https://example.com) here");
+        assert_eq!(Visible::of(&out).text(&out), "see abctxt here");
+        assert_eq!(&out[x..y], "abc\u{202E}txt");
+        // Bold the same as ever: the control drawn, and kept.
+        let (out, ..) = emphasis(t, a, b, Kind::Bold).expect("bold");
+        assert_eq!(out, "see **abc\u{202E}txt** here");
     }
 
     /// The finding: `[abc\u{202E}txt.exe](…) end.` read `abc.dne exe.txt`.

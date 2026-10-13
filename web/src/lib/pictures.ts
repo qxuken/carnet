@@ -44,11 +44,16 @@ export function show(img: HTMLImageElement, name: string, ask: () => Promise<str
     img.src = url;
     if (place.isConnected) place.replaceWith(img);
   };
+  const asked = changes;
   ask().then(shown, (e: unknown) => {
     if (!place.isConnected) return;
     const [said, icon] = why(e, name);
     fill(place, said, name, true, icon);
-    if (!(e instanceof Error && e.message === ON_THE_WEB)) waiting.set(place, () => ask().then(shown));
+    if (e instanceof Error && e.message === ON_THE_WEB) return;
+    waiting.set(place, () => ask().then(shown));
+    // The notes changed while it was asked for (the vault came to name
+    // it, say): asked again now, not at the next change.
+    if (changes !== asked) askAgain();
   });
 }
 
@@ -68,7 +73,13 @@ function why(e: unknown, path: string): [string, string] {
 
 /// Pictures not found, still on the page, and how to ask for each again.
 const waiting = new Map<HTMLElement, () => Promise<void>>();
-addEventListener(NOTES_CHANGED, () => askAgain());
+/// How many times the notes have changed: a picture asked for across a
+/// change is asked again once it's said not found.
+let changes = 0;
+addEventListener(NOTES_CHANGED, () => {
+  changes++;
+  askAgain();
+});
 
 /// Every picture not found asked for again: the notes changed (a device
 /// may have sent it, or the vault names it now).

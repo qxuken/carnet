@@ -253,7 +253,7 @@
   </header>
   <label class="search">
     <Icon name="search" size={16} />
-    <input type="search" placeholder="Search" bind:value={query} />
+    <input type="search" placeholder="Search" aria-label="Search notes" bind:value={query} />
   </label>
   {#if !query}
     <nav bind:this={nav} aria-label="Folders">

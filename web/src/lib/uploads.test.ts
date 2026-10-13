@@ -77,4 +77,24 @@ describe('Uploads', () => {
     expect(list).toEqual([['attachments/waits.png', 'w']]);
     expect(k.now()).toEqual([['attachments/waits.png', 'w']]);
   });
+
+  // The finding: after a reload offline, the browser that put a picture
+  // in said it "hasn't reached the server yet" instead of showing its own
+  // copy. The vault doesn't name it until it's on the server; this list
+  // does, by the id its kept bytes go by.
+  it('names the picture on its way to a path, the last put in there', async () => {
+    const k = kept([
+      ['attachments/a.png', 'a1'],
+      ['attachments/b.png', 'b'],
+    ]);
+    const up = new Uploads(k.keep);
+    expect(await up.going('attachments/a.png')).toBe('a1');
+    expect(await up.going('attachments/c.png')).toBeUndefined();
+    // Put in again there before the first went: the later one.
+    void up.add('attachments/a.png', 'a2');
+    expect(await up.going('attachments/a.png')).toBe('a2');
+    // On the server: on its way no more (the vault names it now).
+    void up.sent('b');
+    expect(await up.going('attachments/b.png')).toBeUndefined();
+  });
 });

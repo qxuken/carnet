@@ -103,10 +103,22 @@ function tell(pe: PageEditor, state: { doc: EditorState['doc']; selection: Edito
   pe.select(al, ac, hl, hc);
 }
 
+/// The editor's lines, as the arrows see them (arrows.ts).
+function linesIn(state: EditorState): Lines {
+  const all = state.field(looks);
+  const doc = state.doc;
+  return {
+    count: doc.lines,
+    line: (n) => doc.line(n),
+    kind: (n) => all[n - 1]?.k,
+    lineAt: (pos) => doc.lineAt(pos).number,
+  };
+}
+
 /// A change CodeMirror is making, made on the page. `null` when the
 /// page's words agree (CodeMirror's change stands, untouched, so an input
 /// method composing is never disturbed); else the page's change instead.
-function mirror(pe: PageEditor, tr: Transaction): TransactionSpec | null {
+export function mirror(pe: PageEditor, tr: Transaction): TransactionSpec | null {
   const start = tr.startState;
   const composing = tr.isUserEvent('input.type.compose');
   const parts: { from: number; to: number; text: string }[] = [];
@@ -114,6 +126,17 @@ function mirror(pe: PageEditor, tr: Transaction): TransactionSpec | null {
   const sel = start.selection.main;
   const one = parts.length === 1 ? parts[0] : null;
   tell(pe, start);
+  const typed = parts.map((p) => p.text).join('');
+  if (!composing && typed && tr.isUserEvent('input.type') && arrows.chosenAtom(linesIn(start), sel) !== null) {
+    // Typed with a picture or a divider chosen: the words take its place,
+    // as on the desktop. A picture is a block of its own, which the
+    // browser's caret can't be in: it stands at the start of the line
+    // after it (or the end of the one before), and the browser types
+    // there; the page's selection is the picture, chosen.
+    if (typed.includes('\n')) pe.paste(typed);
+    else pe.input(typed);
+    return { ...pageSpec(pe, start.doc.toString()), userEvent: 'input' };
+  }
   if (one && !composing && tr.isUserEvent('delete.backward') && !one.text && sel.empty && one.to === sel.head) {
     // A phone's Backspace: the page's, which undoes structure first.
     pe.backspace(one.to - one.from > 1);
@@ -134,6 +157,16 @@ function mirror(pe: PageEditor, tr: Transaction): TransactionSpec | null {
   }
   if (composing || pe.text() === tr.newDoc.toString()) return null;
   return { ...pageSpec(pe, start.doc.toString()), userEvent: 'input' };
+}
+
+/// With a picture or a divider chosen, room made in its place for an
+/// input method about to compose (`PageEditor.make_room`): an empty
+/// paragraph, which the browser's caret is then put in. `null` with none
+/// chosen.
+export function roomFor(pe: PageEditor, state: EditorState): TransactionSpec | null {
+  if (arrows.chosenAtom(linesIn(state), state.selection.main) === null) return null;
+  tell(pe, state);
+  return pe.make_room() ? pageSpec(pe, state.doc.toString()) : null;
 }
 
 // ------------------------------------------------------------ widgets
@@ -569,18 +602,6 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
     provide: (f) => [EditorView.decorations.from(f), EditorView.atomicRanges.of((v) => v.state.field(f))],
   });
 
-  /// The editor's lines, as the arrows see them (arrows.ts).
-  const linesOf = (state: EditorState): Lines => {
-    const all = state.field(looks);
-    const doc = state.doc;
-    return {
-      count: doc.lines,
-      line: (n) => doc.line(n),
-      kind: (n) => all[n - 1]?.k,
-      lineAt: (pos) => doc.lineAt(pos).number,
-    };
-  };
-
   /// ↑ and ↓ a row at a time: off a line once the caret is on its first
   /// row (or last), onto the next line's nearest row, at the caret's
   /// column. CodeMirror's own motion goes by height, and a heading's
@@ -590,7 +611,7 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
   const vertical = (down: boolean, extend: boolean) => (v: EditorView) => {
     const sel = v.state.selection.main;
     const doc = v.state.doc;
-    const plan = arrows.vertical(linesOf(v.state), { anchor: sel.anchor, head: sel.head }, down, extend);
+    const plan = arrows.vertical(linesIn(v.state), { anchor: sel.anchor, head: sel.head }, down, extend);
     if (!plan) return false;
     // On `row` (the one measured), the caret kept there: at the start of
     // a wrapped row, not the end of the row above (arrows.ts `sideOn`).
@@ -630,10 +651,19 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
   /// onto it chooses it whole, and the next is past it.
   const across = (right: boolean) => (v: EditorView) => {
     const sel = v.state.selection.main;
-    const to = arrows.across(linesOf(v.state), { anchor: sel.anchor, head: sel.head }, right);
+    const to = arrows.across(linesIn(v.state), { anchor: sel.anchor, head: sel.head }, right);
     if (!to) return false;
     v.dispatch({ selection: to, scrollIntoView: true, userEvent: 'select' });
     return true;
+  };
+
+  /// Room made over a chosen picture or divider for an input method's
+  /// words (`roomFor`), shown.
+  const makeRoom = (v: EditorView) => {
+    const spec = v.composing ? null : roomFor(pe, v.state);
+    if (!spec) return;
+    v.dispatch(spec);
+    o.edited();
   };
 
   const extensions: Extension[] = [
@@ -659,6 +689,10 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
             if (was > at[0] && rows) pe.cell_select(at[0], rows - 1, 0, 0, 0);
             queueMicrotask(() => place(tables));
           }
+          // A bare caret the page took for more: down from the title onto
+          // a picture or a divider, chosen whole (`Editor::select`).
+          const page = selectionIn(tr.newDoc.toString(), pe.caret()).main;
+          if (!at && tr.selection.main.empty && !page.empty) return [tr, { selection: EditorSelection.create([page]), annotations: own.of(true), sequential: true }];
         }
         return tr;
       }
@@ -717,6 +751,16 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
         e.preventDefault();
         run(() => pe.input(''))(v);
         return true;
+      },
+      // An input method about to compose with a picture or a divider
+      // chosen (its key down, or a dead key's, which come before the
+      // composition): room made in its place first, an empty paragraph
+      // the browser's caret is put in, so the words are composed there.
+      // Not once the composition has begun: a change under it then
+      // leaves the browser composing in the wrong place.
+      keydown(e, v) {
+        if (e.keyCode === 229 || e.key === 'Process' || e.key === 'Dead') makeRoom(v);
+        return false;
       },
       paste(e, v) {
         const s = e.clipboardData?.getData('text/plain');

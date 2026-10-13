@@ -8,7 +8,7 @@
   import { ago, dateWords, left } from '../lib/time';
   import Icon from '../lib/Icon.svelte';
   import { pair_link, password_fault, qr_svg } from '../wasm/carnet_web.js';
-  import { waysBack } from '../lib/words';
+  import { joinedSaid, waysBack } from '../lib/words';
 
   let { back }: { back: (() => void) | null } = $props();
   /// The device whose removal is asked to be confirmed.
@@ -65,6 +65,8 @@
     if (sync.code) sync.pairCancel();
     sync.wordsDone();
     sync.inviteDone();
+    // "A new device is in", seen: not said again next time.
+    if (joinedSaid(sync.paired, sync.devices)) sync.paired = null;
   });
 
   function account(a: { devices: number; seen: number }) {
@@ -239,7 +241,7 @@
           <div class="qr" role="img" aria-label="The code as a QR code">{@html qr}</div>
           <p class="digits" aria-label="Pairing code">{sync.code}</p>
         </div>
-      {:else if sync.paired && sync.devices?.some((d) => d.id === sync.paired)}
+      {:else if joinedSaid(sync.paired, sync.devices)}
         <p class="row ok" role="status"><Icon name="check" size={16} /> A new device is in: it’s in the list above.</p>
       {/if}
       {@render said('pair')}
