@@ -3499,8 +3499,14 @@ impl Carnet {
     /// Markdown on the clipboard, with its HTML beside it for apps that
     /// take formatting. Images are linked from where they are on disk.
     fn copy_markdown(&mut self, md: String, folder: &str) {
+        let html_md = md.clone();
+        self.copy_markdown_as(md, &html_md, folder);
+    }
+
+    /// `md` on the clipboard, its HTML made from `html_md`.
+    fn copy_markdown_as(&mut self, md: String, html_md: &str, folder: &str) {
         let store = &self.store;
-        let html = export::html(&md, |src, wiki| match store.picture_file(folder, src, wiki) {
+        let html = export::html(html_md, |src, wiki| match store.picture_file(folder, src, wiki) {
             Some(p) => format!("file:///{}", p.display().to_string().replace('\\', "/").trim_start_matches('/')),
             None => src.to_string(),
         });

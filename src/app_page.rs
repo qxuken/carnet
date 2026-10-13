@@ -2719,7 +2719,9 @@ impl Carnet {
         match page::copy(self.doc(), self.caret) {
             Some(md) => {
                 let folder = self.store.notes[self.current].folder.clone();
-                self.copy_markdown(md, &folder);
+                // Lines of code are HTML's code too (`page::copy_for_html`).
+                let html_md = page::copy_for_html(self.doc(), self.caret).unwrap_or_else(|| md.clone());
+                self.copy_markdown_as(md, &html_md, &folder);
                 true
             }
             None => false,

@@ -940,6 +940,30 @@ fn a_copy_carries_html_beside_the_markdown() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Lines copied from a code block: the text is the lines, the HTML is
+/// code (`<pre><code>`, its language named), not paragraphs and `<br>`s.
+#[test]
+fn code_copied_carries_code_as_its_html() {
+    let (mut app, mut d, dir) = note_of("copy-code-html", vec![Kind::Raw("```rust\nlet a = 1;\nlet b = 2;\n```".into()), Kind::Text(String::new())]);
+    let slot = Slot::block(blocks(&app)[0].id);
+    let (lo, hi) = page::code_body(&raw(&app, 0)).unwrap();
+    app.caret = Caret { anchor: Pos { slot, byte: lo }, head: Pos { slot, byte: hi } };
+    d.frame(&mut app);
+    key_with(&mut app, &mut d, "c", CTRL);
+    let (text, html) = d
+        .core
+        .take_menu_actions()
+        .into_iter()
+        .find_map(|a| match a {
+            kui_native::MenuAction::SetClipboard { text, html } => Some((text, html)),
+            _ => None,
+        })
+        .expect("a copy");
+    assert_eq!(text, "let a = 1;\nlet b = 2;");
+    assert_eq!(html.as_deref(), Some("<pre><code class=\"language-rust\">let a = 1;\nlet b = 2;</code></pre>"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn settings_open_change_the_page_and_close() {
     let (mut app, mut d, dir) = body("settings");
