@@ -1457,8 +1457,20 @@ impl Store {
         self.vault_write(|v| v.forget_invite(hash))
     }
 
+    /// Every invite's code forgotten (a device removed had them all):
+    /// their hashes, to take back on the server.
+    pub fn forget_all_invites(&mut self) -> Vec<[u8; 32]> {
+        let mut taken = Vec::new();
+        self.vault_write(|v| {
+            taken = v.forget_all_invites();
+            !taken.is_empty()
+        });
+        taken
+    }
+
     /// The server listed `waiting` as the invites still waiting: the codes
-    /// of the others (used, taken back, run out) forgotten.
+    /// of the others forgotten, when the list says which (used, taken
+    /// back), and every one run out, whatever it says.
     pub fn forget_invites_but(&mut self, waiting: &[[u8; 32]], now: u64) -> bool {
         self.vault_write(|v| v.forget_invites_but(waiting, now))
     }
@@ -3888,6 +3900,14 @@ mod tests {
         let pdf = s.linked_file("Archive", "../attachments/Boarding%20pass.pdf").expect("found from a folder");
         assert!(opens_safely(&pdf));
         assert!(!opens_safely(&s.linked_file("", "attachments/run.command").unwrap()), "shown, not run");
+        // Nothing that runs, or opens as a page that could: whatever its
+        // case, and none without a kind.
+        for name in ["x.COMMAND", "x.sh", "x.app", "x.terminal", "x.tool", "x.jar", "x.exe", "x.bat", "x.ps1", "x.html", "x.svg", "x.webloc", "x.fileloc", "x.scpt", "x.pkg", "x.dmg", "x.docm", "x"] {
+            assert!(!opens_safely(Path::new(name)), "{name}");
+        }
+        for name in ["x.PDF", "x.png", "x.m4a", "x.mov", "x.md"] {
+            assert!(opens_safely(Path::new(name)), "{name}");
+        }
         assert_eq!(s.linked_file("", "example.com"), None, "a web address");
         assert_eq!(s.linked_file("", "attachments/gone.pdf"), None);
         let outside = format!("carnet-outside-{}.pdf", std::process::id());

@@ -640,8 +640,9 @@ impl Vault {
     }
 
     /// Takes the device (its id in hex) out of the account; this browser's
-    /// own id, and it leaves.
-    pub fn remove_device(&mut self, device: &str) -> Result<(), JsError> {
+    /// own id, and it leaves. True if waiting invites were taken back with
+    /// it (another device removed had their codes).
+    pub fn remove_device(&mut self, device: &str) -> Result<bool, JsError> {
         let id = unhex(device).ok_or_else(|| JsError::new("not a device id"))?;
         self.notes.remove_device(&id, &mut WebRandom).map_err(|e| JsError::new(&e))
     }

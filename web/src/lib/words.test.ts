@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { footer, linkAction, numbered, overflow, waysBack } from './words';
+import { footer, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
 
 const base = { status: 'Up to date', changes: 0, pictures: 0, waitShown: false, allSent: false, readOnly: false };
 
@@ -51,5 +51,55 @@ describe('overflow', () => {
     expect(overflow(0, 500, 700)).toEqual({ start: false, end: true });
     expect(overflow(100, 500, 700)).toEqual({ start: true, end: true });
     expect(overflow(200, 500, 700)).toEqual({ start: true, end: false });
+  });
+});
+
+describe('linkedCode', () => {
+  it('fills the form only when nothing is typed and nothing connects', () => {
+    expect(linkedCode('47-381095', '', false)).toBe('fill');
+    expect(linkedCode('47-381095', '  ', false)).toBe('fill');
+    expect(linkedCode('47-381095', '47-381095', false)).toBe('fill');
+  });
+  it('asks before changing a code being typed', () => {
+    expect(linkedCode('47-381095', '12-34', false)).toBe('ask');
+    expect(linkedCode('66-000001', '47-381095', false)).toBe('ask');
+  });
+  it('leaves a code connecting alone, and a link with none', () => {
+    expect(linkedCode('47-381095', '', true)).toBe('ignore');
+    expect(linkedCode('47-381095', '12-34', true)).toBe('ignore');
+    expect(linkedCode(null, '', false)).toBe('ignore');
+    expect(linkedCode('', '', false)).toBe('ignore');
+  });
+});
+
+describe('serverWords', () => {
+  it('is one line, with no letter that hides or turns text around', () => {
+    expect(serverWords('two\nlines\t and\u202eevil\u200b ')).toBe('two lines andevil');
+    const sly = 'a\u061cb\u200b\u200ec\u2060\u2061\u2064\u206fd\ufeffe\u{e0001}\u{e0041}\u{e007f}f\u00adg\ufff9h';
+    expect(serverWords(sly)).toBe('abcdefgh');
+    expect(serverWords('caf\u00e9 \u{1f600}')).toBe('caf\u00e9 \u{1f600}');
+  });
+  it('is cut short', () => {
+    const long = serverWords('\u00e9'.repeat(1000));
+    expect([...long].length).toBe(201);
+    expect(long.endsWith('…')).toBe(true);
+  });
+  it("is said as the server's own", () => {
+    expect(serverSays('only the owner can')).toBe('The server says: only the owner can');
+    expect(serverSays('\u200b \u202e')).toBe('');
+  });
+});
+
+describe('shownPage', () => {
+  it("shows a web page of the server's", () => {
+    expect(shownPage('https://x.co/start', 'https:')).toBe('https://x.co/start');
+    expect(shownPage('http://127.0.0.1:8787/join', 'http:')).toBe('http://127.0.0.1:8787/join');
+  });
+  it('shows nothing else', () => {
+    for (const bad of ['javascript:alert(1)', 'data:text/html,hi', 'http://x.co/start', 'https://x.co/\u202eevil', 'https://u@x.co/', 'ftp://x.co', 'https://x.co/a b', 'not a link', '']) {
+      expect(shownPage(bad, 'https:'), bad).toBe(null);
+    }
+    expect(shownPage(null, 'https:')).toBe(null);
+    expect(shownPage(undefined, 'https:')).toBe(null);
   });
 });

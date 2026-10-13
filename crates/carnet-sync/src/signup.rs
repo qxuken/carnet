@@ -8,6 +8,7 @@
 //! [`http::ask`](crate::http::ask)'s.
 
 use crate::http::Answer;
+use crate::link;
 use crate::session::server_says;
 
 /// A server's address as typed, as the app uses it: no slash at its end,
@@ -90,9 +91,10 @@ fn minutes(n: u64) -> String {
 
 /// What an answer to a signup means: sent (with whatever more the server
 /// said of it), mailed lately and not again, or why not, in the server's
-/// words when it gives any. `page` is the server's signup page, for a
-/// server whose signup is only there.
-pub fn answered(a: &Answer, page: Option<&str>) -> Result<Sent, String> {
+/// words when it gives any. `page` is the signup page the server at
+/// `origin` names, for a server whose signup is only there: shown only
+/// if it's plainly a web page ([`link::shown_page`]).
+pub fn answered(a: &Answer, origin: &str, page: Option<&str>) -> Result<Sent, String> {
     let said = said(&a.body);
     if (200..300).contains(&a.status) {
         // Asked again within the server's mail limit: nothing went.
@@ -106,7 +108,7 @@ pub fn answered(a: &Answer, page: Option<&str>) -> Result<Sent, String> {
         return Ok(Sent::Now(said.filter(|_| a.status != 204)));
     }
     if matches!(a.status, 404 | 405)
-        && let Some(page) = page
+        && let Some(page) = page.and_then(|p| link::shown_page(origin, p))
     {
         return Err(format!("This server makes accounts on its own page: {page}"));
     }
@@ -133,6 +135,9 @@ fn said(body: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server the answers are from.
+    const O: &str = "https://x.co";
 
     fn answer(status: u16, body: &str) -> Answer {
         Answer { status, body: body.as_bytes().to_vec() }
@@ -161,18 +166,25 @@ mod tests {
 
     #[test]
     fn an_answer_in_the_servers_words() {
-        assert_eq!(answered(&answer(202, r#"{"sent":true}"#), None), Ok(Sent::Now(None)));
-        assert_eq!(answered(&answer(202, r#"{"sent":true,"message":"Mailed already: look for it."}"#), None), Ok(Sent::Now(Some("The server says: Mailed already: look for it.".into()))));
-        assert_eq!(answered(&answer(400, r#"{"error":"That doesn't look like an email address."}"#), None), Err("The server says: That doesn't look like an email address.".into()));
-        assert_eq!(answered(&answer(429, "Mailed lately: wait ten minutes.\n"), None), Err("The server says: Mailed lately: wait ten minutes.".into()));
+        assert_eq!(answered(&answer(202, r#"{"sent":true}"#), O, None), Ok(Sent::Now(None)));
+        assert_eq!(answered(&answer(202, r#"{"sent":true,"message":"Mailed already: look for it."}"#), O, None), Ok(Sent::Now(Some("The server says: Mailed already: look for it.".into()))));
+        assert_eq!(answered(&answer(400, r#"{"error":"That doesn't look like an email address."}"#), O, None), Err("The server says: That doesn't look like an email address.".into()));
+        assert_eq!(answered(&answer(429, "Mailed lately: wait ten minutes.\n"), O, None), Err("The server says: Mailed lately: wait ten minutes.".into()));
         // At any length, on one line: no more than a sentence or two.
         let long = format!(r#"{{"error":"{}\nline two"}}"#, "x".repeat(5000));
-        let said = answered(&answer(400, &long), None).unwrap_err();
+        let said = answered(&answer(400, &long), O, None).unwrap_err();
         assert!(said.starts_with("The server says: xxx") && said.ends_with('…') && !said.contains('\n') && said.chars().count() < 230, "{said}");
-        assert_eq!(answered(&answer(429, ""), None), Err("Too many tries: wait a minute, then try again.".into()));
-        assert_eq!(answered(&answer(503, "<html>oops</html>"), None), Err("Signing up isn't working just now: try again in a few minutes.".into()));
-        assert_eq!(answered(&answer(404, ""), Some("https://x.co/start")), Err("This server makes accounts on its own page: https://x.co/start".into()));
-        assert_eq!(answered(&answer(403, ""), None), Err("The server didn't take that (error 403).".into()));
+        assert_eq!(answered(&answer(429, ""), O, None), Err("Too many tries: wait a minute, then try again.".into()));
+        assert_eq!(answered(&answer(503, "<html>oops</html>"), O, None), Err("Signing up isn't working just now: try again in a few minutes.".into()));
+        assert_eq!(answered(&answer(404, ""), O, Some("https://x.co/start")), Err("This server makes accounts on its own page: https://x.co/start".into()));
+        // A page that isn't plainly the web's: not shown, nor said to be
+        // where accounts are made.
+        for bad in ["javascript:alert(1)", "data:text/html,hi", "http://x.co/start", "https://x.co/\u{202e}evil", "https://u@x.co/", "ftp://x.co", "https://x.co/a b"] {
+            assert_eq!(answered(&answer(404, ""), O, Some(bad)), Err("The server didn't take that (error 404).".into()), "{bad}");
+        }
+        // Plain http, from a server reached so: shown.
+        assert_eq!(answered(&answer(405, ""), "http://127.0.0.1:8787", Some("http://127.0.0.1:8787/join")), Err("This server makes accounts on its own page: http://127.0.0.1:8787/join".into()));
+        assert_eq!(answered(&answer(403, ""), O, None), Err("The server didn't take that (error 403).".into()));
     }
 
     /// Asked again within the server's mail limit: nothing was mailed, so
@@ -180,21 +192,21 @@ mod tests {
     /// asked for.
     #[test]
     fn asked_again_too_soon_says_when_it_went() {
-        let a = answered(&answer(202, r#"{"sent":false,"mailed_ago":12,"again_in":588}"#), None).unwrap();
+        let a = answered(&answer(202, r#"{"sent":false,"mailed_ago":12,"again_in":588}"#), O, None).unwrap();
         assert_eq!(a, Sent::Lately { ago: 12, again_in: 588 });
         assert!(a.lately() && a.more().is_none());
         assert_eq!(
             a.line("ann@example.com"),
             "We emailed ann@example.com a moment ago. Look for it in your inbox (and the spam folder), and paste its code here. You can ask for another email in 10 minutes."
         );
-        let a = answered(&answer(202, r#"{"sent":false,"mailed_ago":130,"again_in":30}"#), None).unwrap();
+        let a = answered(&answer(202, r#"{"sent":false,"mailed_ago":130,"again_in":30}"#), O, None).unwrap();
         let line = a.line("a@b.co");
         assert!(line.starts_with("We emailed a@b.co 2 minutes ago.") && line.ends_with("another email in 1 minute."), "{line}");
         // A server's numbers past counting: said, not overflowed.
-        let a = answered(&answer(202, &format!(r#"{{"sent":false,"mailed_ago":{0},"again_in":{0}}}"#, u64::MAX)), None).unwrap();
+        let a = answered(&answer(202, &format!(r#"{{"sent":false,"mailed_ago":{0},"again_in":{0}}}"#, u64::MAX)), O, None).unwrap();
         assert_eq!(a, Sent::Lately { ago: u64::MAX, again_in: u64::MAX });
         assert!(a.line("a@b.co").starts_with("We emailed a@b.co "));
-        let sent = answered(&answer(202, r#"{"sent":true}"#), None).unwrap();
+        let sent = answered(&answer(202, r#"{"sent":true}"#), O, None).unwrap();
         assert!(!sent.lately());
         assert_eq!(sent.line("ann@example.com"), "We sent an invite to ann@example.com. Paste its code here.");
     }

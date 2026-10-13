@@ -8,8 +8,9 @@
 //! a link that is two requests in one. So a link is followed only when it
 //! is plainly the web's ([`fair`]): https, or http to the server's own
 //! origin (one tried out on this computer); no address on this computer or
-//! its network, unless the server is on one itself; and nothing in it but
-//! printable ASCII, so no space, CR or LF ends a request line early.
+//! its network, unless it's the server's own host, on one itself; and
+//! nothing in it but printable ASCII, so no space, CR or LF ends a request
+//! line early.
 
 use std::net::IpAddr;
 
@@ -82,16 +83,37 @@ impl Url {
 /// followed: it reads ([`Url::parse`]); it's https, or the server itself
 /// is reached by plain http (one tried out, or on a home network, with
 /// its object store beside it the same way: nothing a link could lower);
-/// and it's on no host [`inner`] unless the server's is too. An object
-/// store's link is on a host of its own, and that's fine.
+/// and it's on no host [`inner`] unless that's the server's own host, and
+/// the server's host is inner itself. Any port of it: an object store may
+/// sit beside the server on one of its own. Another host on this computer
+/// or its network, even for a server on one, never: a server isn't let
+/// knock on every door around it. An object store's link on a public host
+/// of its own is fine.
 pub fn fair(origin: &str, url: &str) -> bool {
     let (Ok(link), Ok(server)) = (Url::parse(url), Url::parse(origin)) else { return false };
-    (link.tls || !server.tls) && (!inner(&link.host) || inner(&server.host))
+    (link.tls || !server.tls) && (!inner(&link.host) || (inner(&server.host) && same_host(&link.host, &server.host)))
+}
+
+/// A page the server at `origin` names to be shown (its signup page): as
+/// written, if it reads as a link does ([`Url::parse`]: printable ASCII,
+/// no user in it) and is `https`, or `http` when the server itself is.
+/// Anything else (`javascript:`, a `data:` page, letters that turn the
+/// line around) isn't shown at all.
+pub fn shown_page(origin: &str, page: &str) -> Option<String> {
+    let (link, server) = (Url::parse(page).ok()?, Url::parse(origin).ok()?);
+    (link.tls || !server.tls).then(|| crate::session::server_words(page)).filter(|p| p == page)
+}
+
+/// Whether two hosts, as [`Url`] has them (lowercase), are one: a name's
+/// trailing dot aside.
+pub(crate) fn same_host(a: &str, b: &str) -> bool {
+    a.trim_end_matches('.') == b.trim_end_matches('.')
 }
 
 /// Whether `host` is this computer, or on its network: `localhost` (and
 /// any name under it), or an address that's loopback, private,
-/// link-local, shared (CGNAT), unspecified or broadcast. A name the DNS
+/// link-local, shared (CGNAT), unspecified or broadcast (and such an
+/// IPv4 address written as IPv6, NAT64's among them). A name the DNS
 /// can't give, its last part beginning with a digit (`127.1`,
 /// `2130706433`, `0x7f.1`), some systems read as an address: counted as
 /// one.
@@ -116,10 +138,19 @@ pub(crate) fn inner_ip(ip: IpAddr) -> bool {
         }
         IpAddr::V6(v) => {
             let s = v.segments();
+            // NAT64 (`64:ff9b::/96`): the IPv4 address in its last 32
+            // bits, reached through a gateway; the local-use prefix
+            // (`64:ff9b:1::/48`) is a network's own, whatever it holds.
+            let nat64 = s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] && {
+                let o = v.octets();
+                inner_ip(IpAddr::V4(std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15])))
+            };
             v.is_loopback()
                 || v.is_unspecified()
                 || s[0] & 0xfe00 == 0xfc00
                 || s[0] & 0xffc0 == 0xfe80
+                || s[..3] == [0x64, 0xff9b, 1]
+                || nat64
                 || v.to_ipv4().is_some_and(|v4| inner_ip(IpAddr::V4(v4)))
         }
     }
@@ -182,6 +213,8 @@ mod tests {
             "https://[fe80::1]/x",
             "https://[fd00::1]/x",
             "https://[::ffff:127.0.0.1]/x",
+            "https://[64:ff9b::a00:1]/x",
+            "https://[64:ff9b:1::5]/x",
             "https://localhost/x",
             "https://LOCALHOST./x",
             "https://db.localhost/x",
@@ -198,21 +231,35 @@ mod tests {
             assert!(!fair(public, bad), "{bad:?}");
         }
         // A server tried out on this computer, by plain http: its own
-        // links, and an object store beside it the same way (here, or by
-        // a container's name), as nothing is lowered by them.
+        // links, and an object store beside it on another port, as nothing
+        // is lowered by them. A name (a container's) is the DNS's to say,
+        // and checked there (`http`).
         let here = "http://127.0.0.1:8787";
         assert!(fair(here, "http://127.0.0.1:8787/v1/blobs/t"));
-        assert!(fair(here, "http://localhost:9000/bucket/x"));
+        assert!(fair(here, "http://127.0.0.1:9000/bucket/x"));
         assert!(fair(here, "http://rustfs:9000/carnet/x"));
         assert!(fair(here, "https://bucket.example/x"));
+        assert!(fair("http://localhost:8787", "http://localhost.:9000/bucket/x"));
+        // But no other host on this computer or its network: not another
+        // name for it, not the router, not a service on another address.
+        assert!(!fair(here, "http://localhost:9000/bucket/x"));
+        assert!(!fair(here, "http://127.0.0.2:2375/x"));
+        assert!(!fair(here, "http://192.168.1.1/x"));
+        assert!(!fair("http://localhost:8787", "http://127.0.0.1:2375/x"));
         // One on the internet by plain http: still nothing on this
-        // computer or its network.
+        // computer or its network, a hostile one's links to a local
+        // service (Docker's, here) above all.
         assert!(fair("http://notes.example.com", "http://bucket.example/x"));
         assert!(!fair("http://notes.example.com", "http://127.0.0.1:2375/x"));
-        // On a home network: its own, and the store beside it. Known by
-        // a name, the server isn't known to be on one.
+        assert!(!fair("http://notes.evil", "http://127.0.0.1:2375/containers/json"));
+        assert!(!fair("http://notes.evil", "http://[::1]:2375/x"));
+        assert!(!fair("http://notes.evil", "http://[64:ff9b::7f00:1]:2375/x"));
+        assert!(!fair("http://203.0.113.9:8787", "http://127.0.0.1:2375/x"));
+        // On a home network: its own host, on any port. Known by a name,
+        // the server isn't known to be on one.
         assert!(fair("https://192.168.1.5", "https://192.168.1.5/v1/blobs/t"));
-        assert!(fair("https://192.168.1.5", "https://192.168.1.6:9000/b/x"));
+        assert!(fair("https://192.168.1.5", "https://192.168.1.5:9000/b/x"));
+        assert!(!fair("https://192.168.1.5", "https://192.168.1.6:9000/b/x"));
         assert!(!fair("https://nas.home.arpa", "https://192.168.1.6:9000/b/x"));
         // An origin that doesn't read: nothing followed.
         assert!(!fair("not a server", "https://bucket.example/x"));

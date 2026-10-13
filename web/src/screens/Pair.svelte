@@ -12,6 +12,7 @@
   import Icon from '../lib/Icon.svelte';
   import Scan from './Scan.svelte';
   import { code_from_link, server_fit } from '../wasm/carnet_web.js';
+  import { linkedCode, serverSays, shownPage } from '../lib/words';
 
   /// The steps: choosing a way in, then a way's form. Null until the
   /// server has said what it offers.
@@ -84,7 +85,8 @@
         if (f) passkeys = f.includes('passkeys');
         // A hosted service from before signups were listed said only its page.
         signups = !!f?.includes('signup') || !!i.signup;
-        signupPage = i.signup ?? null;
+        // Shown only if it's plainly a web page.
+        signupPage = shownPage(i.signup, location.protocol);
         signupEmail = i.password_email === 'account';
         outdated = server_fit(i.protocol ?? 0, i.oldest ?? 0, i.deprecated ?? 0);
       }
@@ -117,17 +119,30 @@
   const backTo = $derived<Step | null>(step === 'choose' || step === null ? null : stepped ? 'choose' : step === 'words' ? 'code' : null);
 
   // A link opened in this tab while it's open here: its code, in its
-  // form, as one it was opened by.
+  // form, as one it was opened by; but only into an empty form, and never
+  // while connecting. Something else typed, the page asks first, so a
+  // link opened again and again can't change a code unasked.
   let linkSeen = sync.linked;
+  /// A link's code, waiting for a yes before it takes the form's place.
+  let askLink = $state<string | null>(null);
   $effect(() => {
     const l = sync.linked;
     if (!l || l === linkSeen) return;
     linkSeen = l;
+    const typed = step === 'password' ? email + password : step === 'signup' ? signupAddress : code;
+    const act = linkedCode(l, typed, sync.joining);
+    if (act === 'fill') useLink(l);
+    else if (act === 'ask') askLink = l;
+  });
+
+  /// The link's code in its form.
+  function useLink(l: string) {
+    askLink = null;
     left = step;
     code = fromLink = l;
     step = 'code';
     sync.error = null;
-  });
+  }
 
   /// To another step: what's typed for a code goes, and so does any error.
   /// A passkey's begins at once, the browser asking which.
@@ -185,14 +200,7 @@
       const t = body.trim();
       s = t.length <= 300 && !t.startsWith('<') ? t : '';
     }
-    const line = s
-      .split(/\s+/)
-      .map((w) => w.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ''))
-      .filter(Boolean)
-      .join(' ');
-    if (!line) return '';
-    const letters = [...line];
-    return `The server says: ${letters.length > 200 ? letters.slice(0, 200).join('') + '…' : line}`;
+    return serverSays(s);
   }
 
   /// A yes that mailed nothing: asked again within the server's mail
@@ -374,6 +382,16 @@
         <button type="button" class="link quiet" disabled={sync.joining} onclick={() => to('words')}>Use recovery words</button>
       {/if}
     {/if}
+    {#if askLink}
+      {@const l = askLink}
+      <div class="ask" role="status">
+        <p><Icon name="link" size={16} /> A link brought a code. Use the code from the link?</p>
+        <div class="buttons">
+          <button type="button" class="second" onclick={() => (askLink = null)}>Cancel</button>
+          <button type="button" class="second" disabled={sync.joining} onclick={() => useLink(l)}>Yes, use it</button>
+        </div>
+      </div>
+    {/if}
     {#if outdated}<p class="error" role="alert">{outdated}</p>{/if}
     {#if scanning}<Scan found={scanned} close={() => (scanning = false)} />{/if}
     <p class="note">End-to-end encrypted: the server keeps your notes sealed, and never sees a word of them. This browser keeps its keys sealed too.</p>
@@ -445,6 +463,10 @@
   .error { color: var(--danger); margin: 12px 0 0; }
   .sent { color: var(--ink); }
   .from { color: var(--ink); }
+  .ask { margin-top: 12px; }
+  .ask p { color: var(--ink); margin: 0 0 10px; }
+  .ask :global(.icon) { vertical-align: -3px; margin-right: 2px; color: var(--muted); }
+  .ask .buttons { display: flex; gap: 10px; justify-content: center; }
   .from :global(.icon) { vertical-align: -3px; margin-right: 2px; color: var(--muted); }
   .sent :global(.icon) { vertical-align: -3px; margin-right: 2px; color: var(--success); }
   .said { font-size: 14px; }

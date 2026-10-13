@@ -14,14 +14,15 @@
 //! own (a home server, a private CA), the one certificate given to trust
 //! besides.
 
-use std::sync::Arc;
+use std::net::IpAddr;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc as tmpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{Connector, connect_async_tls_with_config};
+use tokio_tungstenite::{Connector, MaybeTlsStream, connect_async_tls_with_config};
 
 /// What the socket did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +49,7 @@ const KEEPALIVE: Duration = Duration::from_secs(30);
 pub struct Link {
     commands: tmpsc::UnboundedSender<Command>,
     events: mpsc::Receiver<NetEvent>,
+    peer: Arc<Mutex<Option<IpAddr>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -57,6 +59,16 @@ pub fn sync_url(origin: &str, app: &str, version: &str) -> Option<String> {
     let origin = origin.trim_end_matches('/');
     let rest = origin.strip_prefix("https://").map(|r| ("wss", r)).or_else(|| origin.strip_prefix("http://").map(|r| ("ws", r)))?;
     Some(crate::compat::with_app(&format!("{}://{}/v1/sync", rest.0, rest.1), app, version))
+}
+
+/// The address a socket is connected to.
+fn peer_of(s: &MaybeTlsStream<tokio::net::TcpStream>) -> Option<IpAddr> {
+    match s {
+        MaybeTlsStream::Plain(t) => t.peer_addr().ok(),
+        MaybeTlsStream::Rustls(t) => t.get_ref().0.peer_addr().ok(),
+        _ => None,
+    }
+    .map(|a| a.ip())
 }
 
 fn tls(trusted: &[Vec<u8>]) -> Connector {
@@ -94,6 +106,8 @@ impl Link {
     pub fn start_trusting(url: String, trusted: Vec<Vec<u8>>, wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
         let (commands, mut rx) = tmpsc::unbounded_channel::<Command>();
         let (tx, events) = mpsc::channel::<NetEvent>();
+        let peer = Arc::new(Mutex::new(None));
+        let at = peer.clone();
         let thread = std::thread::Builder::new().name("carnet-sync".into()).spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             rt.block_on(async move {
@@ -112,6 +126,7 @@ impl Link {
                     let reason = match connected {
                         Ok(Ok((ws, _))) => {
                             wait = Duration::from_secs(1);
+                            *at.lock().unwrap_or_else(|e| e.into_inner()) = peer_of(ws.get_ref());
                             if !emit(NetEvent::Connected) {
                                 return;
                             }
@@ -175,7 +190,14 @@ impl Link {
                 }
             });
         })?;
-        Ok(Link { commands, events, thread: Some(thread) })
+        Ok(Link { commands, events, peer, thread: Some(thread) })
+    }
+
+    /// The address the socket is (or was last) connected to: what a
+    /// picture's link to the server's own host may lead to, and whether
+    /// the server is on this computer or its network (`http`).
+    pub fn peer(&self) -> Option<IpAddr> {
+        *self.peer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Sends a frame, if the socket is open (else it is dropped: the
@@ -266,6 +288,8 @@ mod tests {
         let trusting = Link::start_trusting(url.clone(), vec![der], || {}).unwrap();
         let seen = wait(&trusting);
         assert_eq!(seen, [NetEvent::Connected, NetEvent::Frame(b"hello".to_vec())]);
+        // Where the socket is: what a picture's link may lead to.
+        assert!(trusting.peer().is_some_and(|ip| ip.is_loopback()), "{:?}", trusting.peer());
         trusting.send(b"back".to_vec());
         assert_eq!(heard.recv_timeout(Duration::from_secs(5)).unwrap(), b"back");
         drop(trusting);
