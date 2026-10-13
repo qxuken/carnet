@@ -237,6 +237,18 @@ impl World {
     }
 
     fn route(&mut self, outs: Vec<Out>) {
+        // A room's records past a part: the rest at once (the network here
+        // holds any amount for a socket).
+        let mut outs = outs;
+        loop {
+            let more = self.hub.take_more();
+            if more.is_empty() {
+                break;
+            }
+            for conn in more {
+                outs.extend(self.hub.drained(conn));
+            }
+        }
         for o in outs {
             match o {
                 Out::Send(conn, bytes) => {

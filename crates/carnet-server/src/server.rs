@@ -47,7 +47,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::blobs::{self as pictures, BlobFiles, Blobs, Counts, FileBlobs, Job, Worker};
 use crate::links::Signer;
-use crate::hub::{ConnId, Hub, Open, Out, Stats};
+use crate::hub::{BACKFILL_PART, ConnId, Hub, Open, Out, Stats};
 use crate::limits::{self, Limiter, Network};
 use crate::quota::{Admission, ByInvite, PasswordEmails, Quota, Unlimited};
 use crate::sqlite::Sharded;
@@ -158,6 +158,9 @@ enum ToHub {
     Ping { reply: oneshot::Sender<()> },
     /// A frame the picture worker made, for a socket: passed on as it is.
     Deliver { conn: ConnId, bytes: Vec<u8> },
+    /// A socket with more of a room's records to come has written most of
+    /// what it was sent: the next part ([`Hub::drained`]).
+    Drained { conn: ConnId },
     /// The numbers for `/metrics`, asked at `asked`: the time the ask
     /// waited in the queue is the hub's lag.
     Metrics { asked: Instant, reply: oneshot::Sender<Snapshot> },
@@ -409,13 +412,27 @@ impl Gate {
 }
 
 /// The hub's thread: one thing at a time, from every socket.
-fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, mut rx: mpsc::UnboundedReceiver<ToHub>, worker: std::sync::mpsc::Sender<Job>) {
+#[allow(clippy::too_many_arguments)]
+fn hub_thread(
+    origin: String,
+    compact_after: usize,
+    store: Store,
+    seams: Seams,
+    limits: SocketLimits,
+    mut rx: mpsc::UnboundedReceiver<ToHub>,
+    worker: std::sync::mpsc::Sender<Job>,
+) {
     let (quota, admission, passwords, password_emails, signup) = seams;
     let mut hub = Hub::new(origin, store).with_quota(quota).with_admission(admission).with_password_emails(password_emails).with_signup(signup);
     if let Some(p) = passwords {
         hub = hub.with_passwords(p);
     }
     hub.compact_when(compact_after, 256 * 1024);
+    // A room's records go a part at a time, an eighth of what may wait
+    // for a socket at most: the next once it has written all but its pace
+    // (`Meter::more`). So what waits stays under its pace, a part, and a
+    // message more (a big one, a fragment) whatever the room holds.
+    hub.backfill_part(BACKFILL_PART.min(limits.queue / 8));
     let mut sockets: std::collections::HashMap<ConnId, Line> = Default::default();
     let mut rng = OsRandom;
     let mut seen = Snapshot::default();
@@ -446,6 +463,7 @@ fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, 
                 Vec::new()
             }
             ToHub::Deliver { conn, bytes } => vec![Out::Send(conn, bytes)],
+            ToHub::Drained { conn } => hub.drained(conn),
             ToHub::Run(job) => job(&mut hub),
             ToHub::Metrics { asked, reply } => {
                 let _ = reply.send(Snapshot {
@@ -461,33 +479,22 @@ fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, 
             }
             ToHub::Shutdown => break,
         };
-        for o in outs {
-            match o {
-                Out::Send(conn, bytes) => {
-                    if let Some(s) = sockets.get(&conn) {
-                        let n = bytes.len() as u64;
-                        if s.send(Message::Binary(bytes.into())) {
-                            seen.frames_out += 1;
-                            seen.bytes_out += n;
-                        }
-                    }
+        let mut outs = outs;
+        loop {
+            route(&mut hub, &mut sockets, outs, &mut seen, &worker);
+            // Sockets with more of a room to come: sent it now if they've
+            // written what they had, else once they have (their writer
+            // says, `ToHub::Drained`).
+            outs = Vec::new();
+            for conn in hub.take_more() {
+                if let Some(s) = sockets.get(&conn)
+                    && s.wants_more()
+                {
+                    outs.extend(hub.drained(conn));
                 }
-                Out::Close(conn) => {
-                    if let Some(s) = sockets.remove(&conn) {
-                        let _ = s.send(Message::Close(None));
-                    }
-                    // What it was in has been told already, by the hub;
-                    // what it had coming goes.
-                    for o in hub.disconnect(conn) {
-                        if let Out::Blob(job) = o {
-                            let _ = worker.send(job);
-                        }
-                    }
-                }
-                // Pictures: allowed, and handed on; the worker does them.
-                Out::Blob(job) => {
-                    let _ = worker.send(job);
-                }
+            }
+            if outs.is_empty() {
+                break;
             }
         }
         if let Some((conn, cost)) = done
@@ -499,6 +506,40 @@ fn hub_thread(origin: String, compact_after: usize, store: Store, seams: Seams, 
             s.meter.handled(cost);
         }
         seen.handled.add(began.elapsed());
+    }
+}
+
+/// What the hub said, done: frames queued for their sockets, sockets
+/// closed, pictures handed to the worker.
+fn route(hub: &mut Hub<Store>, sockets: &mut std::collections::HashMap<ConnId, Line>, outs: Vec<Out>, seen: &mut Snapshot, worker: &std::sync::mpsc::Sender<Job>) {
+    for o in outs {
+        match o {
+            Out::Send(conn, bytes) => {
+                if let Some(s) = sockets.get(&conn) {
+                    let n = bytes.len() as u64;
+                    if s.send(Message::Binary(bytes.into())) {
+                        seen.frames_out += 1;
+                        seen.bytes_out += n;
+                    }
+                }
+            }
+            Out::Close(conn) => {
+                if let Some(s) = sockets.remove(&conn) {
+                    let _ = s.send(Message::Close(None));
+                }
+                // What it was in has been told already, by the hub;
+                // what it had coming goes.
+                for o in hub.disconnect(conn) {
+                    if let Out::Blob(job) = o {
+                        let _ = worker.send(job);
+                    }
+                }
+            }
+            // Pictures: allowed, and handed on; the worker does them.
+            Out::Blob(job) => {
+                let _ = worker.send(job);
+            }
+        }
     }
 }
 
@@ -622,7 +663,7 @@ pub async fn serve_limited(
             }
         }
     })?;
-    let hub =std::thread::Builder::new().name("carnet-hub".into()).spawn(move || hub_thread(origin, compact_after, store, (quota, admission, passwords, password_emails, takes_signups), rx, jobs))?;
+    let hub =std::thread::Builder::new().name("carnet-hub".into()).spawn(move || hub_thread(origin, compact_after, store, (quota, admission, passwords, password_emails, takes_signups), sockets, rx, jobs))?;
     if let Some(ready) = ready {
         ready(HubHandle { tx: tx.clone() });
     }
@@ -1232,6 +1273,13 @@ impl Drop for Held {
     }
 }
 
+/// How much may wait for a socket before its device's next frame waits
+/// instead, and before the next part of a room it joined is sent: a
+/// frame's worth, or half its budget if that's less.
+fn pace(budget: usize) -> usize {
+    MAX_FRAME.min(budget / 2)
+}
+
 /// What a message costs a socket's queue beside its bytes: the queue's
 /// own keeping of it. A pong is four bytes; a million of them waiting
 /// are a lot more than four megabytes.
@@ -1257,6 +1305,10 @@ struct Meter {
     over: AtomicBool,
     /// Logged in: no login timeout.
     ready: AtomicBool,
+    /// The hub has more of a room for it, to be asked for once what waits
+    /// for it is under its pace (`ToHub::Drained`): whichever sees both
+    /// first, the hub's thread or its writer, takes it.
+    more: AtomicBool,
     /// Its task woken: something above changed.
     changed: Notify,
 }
@@ -1291,6 +1343,13 @@ struct Line {
 }
 
 impl Line {
+    /// The hub has more for it: whether to ask for it now (what waits is
+    /// under its pace), or its writer is to once it is.
+    fn wants_more(&self) -> bool {
+        self.meter.more.store(true, Ordering::SeqCst);
+        self.meter.queued.load(Ordering::SeqCst) < pace(self.budget) && self.meter.more.swap(false, Ordering::SeqCst)
+    }
+
     /// `m` queued, whether it was. Past the budget it isn't, nor is
     /// anything after, and the socket's task closes the socket.
     fn send(&self, m: Message) -> bool {
@@ -1341,14 +1400,14 @@ async fn socket_task(app: App, socket: WebSocket, client: String, said: compat::
     let (to, mut from_hub) = mpsc::unbounded_channel::<Message>();
     let meter = Arc::new(Meter::default());
     let line = Line { to, meter: meter.clone(), budget: limits.queue };
-    // A frame's worth waiting, or half the budget if that's less.
-    let pace = MAX_FRAME.min(limits.queue / 2);
+    let pace = pace(limits.queue);
     if app.hub.send(ToHub::Open { conn, to: line.clone(), client, app: said }).is_err() {
         return;
     }
     let (mut sink, mut stream) = socket.split();
     let mut writer = tokio::spawn({
         let meter = meter.clone();
+        let hub = app.hub.clone();
         async move {
             while let Some(m) = from_hub.recv().await {
                 let (cost, closing) = (cost(&m), matches!(m, Message::Close(_)));
@@ -1356,6 +1415,11 @@ async fn socket_task(app: App, socket: WebSocket, client: String, said: compat::
                 meter.sent(cost);
                 if sent.is_err() || closing {
                     break;
+                }
+                // Written down to its pace with more of a room to come: the
+                // next part asked for.
+                if meter.more.load(Ordering::SeqCst) && meter.queued.load(Ordering::SeqCst) < pace && meter.more.swap(false, Ordering::SeqCst) {
+                    let _ = hub.send(ToHub::Drained { conn });
                 }
             }
         }

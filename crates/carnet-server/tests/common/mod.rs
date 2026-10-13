@@ -99,6 +99,18 @@ impl Net {
     }
 
     pub fn route(&mut self, outs: Vec<Out>) {
+        // A room's records past a part: the rest once what went before is
+        // delivered, as a socket's writer would ask.
+        let mut outs = outs;
+        loop {
+            let more = self.hub.take_more();
+            if more.is_empty() {
+                break;
+            }
+            for conn in more {
+                outs.extend(self.hub.drained(conn));
+            }
+        }
         for o in outs {
             match o {
                 Out::Send(c, b) => self.down.push_back((c, b)),

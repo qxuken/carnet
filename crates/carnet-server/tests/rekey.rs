@@ -2,17 +2,19 @@
 //! and key epochs"): each goes signed by the device that made it, and a
 //! device takes one only from a device in the account at its newest
 //! epoch, for the epoch right after, never in place of a key it has. A
-//! device removed, with the server's help, hands nobody a key of its own.
+//! device removed, with the server's help, hands nobody a key of its own,
+//! nor is sealed the next by a card it sealed before it went.
 //! On memory and on SQLite alike.
 
 mod common;
 
 use carnet_server::{ConnId, Storage};
-use carnet_sync::crypto::{DeviceKey, RecoveryCode, VaultKey};
+use carnet_sync::crypto::{Card, DeviceKey, RecoveryCode, VaultKey};
 use carnet_sync::elo;
 use carnet_sync::pair::{Joiner, Joining, Recoverer};
-use carnet_sync::rekey::Signer;
-use carnet_sync::session::{Docs, Event};
+use carnet_sync::rekey::{self, Signer};
+use carnet_sync::session::{DeviceInfo, Docs, Event};
+use carnet_sync::{passkey, password};
 use carnet_sync::wire::{self, Carnet, Frame};
 use carnet_sync::Origin;
 use common::*;
@@ -202,5 +204,214 @@ fn an_epoch_from_the_server_does_not_overflow() {
         assert!(d.session.take_out().is_empty(), "nothing sent");
         assert!(!net.hub.store().device(ACCOUNT, b"laptop").unwrap().revoked);
         assert_eq!(net.device(a).session.ring().epochs(), [0]);
+    }
+}
+
+/// The list as the hub would send it to `conn`, from what the store holds:
+/// for a test's server to alter before handing it over.
+fn honest_list(net: &Net) -> (Vec<wire::DeviceRow>, Vec<u8>, Vec<u8>, Vec<wire::PasskeyRow>) {
+    let store = net.hub.store();
+    let rows = store
+        .devices(ACCOUNT)
+        .into_iter()
+        .filter(|(_, d)| !d.revoked)
+        .map(|(id, d)| wire::DeviceRow { you: id == b"first", online: true, id, public: d.public, card: d.card, seen: 0 })
+        .collect();
+    let passkeys = store.passkeys(ACCOUNT).into_iter().map(|p| wire::PasskeyRow { public: p.public, card: p.card, made: p.made }).collect();
+    (rows, store.recovery_card(ACCOUNT), store.password_card(ACCOUNT), passkeys)
+}
+
+/// `conn` handed a list of devices by the server, as it is.
+fn hand_list(net: &mut Net, conn: ConnId, (devices, recovery, password, passkeys): (Vec<wire::DeviceRow>, Vec<u8>, Vec<u8>, Vec<wire::PasskeyRow>)) -> Vec<DeviceInfo> {
+    let epoch = net.hub.store().epoch(ACCOUNT);
+    let list = Carnet::Devices { epoch, devices, recovery, password, passwords: true, passkeys, password_email: String::new() };
+    net.down.push_back((conn, wire::encode(&Frame::Carnet(list))));
+    net.pump();
+    std::mem::take(&mut net.device(conn).events)
+        .into_iter()
+        .rev()
+        .find_map(|e| if let Event::Devices(l) = e { Some(l) } else { None })
+        .expect("a list")
+}
+
+/// The laptop is removed, and keeps epoch 0's key. The server, with it,
+/// hands the first device a list in which something new to seal to is a
+/// card the laptop sealed under epoch 0, its own box key in it: the
+/// recovery code's (the account has none), the password's, a passkey's, a
+/// device that isn't there, or the tablet's. Each such card is one that
+/// hasn't said who it is, and the next removal is refused, nothing sent:
+/// the laptop is never sealed epoch 2's key. With the list as it is, the
+/// removal goes ahead.
+#[test]
+fn a_card_under_an_older_epoch_is_never_sealed_to() {
+    for store in stores() {
+        let mut net = Net::new(83, store);
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        let (b, laptop_key) = pair_keeping(&mut net, a, b"laptop", 2);
+        let _c = net.pair(a, b"tablet", 3);
+        let _d = net.pair(a, b"phone", 4);
+        let laptop_ring = net.device(b).session.ring().clone();
+        let _ = net.list(a);
+        net.revoke(a, b"laptop").unwrap();
+        assert_eq!(net.hub.store().epoch(ACCOUNT), 1);
+        assert_eq!(net.device(a).session.ring().current().0, 1);
+
+        // The laptop's card for each, under epoch 0.
+        let laptop_box = laptop_key.box_secret().public();
+        let posing = |net: &mut Net, device: &[u8], public: [u8; 32], name: &str| {
+            Card { device: device.to_vec(), public, boxed: laptop_box, name: name.into(), credential: Vec::new() }.seal(&laptop_ring, &mut net.rng)
+        };
+        let passkey_public = DeviceKey::generate(&mut net.rng).public();
+        let tablet_public = net.hub.store().device(ACCOUNT, b"tablet").unwrap().public;
+        let mut lists = Vec::new();
+        let mut l = honest_list(&net);
+        l.1 = posing(&mut net, &[], laptop_key.public(), "");
+        lists.push(("the recovery code's", l));
+        let mut l = honest_list(&net);
+        l.2 = posing(&mut net, password::SLOT, laptop_key.public(), "ann@example.com");
+        lists.push(("the password's", l));
+        let mut l = honest_list(&net);
+        let card = posing(&mut net, &passkey::slot(&passkey_public), passkey_public, "Passkey");
+        l.3.push(wire::PasskeyRow { public: passkey_public, card, made: 1 });
+        lists.push(("a passkey's", l));
+        let mut l = honest_list(&net);
+        let card = posing(&mut net, b"ghost", laptop_key.public(), "ghost");
+        l.0.push(wire::DeviceRow { id: b"ghost".to_vec(), public: laptop_key.public(), card, seen: 0, you: false, online: false });
+        lists.push(("a device not in the account", l));
+        let mut l = honest_list(&net);
+        let card = posing(&mut net, b"tablet", tablet_public, "tablet");
+        l.0.iter_mut().find(|r| r.id == b"tablet").unwrap().card = card;
+        lists.push(("the tablet's", l));
+
+        for (what, list) in lists {
+            let shown = hand_list(&mut net, a, list);
+            for row in &shown {
+                if row.id == b"ghost" || (what == "the tablet's" && row.id == b"tablet") {
+                    assert_eq!(row.name, None, "{what}: shown as not having said who it is");
+                }
+            }
+            let Net { peers, rng, .. } = &mut net;
+            let Some(Peer::Device(d)) = peers.get_mut(&a) else { panic!() };
+            let _ = d.session.take_out();
+            assert!(d.session.revoke(b"phone", rng).is_err(), "{what}: refused");
+            assert!(d.session.take_out().is_empty(), "{what}: nothing sent");
+            assert!(!net.hub.store().device(ACCOUNT, b"phone").unwrap().revoked);
+            assert_eq!(net.hub.store().epoch(ACCOUNT), 1);
+        }
+
+        // The list as it is: removed, and epoch 2's key sealed to nothing
+        // the laptop opens.
+        let list = honest_list(&net);
+        hand_list(&mut net, a, list);
+        net.revoke(a, b"phone").unwrap();
+        assert_eq!(net.hub.store().epoch(ACCOUNT), 2);
+        assert_eq!(net.device(a).session.ring().current().0, 2);
+        let mut ring = laptop_ring.clone();
+        for to in [&b"first"[..], b"tablet", b"laptop", b"ghost", &[]] {
+            let mut sent = net.hub.store().rekeys(ACCOUNT, to);
+            rekey::take_all(&mut ring, ACCOUNT, &laptop_key.box_secret(), &mut sent);
+        }
+        assert_eq!(ring.epochs(), [0], "the laptop has no key after its own");
+    }
+}
+
+/// A list read before this device took a new key: its cards were the old
+/// epoch's. A removal by it is refused, and the list asked for again; then
+/// it goes ahead.
+#[test]
+fn a_list_from_before_a_new_key_is_read_again() {
+    for store in stores() {
+        let mut net = Net::new(84, store);
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        let _b = net.pair(a, b"laptop", 2);
+        let c = net.pair(a, b"tablet", 3);
+        let _d = net.pair(a, b"phone", 4);
+        // The tablet reads the list, then is away while the laptop is
+        // removed; back, it takes epoch 1's key, its list still epoch 0's.
+        let _ = net.list(c);
+        let away = net.take(c);
+        let _ = net.list(a);
+        net.revoke(a, b"laptop").unwrap();
+        let c = net.back(away);
+        assert_eq!(net.device(c).session.ring().current().0, 1);
+        {
+            let Net { peers, rng, .. } = &mut net;
+            let Some(Peer::Device(d)) = peers.get_mut(&c) else { panic!() };
+            let _ = d.session.take_out();
+            assert!(d.session.revoke(b"phone", rng).is_err());
+            let out = d.session.take_out();
+            assert_eq!(out.len(), 1, "the list asked for, nothing else");
+            assert!(matches!(wire::decode(&out[0]), Ok(Frame::Carnet(Carnet::ListDevices))));
+            d.session.list_devices();
+        }
+        net.pump();
+        net.revoke(c, b"phone").unwrap();
+        assert_eq!(net.hub.store().epoch(ACCOUNT), 2);
+        assert_eq!(net.device(a).session.ring().current().0, 2);
+    }
+}
+
+/// Two removals, one after the other, with the tablet away across both and
+/// a recovery code and a passkey set: the second is sealed to the tablet's
+/// card and the slots' as the first sealed them anew. The tablet, back,
+/// takes both keys (the card it sends as it logs in, under epoch 0, isn't
+/// kept in place of the removal's); the words and the passkey let a device
+/// in with every key; and a third removal goes ahead with the tablet in it.
+#[test]
+fn a_second_removal_includes_a_device_away_across_the_first() {
+    for store in stores() {
+        let mut net = Net::new(85, store);
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        let _b = net.pair(a, b"laptop", 2);
+        let c = net.pair(a, b"tablet", 3);
+        let _d = net.pair(a, b"phone", 4);
+        let _e = net.pair(a, b"watch", 5);
+        let words = RecoveryCode::generate(&mut net.rng);
+        let prf = [7; 32];
+        {
+            let Net { peers, rng, .. } = &mut net;
+            let Some(Peer::Device(d)) = peers.get_mut(&a) else { panic!() };
+            d.session.set_recovery(&words, rng);
+            d.session.add_passkey("Passkey", b"cred", &prf, rng).unwrap();
+        }
+        net.pump();
+        net.write(a, "# Plans\n");
+        let away = net.take(c);
+
+        let _ = net.list(a);
+        net.revoke(a, b"laptop").unwrap();
+        assert_eq!(net.hub.store().epoch(ACCOUNT), 1);
+        let card = net.hub.store().device(ACCOUNT, b"tablet").unwrap().card;
+        assert_eq!(Card::epoch(&card), Some(1), "the tablet's card, sealed anew by the removal");
+        let shown = net.list(a);
+        assert!(shown.iter().all(|r| r.name.is_some()), "{shown:?}");
+        net.revoke(a, b"phone").unwrap();
+        assert_eq!(net.hub.store().epoch(ACCOUNT), 2);
+        assert_eq!(net.hub.store().rekeys(ACCOUNT, b"tablet").len(), 2);
+
+        let c = net.back(away);
+        assert_eq!(net.device(c).session.ring().epochs(), [0, 1, 2]);
+        assert_eq!(Card::epoch(&net.hub.store().device(ACCOUNT, b"tablet").unwrap().card), Some(2));
+        net.write(a, "# Plans\n\nafter both\n");
+        assert_eq!(net.device(c).notes.docs[ROOM].text(), "# Plans\n\nafter both\n");
+
+        // The words, and the passkey: in, with every key.
+        for n in [&b"phoenix"[..], b"griffin"] {
+            let key = DeviceKey::generate(&mut net.rng);
+            let r = if n == b"phoenix" { Recoverer::new(ORIGIN, words.clone(), n.to_vec(), key.clone()) } else { Recoverer::passkey(ORIGIN, &prf, n.to_vec(), key.clone()) };
+            let conn = net.connect(Peer::Recoverer(r));
+            net.pump();
+            net.admit(conn, n, key, 9);
+            assert_eq!(net.device(conn).session.ring().epochs(), [0, 1, 2]);
+            assert_eq!(net.device(conn).notes.docs[ROOM].text(), "# Plans\n\nafter both\n");
+        }
+
+        let _ = net.list(c);
+        net.revoke(c, b"watch").unwrap();
+        assert_eq!(net.hub.store().epoch(ACCOUNT), 3);
+        assert_eq!(net.device(a).session.ring().current().0, 3);
     }
 }

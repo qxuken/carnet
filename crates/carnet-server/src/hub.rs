@@ -4,14 +4,14 @@
 //! tells each device what changed while it was away. It reads headers
 //! only: what is in a record it never knows (docs/SYNC.md §6, §7).
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use carnet_sync::compat::{self, Client, Greeting, feature};
 use carnet_sync::crypto::{Random, login_message, recovery_message, verify};
 use carnet_sync::invite::InviteCode;
 use carnet_sync::pair::NO_SLOT;
 use carnet_sync::{passkey, password};
-use carnet_sync::elo::{self, Header};
+use carnet_sync::elo::{self, Header, Pieces};
 use carnet_sync::wire::{
     self, AccountRow, BaseRow, BatchId, Carnet, CrdtType, Deny, DeviceRow, Frame, InviteRow, LogRow, PasskeyRow, Permission, RoomRow, UpdateStatusCode,
 };
@@ -20,7 +20,7 @@ use loro_protocol::ProtocolMessage;
 use crate::blobs::Job;
 use crate::limits::{self, Limiter};
 use crate::quota::{Admission, ByInvite, NO_ACCOUNT_EMAIL, NOTES_FULL, PasswordEmails, Quota, ROOM_FULL, Unlimited, password_email_is};
-use crate::storage::{self, Live, Logged, Storage, covers};
+use crate::storage::{self, Live, Logged, Span, Storage, covers};
 
 pub type ConnId = u64;
 
@@ -34,8 +34,16 @@ pub enum Out {
     Blob(Job),
 }
 
-/// The largest record kept; one past it is refused, not stored.
+/// The largest delta record kept; one past it is refused, not stored. A
+/// snapshot may be bigger, up to [`elo::MAX_SNAPSHOT`]: it comes, and
+/// goes, in fragments.
 pub const MAX_RECORD: usize = 256 * 1024;
+
+/// How much of a room's records goes to a socket that joined it before
+/// the rest waits for it to be written ([`Hub::drained`]): a room's
+/// records, its base among them, can be more than a socket may have
+/// waiting.
+pub const BACKFILL_PART: usize = 2 << 20;
 
 /// The longest room id taken: a note's is 32 hex digits, the vault's
 /// `vault`. A longer one is never joined, written, or repaired.
@@ -104,6 +112,51 @@ struct Conn {
     /// (`ROOM_FULL`, `NOTES_FULL`): once a socket, however often it sends
     /// again.
     told_full: bool,
+    /// Rooms it joined whose records are on their way to it, a part at a
+    /// time, the first going now.
+    backfills: VecDeque<Backfill>,
+    /// A snapshot coming from it in fragments, until whole.
+    incoming: Option<Pieces>,
+}
+
+/// A room's records on their way to a socket that joined it (§6): sent a
+/// part at a time ([`BACKFILL_PART`]), the next once the socket has
+/// written most of the last ([`Hub::drained`]).
+struct Backfill {
+    room: String,
+    /// What the device has, by peer: as it joined, and the base's once
+    /// that is sent.
+    has: HashMap<u64, u64>,
+    /// The room's records as read when it joined, not gone through yet;
+    /// `None` for a join that waited behind another, read from the store
+    /// a part at a time.
+    first: Option<VecDeque<Span>>,
+    /// A join that waited behind another: its base is read when its turn
+    /// comes, not held meanwhile.
+    base_due: bool,
+    /// The last record's `seq` gone through.
+    after: u64,
+    /// Messages made and not sent yet: a base's fragments, a part's
+    /// batches, and what another device writes to the room meanwhile.
+    ready: VecDeque<Vec<u8>>,
+}
+
+impl Backfill {
+    /// The room's base, first, if the device isn't past it: from then on
+    /// it has what the base holds.
+    fn base(&mut self, base: Option<&storage::Base>) {
+        self.base_due = false;
+        let Some(base) = base else { return };
+        let has: Vec<(u64, u64)> = self.has.iter().map(|(&p, &c)| (p, c)).collect();
+        if covers(&has, &base.vv) {
+            return;
+        }
+        self.ready.extend(encoded(&self.room, std::slice::from_ref(&base.record)));
+        for &(p, c) in &base.vv {
+            let h = self.has.entry(p).or_insert(0);
+            *h = (*h).max(c);
+        }
+    }
 }
 
 /// A pairing open (§7): the device in that opened it, and the new device
@@ -239,6 +292,11 @@ pub struct Hub<S: Storage> {
     signup: bool,
     /// Which email a password may sign in as.
     password_emails: PasswordEmails,
+    /// How much of a room's records goes before the rest waits.
+    backfill_part: usize,
+    /// Sockets with more of a room's records to come, once they've
+    /// written what they were sent: [`Hub::take_more`].
+    more: BTreeSet<ConnId>,
 }
 
 impl<S: Storage> Hub<S> {
@@ -267,7 +325,33 @@ impl<S: Storage> Hub<S> {
             passwords: None,
             signup: false,
             password_emails: PasswordEmails::Any,
+            backfill_part: BACKFILL_PART,
+            more: BTreeSet::new(),
         }
+    }
+
+    /// How much of a room's records goes to a socket before the rest waits
+    /// for it to be written ([`BACKFILL_PART`] unless said): a driver
+    /// holding sockets to a smaller budget says so.
+    pub fn backfill_part(&mut self, bytes: usize) {
+        self.backfill_part = bytes.max(1);
+    }
+
+    /// The sockets with more of a room's records to come since this was
+    /// last asked: each is to be [`drained`](Hub::drained) once it has
+    /// written most of what it was sent (at once, for a driver that
+    /// doesn't hold sockets to a budget).
+    pub fn take_more(&mut self) -> Vec<ConnId> {
+        std::mem::take(&mut self.more).into_iter().collect()
+    }
+
+    /// `conn` has written most of what it was sent: the next part of the
+    /// rooms it joined.
+    pub fn drained(&mut self, conn: ConnId) -> Vec<Out> {
+        self.more.remove(&conn);
+        let Some(State::Ready { account, .. }) = self.conns.get(&conn).map(|c| &c.state) else { return Vec::new() };
+        let account = account.clone();
+        self.backfill(conn, &account)
     }
 
     /// Taking passwords, with this OPAQUE key (kept: a new one would make
@@ -488,7 +572,15 @@ impl<S: Storage> Hub<S> {
     pub fn connect_from(&mut self, conn: ConnId, client: &str, app: Client, rng: &mut impl Random) -> Vec<Out> {
         let nonce: [u8; 32] = rng.bytes();
         let protocol = app.protocol;
-        self.conns.insert(conn, Conn { state: State::Challenged(nonce), rooms: HashSet::new(), client: client.to_string(), app, told_full: false });
+        self.conns.insert(conn, Conn {
+            state: State::Challenged(nonce),
+            rooms: HashSet::new(),
+            client: client.to_string(),
+            app,
+            told_full: false,
+            backfills: VecDeque::new(),
+            incoming: None,
+        });
         let mut out = vec![self.challenge(conn, nonce)];
         if compat::takes(protocol) == compat::Fit::AppTooOld {
             out.extend(self.deny_as(conn, compat::APP_TOO_OLD, Deny::Outdated));
@@ -525,6 +617,7 @@ impl<S: Storage> Hub<S> {
     /// its own open) was last seen now, and the account's other devices
     /// online are sent their list again, so none says it's online (§7).
     pub fn disconnect(&mut self, conn: ConnId) -> Vec<Out> {
+        self.more.remove(&conn);
         let gone = self.conns.remove(&conn).and_then(|c| match c.state {
             State::Ready { account, device } => Some((account, device)),
             _ => None,
@@ -803,6 +896,14 @@ impl<S: Storage> Hub<S> {
             Carnet::SetCard { card } => {
                 if card.len() > MAX_CARD {
                     return self.deny(conn, "a card past its size");
+                }
+                // Sealed under an epoch before the account's: from a device
+                // that hasn't the newest key yet (it sends its card as it
+                // logs in, before the keys made while it was away). The
+                // card the removal sealed for it under the newest stays,
+                // which is the only one the others believe (§7).
+                if card.get(..4).map(|e| u32::from_be_bytes(e.try_into().expect("4"))) < Some(self.store.epoch(&account)) {
+                    return Vec::new();
                 }
                 if self.store.set_card(&account, &me, card).is_err() {
                     return Vec::new();
@@ -1142,10 +1243,74 @@ impl<S: Storage> Hub<S> {
         for id in ids {
             let c = &self.conns[&id];
             if matches!(&c.state, State::Ready { account: a, .. } if a == account) && c.rooms.contains(room) {
-                out.push(send(id, update(room, std::slice::from_ref(&record), BatchId([0; 8]))));
+                out.extend(self.pass_on(id, room, std::slice::from_ref(&record)));
             }
         }
         out
+    }
+
+    /// Records of `room` passed on to `conn`, which joined it: now, or,
+    /// while some of what it lacked of the room is made and not sent yet
+    /// (a base's fragments), after that, so an update in fragments never
+    /// meets another of its room.
+    fn pass_on(&mut self, conn: ConnId, room: &str, records: &[Vec<u8>]) -> Vec<Out> {
+        let messages = elo::batches(records.to_vec()).into_iter().flat_map(|batch| encoded(room, &batch));
+        if let Some(b) = self.conns.get_mut(&conn).and_then(|c| c.backfills.front_mut()).filter(|b| b.room == room && !b.ready.is_empty()) {
+            b.ready.extend(messages);
+            return Vec::new();
+        }
+        messages.map(|m| Out::Send(conn, m)).collect()
+    }
+
+    /// The next part of what `conn` lacks of the rooms it joined, up to
+    /// [`BACKFILL_PART`] bytes: the first room's, then the next's. A room
+    /// all sent, the device may be asked to compact it (it has everything
+    /// the server holds of it now: one socket keeps its order). More to
+    /// come, it's said ([`Hub::take_more`]).
+    fn backfill(&mut self, conn: ConnId, account: &[u8]) -> Vec<Out> {
+        let part = self.backfill_part;
+        let mut out = Vec::new();
+        let mut sent = 0;
+        loop {
+            let Some(c) = self.conns.get_mut(&conn) else { return out };
+            let Some(b) = c.backfills.front_mut() else { return out };
+            if sent >= part {
+                self.more.insert(conn);
+                return out;
+            }
+            if b.base_due {
+                b.base(self.store.base(account, &b.room).as_ref());
+            }
+            if let Some(m) = b.ready.pop_front() {
+                sent += m.len();
+                out.push(Out::Send(conn, m));
+                continue;
+            }
+            let read = match &mut b.first {
+                Some(first) => {
+                    let n = first.iter().scan(0, |n, s| {
+                        let before = *n;
+                        *n += s.record.len();
+                        Some(before)
+                    });
+                    let take = n.take_while(|&before| before < part).count().max(1).min(first.len());
+                    first.drain(..take).collect()
+                }
+                None => self.store.spans_after(account, &b.room, b.after, part),
+            };
+            if read.is_empty() {
+                let room = b.room.clone();
+                c.backfills.pop_front();
+                let live = self.store.live(account, &room);
+                out.extend(self.compact_now(conn, account, &room, live));
+                continue;
+            }
+            b.after = read.last().map_or(b.after, |s| s.seq);
+            let records: Vec<Vec<u8>> = read.into_iter().filter(|s| s.end > b.has.get(&s.peer).copied().unwrap_or(0)).map(|s| s.record).collect();
+            for batch in elo::batches_under(records, elo::MAX_BATCH.min(part)) {
+                b.ready.extend(encoded(&b.room, &batch));
+            }
+        }
     }
 
     /// The invites waiting and every account, for the owner's device; for
@@ -1422,33 +1587,83 @@ impl<S: Storage> Hub<S> {
                     app_code: None,
                 })]
             }
+            // Joined: what the server holds of the room said, then what the
+            // device lacks of it (the base, if it isn't past it, and every
+            // delta its version vector doesn't cover), a part at a time,
+            // after any room joined before whose records are still on their
+            // way. Once it's all gone, it may be asked to compact.
             ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, version, .. } => {
                 let has = wire::decode_vv(&version).unwrap_or_default();
                 let base = self.store.base(account, &room_id);
                 let spans = self.store.spans(account, &room_id);
-                let records = storage::backfill(base.as_ref(), &spans, &has);
-                if let Some(c) = self.conns.get_mut(&conn) {
-                    c.rooms.insert(room_id.clone());
+                let held = storage::held(base.as_ref(), &spans);
+                let mut b = Backfill { room: room_id.clone(), has: has.iter().copied().collect(), first: None, base_due: true, after: 0, ready: VecDeque::new() };
+                let Some(c) = self.conns.get_mut(&conn) else { return Vec::new() };
+                c.rooms.insert(room_id.clone());
+                // Joined again: what was on its way of the room starts over.
+                c.backfills.retain(|b| b.room != room_id);
+                let first = c.backfills.is_empty();
+                if first {
+                    b.base(base.as_ref());
+                    b.first = Some(spans.into());
                 }
+                c.backfills.push_back(b);
                 let mut out = vec![send(conn, ProtocolMessage::JoinResponseOk {
                     crdt: CrdtType::Elo,
-                    room_id: room_id.clone(),
+                    room_id,
                     permission: if self.quota.limit(account).writable { Permission::Write } else { Permission::Read },
-                    version: wire::encode_vv(&storage::held(base.as_ref(), &spans)),
+                    version: wire::encode_vv(&held),
                     extra: None,
                 })];
-                for batch in elo::batches(records) {
-                    out.push(send(conn, update(&room_id, &batch, BatchId([0; 8]))));
+                if first {
+                    out.extend(self.backfill(conn, account));
                 }
-                let live = Live { records: spans.len() as u64, bytes: spans.iter().map(|s| s.record.len() as u64).sum(), based: base.is_some() };
-                out.extend(self.compact_now(conn, account, &room_id, live));
                 out
             }
             ProtocolMessage::Leave { room_id, .. } => {
                 if let Some(c) = self.conns.get_mut(&conn) {
                     c.rooms.remove(&room_id);
+                    c.backfills.retain(|b| b.room != room_id);
                 }
                 Vec::new()
+            }
+            // Only a snapshot comes in fragments (one past a message): from
+            // the lease holder, of a room it joined, no bigger than a
+            // snapshot may be, one at a time. Nothing is set aside for it
+            // unless it's all of that; then it's taken as if it came whole.
+            ProtocolMessage::DocUpdateFragmentHeader { crdt: CrdtType::Elo, room_id, batch_id, fragment_count, total_size_bytes } => {
+                let joined = self.conns.get(&conn).is_some_and(|c| c.rooms.contains(&room_id));
+                let leased = self.leases.get(&(account.to_vec(), room_id.clone())).is_some_and(|l| l.conn == conn && l.until > self.now);
+                if !joined || !leased || !self.quota.limit(account).writable {
+                    return self.refuse(conn, &room_id, batch_id, UpdateStatusCode::PermissionDenied);
+                }
+                let Some(p) = Pieces::start(&room_id, batch_id, fragment_count, total_size_bytes) else {
+                    return self.refuse(conn, &room_id, batch_id, UpdateStatusCode::PayloadTooLarge);
+                };
+                if let Some(c) = self.conns.get_mut(&conn) {
+                    c.incoming = Some(p);
+                }
+                Vec::new()
+            }
+            ProtocolMessage::DocUpdateFragment { crdt: CrdtType::Elo, room_id, batch_id, index, fragment } => {
+                let Some(p) = self.conns.get_mut(&conn).and_then(|c| c.incoming.as_mut()) else { return Vec::new() };
+                match p.add(&room_id, batch_id, index, &fragment) {
+                    Ok(None) => Vec::new(),
+                    Ok(Some(update)) => {
+                        if let Some(c) = self.conns.get_mut(&conn) {
+                            c.incoming = None;
+                        }
+                        self.room_message(conn, account, me, ProtocolMessage::DocUpdate { crdt: CrdtType::Elo, room_id, updates: vec![update], batch_id })
+                    }
+                    Err(_) => {
+                        let batch_id = p.batch_id;
+                        let room = p.room.clone();
+                        if let Some(c) = self.conns.get_mut(&conn) {
+                            c.incoming = None;
+                        }
+                        self.refuse(conn, &room, batch_id, UpdateStatusCode::InvalidUpdate)
+                    }
+                }
             }
             ProtocolMessage::DocUpdate { crdt: CrdtType::Elo, room_id, updates, batch_id } => {
                 let joined = self.conns.get(&conn).is_some_and(|c| c.rooms.contains(&room_id));
@@ -1464,7 +1679,10 @@ impl<S: Storage> Hub<S> {
                     };
                     for r in records {
                         match elo::header(r) {
-                            _ if r.len() > MAX_RECORD => {
+                            Ok(Header::Snapshot { .. }) if r.len() > elo::MAX_SNAPSHOT => {
+                                return self.refuse(conn, &room_id, batch_id, UpdateStatusCode::PayloadTooLarge);
+                            }
+                            Ok(Header::Delta { .. }) | Err(_) if r.len() > MAX_RECORD => {
                                 return self.refuse(conn, &room_id, batch_id, UpdateStatusCode::PayloadTooLarge);
                             }
                             Ok(Header::Delta { peer, start, end, .. }) if start < end => deltas.push((peer, start, end, r.to_vec())),
@@ -1539,20 +1757,18 @@ impl<S: Storage> Hub<S> {
 
     /// The account's other devices: the records, to those in the room;
     /// that the room changed, to the rest.
-    fn tell_others(&self, from: ConnId, account: &[u8], room: &str, records: &[Vec<u8>], seq: u64) -> Vec<Out> {
+    fn tell_others(&mut self, from: ConnId, account: &[u8], room: &str, records: &[Vec<u8>], seq: u64) -> Vec<Out> {
         let mut out = Vec::new();
-        let mut ids: Vec<&ConnId> = self.conns.keys().collect();
+        let mut ids: Vec<ConnId> = self.conns.keys().copied().collect();
         ids.sort_unstable();
-        for &id in ids {
+        for id in ids {
             let c = &self.conns[&id];
             let mine = matches!(&c.state, State::Ready { account: a, .. } if a == account);
             if id == from || !mine {
                 continue;
             }
             if c.rooms.contains(room) {
-                for batch in elo::batches(records.to_vec()) {
-                    out.push(send(id, update(room, &batch, BatchId([0; 8]))));
-                }
+                out.extend(self.pass_on(id, room, records));
             } else {
                 out.push(Out::Send(id, wire::encode(&Frame::Carnet(Carnet::Changed { rooms: vec![(room.to_string(), seq)] }))));
             }
@@ -1578,8 +1794,10 @@ fn send(conn: ConnId, m: ProtocolMessage) -> Out {
     Out::Send(conn, wire::encode(&Frame::Room(m)))
 }
 
-fn update(room: &str, records: &[Vec<u8>], batch_id: BatchId) -> ProtocolMessage {
-    ProtocolMessage::DocUpdate { crdt: CrdtType::Elo, room_id: room.to_string(), updates: vec![elo::container(records)], batch_id }
+/// Records for `room` as one update, encoded: one message, or, past what
+/// a message holds (a big base), its fragments.
+fn encoded(room: &str, records: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    elo::messages(room, elo::container(records), BatchId([0; 8])).into_iter().map(|m| wire::encode(&Frame::Room(m))).collect()
 }
 
 fn ack(room: &str, ref_id: BatchId, status: UpdateStatusCode) -> ProtocolMessage {
