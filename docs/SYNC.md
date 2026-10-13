@@ -256,7 +256,7 @@ On login a device joins every room it has a doc for, the vault's first, and with
 - **Needed:** the room holds more than 200 deltas since its base (`--compact-after N`), or more than 256 KiB of them.
 - **Safe:** all of these hold.
   1. **The device is caught up.** The device is asked right after the server has sent it everything it holds for the room (on one socket, in order), so the snapshot it writes covers everything.
-  2. **Nobody else is writing.** The device is the account's only one connected, or the room has had no new record for 5 minutes.
+  2. **Nobody else is writing.** The device is the account's only one connected, or the room has had no new record for 5 minutes. Or the room is halfway to what it keeps uncompacted (below: 5,000 records, or 32 MiB): then the device writing to it is asked whoever else is online. A device that writes on and on while another is connected (a big import with a browser tab open, the vault taking a record for every note) would otherwise never be asked, and its room would fill and stop taking writes.
   3. **One lease.** The server sends `Compact { room }` to that one device, which holds the lease for 10 minutes. No other device is asked meanwhile, so two snapshots never race.
 
   A device is asked when it joins or writes to a room. An edit that lands during compaction is harmless: the snapshot's version vector doesn't cover it, so that delta stays.
