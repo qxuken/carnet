@@ -67,6 +67,7 @@ A binary built this way doesn't include the web app; [The web app](#the-web-app)
 | `--web DIR` | `CARNET_WEB` | none | the web app's build (`web/dist`), served at `/`; the container has it |
 | `--metrics ADDR` | `CARNET_METRICS` | none | serve `/metrics` there, a listener of its own (see below) |
 | `--trusted-proxy LIST` | `CARNET_TRUSTED_PROXY` | none | the proxies in front (`127.0.0.1`, `172.16.0.0/12`), comma separated, whose word on who a request is from is taken (see below) |
+| `--client-header cf\|xff` | `CARNET_CLIENT_HEADER` | `xff` | the header they say it in: `xff`, `X-Forwarded-For` (nginx, Caddy); `cf`, `CF-Connecting-IP`, only when Cloudflare is the proxy named (see below) |
 | `--passwords` | `CARNET_PASSWORDS=1` | off | let devices set an email and password, and sign in with them (OPAQUE: the password never reaches the server). Off, codes and the recovery words are the ways in |
 | `--compact-after N` | `CARNET_COMPACT_AFTER` | `200` | a note kept as this many records is asked to be compacted into one |
 
@@ -134,6 +135,7 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header CF-Connecting-IP "";  # a client's own, not passed on
         proxy_read_timeout 120s;
         client_max_body_size 40m;  # a picture, put at its link
     }
@@ -147,16 +149,28 @@ server {
 
 ```
 notes.example.com {
-    reverse_proxy 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:8080 {
+        header_up -CF-Connecting-IP  # a client's own, not passed on
+    }
 }
 ```
 
-**Tell it which proxy is yours.** The server limits how much one address (an IPv6 address's whole /64) may ask of it: sockets opened (30 at once, then one every 2 seconds, at most 64 open), and tries that guess at something or cost it work (a login that fails, an invite used, a pairing joined, a recovery: 10 at once, then one every 6 seconds). A login that succeeds is never counted, so your own devices are never shut out. Behind a proxy, every request comes from the proxy's address, so name it, and the server counts by the address it says each request is for (`CF-Connecting-IP`, else `X-Forwarded-For` read from the right). It believes those headers from the proxies named, and nobody else:
+**Tell it which proxy is yours.** The server limits how much one address (an IPv6 address's whole /64) may ask of it: sockets opened (30 at once, then one every 2 seconds, at most 64 open), and tries that guess at something or cost it work (a login that fails, an invite used, a pairing joined, a recovery: 10 at once, then one every 6 seconds). A login that succeeds is never counted, so your own devices are never shut out. Behind a proxy, every request comes from the proxy's address, so name it, and the server counts by the address it says each request is for: `X-Forwarded-For`, read from the right past the proxies named. It believes it from the proxies named, and nobody else:
 
 ```bash
 carnet-server --trusted-proxy 127.0.0.1          # nginx or Caddy on the same machine
 carnet-server --trusted-proxy 172.16.0.0/12      # a proxy in another container
 ```
+
+Straight behind Cloudflare (a Tunnel, or Cloudflare's own addresses as the proxies named), say so, and the server reads Cloudflare's `CF-Connecting-IP` instead, and only it:
+
+```bash
+carnet-server --trusted-proxy 127.0.0.1 --client-header cf   # cloudflared on the same machine
+```
+
+Only then: nginx and Caddy pass on whatever `CF-Connecting-IP` a client sends, so behind them it would let one machine be any address it likes. The examples above drop it anyway.
+
+One machine with many addresses (IPv6 hands out whole networks) can still ask as many of them: each limit keeps 100,000 addresses at most, and while it's full of ones still counting, a new address is refused as if over its limit, and the ones it knows keep theirs.
 
 A socket past the limit is refused with `429`; a try past it, with "too many tries from this address". `carnet_limited_total` in `/metrics` counts both.
 

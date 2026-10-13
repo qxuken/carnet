@@ -2,8 +2,8 @@
 //! database server and a bucket.
 //!
 //! ```text
-//! carnet-server [--data DIR] [--listen ADDR] [--origin URL] [--web DIR] [--metrics ADDR] [--trusted-proxy LIST] [--passwords] [--compact-after N]
-//!               [--postgres URL] [--s3 URL [--s3-region R] [--s3-virtual-host]]
+//! carnet-server [--data DIR] [--listen ADDR] [--origin URL] [--web DIR] [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
+//!               [--passwords] [--compact-after N] [--postgres URL] [--s3 URL [--s3-region R] [--s3-virtual-host]]
 //! carnet-server invite [--data DIR] [--postgres URL]
 //! carnet-server backup DIR [--data DIR]
 //! carnet-server health [--listen ADDR]
@@ -18,8 +18,10 @@
 //! `web/dist`, served at `/`; none by default), `CARNET_METRICS` (an
 //! address for `/metrics`, its own listener; none by default),
 //! `CARNET_TRUSTED_PROXY` (the proxies in front, addresses or ranges, comma
-//! separated, whose `X-Forwarded-For` or `CF-Connecting-IP` is believed;
-//! none by default), `CARNET_POSTGRES` and `CARNET_S3` (with the features
+//! separated, whose word on who a request is from is believed; none by
+//! default), `CARNET_CLIENT_HEADER` (the header they say it in: `xff`,
+//! `X-Forwarded-For`, by default; `cf`, Cloudflare's `CF-Connecting-IP`,
+//! straight behind Cloudflare), `CARNET_POSTGRES` and `CARNET_S3` (with the features
 //! built in; none by default), `CARNET_S3_REGION`, `CARNET_S3_VIRTUAL_HOST`.
 //! A bucket's keys come only from the environment: `CARNET_S3_ACCESS_KEY`
 //! and `CARNET_S3_SECRET_KEY` (or AWS's own two names).
@@ -34,8 +36,8 @@ const HELP: &str = "carnet-server: the sync server for Carnet notes
 
 usage:
   carnet-server [--data DIR] [--listen ADDR] [--origin URL] [--web DIR]
-                [--metrics ADDR] [--trusted-proxy LIST] [--passwords]
-                [--compact-after N] [--postgres URL] [--s3 URL]
+                [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
+                [--passwords] [--compact-after N] [--postgres URL] [--s3 URL]
   carnet-server invite [--data DIR] [--postgres URL]
   carnet-server backup DIR [--data DIR]
   carnet-server health [--listen ADDR]
@@ -54,6 +56,10 @@ usage:
                   is from is taken: addresses or ranges, comma separated,
                   e.g. 127.0.0.1 or 172.16.0.0/12; what the limits on
                   tries and sockets count by    (CARNET_TRUSTED_PROXY, none)
+  --client-header cf|xff  the header they say it in: xff, X-Forwarded-For
+                  (nginx, Caddy); cf, Cloudflare's CF-Connecting-IP, only
+                  when Cloudflare (a Tunnel too) is the proxy named
+                                                        (CARNET_CLIENT_HEADER, xff)
   --passwords     let devices set a password, and sign in by email and
                   password (OPAQUE: the password never reaches the
                   server)                      (CARNET_PASSWORDS=1, off)
@@ -104,6 +110,7 @@ struct Args {
     web: Option<PathBuf>,
     metrics: Option<String>,
     trusted: Vec<carnet_server::limits::Network>,
+    client_header: carnet_server::limits::ClientHeader,
     passwords: bool,
     postgres: Option<String>,
     s3: Option<String>,
@@ -136,6 +143,9 @@ fn args() -> Result<Args, String> {
     if let Some(list) = env("CARNET_TRUSTED_PROXY") {
         a.trusted = carnet_server::limits::networks(&list).map_err(|e| format!("CARNET_TRUSTED_PROXY: {e}"))?;
     }
+    if let Some(h) = env("CARNET_CLIENT_HEADER") {
+        a.client_header = h.parse().map_err(|e| format!("CARNET_CLIENT_HEADER: {e}"))?;
+    }
     if let Some(n) = env("CARNET_COMPACT_AFTER") {
         a.compact_after = n.parse().map_err(|_| format!("CARNET_COMPACT_AFTER={n}: not a number"))?;
     }
@@ -154,6 +164,7 @@ fn args() -> Result<Args, String> {
             "--web" => a.web = Some(value("--web")?.into()),
             "--metrics" => a.metrics = Some(value("--metrics")?),
             "--trusted-proxy" => a.trusted = carnet_server::limits::networks(&value("--trusted-proxy")?).map_err(|e| format!("--trusted-proxy: {e}"))?,
+            "--client-header" => a.client_header = value("--client-header")?.parse().map_err(|e| format!("--client-header: {e}"))?,
             "--passwords" => a.passwords = true,
             "--postgres" => a.postgres = Some(value("--postgres")?),
             "--s3" => a.s3 = Some(value("--s3")?),
@@ -328,7 +339,7 @@ fn main() -> ExitCode {
             println!("carnet-server: stopping");
         };
         let host = server::Host { passwords: a.passwords, store, blobs, ..server::Host::default() };
-        server::serve_hosted(Config { data: a.data, origin, compact_after: a.compact_after, web: a.web, trusted: a.trusted }, listener, metrics, host, stop).await
+        server::serve_hosted(Config { data: a.data, origin, compact_after: a.compact_after, web: a.web, trusted: a.trusted, client_header: a.client_header }, listener, metrics, host, stop).await
     });
     match served {
         Ok(()) => ExitCode::SUCCESS,

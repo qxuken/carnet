@@ -312,7 +312,7 @@ Invite codes are 80 random bits as 16 Crockford base32 characters in groups of f
 
 **TLS** is the reverse proxy's job; the server speaks plain HTTP behind it (nginx, Caddy, or Cloudflare, including a Tunnel for a home server with no open port). Cloudflare terminating TLS is harmless here: all it sees is ciphertext.
 
-**Limits** (`limits.rs`), counted per client: an IPv4 address, or an IPv6 address's /64 (a home or a server is handed a whole /64, so each of its addresses counted apart would never run out). An IPv4 address written as IPv6 counts as itself. The address is taken from `CF-Connecting-IP` or `X-Forwarded-For` (read from the right, past the trusted hops) only when `--trusted-proxy` names the proxy:
+**Limits** (`limits.rs`), counted per client: an IPv4 address, or an IPv6 address's /64 (a home or a server is handed a whole /64, so each of its addresses counted apart would never run out). An IPv4 address written as IPv6 counts as itself. The address is taken from `X-Forwarded-For` (read from the right, past the trusted hops), or with `--client-header cf` from `CF-Connecting-IP` alone, only when `--trusted-proxy` names the proxy. Each limit keeps 100,000 clients at most; full, a new one is refused while the known keep their buckets:
 
 - sockets: 30 at once, then one every 2 s, and at most 64 open; past that, `429` before the upgrade;
 - tries that guess at something or cost work (a failed login, an invite, joining a pairing, a recovery or password sign-in): 10 at once, then one every 6 s; past that, `Denied`. A login that succeeds is never counted, so a reconnecting device never shuts itself out.
