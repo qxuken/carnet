@@ -290,7 +290,7 @@ async fn a_server_starts_on_postgres_with_its_first_invite() {
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = tokio::sync::oneshot::channel::<()>();
     let host = Host { store: Some(Box::new(Postgres::open(&url).unwrap())), ..Host::default() };
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
     let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
         let _ = rx.await;
     }));
@@ -674,7 +674,7 @@ mod device {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (stop, rx) = oneshot::channel::<()>();
-        let config = Config { data: data.to_path_buf(), origin: origin.map_or_else(|| format!("http://{addr}"), str::to_string), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+        let config = Config { data: data.to_path_buf(), origin: origin.map_or_else(|| format!("http://{addr}"), str::to_string), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
         let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
             let _ = rx.await;
         }));

@@ -48,7 +48,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use crate::blobs::{self as pictures, BlobFiles, Blobs, Counts, FileBlobs, Job, Worker};
 use crate::links::Signer;
 use crate::hub::{ConnId, Hub, Open, Out, Stats};
-use crate::limits::{self, Limiter, Network};
+use crate::limits::{self, ClientHeader, Limiter, Network};
 use crate::quota::{Admission, ByInvite, PasswordEmails, Quota, Unlimited};
 use crate::sqlite::Sharded;
 use crate::storage::{Failed, Storage};
@@ -71,6 +71,9 @@ pub struct Config {
     /// who a request is from is taken: what the limits count by. None,
     /// and each request is from the address it came from.
     pub trusted: Vec<Network>,
+    /// Which header the trusted proxies say it in: `X-Forwarded-For`
+    /// unless they're Cloudflare's.
+    pub client_header: ClientHeader,
 }
 
 /// Records a room keeps one by one before it's asked for as a snapshot.
@@ -360,6 +363,7 @@ struct App {
     password_emails: PasswordEmails,
     next: Arc<AtomicU64>,
     trusted: Arc<[Network]>,
+    client_header: ClientHeader,
     gate: Arc<std::sync::Mutex<Gate>>,
     refused: Arc<AtomicU64>,
     sockets: SocketLimits,
@@ -637,6 +641,7 @@ pub async fn serve_limited(
         password_emails,
         next: Arc::new(AtomicU64::new(1)),
         trusted: config.trusted.clone().into(),
+        client_header: config.client_header,
         gate: Arc::new(std::sync::Mutex::new(gate)),
         refused: refused.clone(),
         sockets,
@@ -1168,7 +1173,7 @@ async fn sync_route(
     // The app's protocol, name and version, in its address; no
     // protocol, a build from before.
     let app_said = compat::Client::from_query(query.as_deref());
-    let client = limits::client_of(peer.ip(), header("cf-connecting-ip"), header("x-forwarded-for"), &app.trusted).to_string();
+    let client = limits::client_of(peer.ip(), header("cf-connecting-ip"), header("x-forwarded-for"), &app.trusted, app.client_header).to_string();
     if !app.gate.lock().unwrap_or_else(|e| e.into_inner()).admit(&client) {
         app.refused.fetch_add(1, Ordering::Relaxed);
         return (StatusCode::TOO_MANY_REQUESTS, limits::TOO_MANY).into_response();

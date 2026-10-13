@@ -35,6 +35,12 @@ pub const TRIES: Rate = Rate { burst: 10.0, every: 6.0 };
 /// What a client turned away for trying too much is told.
 pub const TOO_MANY: &str = "too many tries from this address: wait a minute, then try again";
 
+/// Clients a [`Limiter`] keeps a bucket for at most: past it, the full
+/// ones are forgotten at once, and if none is, a client it doesn't know
+/// is refused while the ones it does keep theirs. Many /64s are one
+/// IPv6 network's, so without it one host could grow it without end.
+pub const MAX_CLIENTS: usize = 100_000;
+
 #[derive(Clone, Copy, Debug)]
 struct Bucket {
     tokens: f64,
@@ -46,19 +52,39 @@ struct Bucket {
 pub struct Limiter {
     rate: Rate,
     buckets: HashMap<String, Bucket>,
+    /// Clients kept at most ([`MAX_CLIENTS`]).
+    max: usize,
+    /// When it was last pruned for being full: once a second at most, so
+    /// a full one isn't walked for every new client.
+    pruned: f64,
 }
 
 impl Limiter {
     pub fn new(rate: Rate) -> Self {
-        Limiter { rate, buckets: HashMap::new() }
+        Limiter::with_max(rate, MAX_CLIENTS)
+    }
+
+    /// One that keeps `max` clients at most.
+    pub fn with_max(rate: Rate, max: usize) -> Self {
+        Limiter { rate, buckets: HashMap::new(), max, pruned: f64::NEG_INFINITY }
     }
 
     /// One try by `client` at `now` (seconds, from any start): whether it
     /// may. An empty client is one the server can't tell (a test's): never
-    /// limited.
+    /// limited. A client it doesn't know, while it keeps as many as it
+    /// may, is refused (after the full buckets are forgotten, if still).
     pub fn allow(&mut self, client: &str, now: f64) -> bool {
         if client.is_empty() {
             return true;
+        }
+        if self.buckets.len() >= self.max && !self.buckets.contains_key(client) {
+            if now - self.pruned >= 1.0 {
+                self.pruned = now;
+                self.prune(now);
+            }
+            if self.buckets.len() >= self.max {
+                return false;
+            }
         }
         let Rate { burst, every } = self.rate;
         let b = self.buckets.entry(client.to_string()).or_insert(Bucket { tokens: burst, at: now });
@@ -135,19 +161,44 @@ pub fn networks(list: &str) -> Result<Vec<Network>, String> {
     list.split(',').filter(|s| !s.trim().is_empty()).map(str::parse).collect()
 }
 
+/// Which header a trusted proxy says who a request is for in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClientHeader {
+    /// `X-Forwarded-For`, read from the right: nginx, Caddy, most proxies.
+    #[default]
+    ForwardedFor,
+    /// Cloudflare's `CF-Connecting-IP`, and only it: a proxied record or a
+    /// Tunnel straight to the server. A proxy that isn't Cloudflare's
+    /// passes on whatever `CF-Connecting-IP` the client sent, so it's never
+    /// read otherwise.
+    Cloudflare,
+}
+
+impl FromStr for ClientHeader {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.trim() {
+            "xff" => Ok(ClientHeader::ForwardedFor),
+            "cf" => Ok(ClientHeader::Cloudflare),
+            other => Err(format!("{other}: not xff or cf")),
+        }
+    }
+}
+
 /// Who a request is from, as the limits count it ([`client`]): the
 /// address it came from, unless that is a proxy named as trusted, which
-/// says who it came from for. Cloudflare's `CF-Connecting-IP` first; else
+/// says who it came from for, in the one header `header` names:
 /// `X-Forwarded-For`, read from the right (the proxy's own addition) past
-/// every trusted proxy. Anyone else's headers are ignored: they could say
-/// anything.
-pub fn client_of(peer: IpAddr, cf: Option<&str>, forwarded: Option<&str>, trusted: &[Network]) -> IpAddr {
+/// every trusted proxy; or Cloudflare's `CF-Connecting-IP`. Anyone else's
+/// headers, and the other one, are ignored: they could say anything.
+pub fn client_of(peer: IpAddr, cf: Option<&str>, forwarded: Option<&str>, trusted: &[Network], header: ClientHeader) -> IpAddr {
     let trusted_ip = |ip: IpAddr| trusted.iter().any(|n| n.contains(ip));
     if !trusted_ip(peer) {
         return client(peer);
     }
-    if let Some(ip) = cf.and_then(|c| c.trim().parse::<IpAddr>().ok()) {
-        return client(ip);
+    if header == ClientHeader::Cloudflare {
+        return client(cf.and_then(|c| c.trim().parse::<IpAddr>().ok()).unwrap_or(peer));
     }
     let mut last = peer;
     for hop in forwarded.unwrap_or_default().rsplit(',') {
@@ -187,18 +238,46 @@ mod tests {
     }
 
     #[test]
+    fn a_full_limiter_forgets_the_full_buckets_then_refuses_new_clients() {
+        let mut l = Limiter::with_max(Rate { burst: 3.0, every: 10.0 }, 2);
+        assert!(l.allow("a", 0.0) && l.allow("b", 0.0));
+        assert!(!l.allow("c", 0.0), "full: a new client is refused");
+        assert!(l.allow("a", 0.0) && l.allow("b", 0.0), "the ones it knows keep their buckets");
+        assert_eq!(l.len(), 2);
+        assert!(!l.allow("c", 0.5), "pruned once a second at most");
+        // b full again by 30 s, a spent more: b is forgotten, c let in.
+        assert!(l.allow("a", 20.0) && l.allow("a", 20.0) && l.allow("a", 20.0));
+        assert!(l.allow("c", 30.0), "a full bucket forgotten makes room");
+        assert_eq!(l.len(), 2);
+        assert!(!l.allow("d", 30.5));
+        // Spoofed addresses, one each: never more than it keeps.
+        let mut sockets = Limiter::with_max(SOCKETS, 100);
+        let let_in = (0..1000u32).filter(|n| sockets.allow(&format!("10.0.{}.{}", n / 256, n % 256), 0.0)).count();
+        assert_eq!((let_in, sockets.len()), (100, 100));
+    }
+
+    #[test]
     fn a_proxy_named_trusted_says_who_it_is_for_and_nobody_else_does() {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         let trusted = networks("127.0.0.1, 10.0.0.0/8").unwrap();
+        let (xff, cf) = (ClientHeader::ForwardedFor, ClientHeader::Cloudflare);
         // Not a trusted proxy: its headers say nothing.
-        assert_eq!(client_of(ip("203.0.113.9"), Some("1.2.3.4"), Some("5.6.7.8"), &trusted), ip("203.0.113.9"));
-        // Cloudflare's header, from a trusted peer.
-        assert_eq!(client_of(ip("127.0.0.1"), Some("198.51.100.7"), None, &trusted), ip("198.51.100.7"));
+        assert_eq!(client_of(ip("203.0.113.9"), Some("1.2.3.4"), Some("5.6.7.8"), &trusted, xff), ip("203.0.113.9"));
+        assert_eq!(client_of(ip("203.0.113.9"), Some("1.2.3.4"), Some("5.6.7.8"), &trusted, cf), ip("203.0.113.9"));
         // X-Forwarded-For from the right, past the trusted hops; what a
         // client wrote itself on the left is not believed.
-        assert_eq!(client_of(ip("127.0.0.1"), None, Some("6.6.6.6, 198.51.100.7, 10.1.2.3"), &trusted), ip("198.51.100.7"));
-        assert_eq!(client_of(ip("127.0.0.1"), None, None, &trusted), ip("127.0.0.1"), "no header: the proxy itself");
-        assert_eq!(client_of(ip("::ffff:127.0.0.1"), Some("198.51.100.7"), None, &trusted), ip("198.51.100.7"), "a v4 peer as v6");
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("6.6.6.6, 198.51.100.7, 10.1.2.3"), &trusted, xff), ip("198.51.100.7"));
+        assert_eq!(client_of(ip("127.0.0.1"), None, None, &trusted, xff), ip("127.0.0.1"), "no header: the proxy itself");
+        // Cloudflare's header, from a trusted peer, is ignored by
+        // default: nginx or Caddy pass on what the client wrote.
+        assert_eq!(client_of(ip("127.0.0.1"), Some("6.6.6.6"), None, &trusted, xff), ip("127.0.0.1"));
+        assert_eq!(client_of(ip("127.0.0.1"), Some("6.6.6.6"), Some("198.51.100.7"), &trusted, xff), ip("198.51.100.7"));
+        assert_eq!(ClientHeader::default(), xff);
+        // Behind Cloudflare, it alone is read, and X-Forwarded-For isn't.
+        assert_eq!(client_of(ip("127.0.0.1"), Some("198.51.100.7"), Some("6.6.6.6"), &trusted, cf), ip("198.51.100.7"));
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("6.6.6.6"), &trusted, cf), ip("127.0.0.1"), "none: the proxy itself");
+        assert_eq!(client_of(ip("::ffff:127.0.0.1"), Some("198.51.100.7"), None, &trusted, cf), ip("198.51.100.7"), "a v4 peer as v6");
+        assert_eq!(("cf".parse(), "xff".parse(), "nginx".parse::<ClientHeader>().is_err()), (Ok(cf), Ok(xff), true));
         assert!(networks("10.0.0.0/33").is_err() && networks("nope").is_err());
         assert!("::1".parse::<Network>().unwrap().contains(ip("::1")));
         assert!("0.0.0.0/0".parse::<Network>().unwrap().contains(ip("8.8.8.8")));
@@ -208,7 +287,7 @@ mod tests {
     fn an_ipv6_client_is_its_64_and_an_ipv4_one_its_address() {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         let none: &[Network] = &[];
-        let of = |s: &str| client_of(ip(s), None, None, none).to_string();
+        let of = |s: &str| client_of(ip(s), None, None, none, ClientHeader::ForwardedFor).to_string();
         // One /64, any address in it: one client, one bucket.
         assert_eq!(of("2001:db8:1:2::1"), "2001:db8:1:2::");
         assert_eq!(of("2001:db8:1:2:ffff:ffff:ffff:ffff"), of("2001:db8:1:2::1"));
@@ -219,8 +298,8 @@ mod tests {
         assert_ne!(of("198.51.100.8"), of("198.51.100.7"));
         // What a trusted proxy says is grouped the same.
         let trusted = networks("127.0.0.1").unwrap();
-        assert_eq!(client_of(ip("127.0.0.1"), Some("2001:db8::abcd"), None, &trusted).to_string(), "2001:db8::");
-        assert_eq!(client_of(ip("127.0.0.1"), None, Some("2001:db8:0:0:1::9"), &trusted).to_string(), "2001:db8::");
+        assert_eq!(client_of(ip("127.0.0.1"), Some("2001:db8::abcd"), None, &trusted, ClientHeader::Cloudflare).to_string(), "2001:db8::");
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("2001:db8:0:0:1::9"), &trusted, ClientHeader::ForwardedFor).to_string(), "2001:db8::");
 
         // So a /64's addresses share the limits: its 31st socket at once,
         // and its 11th try, are refused whichever address asks.

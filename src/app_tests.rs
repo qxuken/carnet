@@ -3741,7 +3741,7 @@ fn a_new_device_comes_in_by_email_and_password() {
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let host = server::Host { passwords: true, ..server::Host::default() };
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, host, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -3837,7 +3837,7 @@ fn offline_is_said_in_plain_words() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -3886,7 +3886,7 @@ fn a_remote_edit_leaves_the_caret_where_it_was() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     #[allow(clippy::type_complexity)]
@@ -4019,7 +4019,7 @@ fn the_recovery_code_is_replaced_only_when_asked() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, server::Host::default(), async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, server::Host::default(), async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -4100,7 +4100,7 @@ fn a_hosted_password_signs_in_with_the_email_signed_up_with() {
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let host = server::Host { passwords: true, password_emails: PasswordEmails::Account, admission: std::sync::Arc::new(Signup), first_invite: false, ..server::Host::default() };
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, host, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -4190,7 +4190,7 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
         ..server::Host::default()
     };
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, host, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -4287,7 +4287,7 @@ fn new_here_an_invite_asked_for_in_settings_makes_the_account() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let own_origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop_own, stopped_own) = tokio::sync::oneshot::channel::<()>();
-    let served_own = rt.spawn(server::serve(Config { data: own.clone(), origin: own_origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served_own = rt.spawn(server::serve(Config { data: own.clone(), origin: own_origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped_own.await;
     }));
     let (mut b, mut db, dir_b) = fresh("signup-own");
@@ -4354,7 +4354,7 @@ fn a_server_that_takes_only_codes_goes_straight_to_the_code() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     let (mut a, mut d, dir) = tall("codes-only");
@@ -4435,7 +4435,7 @@ fn a_hosted_server_offers_every_way_in() {
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let host = server::Host { signup: Some(format!("{origin}/start")), passwords: true, first_invite: false, ..server::Host::default() };
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, host, async {
         let _ = stopped.await;
     }));
     let (mut a, mut d, dir) = tall("every-way");
@@ -4494,7 +4494,7 @@ fn the_accounts_passkeys_are_listed_and_removed() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, server::Host::default(), async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, server::Host::default(), async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -4559,7 +4559,7 @@ fn the_app_learns_at_once_its_account_can_write_again() {
     let handle: Arc<Mutex<Option<HubHandle>>> = Arc::default();
     let h = handle.clone();
     let host = server::Host { quota: plan.clone(), first_invite: false, ready: Some(Box::new(move |hub| *h.lock().unwrap() = Some(hub))), ..server::Host::default() };
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, host, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -4656,7 +4656,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     let handle: Arc<Mutex<Option<HubHandle>>> = Arc::default();
     let h = handle.clone();
     let host = server::Host { quota: plan.clone(), first_invite: false, ready: Some(Box::new(move |hub| *h.lock().unwrap() = Some(hub))), ..server::Host::default() };
-    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, host, async {
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, None, host, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
@@ -4719,7 +4719,7 @@ fn the_device_list_says_who_is_online_as_they_come_and_go() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&Carnet) -> bool| {
@@ -4782,7 +4782,7 @@ fn a_device_paired_late_gets_every_note() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     #[allow(clippy::type_complexity)]
@@ -4887,7 +4887,7 @@ fn two_apps_sync_through_a_server() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 4, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 4, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     #[allow(clippy::type_complexity)]
@@ -5178,7 +5178,7 @@ fn the_owner_invites_someone_and_removes_their_account() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     #[allow(clippy::type_complexity)]
@@ -5321,7 +5321,7 @@ fn removed_then_back_by_an_invite_draws_each_node_once() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     // Every frame of each, looked at: a duplicate seen the moment it's drawn.
@@ -5729,7 +5729,7 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     let (store, dir) = temp_store("elsewhere");
@@ -6761,7 +6761,7 @@ fn the_inspector_knows_the_vault_and_keeps_up() {
     let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
         let _ = stopped.await;
     }));
     let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {

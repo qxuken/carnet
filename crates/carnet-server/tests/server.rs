@@ -44,7 +44,7 @@ async fn start(data: &Path, origin: Option<&str>) -> Running {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.to_path_buf(), origin: origin.map_or_else(|| format!("http://{addr}"), str::to_string), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+    let config = Config { data: data.to_path_buf(), origin: origin.map_or_else(|| format!("http://{addr}"), str::to_string), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
     let done = tokio::spawn(server::serve(config, listener, async {
         let _ = rx.await;
     }));
@@ -282,7 +282,7 @@ async fn the_web_viewer_is_served_beside_the_socket() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: dir.join("data"), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new() };
+    let config = Config { data: dir.join("data"), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new(), client_header: Default::default() };
     let done = tokio::spawn(server::serve(config, listener, async {
         let _ = rx.await;
     }));
@@ -350,7 +350,7 @@ async fn health_and_metrics_say_how_the_server_is() {
     let metrics = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let maddr = metrics.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
     let done = tokio::spawn(server::serve_with(config, listener, Some(metrics), async {
         let _ = rx.await;
     }));
@@ -437,25 +437,63 @@ async fn sockets_from_one_address_are_limited_behind_a_trusted_proxy() {
     let maddr = metrics.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
     let trusted = carnet_server::limits::networks("127.0.0.1").unwrap();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted, client_header: Default::default() };
     let done = tokio::spawn(server::serve_with(config, listener, Some(metrics), async {
         let _ = rx.await;
     }));
-    let open = |from: &'static str| async move {
+    let open = |from: &'static str, cf: String| async move {
         let mut req = format!("ws://{addr}/v1/sync?protocol={}", carnet_sync::compat::PROTOCOL).into_client_request().unwrap();
+        req.headers_mut().insert("x-forwarded-for", from.parse().unwrap());
+        // What a client wrote itself, passed on by nginx or Caddy: not
+        // believed unless the proxy is said to be Cloudflare.
+        req.headers_mut().insert("cf-connecting-ip", cf.parse().unwrap());
+        tokio_tungstenite::connect_async(req).await
+    };
+    let mut held = Vec::new();
+    for n in 0..30 {
+        held.push(open("198.51.100.7", format!("10.9.0.{n}")).await.expect("within the limit").0);
+    }
+    let refused = open("198.51.100.7", "10.9.1.1".into()).await.expect_err("the thirty-first");
+    assert!(refused.to_string().contains("429"), "{refused}");
+    assert!(open("203.0.113.9", "10.9.1.2".into()).await.is_ok(), "another address behind the proxy");
+    let (_, _, page) = get(maddr, "/metrics", "").await;
+    let page = String::from_utf8(page).unwrap();
+    assert_eq!(metric(&page, r#"carnet_limited_total{what="sockets"}"#), 1.0);
+    drop(held);
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(10), done).await.expect("stops").unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Behind Cloudflare (`--client-header cf`), its `CF-Connecting-IP` is
+/// who a socket is for, and `X-Forwarded-For` says nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn behind_cloudflare_sockets_are_limited_by_its_header() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let data = temp("limits-cf");
+    std::fs::create_dir_all(&data).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (stop, rx) = oneshot::channel::<()>();
+    let trusted = carnet_server::limits::networks("127.0.0.1").unwrap();
+    let client_header = carnet_server::limits::ClientHeader::Cloudflare;
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted, client_header };
+    let done = tokio::spawn(server::serve(config, listener, async {
+        let _ = rx.await;
+    }));
+    let open = |cf: &'static str, from: String| async move {
+        let mut req = format!("ws://{addr}/v1/sync?protocol={}", carnet_sync::compat::PROTOCOL).into_client_request().unwrap();
+        req.headers_mut().insert("cf-connecting-ip", cf.parse().unwrap());
         req.headers_mut().insert("x-forwarded-for", from.parse().unwrap());
         tokio_tungstenite::connect_async(req).await
     };
     let mut held = Vec::new();
-    for _ in 0..30 {
-        held.push(open("198.51.100.7").await.expect("within the limit").0);
+    for n in 0..30 {
+        held.push(open("198.51.100.7", format!("10.9.0.{n}")).await.expect("within the limit").0);
     }
-    let refused = open("198.51.100.7").await.expect_err("the thirty-first");
+    let refused = open("198.51.100.7", "10.9.1.1".into()).await.expect_err("the thirty-first");
     assert!(refused.to_string().contains("429"), "{refused}");
-    assert!(open("203.0.113.9").await.is_ok(), "another address behind the proxy");
-    let (_, _, page) = get(maddr, "/metrics", "").await;
-    let page = String::from_utf8(page).unwrap();
-    assert_eq!(metric(&page, r#"carnet_limited_total{what="sockets"}"#), 1.0);
+    assert!(open("203.0.113.9", "10.9.1.2".into()).await.is_ok(), "another address behind Cloudflare");
     drop(held);
     let _ = stop.send(());
     tokio::time::timeout(Duration::from_secs(10), done).await.expect("stops").unwrap().unwrap();
@@ -663,7 +701,7 @@ async fn a_host_adds_routes_and_works_on_the_hub() {
         ..server::Host::default()
     };
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
     let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
         let _ = rx.await;
     }));
@@ -712,7 +750,7 @@ async fn a_hosts_pages_keep_their_headers_beside_the_app() {
         ..server::Host::default()
     };
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: dir.join("data"), origin: "https://notes.example".into(), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new() };
+    let config = Config { data: dir.join("data"), origin: "https://notes.example".into(), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new(), client_header: Default::default() };
     let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
         let _ = rx.await;
     }));
@@ -765,7 +803,7 @@ async fn the_data_is_private_and_a_deleted_accounts_link_puts_nothing() {
         ..server::Host::default()
     };
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
     let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
         let _ = rx.await;
     }));
