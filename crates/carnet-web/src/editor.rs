@@ -1504,9 +1504,9 @@ mod tests {
         assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nx\n\n---\n\nNext\n");
     }
 
-    /// Autolinks are links in the editor; a link's words come without
-    /// bidi controls, and so does its address in the link sheet. The note
-    /// keeps them as written.
+    /// Autolinks are links in the editor, a mail's address alone too; a
+    /// link's words come without bidi controls, and so does its address
+    /// in the link sheet. The note keeps them as written.
     #[test]
     fn autolinks_and_bidi_controls_in_links() {
         let md = "# T\n\nsee <https://example.com> and [abc\u{202E}txt.exe](https://x.com/\u{202E}y) end.\n";
@@ -1516,6 +1516,13 @@ mod tests {
         assert_eq!(e.link_here().as_deref(), Some("https://example.com"));
         e.select(1, 30, 1, 30);
         assert_eq!(e.link_here().as_deref(), Some("https://x.com/y"));
+        assert_eq!(e.markdown(), md);
+        // A mail's address alone: its words the address, opening a mail.
+        let md = "# T\n\nwrite to <me@x.com> today\n";
+        let mut e = Editor::open(md);
+        assert_eq!(e.lines()[1].text, "write to me@x.com today");
+        e.select(1, 12, 1, 12);
+        assert_eq!(e.link_to_open().as_deref(), Some("mailto:me@x.com"));
         assert_eq!(e.markdown(), md);
     }
 

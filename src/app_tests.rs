@@ -1732,7 +1732,8 @@ fn a_link_typed_without_a_scheme_is_given_the_webs() {
 
 /// Ctrl+click (⌘ on a Mac) on a link opens only one a note may follow:
 /// never one that runs (`javascript:`), nor a mail that would attach a
-/// file of this computer's, however it is written.
+/// file of this computer's, however it is written. A mail's address
+/// alone (`<me@x.test>`) opens a mail to it.
 #[test]
 fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
     let (mut app, mut d, dir) = body("link-open");
@@ -1742,6 +1743,7 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
         "[run](javascript:alert(1))",
         "[bare](me@x.test?%41ttachment=a.txt)",
         "[web](https://x.test/a)",
+        "<me@x.test>",
     ];
     let mut slots = Vec::new();
     for line in lines {
@@ -1749,7 +1751,7 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
         slots.push(app.caret.head.slot);
         key(&mut app, &mut d, "enter");
     }
-    assert_eq!(texts(&app)[..4], lines);
+    assert_eq!(texts(&app)[..5], lines);
     let ctrl_click = |app: &mut Carnet, d: &mut Drive, slot: Slot| {
         d.input(app, InputEvent::Modifiers(CTRL));
         click_drawn(app, d, slot, 1);
@@ -1764,6 +1766,10 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
     }
     ctrl_click(&mut app, &mut d, slots[3]);
     assert_eq!(opened(), ["https://x.test/a"]);
+    assert_eq!(app.error, None);
+    // A mail's address alone opens a mail to it.
+    ctrl_click(&mut app, &mut d, slots[4]);
+    assert_eq!(opened(), ["mailto:me@x.test"]);
     assert_eq!(app.error, None);
     // The menu's Open link and the link editor's go the same way.
     click_drawn(&mut app, &mut d, slots[0], 2);

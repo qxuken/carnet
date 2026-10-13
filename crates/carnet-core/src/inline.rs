@@ -584,19 +584,46 @@ fn read_counting(text: &str, count: Count) -> Read {
 }
 
 /// The `>` of a CommonMark autolink opening at `at` (`<scheme:…>`, no
-/// space, control or `<` inside), when its address is one a page may
-/// follow: the web's or a mail's.
+/// space, control or `<` inside, or a mail's address alone, `<me@x.com>`),
+/// when its address is one a page may follow: the web's or a mail's.
 fn autolink_end(text: &str, at: usize) -> Option<usize> {
     let rest = &text[at + 1..];
     let end = rest.find(['>', '<', ' '])?;
     let url = &rest[..end];
+    if !rest[end..].starts_with('>') {
+        return None;
+    }
+    if is_mail_address(url) {
+        return crate::export::safe_href(&autolink_href(url)).is_some().then_some(at + 1 + end);
+    }
     let (scheme, _) = url.split_once(':')?;
-    let ok = rest[end..].starts_with('>')
-        && (2..=32).contains(&scheme.len())
+    let ok = (2..=32).contains(&scheme.len())
         && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         && scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
         && !url.chars().any(|c| c.is_control() || is_bidi_control(c));
     (ok && crate::export::safe_href(url).is_some()).then_some(at + 1 + end)
+}
+
+/// Whether `s` is a plain mail address, as CommonMark's email autolink
+/// has one: a name of letters, digits and a few marks, `@`, and a host's
+/// labels of letters, digits and inner hyphens, `.` between. Nothing that
+/// would be read as more than an address once `mailto:` is before it: no
+/// `?` (a mail's fields), `%` or `/`.
+fn is_mail_address(s: &str) -> bool {
+    let Some((name, host)) = s.split_once('@') else { return false };
+    let label = |l: &str| {
+        (1..=63).contains(&l.len())
+            && l.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+    };
+    !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || b".!#$&'*+=^_{|}~-".contains(&c)) && host.split('.').all(label)
+}
+
+/// What an autolink's words open: the address as written, or a mail's
+/// given its `mailto:`.
+fn autolink_href(words: &str) -> String {
+    if is_mail_address(words) { format!("mailto:{words}") } else { words.to_string() }
 }
 
 /// Whether a pair is an autolink's (`<https://…>`): its address its words.
@@ -1513,8 +1540,8 @@ pub fn link_at(text: &str, at: usize) -> Option<(Pair, String)> {
         .into_iter()
         .find(|p| p.kind == Kind::Link && p.open.1 <= at && at <= p.close.0)
         .map(|p| {
-            let url = if is_autolink(text, &p) { &text[p.open.1..p.close.0] } else { &text[p.close.0 + 2..p.close.1 - 1] };
-            (p, url.to_string())
+            let url = if is_autolink(text, &p) { autolink_href(&text[p.open.1..p.close.0]) } else { text[p.close.0 + 2..p.close.1 - 1].to_string() };
+            (p, url)
         })
 }
 
@@ -2141,6 +2168,25 @@ mod tests {
         assert_eq!(unlink("<https://a.com>", 3).unwrap(), "https://a.com");
         // A letter taken out of its words is taken out of its address.
         assert_eq!(delete("<https://ab.com>", 10, 11).0, "<https://a.com>");
+    }
+
+    /// The finding: `<me@x.com>` showed as written. A mail's address
+    /// alone, as CommonMark has it, is a link too: its words the address,
+    /// opening `mailto:` it. Only a plain address: one with a mail's
+    /// fields, a path or no host stays as written.
+    #[test]
+    fn a_mail_address_in_brackets_is_a_link_to_it() {
+        let t = "write to <me.too+notes@mail-1.example.com> today";
+        assert_eq!(Visible::of(t).text(t), "write to me.too+notes@mail-1.example.com today");
+        assert!(styles(t)[12].link);
+        assert_eq!(link_at(t, 12).map(|l| l.1).as_deref(), Some("mailto:me.too+notes@mail-1.example.com"));
+        assert_eq!(link_at("<a_b@x>", 2).map(|l| l.1).as_deref(), Some("mailto:a_b@x"), "no `_` read as a mark");
+        for not in ["<me@>", "<@x.com>", "<me@x..com>", "<me@-x.com>", "<me@x.com?attach=/etc/passwd>", "<me%40x@y.com>", "<a/b@x.com>", "<me @x.com>", "<me@x.com", "<me@x\u{202E}.com>"] {
+            assert!(!styles(not).iter().any(|s| s.link), "{not}");
+        }
+        // Given another address, it's an autolink to that.
+        assert_eq!(set_link(t, 12, "you@example.org").unwrap(), "write to <mailto:you@example.org> today");
+        assert_eq!(unlink("<me@x.com>", 3).unwrap(), "me@x.com");
     }
 
     /// The finding: `[abc\u{202E}txt.exe](…) end.` read `abc.dne exe.txt`.
