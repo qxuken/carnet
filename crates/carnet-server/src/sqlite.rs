@@ -45,8 +45,9 @@ pub const OPEN: usize = 256;
 /// The schemas' version, in every file's `user_version`. 2: recovery.
 /// 3: device cards, last seen, key epochs and the keys sealed for them.
 /// 4: bases (compaction), records set aside, the log. 5: pictures.
-/// 6: rooms removed. 7: passwords. 8: passkeys.
-const VERSION: i64 = 8;
+/// 6: rooms removed. 7: passwords. 8: passkeys. 9: what each room holds
+/// live, kept counted ([`ROOMS`]).
+const VERSION: i64 = 9;
 
 const PRAGMAS: &str = "
 PRAGMA journal_mode = WAL;
@@ -177,10 +178,86 @@ CREATE TABLE IF NOT EXISTS recovery (
 );
 ";
 
+/// What each room holds live, kept counted as its records and bases come
+/// and go, set aside or back (schema 9): what [`Storage::live`] and
+/// [`Storage::room_count`] answer, the hub asking at every write, without
+/// a room's records counted. Kept by triggers, in the transaction that
+/// changes them, whatever changes them. And the index a write finds what
+/// it covers by. Made after [`ACCOUNT_COLUMNS`] (`meta.rooms` is one, and
+/// `records.shelved_by`, which the index names).
+const ROOMS: &str = "
+-- What a write asks: a live record of the peer's that covers the new
+-- one, or that it covers. Either reaches at least as far as the new one
+-- starts, so only those are looked at, not all the peer's.
+CREATE INDEX IF NOT EXISTS records_reach ON records (room, peer, span_end) WHERE shelved_by = 0;
+-- A room's live records, their bytes, its live bases (one at most).
+CREATE TABLE IF NOT EXISTS rooms (
+    room TEXT PRIMARY KEY,
+    records INTEGER NOT NULL DEFAULT 0,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    bases INTEGER NOT NULL DEFAULT 0
+);
+CREATE TRIGGER IF NOT EXISTS records_in AFTER INSERT ON records WHEN NEW.shelved_by = 0 BEGIN
+    INSERT INTO rooms (room, records, bytes) VALUES (NEW.room, 1, LENGTH(NEW.bytes))
+        ON CONFLICT (room) DO UPDATE SET records = records + 1, bytes = bytes + excluded.bytes;
+END;
+CREATE TRIGGER IF NOT EXISTS records_out AFTER DELETE ON records WHEN OLD.shelved_by = 0 BEGIN
+    UPDATE rooms SET records = records - 1, bytes = bytes - LENGTH(OLD.bytes) WHERE room = OLD.room;
+END;
+CREATE TRIGGER IF NOT EXISTS records_back AFTER UPDATE OF shelved_by ON records WHEN OLD.shelved_by > 0 AND NEW.shelved_by = 0 BEGIN
+    INSERT INTO rooms (room, records, bytes) VALUES (NEW.room, 1, LENGTH(NEW.bytes))
+        ON CONFLICT (room) DO UPDATE SET records = records + 1, bytes = bytes + excluded.bytes;
+END;
+CREATE TRIGGER IF NOT EXISTS records_aside AFTER UPDATE OF shelved_by ON records WHEN OLD.shelved_by = 0 AND NEW.shelved_by > 0 BEGIN
+    UPDATE rooms SET records = records - 1, bytes = bytes - LENGTH(OLD.bytes) WHERE room = OLD.room;
+END;
+CREATE TRIGGER IF NOT EXISTS bases_in AFTER INSERT ON bases WHEN NEW.shelved_by = 0 BEGIN
+    INSERT INTO rooms (room, bases) VALUES (NEW.room, 1) ON CONFLICT (room) DO UPDATE SET bases = bases + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS bases_out AFTER DELETE ON bases WHEN OLD.shelved_by = 0 BEGIN
+    UPDATE rooms SET bases = bases - 1 WHERE room = OLD.room;
+END;
+CREATE TRIGGER IF NOT EXISTS bases_back AFTER UPDATE OF shelved_by ON bases WHEN OLD.shelved_by > 0 AND NEW.shelved_by = 0 BEGIN
+    INSERT INTO rooms (room, bases) VALUES (NEW.room, 1) ON CONFLICT (room) DO UPDATE SET bases = bases + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS bases_aside AFTER UPDATE OF shelved_by ON bases WHEN OLD.shelved_by = 0 AND NEW.shelved_by > 0 BEGIN
+    UPDATE rooms SET bases = bases - 1 WHERE room = OLD.room;
+END;
+-- How many rooms hold anything live: one more as a room comes to, one
+-- less as it comes to nothing.
+CREATE TRIGGER IF NOT EXISTS rooms_in AFTER INSERT ON rooms WHEN NEW.records > 0 OR NEW.bases > 0 BEGIN
+    UPDATE meta SET rooms = rooms + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS rooms_changed AFTER UPDATE ON rooms
+    WHEN (OLD.records > 0 OR OLD.bases > 0) <> (NEW.records > 0 OR NEW.bases > 0) BEGIN
+    UPDATE meta SET rooms = rooms + CASE WHEN NEW.records > 0 OR NEW.bases > 0 THEN 1 ELSE -1 END;
+END;
+CREATE TRIGGER IF NOT EXISTS rooms_out AFTER DELETE ON rooms WHEN OLD.records > 0 OR OLD.bases > 0 BEGIN
+    UPDATE meta SET rooms = rooms - 1;
+END;
+";
+
+/// [`ROOMS`] counted from what a file holds: once, for a file from
+/// before it (its records counted the once). In one transaction, and
+/// again if it's cut off: a file isn't said to be this version until
+/// it's done.
+const COUNT_ROOMS: &str = "
+BEGIN;
+DELETE FROM rooms;
+INSERT INTO rooms (room, records, bytes, bases)
+    SELECT room, SUM(records), SUM(bytes), SUM(bases) FROM (
+        SELECT room, 1 AS records, LENGTH(bytes) AS bytes, 0 AS bases FROM records WHERE shelved_by = 0
+        UNION ALL SELECT room, 0, 0, 1 FROM bases WHERE shelved_by = 0)
+    GROUP BY room;
+UPDATE meta SET rooms = (SELECT COUNT(*) FROM rooms WHERE records > 0 OR bases > 0);
+COMMIT;
+";
+
 /// Columns an account file from an older server lacks, added in place:
 /// table, column, its declaration.
 const ACCOUNT_COLUMNS: &[(&str, &str, &str)] = &[
     ("meta", "epoch", "INTEGER NOT NULL DEFAULT 0"),
+    ("meta", "rooms", "INTEGER NOT NULL DEFAULT 0"),
     ("devices", "card", "BLOB NOT NULL DEFAULT x''"),
     ("devices", "seen", "INTEGER NOT NULL DEFAULT 0"),
     ("recovery", "card", "BLOB NOT NULL DEFAULT x''"),
@@ -217,14 +294,34 @@ fn uint(n: i64) -> u64 {
 }
 
 /// The schema made, or checked: a file from a newer server is not read.
-fn prepare(db: &Connection, schema: &str) -> Result<(), Failed> {
+/// The version it was comes back; it's said to be this one by [`stamp`],
+/// once it is.
+fn prepare(db: &Connection, schema: &str) -> Result<i64, Failed> {
     db.execute_batch(PRAGMAS).map_err(failed)?;
     let v: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(failed)?;
     if v > VERSION {
         return Err(Failed(format!("a database from a newer carnet-server (schema {v}, this reads {VERSION})")));
     }
     db.execute_batch(schema).map_err(failed)?;
+    Ok(v)
+}
+
+fn stamp(db: &Connection) -> Result<(), Failed> {
     db.execute_batch(&format!("PRAGMA user_version = {VERSION}")).map_err(failed)
+}
+
+/// An account's file made, or brought up to this version.
+fn prepare_account(db: &Connection) -> Result<(), Failed> {
+    let v = prepare(db, ACCOUNT)?;
+    add_columns(db, ACCOUNT_COLUMNS)?;
+    db.execute_batch(ROOMS).map_err(failed)?;
+    if v < 9 {
+        db.execute_batch(COUNT_ROOMS).map_err(|e| {
+            let _ = db.execute_batch("ROLLBACK");
+            failed(e)
+        })?;
+    }
+    stamp(db)
 }
 
 /// An account's file name: its id in hex, so no id names a path.
@@ -258,6 +355,7 @@ impl Sharded {
         let directory = Connection::open(&path).map_err(failed)?;
         crate::private::file(&path).map_err(|e| Failed(e.to_string()))?;
         prepare(&directory, DIRECTORY)?;
+        stamp(&directory)?;
         Ok(Sharded { place: Place::Disk(data.to_path_buf()), directory, open: RefCell::default(), clock: Cell::new(0) })
     }
 
@@ -266,6 +364,7 @@ impl Sharded {
     pub fn memory() -> Result<Self, Failed> {
         let directory = Connection::open_in_memory().map_err(failed)?;
         prepare(&directory, DIRECTORY)?;
+        stamp(&directory)?;
         Ok(Sharded { place: Place::Memory, directory, open: RefCell::default(), clock: Cell::new(0) })
     }
 
@@ -328,8 +427,7 @@ impl Sharded {
             }
             Place::Memory => Connection::open_in_memory().map_err(failed)?,
         };
-        prepare(&db, ACCOUNT)?;
-        add_columns(&db, ACCOUNT_COLUMNS)?;
+        prepare_account(&db)?;
         if matches!(self.place, Place::Disk(_)) && open.len() >= OPEN {
             let oldest = open.iter().min_by_key(|(_, (_, used))| *used).map(|(k, _)| k.clone());
             if let Some(k) = oldest {
@@ -702,26 +800,33 @@ impl Storage for Sharded {
     }
 
     fn put(&mut self, account: &[u8], room: &str, peer: u64, start: u64, end: u64, record: Vec<u8>) -> Result<Option<u64>, Failed> {
-        if self.base(account, room).is_some_and(|b| covers(&b.vv, &[(peer, end)])) {
-            return Ok(None);
-        }
         self.with(account, |db| -> Result<Option<u64>, Failed> {
+            // What the base holds, not the base (a snapshot, however big).
+            let vv: Option<Vec<u8>> = db
+                .prepare_cached("SELECT vv FROM bases WHERE room = ?1 AND shelved_by = 0")
+                .and_then(|mut q| q.query_row(params![room], |r| r.get(0)).optional())
+                .map_err(failed)?;
+            if vv.is_some_and(|vv| covers(&decode_vv(&vv).unwrap_or_default(), &[(peer, end)])) {
+                return Ok(None);
+            }
             let tx = db.unchecked_transaction().map_err(failed)?;
+            // Each by `records_reach`: what covers it reaches past its end,
+            // what it covers past its start.
             let covered: bool = tx
-                .query_row(
-                    "SELECT EXISTS (SELECT 1 FROM records WHERE room = ?1 AND peer = ?2 AND span_start <= ?3 AND ?4 <= span_end
-                         AND shelved_by = 0)",
-                    params![room, int(peer), int(start), int(end)],
-                    |r| r.get(0),
+                .prepare_cached(
+                    "SELECT EXISTS (SELECT 1 FROM records WHERE room = ?1 AND peer = ?2 AND shelved_by = 0
+                         AND span_end >= ?4 AND span_start <= ?3)",
                 )
+                .and_then(|mut q| q.query_row(params![room, int(peer), int(start), int(end)], |r| r.get(0)))
                 .map_err(failed)?;
             if covered {
                 return Ok(None);
             }
-            tx.execute(
-                "DELETE FROM records WHERE room = ?1 AND peer = ?2 AND ?3 <= span_start AND span_end <= ?4 AND shelved_by = 0",
-                params![room, int(peer), int(start), int(end)],
+            tx.prepare_cached(
+                "DELETE FROM records WHERE room = ?1 AND peer = ?2 AND shelved_by = 0
+                     AND span_end >= ?3 AND span_end <= ?4 AND span_start >= ?3",
             )
+            .and_then(|mut q| q.execute(params![room, int(peer), int(start), int(end)]))
             .map_err(failed)?;
             let seq: i64 = tx.query_row("UPDATE meta SET seq = seq + 1 RETURNING seq", [], |r| r.get(0)).map_err(failed)?;
             tx.execute(
@@ -773,14 +878,11 @@ impl Storage for Sharded {
 
     fn live(&self, account: &[u8], room: &str) -> Live {
         self.with(account, |db| {
-            db.query_row(
-                "SELECT (SELECT COUNT(*) FROM records WHERE room = ?1 AND shelved_by = 0),
-                        (SELECT COALESCE(SUM(LENGTH(bytes)), 0) FROM records WHERE room = ?1 AND shelved_by = 0),
-                        EXISTS (SELECT 1 FROM bases WHERE room = ?1 AND shelved_by = 0)",
-                params![room],
-                |r| Ok(Live { records: uint(r.get(0)?), bytes: uint(r.get(1)?), based: r.get(2)? }),
-            )
-            .unwrap_or_default()
+            db.prepare_cached("SELECT records, bytes, bases > 0 FROM rooms WHERE room = ?1")
+                .and_then(|mut q| q.query_row(params![room], |r| Ok(Live { records: uint(r.get(0)?), bytes: uint(r.get(1)?), based: r.get(2)? })).optional())
+                .ok()
+                .flatten()
+                .unwrap_or_default()
         })
         .ok()
         .flatten()
@@ -788,18 +890,10 @@ impl Storage for Sharded {
     }
 
     fn room_count(&self, account: &[u8]) -> u64 {
-        self.with(account, |db| {
-            db.query_row(
-                "SELECT COUNT(*) FROM (SELECT room FROM records WHERE shelved_by = 0 UNION SELECT room FROM bases WHERE shelved_by = 0)",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(uint)
+        self.with(account, |db| db.query_row("SELECT rooms FROM meta", [], |r| r.get::<_, i64>(0)).map(uint).unwrap_or(0))
+            .ok()
+            .flatten()
             .unwrap_or(0)
-        })
-        .ok()
-        .flatten()
-        .unwrap_or(0)
     }
 
     fn changed_since(&self, account: &[u8], seq: u64) -> Vec<(String, u64)> {
@@ -934,7 +1028,7 @@ impl Storage for Sharded {
     fn remove_room(&mut self, account: &[u8], room: &str, now: u64) -> Result<(), Failed> {
         self.with(account, |db| -> Result<(), Failed> {
             let tx = db.unchecked_transaction().map_err(failed)?;
-            for table in ["records", "bases"] {
+            for table in ["records", "bases", "rooms"] {
                 tx.execute(&format!("DELETE FROM {table} WHERE room = ?1"), params![room]).map_err(failed)?;
             }
             tx.execute("INSERT OR IGNORE INTO removed (room, at) VALUES (?1, ?2)", params![room, int(now)]).map_err(failed)?;
@@ -1387,6 +1481,52 @@ mod tests {
         let v: i64 = s.with(b"alice", |db| db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()).unwrap().unwrap();
         assert_eq!(v, VERSION);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// What SQLite steps through for one write as the hub makes it (what
+    /// the room holds, the record kept, what it holds now): about the
+    /// same with thousands of records in the room as with a hundred, all
+    /// of one peer, none read or counted.
+    #[test]
+    fn a_write_steps_through_as_much_however_many_records_its_room_has() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let mut s = Sharded::memory().unwrap();
+        s.add_account(b"alice", true).unwrap();
+        let steps = std::sync::Arc::new(AtomicU64::new(0));
+        let counter = steps.clone();
+        s.with(b"alice", |db| {
+            db.progress_handler(
+                1,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+        })
+        .unwrap();
+        let mut n = 0;
+        let mut write = |s: &mut Sharded| {
+            let before = s.live(b"alice", "r");
+            assert!(s.put(b"alice", "r", 7, n, n + 1, vec![b'x'; 200]).unwrap().is_some());
+            assert_eq!(s.live(b"alice", "r").records, before.records + 1);
+            n += 1;
+        };
+        let mut ten = |s: &mut Sharded| {
+            let at = steps.load(Ordering::Relaxed);
+            for _ in 0..10 {
+                write(s);
+            }
+            steps.load(Ordering::Relaxed) - at
+        };
+        for _ in 0..10 {
+            ten(&mut s);
+        }
+        let early = ten(&mut s);
+        for _ in 0..300 {
+            ten(&mut s);
+        }
+        let late = ten(&mut s);
+        assert!(late < early * 3 / 2, "{early} steps for ten writes at a hundred records, {late} at three thousand");
     }
 
     #[test]
