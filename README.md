@@ -6,11 +6,15 @@ Carnet is a small, fast, native notes app for macOS, Windows and Linux. Every no
 
 | Light | Dark |
 |---|---|
-| ![A note with a dropped first letter, a highlight, a picture and a checklist, in the Linen palette](docs/light.png) | ![A table of books, in the Linen palette's dark mode](docs/dark.png) |
+| ![A note with a dropped first letter, a highlight, and a checklist with a picture beside it, in the Linen palette](docs/light.png) | ![A table of books, in the Linen palette's dark mode](docs/dark.png) |
 
 | Settings | A narrow window |
 |---|---|
 | ![The settings page: theme, page width, density, text size, dividers, the first letter's height, font and colour, and the fonts](docs/settings.png) | ![A note in a narrow window, the library tucked away](docs/narrow.png) |
+
+| The web app, on a phone |
+|---|
+| ![The web app on two phones: the library with its folders, and a note with a dropped first letter, a picture and a checklist](docs/web.png) |
 
 A *carnet* is French for a small notebook.
 
@@ -131,8 +135,9 @@ The toolbar acts on the blocks the caret touches: turn them into another kind, d
 | Ctrl+. | zen mode: only the note |
 | Ctrl+, | settings |
 | F2, Delete on a folder in the list | rename it in place, delete it (one with notes goes to the trash whole, and Undo brings it back) |
-| drag a note onto a folder | move it there ("All notes" takes it to the top level) |
+| drag a note or a folder onto a folder | move it there ("All notes" takes it to the top level); a folder takes its notes and folders with it |
 | Shift+click / Ctrl+click in the list | choose several notes and folders, to trash or move together |
+| Shift+↑ / ↓ in the list | choose from the folder you're on, or, after a click on a note's card, from that note |
 | right-click a note in the list | open, its history, pin, show in Explorer or Finder, copy its path, move to a folder, move to the trash |
 
 **History** (from a note's menu, or **View → Note History**) lists every version the note has been, newest first: written here, changed in another app, or restored. Click one to read it, with what it changed marked; **Compare with now** shows what restoring it would bring back and take away. **Restore** makes it the note again, and **Restore as a copy** makes it a note of its own.
@@ -150,7 +155,9 @@ On a narrow window it is one thing at a time: the note, with a back arrow to the
 - **Ctrl+V** with a picture on the clipboard (a screenshot, an image copied in a browser) puts it in at the caret. Picture files copied in Explorer or Finder, or dragged onto the page, go in the same way.
 - A picture is a block of its own: click to select it, then drag a handle to resize it. Right-click it to copy it, size it, place it at the left or right of the text, or show its file.
 - A picture at the left or right edge has the text run beside it. It is written `![alt|right|300](src)`, Obsidian's width with a side before it.
-- **Carnet's pictures and yours.** The pictures Carnet keeps are the ones in the notes folder's `attachments/` folder, where a paste, a drop or an import puts them. Those sync, and Carnet tidies them up: one no note has shown for a week, in any version of a note, a note in Deleted included, goes to the notes folder's `.trash/attachments/`, where you can still find it. Any other picture a note shows (beside the note, elsewhere in the folder, or outside it) is your own file: Carnet shows it faint, with a small phone in its corner, never syncs it, and never moves or deletes it. Select it to see why, and to **Move into Carnet** (the file goes to `attachments/` and every note showing it follows; the notice's Undo moves it back) or **Copy into Carnet** (a copy for this note alone; your file stays where it is, and the notice's Undo takes the copy away again). On another device (the web, or another computer syncing the notes) such a picture is a grey card the size of the picture's place, saying it's only on the device that has it.
+- **In a table**, drag a picture into a cell. It is drawn as wide as the cell allows and written plainly, `![alt](src)`, as other apps read it.
+- The arrow keys choose a picture or a divider whole on their way past it. Typing while one is chosen puts a new paragraph in its place; Enter opens a line beside it and keeps it.
+- **Carnet's pictures and yours.** The pictures Carnet keeps are the ones in the notes folder's `attachments/` folder, where a paste, a drop or an import puts them. Those sync (pictures only: other files there stay on this device), and Carnet tidies them up: one no note has shown for a week, in any version of a note, a note in Deleted included, goes to the notes folder's `.trash/attachments/`, where you can still find it. Any other picture a note shows (beside the note, elsewhere in the folder, or outside it) is your own file: Carnet shows it faint, with a small phone in its corner, never syncs it, and never moves or deletes it. Select it to see why, and to **Move into Carnet** (the file goes to `attachments/` and every note showing it follows; the notice's Undo moves it back) or **Copy into Carnet** (a copy for this note alone; your file stays where it is, and the notice's Undo takes the copy away again). On another device (the web, or another computer syncing the notes) such a picture is a grey card the size of the picture's place, saying it's only on the device that has it.
 
 ### Settings
 
@@ -180,15 +187,15 @@ Sync is end-to-end encrypted. Your notes, their titles, folder names and picture
 To start, you need a sync server and an invite code from it:
 
 1. **Run `carnet-server`**, from the released image (`qxuken/carnet-server` on Docker Hub, or `ghcr.io/qxuken/carnet-server`) or built from this repository. On its first start it prints an invite code for the first account. [crates/carnet-server/README.md](crates/carnet-server/README.md) is the full self-hosting guide: running it, TLS, backups, monitoring, and moving to Postgres and S3.
-2. **In Carnet, open Settings → Sync**, type the server's address and the invite code, and connect.
+2. **In Carnet, open Settings → Sync**, type the server's address, choose **Enter the code**, and type the invite code.
 3. **Add your other devices** from **Settings → Sync → Add a device**: it shows a code (and a QR code) that the new device types or scans. The server only relays the two devices' messages and cannot read what passes between them.
-4. **Keep the recovery words.** Twelve words let a new device in when none of yours is left. They are shown once and kept nowhere.
+4. **Keep a way back in.** Twelve recovery words let a new device in when none of yours is left; they are shown once and kept nowhere. A password (and, in the web app, a passkey) does the same and can be changed at any time; the server never learns the password.
 
 The first account on a server is its owner's: the owner's devices can invite other people, each with an account and notes of their own.
 
 ## The web app
 
-`carnet-server` also serves a web app at its address. Open it in a browser and type a pairing code from one of your devices, or scan the QR code with a phone's camera, and the browser becomes one of your devices. It reads, searches and edits your notes, ticks checkboxes, shows a note's history, lists and removes devices, and keeps working offline. Install it from the browser's menu, or with **Share → Add to Home Screen** on an iPhone. It decrypts in the browser, like the desktop app.
+`carnet-server` also serves a web app at its address. Open it in a browser and type a pairing code from one of your devices, or scan the QR code with a phone's camera, and the browser becomes one of your devices. It reads, searches and edits your notes the way the desktop does, with pictures, tables and checklists; makes, renames, nests and deletes folders, moves notes between them and pins them; shows a note's history; lists and removes devices; and keeps working offline. Install it from the browser's menu, or with **Share → Add to Home Screen** on an iPhone. It decrypts in the browser, like the desktop app.
 
 ## Building from source
 
