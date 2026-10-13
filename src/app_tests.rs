@@ -4057,12 +4057,30 @@ fn a_new_device_comes_in_by_email_and_password() {
     a.pw_edit = Some(("Ann@Example.com".into(), short.clone()));
     a.on_plain(Msg::SyncPasswordSave);
     assert!(a.sync.password_error.is_some());
-    a.pw_edit = Some(("Ann@Example.com".into(), "correct horse battery".into()));
+    // Typed in the field, as a hand would.
+    a.pw_edit = Some(("Ann@Example.com".into(), String::new()));
+    da.frame(&mut a);
+    let pw_field = app_field(&a, Field::PasswordNew).unwrap();
+    da.core.set_edit_text(pw_field, "");
+    da.focus(&mut a, pw_field);
+    da.text(&mut a, "correct horse battery");
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some("correct horse battery"));
     a.on_plain(Msg::SyncPasswordSave);
     until("set", &mut a, &mut da, &|x| x.notice.as_ref().is_some_and(|n| n.text.starts_with("Password set")));
     assert_eq!((a.sync.password_error.as_deref(), a.sync.error.as_deref()), (None, None));
     assert!(!drawn(&mut da, &mut a, &why));
     until("listed", &mut a, &mut da, &|x| x.sync.password == Some((true, Some("ann@example.com".into()))));
+    // Set, the field put away keeps nothing of it; Change opens it empty.
+    da.frame(&mut a);
+    assert!(a.pw_edit.is_none());
+    assert_eq!(da.core.edit_text(pw_field).as_deref(), Some(""), "nothing kept in the field put away");
+    assert!(drawn(&mut da, &mut a, "Change"));
+    a.on_plain(Msg::SyncPassword);
+    d_frame_twice(&mut a, &mut da);
+    let k = app_field(&a, Field::PasswordNew).unwrap();
+    assert_eq!(da.core.edit_text(k).as_deref(), Some(""), "Change opens empty");
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some(""));
+    a.on_plain(Msg::SyncPasswordCancel);
 
     // A wrong one: nothing let in, and said.
     let (mut c, mut dc, dir_c) = fresh("pw-c");
@@ -4089,6 +4107,7 @@ fn a_new_device_comes_in_by_email_and_password() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(b.sync.is_on());
+    assert!(b.sync_password.is_empty(), "the password signed in with isn't kept");
 
     // Deleted from A: asked first, then gone everywhere; each says so.
     a.settings_open = true;

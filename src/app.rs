@@ -812,6 +812,10 @@ pub struct Carnet {
     /// when next drawn: a field keeps its own text, so changing ours is not
     /// enough.
     sync_reset_fields: bool,
+    /// The password fields declared on the last frame, and on this one
+    /// so far: one that goes is emptied (`forget_passwords`).
+    passwords_shown: Vec<Key>,
+    passwords_now: Vec<Key>,
     /// The sync inspector is open in Settings → Sync.
     pub sync_inspector: bool,
     /// A rollback (false) or repair (true) of this room, awaiting yes.
@@ -1072,6 +1076,8 @@ impl Carnet {
             sync_rename: None,
             pair_qr: None,
             sync_reset_fields: false,
+            passwords_shown: Vec::new(),
+            passwords_now: Vec::new(),
             sync_inspector: false,
             sync_inspect_armed: None,
             sync_inspect_open: None,
@@ -2054,9 +2060,11 @@ impl Carnet {
             self.sync_server = origin;
             self.sync_reset_fields = true;
         }
-        // In: the code, or the twelve words, need not stay on screen.
-        if self.sync.is_on() && !self.sync_code.is_empty() {
+        // In: the code, or the twelve words, need not stay on screen; nor
+        // the password signed in with be kept.
+        if self.sync.is_on() && !(self.sync_code.is_empty() && self.sync_password.is_empty()) {
             self.sync_code.clear();
+            self.sync_password.clear();
             self.sync_reset_fields = true;
         }
         // Joining an account can take a note away, the open one or one
@@ -3907,6 +3915,20 @@ impl Carnet {
         self.field_caret = Some(FieldCaret { key: k, version, ends, held });
     }
 
+    /// A password field no longer shown is emptied: kui keeps an editor's
+    /// words while its key is off screen, so a password typed to set one
+    /// came back in the field the next Change opened, and stayed in
+    /// memory until then. Carnet keeps no password: the server's OPAQUE
+    /// needs it only while it is being set or signed in with.
+    fn forget_passwords(&mut self, core: &mut Core) {
+        let shown = std::mem::take(&mut self.passwords_now);
+        for k in std::mem::replace(&mut self.passwords_shown, shown) {
+            if !self.passwords_shown.contains(&k) {
+                core.set_edit_text(k, "");
+            }
+        }
+    }
+
     /// Hands focus to the field a model change asked for, the frame it is
     /// declared in.
     fn apply_focus(&mut self, ui: &mut Ui<'_>, k: Key, field: Field) {
@@ -4180,6 +4202,7 @@ impl App for Carnet {
             ui.core().declare_menu_bar(bar);
         }
         self.fields.clear();
+        self.forget_passwords(ui.core());
         self.caret = page::fix(self.doc(), self.caret);
         self.follow_pointer(ui);
         let mut l = self.styler.look(ui, &self.settings);
