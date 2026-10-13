@@ -7672,6 +7672,111 @@ fn a_built_in_face_is_listed_once() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Code is drawn in a monospaced face, a block of it and a word of it:
+/// ten i's as wide as ten M's, where the text's face makes them far
+/// apart. The face is the system's monospace until one is chosen; a
+/// chosen one draws the code, and the text stays in its own.
+#[test]
+fn code_is_drawn_in_the_code_face() {
+    let (store, dir) = temp_store("code-face");
+    drop(store);
+    let (i, m) = ("iiiiiiiiii", "MMMMMMMMMM");
+    std::fs::write(dir.join("Code.md"), format!("# Code\n\n```\n{i}\n```\n\n```\n{m}\n```\n\n`{i}`\n\n`{m}`\n\n{i}\n\n{m}\n")).unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 900.0).framing();
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    let n = app.store.notes.iter().position(|n| n.title == "Code").unwrap();
+    app.open(n);
+    // The widths drawn, top to bottom: the blocks, the words, the text.
+    let widths = |app: &mut Carnet, d: &mut Drive| -> Vec<f32> {
+        for _ in 0..3 {
+            d.frame(app);
+        }
+        let mut found: Vec<(f32, f32)> = d
+            .core
+            .nodes()
+            .iter()
+            .filter(|n| n.rect.x > 268.0 && (n.text.as_deref() == Some(i) || n.text.as_deref() == Some(m)))
+            .map(|n| (n.rect.y, n.rect.w))
+            .collect();
+        found.sort_by(|a, b| a.0.total_cmp(&b.0));
+        found.into_iter().map(|f| f.1).collect()
+    };
+    let w = widths(&mut app, &mut d);
+    assert_eq!(w.len(), 6, "{w:?}");
+    assert!((w[0] - w[1]).abs() < 0.5, "a block of code is monospaced: {w:?}");
+    assert!((w[2] - w[3]).abs() < 0.5, "a word of code is monospaced: {w:?}");
+    assert!(w[5] > w[4] * 1.5, "the text is not: {w:?}");
+    // The system's monospace, at code's size (whole px, as the page has it).
+    let style = TextStyle::new(Type::CODE.size.round()).family(kui_native::FontFamily::Mono);
+    let mono = d.core.measure_text(m, &style, None).width;
+    assert!((w[1] - mono).abs() < 0.5, "{} drawn, {mono} measured", w[1]);
+
+    // Another monospaced face installed, one that draws wider or narrower:
+    // chosen, it draws the code.
+    let other = d.core.system_fonts().into_iter().filter(|f| f.monospaced && !f.family.starts_with('.')).find_map(|f| {
+        let id = d.core.add_system_font(&f.family)?;
+        let wide = d.core.measure_text(m, &style.family(kui_native::FontFamily::Custom(id)), None).width;
+        ((wide - mono).abs() > 2.0).then_some((f.family, wide))
+    });
+    if let Some((name, wide)) = other {
+        app.settings.code_font = name.clone();
+        let w = widths(&mut app, &mut d);
+        assert!((w[1] - wide).abs() < 0.5, "{name}: {} drawn, {wide} measured", w[1]);
+        assert!((w[0] - w[1]).abs() < 0.5 && (w[2] - w[3]).abs() < 0.5, "{w:?}");
+        assert!(w[5] > w[4] * 1.5, "the text in its own face still: {w:?}");
+    } else {
+        eprintln!("skipped: no second monospaced face installed");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Settings → Fonts → Code: its list holds the monospaced families only,
+/// the system's own first; a click chooses one, its pill says so, and
+/// Reset puts the system's back.
+#[test]
+fn the_code_font_is_chosen_from_monospaced_families() {
+    let (store, dir) = temp_store("code-font");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(d.texts_under("font-code"), ["System monospace"]);
+    app.on_settings(Msg::FontMenu { which: 3 });
+    d_frame_twice(&mut app, &mut d);
+    let mono: std::collections::HashSet<String> =
+        d.core.system_fonts().into_iter().filter(|f| f.monospaced).map(|f| f.family).collect();
+    assert!(app.font_rows.iter().all(|f| mono.contains(f)), "monospaced only: {:?}", app.font_rows);
+    assert!(!app.font_rows.iter().any(|f| f == "Inter" || f == "Source Serif 4"));
+    assert!(d.key_named("System monospace").is_some(), "the default row");
+    let Some(name) = app.font_rows.first().cloned() else {
+        eprintln!("skipped: no monospaced family installed");
+        let _ = std::fs::remove_dir_all(dir);
+        return;
+    };
+    let r = d.core.nodes().iter().find(|n| n.text.as_deref() == Some(name.as_str())).map(|n| n.rect).unwrap();
+    d.click(&mut app, r.x + 20.0, r.y + r.h / 2.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!((app.settings.code_font.as_str(), app.font_pick), (name.as_str(), None));
+    assert_eq!(d.texts_under("font-code"), [name.as_str()]);
+    assert!(app.settings.to_text().contains(&format!("code_font = {name}\n")));
+    // Searched, the list narrows as the others do.
+    app.on_settings(Msg::FontMenu { which: 3 });
+    app.font_query = "no such face".into();
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.font_rows.is_empty());
+    app.on_settings(Msg::FontMenu { which: 3 });
+    // Reset: the system's again.
+    app.on_settings(Msg::ResetLook);
+    app.on_settings(Msg::ResetLook);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.code_font, "");
+    assert_eq!(d.texts_under("font-code"), ["System monospace"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A font list opens afresh: its search empty and every font listed,
 /// whatever was searched for the last time.
 #[test]
@@ -8134,6 +8239,64 @@ fn list_tools_turn_every_selected_line_and_back() {
     key_with(&mut app, &mut d, "5", CTRL_ALT);
     key_with(&mut app, &mut d, "z", CTRL);
     assert_eq!(kinds(&app), ["text"; 3]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A note from Apple Notes' export, its lines ended by line breaks: a
+/// click on its first line and the toolbar's Bulleted list make that line
+/// an item, and the rest of the file stays as it was, byte for byte; the
+/// shortcut takes it back to a paragraph of its own, and Ctrl+Z to the
+/// file as it came. ⌥⌘6 numbers a line in the middle of a paragraph.
+#[test]
+fn an_exported_notes_line_is_turned_alone() {
+    const EXPORT: &str = include_str!("../crates/carnet-core/tests/fixtures/apple-notes.md");
+    let (store, dir) = temp_store("export-lines");
+    drop(store);
+    std::fs::write(dir.join("поездки.md"), EXPORT).unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    let i = app.store.notes.iter().position(|n| n.title == "поездки").unwrap();
+    app.open(i);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let written = |app: &mut Carnet| {
+        app.save_current();
+        std::fs::read_to_string(dir.join("поездки.md")).unwrap()
+    };
+    assert_eq!(written(&mut app), EXPORT);
+    // On the page (not the note's card in the library): the paragraph.
+    let first = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("путь: жильё   \nhostel / ryokan  ")).expect("the first paragraph").rect;
+    d.click(&mut app, first.x + 30.0, first.y + 8.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(page::touched(app.doc(), app.caret), 0..=0);
+    let tool = d.key_of("t-bullet").expect("the toolbar's Bulleted list");
+    d.click_key(&mut app, tool);
+    d_frame_twice(&mut app, &mut d);
+    let one = EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n", 1);
+    assert_eq!(written(&mut app), one);
+    assert!(page::turned_to(app.doc(), app.caret, TURN_BULLET), "the tool shows on");
+    key_with(&mut app, &mut d, "5", CTRL_ALT);
+    let back = EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "**путь:** жильё\n\nhostel / ryokan  \n", 1);
+    assert_eq!(written(&mut app), back);
+    key_with(&mut app, &mut d, "z", CTRL);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(written(&mut app), EXPORT, "undone, the file as it came");
+
+    // A line in the middle of the longest paragraph, by the keyboard.
+    let big = app.doc().blocks().iter().position(|b| b.text_ref().is_some_and(|t| t.starts_with("**дом:** мысли"))).unwrap();
+    let slot = Slot::block(app.doc().blocks()[big].id);
+    let at = page::text(app.doc(), slot).find("picture").unwrap();
+    app.caret = Caret::at(Pos { slot, byte: at + 3 });
+    key_with(&mut app, &mut d, "6", CTRL_ALT);
+    assert_eq!(
+        written(&mut app),
+        EXPORT.replacen("коридоре  \npicture rail  \nskylight", "коридоре  \n\n1. picture rail\n\nskylight", 1)
+    );
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 

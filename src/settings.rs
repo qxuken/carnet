@@ -126,6 +126,10 @@ pub struct Settings {
     pub font: String,
     /// The title's and headings' face; empty for the built-in serif.
     pub heading_font: String,
+    /// Code's face, a block of it or a word: a monospaced family by name;
+    /// empty for the system's own monospace (SF Mono or Menlo, Cascadia
+    /// Mono or Consolas, DejaVu Sans Mono…).
+    pub code_font: String,
     /// The body's size in px; headings and tables scale with it.
     pub size: u32,
     pub width: Width,
@@ -191,6 +195,7 @@ impl Default for Settings {
             density: Density::Comfortable,
             font: String::new(),
             heading_font: String::new(),
+            code_font: String::new(),
             size: 16,
             width: Width::Medium,
             sort: Sort::Edited,
@@ -254,6 +259,7 @@ impl Settings {
                 "density" => s.density = Density::from_key(v).unwrap_or(Density::Comfortable),
                 "font" => s.font = v.to_string(),
                 "heading_font" => s.heading_font = v.to_string(),
+                "code_font" => s.code_font = v.to_string(),
                 "size" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.size = n.clamp(*SIZES.start(), *SIZES.end());
@@ -327,11 +333,12 @@ impl Settings {
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
         let collapsed: String = self.collapsed.iter().map(|f| format!("collapsed = {f}\n")).collect();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nlinks = {}\nsidebar = {}\n{collapsed}colors = {}\ncheck_updates = {}\ntold_update = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\ncode_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nlinks = {}\nsidebar = {}\n{collapsed}colors = {}\ncheck_updates = {}\ntold_update = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
             self.heading_font,
+            self.code_font,
             self.size,
             if self.dates_created { "created" } else { "edited" },
             self.divider.key(),
@@ -421,6 +428,7 @@ mod tests {
             density: Density::Airy,
             font: "Georgia".into(),
             heading_font: "Inter".into(),
+            code_font: "JetBrains Mono".into(),
             size: 18,
             width: Width::Wide,
             sort: Sort::Title,
@@ -482,7 +490,7 @@ mod tests {
     #[test]
     fn a_reset_puts_back_the_look_and_keeps_the_rest() {
         let mut s = Settings::parse(
-            "theme = dark\npalette = sage\nfont = Georgia\nsize = 20\nwidth = wide\ninitial_lines = 4\nfocus = on\n\
+            "theme = dark\npalette = sage\nfont = Georgia\ncode_font = Menlo\nsize = 20\nwidth = wide\ninitial_lines = 4\nfocus = on\n\
              window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncollapsed = Work\ncolors = #c0504d\ndir = /notes\n",
         );
         s.file = Some(PathBuf::from("/c/settings.txt"));
@@ -492,6 +500,7 @@ mod tests {
         let d = Settings::default();
         assert_eq!((s.theme, s.palette, s.font.as_str(), s.size, s.width), (d.theme, d.palette, "", 16, Width::Medium));
         assert_eq!((s.initial_lines, s.focus), (3, false));
+        assert_eq!(s.code_font, "", "code in the system's monospace again");
         assert_eq!(s.translucent, d.translucent, "the window as at first");
         assert_eq!((s.sort, s.dates_created, s.library_w, s.sidebar), (Sort::Title, true, 300, false));
         assert!(s.collapsed.contains("Work"), "the folders folded stay folded");

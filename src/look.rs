@@ -35,6 +35,11 @@ pub struct Look {
     pub body: FontFamily,
     /// A dropped first letter's face: the headings' unless one is chosen.
     pub initial: FontFamily,
+    /// Code's, a block or a word of it: the system's monospace (kui's
+    /// `Mono`: SF Mono or Menlo on a Mac, Cascadia Mono or Consolas on
+    /// Windows, DejaVu Sans Mono or Liberation Mono elsewhere) unless one
+    /// is chosen.
+    pub code: FontFamily,
     /// The body's size over the 16px everything was drawn at: headings,
     /// tables and the title scale by it.
     pub k: f32,
@@ -152,6 +157,7 @@ impl Styler {
         let serif = self.face(ui, &s.heading_font, default_serif);
         let body = self.face(ui, &s.font, default_body);
         let initial = self.face(ui, &s.initial_font, serif);
+        let code = self.face(ui, &s.code_font, FontFamily::Mono);
         let t = ui.theme();
         Look {
             t,
@@ -165,6 +171,7 @@ impl Styler {
             serif,
             body,
             initial,
+            code,
             k: s.size as f32 / 16.0,
             // As wide as chosen, whatever the text's size: smaller text
             // doesn't narrow the page, nor bigger text widen it.

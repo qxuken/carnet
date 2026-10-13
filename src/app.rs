@@ -648,12 +648,14 @@ pub struct Carnet {
     /// What the font list is narrowed to.
     font_query: String,
     /// The font list open in the settings: for the body (0), the headings
-    /// (1), the dropped letter (2).
+    /// (1), the dropped letter (2), code (3).
     font_pick: Option<u64>,
     /// The font list's rows as last drawn: what `Msg::SetFont` indexes.
     font_rows: Vec<String>,
     /// Every installed family, read once when the list first opens.
     families: Option<Vec<String>>,
+    /// The monospaced ones among them, for code's list.
+    mono_families: Option<std::collections::HashSet<String>>,
     /// Faces by name, for drawing each font's name in itself.
     font_faces: HashMap<String, kui_native::FontFamily>,
     /// Ask for a folder on the next frame.
@@ -1048,6 +1050,7 @@ impl Carnet {
             font_pick: None,
             font_rows: Vec::new(),
             families: None,
+            mono_families: None,
             font_faces: HashMap::new(),
             pick_dir: false,
             dir_change: None,
