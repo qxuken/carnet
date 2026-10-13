@@ -6,7 +6,7 @@ import init, { Join, Vault, app_version, code_from_link, invite_from, max_sealed
 import * as sealed from './sealed';
 import * as db from './db';
 import * as passkey from './passkey';
-import { Coalesced } from './coalesce';
+import { AfterQuiet, Coalesced, withCard } from './coalesce';
 import { Shown } from './shown';
 import { type Entry, Uploads } from './uploads';
 import { type Entry as Typed, Pending, replay } from './pending';
@@ -81,6 +81,8 @@ const PENDING = 'pending:';
 /// How soon what's kept is kept again after an edit: the edit goes to the
 /// server then (`Sync.flush`).
 const KEEP_EDITS = 250;
+/// How long typing pauses before the notes are listed again.
+const TYPING_PAUSE = 1000;
 const PICTURE = 'picture:';
 /// Said on `window` when the notes change: pictures.ts asks again for
 /// those not found.
@@ -238,6 +240,9 @@ class Sync {
     this.refresh();
     this.save();
   });
+  /// After typing, the note's own card at once, and the notes listed
+  /// again once it pauses (`edit`).
+  private afterTyping = new AfterQuiet(() => this.lists.ask(), TYPING_PAUSE);
   private pictures = new Shown();
   private wanted = new Map<string, { path: string; done: (url: string) => void; fail: (e: Error) => void }[]>();
   private pruneTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1035,7 +1040,11 @@ class Sync {
     // Held until kept, kept soon (`flush`).
     this.held = ++this.edits;
     this.pending.sent(key, r[1], r[0]);
-    this.refresh();
+    // Its own card now, read alone; the whole list (ten thousand notes,
+    // say) once typing pauses, not at each edit.
+    const card = this.vault?.note(key);
+    this.notes = withCard(this.notes, key, card ? (JSON.parse(card) as Note) : null);
+    this.afterTyping.ask();
     this.save(KEEP_EDITS);
     return r;
   }
@@ -1291,6 +1300,7 @@ class Sync {
   /// The vault let go of, its keys wiped from the wasm's memory.
   private dropVault() {
     this.lists.cancel();
+    this.afterTyping.cancel();
     const v = this.vault;
     this.vault = null;
     v?.free();

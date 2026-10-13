@@ -600,6 +600,12 @@ fn the_browser_edits_merges_renames_makes_and_deletes_notes() {
     assert_eq!(text, "# Plan\n\nA walk.\n");
     let (merged, base) = web.edit(&ks, &base, "# Plan\n\nA walk. Water.\n", &mut rng).unwrap();
     assert_eq!(merged, "# Plan\n\nA walk. Water.\n");
+    // Its card, read alone (the page's at once after an edit), as the
+    // whole list has it.
+    let card = web.listed(&ks).expect("listed");
+    assert_eq!(card.snippet, "A walk. Water.");
+    assert_eq!(Some(&card), web.notes().iter().find(|n| n.key == ks));
+    assert_eq!(web.listed("not a key"), None);
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert_eq!(desk.docs[&ks].text(), merged);
 
@@ -657,12 +663,13 @@ fn a_picture_put_in_here_goes_to_the_server_then_the_vault() {
     assert_eq!(path, "attachments/pasted-2026-10-10-120000.jpg");
     let id = web.upload(&path, bytes.clone()).expect("not too big");
     assert_eq!(web.picture_free("pasted-2026-10-10-120000", "jpg"), "attachments/pasted-2026-10-10-120000-2.jpg", "taken while it goes");
-    web.changed.clear();
-    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    web.take_changed();
+    deliver(&mut hub, &mut desk, &mut web, &mut None, &mut rng);
     assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
     // The page told the vault changed: it names the picture now, so a
     // note showing "not on the server yet" in its place asks again.
-    assert!(web.changed.iter().any(|r| r == vault::ROOM), "{:?}", web.changed);
+    let changed = web.take_changed();
+    assert!(changed.iter().any(|r| r == vault::ROOM), "{changed:?}");
     assert_eq!(web.picture_id(&path).as_deref(), Some(id.as_str()));
     // In the vault, for every device; the desktop fetches it whole.
     assert_eq!(desk.docs[vault::ROOM].pictures().get(&path), Some(&id));

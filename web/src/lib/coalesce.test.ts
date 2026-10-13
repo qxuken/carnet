@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type Clock, Coalesced } from './coalesce';
+import { AfterQuiet, type Clock, Coalesced, withCard } from './coalesce';
 
 /// A clock moved by hand, its timers run as it passes them.
 function hand() {
@@ -104,5 +104,40 @@ describe('Coalesced', () => {
     expect(() => h.pass(60)).toThrow();
     expect(runs).toBe(2);
     expect(c.waiting).toBe(false);
+  });
+});
+
+// The finding: in a 10,000-note account each edit listed every note again
+// (the vault read, made JSON, parsed, sorted). Typing now changes only its
+// note's card, at once; the whole list comes once typing pauses.
+describe('after typing', () => {
+  it('lists the notes once typing pauses, not at each edit', () => {
+    const h = hand();
+    let lists = 0;
+    const after = new AfterQuiet(() => lists++, 1000, h.clock);
+    // An edit every 500 ms (the editor sends that often) for 5 s.
+    for (let i = 0; i < 10; i++) {
+      after.ask();
+      h.pass(500);
+    }
+    expect(lists).toBe(0);
+    h.pass(600);
+    expect(lists).toBe(1);
+    after.ask();
+    after.cancel();
+    h.pass(2000);
+    expect(lists).toBe(1);
+  });
+
+  it("changes only the typed note's card", () => {
+    const a = { key: 'a', title: 'Plan', snippet: 'A walk' };
+    const b = { key: 'b', title: 'Other', snippet: '' };
+    const list = [a, b];
+    const typed = withCard(list, 'a', { key: 'a', title: 'Plan', snippet: 'A walk. Water.' });
+    expect(typed).toEqual([{ key: 'a', title: 'Plan', snippet: 'A walk. Water.' }, b]);
+    expect(typed[1]).toBe(b);
+    expect(withCard(list, 'a', { ...a }), 'the same: the list as it was').toBe(list);
+    expect(withCard(list, 'c', { key: 'c', title: 'New', snippet: '' }).map((n) => n.key)).toEqual(['a', 'b', 'c']);
+    expect(withCard(list, 'b', null)).toEqual([a]);
   });
 });
