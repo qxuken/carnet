@@ -8,6 +8,7 @@ import * as db from './db';
 import * as passkey from './passkey';
 import { Shown } from './shown';
 import { type Entry, Uploads } from './uploads';
+import { type Entry as Typed, Pending, replay } from './pending';
 import { linkAction, numbered } from './words';
 
 export type Note = {
@@ -73,6 +74,12 @@ type Said =
 
 const IDENTITY = 'identity';
 const STATE = 'state';
+/// Words typed and not yet in what's kept (`STATE`), a record a note,
+/// sealed: this, then the note's key (pending.ts).
+const PENDING = 'pending:';
+/// How soon what's kept is kept again after an edit: the edit goes to the
+/// server then (`Sync.flush`).
+const KEEP_EDITS = 250;
 const PICTURE = 'picture:';
 /// Said on `window` when the notes change: pictures.ts asks again for
 /// those not found.
@@ -215,6 +222,10 @@ class Sync {
   private wait = 1000;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
+  /// Edits made, counted; and the last not yet in what's kept here, held
+  /// back from the server till it is (0: none).
+  private edits = 0;
+  private held = 0;
   private pictures = new Shown();
   private wanted = new Map<string, { path: string; done: (url: string) => void; fail: (e: Error) => void }[]>();
   private pruneTimer: ReturnType<typeof setTimeout> | undefined;
@@ -226,6 +237,12 @@ class Sync {
   private unsent: string[] = [];
   /// The pictures on their way, as kept across a reload.
   private uploads = new Uploads({ read: () => readUploads(), write: (list) => setUploads(list) });
+  /// Words typed and not yet kept with the rest: kept apart at once, so a
+  /// reload loses none (pending.ts). The editor says what it types.
+  readonly pending = new Pending({
+    put: (key, e) => sealed.put(PENDING + key, new TextEncoder().encode(JSON.stringify(e))),
+    del: (key) => db.delMany([PENDING + key]),
+  });
   /// Pictures that didn't go, tried again: when, and the wait.
   private pictureTimer: ReturnType<typeof setTimeout> | undefined;
   private pictureWait = PICTURE_RETRY;
@@ -307,10 +324,32 @@ class Sync {
     }
     this.account = this.vault.account();
     this.unsent = readList(await sealed.get(UNSENT));
+    await this.recoverTyped();
     this.refresh();
     this.phase = 'ready';
     await this.resumeUploads();
     this.connect();
+  }
+
+  /// Words typed before a reload and not kept with the rest: made on the
+  /// vault again (pending.ts `replay`), kept, and let go.
+  private async recoverTyped() {
+    const v = this.vault;
+    if (!v) return;
+    const names = (await db.keys()).filter((k) => k.startsWith(PENDING));
+    if (!names.length) return;
+    const entries: Typed[] = [];
+    for (const name of names) {
+      const kept = await sealed.get(name);
+      try {
+        if (kept) entries.push(JSON.parse(new TextDecoder().decode(kept)) as Typed);
+      } catch {
+        // Not readable: nothing to make again.
+      }
+    }
+    replay(entries, v);
+    await this.keepNow();
+    await db.delMany(names);
   }
 
   /// Pictures put in here before a reload and not yet sent: sent again.
@@ -386,7 +425,10 @@ class Sync {
   }
 
   private flush() {
-    const out = this.join ? this.join.take_out() : this.vault?.take_out();
+    // Words typed go to the server only once they're in what's kept here
+    // (`held`): a reload then never makes them again beside the copy the
+    // server sends back (pending.ts).
+    const out = this.join ? this.join.take_out() : this.held ? [] : this.vault?.take_out();
     for (const f of out ?? []) this.ws?.send(f);
     // After every edit and every frame: what the server isn't known to
     // keep yet.
@@ -630,9 +672,9 @@ class Sync {
   }
 
   /// Kept a moment after the last change, sealed.
-  private save() {
+  private save(after = 1500) {
     clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => void this.keepNow(), 1500);
+    this.saveTimer = setTimeout(() => void this.keepNow(), after);
   }
 
   /// Comes into the account by a code shown on another device.
@@ -950,9 +992,11 @@ class Sync {
   edit(key: string, base: string, text: string): [string, string] | null {
     const r = this.vault?.edit(key, base, text) as [string, string] | undefined;
     if (!r) return null;
-    this.flush();
+    // Held until kept, kept soon (`flush`).
+    this.held = ++this.edits;
+    this.pending.sent(key, r[1], r[0]);
     this.refresh();
-    this.save();
+    this.save(KEEP_EDITS);
     return r;
   }
 
@@ -1066,14 +1110,33 @@ class Sync {
   /// perhaps for good).
   async keepNow() {
     clearTimeout(this.saveTimer);
+    // The words typed kept apart first, with the versions sent from them:
+    // what's kept then never holds an edit they don't know was made.
+    while (this.pending.busy()) await this.pending.settled();
     if (!this.vault) return;
     // Both taken now: the vault may be gone by the time the first is kept.
+    // And the notes' versions with words kept apart, as they are in it.
     const state = this.vault.save();
     const me = this.vault.identity();
+    const v = this.vault;
+    const versions = this.pending.keys().map((k): [string, string | undefined] => [k, v.source(k)?.[1] as string | undefined]);
+    const edits = this.edits;
+    const release = () => {
+      // The edits in what was kept go now; one made since, once it's kept.
+      if (this.held && this.held <= edits) {
+        this.held = 0;
+        this.flush();
+      }
+    };
     try {
       await sealed.put(STATE, state);
+      this.pending.kept(versions);
+      release();
       await sealed.put(IDENTITY, me);
     } catch (e) {
+      // Not kept (storage refused): sent all the same; kept or not, the
+      // server is where they're safe then.
+      release();
       // A newer Carnet, in another tab, took the database on.
       if (e instanceof db.Newer) this.halt(e.message);
       else throw e;
