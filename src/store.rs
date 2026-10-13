@@ -1241,6 +1241,7 @@ impl Store {
             && *old != target
         {
             let _ = fs::remove_file(old);
+            mark_own(old);
         }
         let disk = stamp(&target);
         let note = &mut self.notes[i];
@@ -1644,7 +1645,8 @@ impl Store {
                 self.forgotten.pictures.extend(unused);
             }
             if let Ok(file) = self.inside(self.dir.join(p)) {
-                let _ = fs::remove_file(file);
+                let _ = fs::remove_file(&file);
+                mark_own(&file);
             }
         }
     }
@@ -1673,7 +1675,8 @@ impl Store {
                 }
                 if untouched {
                     if let Some(path) = self.notes[i].path.clone().and_then(|p| self.inside(p).ok()) {
-                        let _ = fs::remove_file(path);
+                        let _ = fs::remove_file(&path);
+                        mark_own(&path);
                     }
                     self.notes.remove(i);
                     self.save_pins()?;
@@ -1688,6 +1691,7 @@ impl Store {
                 let path = self.dir.join(&rel);
                 if within(&self.dir, &path) {
                     let _ = fs::remove_file(&path);
+                    mark_own(&path);
                 }
                 if rel.matches('/').count() == 1 {
                     self.note_origin(&path, None);
@@ -2815,6 +2819,33 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     rename_retrying(&tmp, path)
 }
 
+/// The files the app wrote, renamed or removed itself, each as it left
+/// it (its modified time and length, or gone): what the folder's watch
+/// (watch.rs) leaves out, so a save, or a note come from another device,
+/// is not taken for another app's change. Keyed as [`same_path`] keys.
+static OWN: std::sync::Mutex<Option<Stamps>> = std::sync::Mutex::new(None);
+
+/// Files by their [`path_key`], each as it was left: [`stamp`]ed.
+type Stamps = HashMap<String, Option<(SystemTime, u64)>>;
+
+/// The file at `path` is as the app left it: written, renamed, removed.
+pub(crate) fn mark_own(path: &Path) {
+    let mut own = OWN.lock().unwrap_or_else(|e| e.into_inner());
+    let own = own.get_or_insert_with(HashMap::new);
+    // Never more than a big folder's worth: the oldest are no use.
+    if own.len() > 100_000 {
+        own.clear();
+    }
+    own.insert(path_key(path), stamp(path));
+}
+
+/// Whether the file at `path` is still as the app left it: a change the
+/// system says it had is the app's own.
+pub fn is_own(path: &Path) -> bool {
+    let own = OWN.lock().unwrap_or_else(|e| e.into_inner());
+    own.as_ref().and_then(|o| o.get(&path_key(path))).is_some_and(|s| *s == stamp(path))
+}
+
 /// One file, as a file system that ignores case sees it.
 fn same_path(a: &Path, b: &Path) -> bool {
     path_key(a) == path_key(b)
@@ -2965,7 +2996,11 @@ fn rename_retrying(from: &Path, to: &Path) -> io::Result<()> {
     let mut tries = 0;
     loop {
         match fs::rename(from, to) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                mark_own(from);
+                mark_own(to);
+                return Ok(());
+            }
             Err(e) if tries < 6 && e.kind() != io::ErrorKind::NotFound => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(40 * tries));

@@ -1103,6 +1103,7 @@ impl Carnet {
                 let read_only = self.sync.read_only;
                 let update_soon = self.sync.update_soon;
                 let waiting = (self.sync.waiting(), self.sync.pictures_waiting());
+                let held_pictures = self.sync.pictures_held();
                 let (wait_said, again) = self.wait_line.said(ui.now(), waiting != (0, 0));
                 if let Some(at) = again {
                     ui.request_frame_at(at);
@@ -1137,6 +1138,11 @@ impl Carnet {
                         Some(Waited::Waiting) => said(ui, Icon::Clock, t.muted, &waiting_words(waiting.0, waiting.1)),
                         Some(Waited::Sent) => said(ui, Icon::Check, t.muted, ALL_SENT),
                         None => {}
+                    }
+                    // Pictures that won't go however often they're tried:
+                    // why, beside how many wait (the web's words).
+                    if let Some(why) = held_pictures {
+                        said(ui, Icon::Warning, t.warning, why);
                     }
                     // What the server keeps for the account, and, on a
                     // hosted plan, how much it may.

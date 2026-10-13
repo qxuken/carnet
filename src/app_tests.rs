@@ -8068,3 +8068,32 @@ fn a_file_written_from_outside_shows_without_the_window_coming_to_the_front() {
     assert!(app.order.iter().any(|&i| app.store.notes[i].title == "From outside"), "and listed");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A note saved here is no news to the folder's watch: the save is the
+/// app's own, and no rescan follows it. One written by another app is.
+#[test]
+fn an_autosave_brings_no_rescan_and_another_apps_write_does() {
+    let (mut app, mut d, dir) = body("own-save");
+    let run = |app: &mut Carnet, d: &mut Drive, secs: u64, until: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !until(app) && t0.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_millis(20));
+            d.frame(app);
+        }
+    };
+    // The start's look, once typing has paused.
+    run(&mut app, &mut d, 10, &|a| a.rescans > 0);
+    assert_eq!(app.rescans, 1, "the start counts once");
+    type_in(&mut app, &mut d, "Saved by itself");
+    run(&mut app, &mut d, 10, &|a| !a.store.notes[a.current].dirty && a.store.notes[a.current].path.is_some());
+    let path = app.store.notes[app.current].path.clone().expect("saved");
+    assert!(std::fs::read_to_string(&path).unwrap().contains("Saved by itself"));
+    // Past the pause a change waits for, and the system's word.
+    run(&mut app, &mut d, 4, &|_| false);
+    assert_eq!(app.rescans, 1, "the app's own save: no rescan");
+    std::fs::write(&path, "# Saved by itself\n\nand edited elsewhere\n").unwrap();
+    run(&mut app, &mut d, 10, &|a| a.rescans > 1);
+    assert_eq!(app.rescans, 2, "another app's edit: one");
+    assert!(app.store.notes.iter().any(|n| n.markdown().contains("edited elsewhere")));
+    let _ = std::fs::remove_dir_all(dir);
+}

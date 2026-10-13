@@ -37,6 +37,10 @@ struct Two {
     sides: Vec<Side>,
     /// The devices' clock, in seconds since 1970.
     now: u64,
+    /// What the picture storage answers every send with, when it refuses
+    /// them (`HTTP 403`); and how many sends were tried.
+    refuse: Option<String>,
+    puts: usize,
 }
 
 fn temp(name: &str) -> PathBuf {
@@ -82,7 +86,7 @@ impl Two {
             })
             .collect();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        let mut two = Two { hub, worker: carnet_server::blobs::Worker::memory(), sides, now };
+        let mut two = Two { hub, worker: carnet_server::blobs::Worker::memory(), sides, now, refuse: None, puts: 0 };
         for i in 0..2 {
             two.sides[i].session.connected();
             let outs = two.hub.connect(two.sides[i].conn, &mut OsRandom);
@@ -176,7 +180,13 @@ impl Two {
                 for t in s.session.take_transfers() {
                     moved = true;
                     let put = matches!(t, carnet_sync::session::Transfer::Put { .. });
-                    let result = self.worker.blobs.serve(&t);
+                    self.puts += usize::from(put);
+                    let result = match &self.refuse {
+                        Some(answer) if put => Err(answer.clone()),
+                        _ => self.worker.blobs.serve(&t),
+                    };
+                    // As the app does: the pictures hear first.
+                    s.pictures.transferred(t.id(), put, &result);
                     s.session.transferred(t.id(), put, result);
                     for e in s.session.take_events() {
                         s.pictures.event(&e, &mut s.store, &mut s.session, &mut OsRandom).unwrap();
@@ -722,6 +732,84 @@ fn a_picture_held_back_while_full_goes_once_there_is_room() {
     }
     assert!(!two.sides[0].pictures.is_holding());
     assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok().as_deref(), Some(photo.as_slice()), "on the other device");
+}
+
+/// The server's picture storage turns a picture away (an HTTP 4xx): it
+/// waits, Settings says why in the web's words, and it's tried again
+/// after 15 s, then 30, and so on, not at every tick. A failure that
+/// passes (503) waits as long, and says nothing. Once the storage takes
+/// it, it goes, and nothing is said any more; a new login forgets why too.
+#[test]
+fn a_picture_the_storage_turns_away_waits_says_why_and_is_tried_less_often() {
+    use std::time::Duration;
+    let mut two = Two::new("turned-away");
+    two.refuse = Some("HTTP 503".into());
+    let photo: Vec<u8> = (0..20_000u32).map(|i| (i % 239) as u8).collect();
+    let a = &mut two.sides[0].store;
+    let src = a.save_attachment("", "png", &photo).unwrap();
+    let mut n = crate::store::Note::new("Refused", Doc::new(vec![Block::text("a view")]));
+    n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.clone(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    a.notes.push(n);
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let p = &two.sides[0].pictures;
+    assert_eq!(two.puts, 1, "sent once");
+    assert_eq!((p.waiting(), p.held_why(), p.put_wait()), (1, None, Duration::from_secs(15)), "busy for a while: waits, quietly");
+
+    // Turned away: said, and the wait doubles.
+    two.refuse = Some("HTTP 403".into());
+    two.sides[0].pictures.wait_over();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let p = &two.sides[0].pictures;
+    assert_eq!(two.puts, 2);
+    assert_eq!(p.held_why(), Some(crate::pictures::TURNED_AWAY));
+    assert_eq!(p.held_why(), Some("The server's picture storage turned new pictures away, so they stay on this device for now."));
+    assert_eq!((p.waiting(), p.put_wait()), (1, Duration::from_secs(30)));
+    assert!(p.busy_paths().contains(&src), "kept from the sweep");
+    // Ticks meanwhile send nothing.
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert_eq!(two.puts, 2, "not tried at every tick");
+    // Up to five minutes, no more.
+    for _ in 0..6 {
+        two.sides[0].pictures.wait_over();
+        two.pump();
+    }
+    assert_eq!(two.sides[0].pictures.put_wait(), Duration::from_secs(5 * 60));
+    assert!(!two.sides[1].dir.join(&src).exists());
+
+    // Taken: it goes, and nothing's said; the next failure waits 15 s.
+    two.refuse = None;
+    two.sides[0].pictures.wait_over();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let p = &two.sides[0].pictures;
+    assert_eq!((p.waiting(), p.held_why(), p.put_wait()), (0, None, Duration::ZERO));
+    assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok().as_deref(), Some(photo.as_slice()), "on the other device");
+
+    // Said again, then a new login: forgotten, and offered at once.
+    two.refuse = Some("HTTP 401".into());
+    let other: Vec<u8> = (0..20_000u32).map(|i| (i % 227) as u8).collect();
+    let a = &mut two.sides[0].store;
+    let src2 = a.save_attachment("", "png", &other).unwrap();
+    let mut n = crate::store::Note::new("Again", Doc::new(vec![Block::text("another")]));
+    n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src2, alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    a.notes.push(n);
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert_eq!(two.sides[0].pictures.held_why(), Some(crate::pictures::TURNED_AWAY));
+    two.sides[0].pictures.retry();
+    assert_eq!(two.sides[0].pictures.held_why(), None, "a new login");
 }
 
 /// A picture beside its note is the user's: it stays on its device, not

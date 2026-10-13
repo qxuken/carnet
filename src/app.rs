@@ -501,6 +501,8 @@ pub struct Carnet {
     watch: Option<crate::watch::Watch>,
     /// What wakes the app from another thread, once the shell gives it.
     waker: Option<Waker>,
+    /// How many times the folder was caught up with: what a test counts.
+    rescans: u64,
     /// The page's key sink, as last declared.
     pub page_key: Option<Key>,
     /// Give the page the keyboard on the next frame.
@@ -940,6 +942,7 @@ impl Carnet {
             next_sweep: Instant::now() + SWEEP_FIRST,
             watch: None,
             waker: None,
+            rescans: 0,
             page_key: None,
             focus_page: false,
             slot_keys: HashMap::new(),
@@ -1536,7 +1539,7 @@ impl Carnet {
     fn watch_tick(&mut self) {
         if self.watch.as_ref().is_none_or(|w| w.dir() != self.store.dir) {
             let waker = self.waker.clone();
-            self.watch = Some(crate::watch::Watch::start(self.store.dir.clone(), crate::watch::EVERY, move || {
+            self.watch = Some(crate::watch::Watch::start(self.store.dir.clone(), move || {
                 if let Some(w) = &waker {
                     w.wake();
                 }
@@ -1550,6 +1553,7 @@ impl Carnet {
     /// Catches up with edits made to the folder in other apps. The open
     /// note is followed by id; if it went, the first in the list opens.
     fn rescan(&mut self) {
+        self.rescans += 1;
         let open = self.store.notes.get(self.current).map(|n| n.id);
         // Each note as it is before: one reread from disk comes back
         // with its `rev` moved on.

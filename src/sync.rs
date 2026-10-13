@@ -936,6 +936,12 @@ impl Sync {
         self.pictures.as_ref().map_or(0, Pictures::waiting)
     }
 
+    /// Why they wait, when trying again won't mend it: the server's
+    /// picture storage turned them away.
+    pub fn pictures_held(&self) -> Option<&'static str> {
+        self.pictures.as_ref().and_then(Pictures::held_why)
+    }
+
     /// Logged in, every room joined, everything sent acknowledged.
     #[cfg(test)]
     pub fn is_idle(&self) -> bool {
@@ -1182,6 +1188,9 @@ impl Sync {
                 if let Some(http) = &self.http {
                     for d in http.poll() {
                         busy = true;
+                        if let Some(p) = self.pictures.as_mut() {
+                            p.transferred(d.id, d.put, &d.result);
+                        }
                         session.transferred(d.id, d.put, d.result);
                     }
                 }

@@ -28,6 +28,10 @@ kui-native = "=0.1.0-alpha.56"
 # Both are already in kui-native's tree; these name them for Carnet's use.
 arboard = "3.6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# The notes folder watched for other apps' changes: the system's file
+# events (FSEvents, inotify, ReadDirectoryChangesW), so an idle folder
+# costs nothing (src/watch.rs).
+notify = "8.2"
 # The pairing code as a QR code, for a phone's camera (Settings → Sync).
 qrcode = { version = "0.14", default-features = false }
 
