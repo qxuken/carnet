@@ -2774,26 +2774,14 @@ fn free_file(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 
 /// Now, as `2026-10-07-140322` (UTC): a name that sorts by time.
 fn timestamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
-    // Howard Hinnant's civil-from-days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02}-{:02}{:02}{:02}",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
+    wall_clock(jiff::Timestamp::now(), &jiff::tz::TimeZone::system())
+}
+
+/// `at` as the clock in `tz` says it, "2026-10-13-143626": a pasted
+/// picture's name says when it was pasted as the clock on the wall did,
+/// not as Greenwich's.
+fn wall_clock(at: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> String {
+    at.to_zoned(tz.clone()).strftime("%Y-%m-%d-%H%M%S").to_string()
 }
 
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -3226,6 +3214,27 @@ fn welcome() -> Note {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pasted picture's name is the local time it was pasted at: 11:36
+    /// UTC is 14:36 three hours east, and the day turns at local midnight.
+    #[test]
+    fn a_pasted_pictures_name_is_the_local_time() {
+        let at: jiff::Timestamp = "2026-10-13T11:36:26Z".parse().unwrap();
+        let east = jiff::tz::TimeZone::fixed(jiff::tz::offset(3));
+        assert_eq!(wall_clock(at, &east), "2026-10-13-143626");
+        assert_eq!(wall_clock(at, &jiff::tz::TimeZone::UTC), "2026-10-13-113626");
+        let late: jiff::Timestamp = "2026-10-13T22:10:00Z".parse().unwrap();
+        assert_eq!(wall_clock(late, &east), "2026-10-14-011000");
+        // The name made now is this machine's clock's.
+        let dir = temp_dir("pasted-local");
+        let s = Store::open(dir.clone()).unwrap();
+        let src = s.save_attachment("", "png", b"p").unwrap();
+        let _ = fs::remove_dir_all(dir);
+        let now = jiff::Zoned::now();
+        let hour = now.strftime("%Y-%m-%d-%H").to_string();
+        let hour_before = now.checked_sub(jiff::Span::new().minutes(1)).unwrap().strftime("%Y-%m-%d-%H").to_string();
+        assert!(src.contains(&format!("pasted-{hour}")) || src.contains(&format!("pasted-{hour_before}")), "{src} at {now}");
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("carnet-test-{name}-{}", std::process::id()));
