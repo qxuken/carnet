@@ -413,6 +413,14 @@ pub fn chosen_atom(doc: &Doc, c: Caret) -> Option<Slot> {
     (c.anchor.slot == slot && is_atomic(doc, slot) && c.anchor.byte.min(c.head.byte) == 0 && c.anchor.byte.max(c.head.byte) == 1).then_some(slot)
 }
 
+/// Whether a style switched on at `c` is for what is typed next
+/// ([`Typing::pend`]) rather than on the selection: with nothing
+/// selected, or a divider or picture chosen, which what is typed takes
+/// the place of.
+pub fn styles_typing(doc: &Doc, c: Caret) -> bool {
+    c.is_empty() || chosen_atom(doc, c).is_some()
+}
+
 /// A divider's or picture's slot chosen whole, the head on the side the
 /// arrows came on to it from.
 fn whole(slot: Slot, rightwards: bool) -> Caret {
@@ -2554,6 +2562,10 @@ impl Typing {
     /// The marks that switch `kind` on at the caret, or off when it is in
     /// a run of it ([`inline::switch_at`]), for [`Typing::pend`].
     pub fn switch(&self, doc: &Doc, c: Caret, kind: inline::Kind) -> (String, String) {
+        // Over a chosen picture or divider: on, for the line typed there.
+        if chosen_atom(doc, c).is_some() {
+            return inline::switch_at("", 0, kind);
+        }
         let p = self.styled_at(doc, c).head;
         let _r = reading(p.slot);
         inline::switch_at(text(doc, p.slot), p.byte, kind)
@@ -2627,12 +2639,16 @@ impl Typing {
     pub fn type_text(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
         let mut changed = false;
         if !c.is_empty() {
+            // A style switched on over a chosen picture or divider is on
+            // for the words that take its place.
+            let kept = chosen_atom(doc, *c).and(self.pending.take().filter(|q| q.caret == *c));
             self.pending = None;
             self.carry = None;
             if s.is_empty() {
                 return delete_selection(doc, c);
             }
             changed = replace_selection(doc, c);
+            self.pending = kept.map(|q| Pending { caret: *c, ..q });
         }
         if let Some(p) = past_link(doc, *c).filter(|_| !s.is_empty() && self.carry_at(doc, *c).is_none()) {
             if let Some(q) = self.pending.as_mut().filter(|q| q.caret == *c) {
@@ -4455,6 +4471,19 @@ mod tests {
                 assert_eq!(texts(&d), ["Text:Plan", "Text:replaced", written, "Text:"], "pasted: {pasted}");
                 assert_eq!(c, at(&d, 1, 8));
             }
+        }
+        // Bold switched on with one chosen: on for the words in its place.
+        for (atom, written) in [(Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: Some(200), float: Float::Left, wiki: false }), "[x]Book"), (Block::new(Kind::Divider), "Quot:The light")] {
+            let after = if written == "[x]Book" { Block::new(Kind::Item { style: ListStyle::Todo, indent: 0, done: true, num: 0, text: "Book".into() }) } else { Block::new(Kind::Quote("The light".into())) };
+            let mut d = doc(vec![Block::text("Plan"), atom, after, Block::text("")]);
+            let mut c = select_blocks(&d, 1, 1);
+            assert!(styles_typing(&d, c));
+            let mut w = Typing::default();
+            let (pre, post) = w.switch(&d, c, inline::Kind::Bold);
+            w.pend(c, "bold", pre, post);
+            w.type_text(&mut d, &mut c, "replaced");
+            assert_eq!(texts(&d), ["Text:Plan", "Text:**replaced**", written, "Text:"]);
+            assert_eq!(c, at(&d, 1, 10));
         }
     }
 

@@ -425,12 +425,13 @@ impl Editor {
     }
 
     /// Bold, italic, struck or code (`inline::Kind`) on the selection; with
-    /// nothing selected, on (or off) for what is typed next.
+    /// nothing selected, or a picture or divider chosen, on (or off) for
+    /// what is typed next.
     pub fn style(&mut self, kind: inline::Kind) -> bool {
         if !matches!(self.focus, Focus::Body) {
             return false;
         }
-        if self.caret.is_empty() {
+        if page::styles_typing(&self.doc, self.caret) {
             let (pre, post) = self.typing.switch(&self.doc, self.caret, kind);
             self.typing.pend(self.caret, &format!("{kind:?}"), pre, post);
             return true;
@@ -1486,6 +1487,12 @@ mod tests {
         e.select(1, 1, 1, 0);
         e.input("Q");
         assert_eq!(e.markdown(), "# T\n\nQ\n\nbelow words\n");
+        // Bold switched on with it chosen: on for the words in its place.
+        let mut e = Editor::open("# T\n\n![](a.png)\n\nbelow words\n");
+        e.select(1, 0, 1, 1);
+        assert!(e.style(inline::Kind::Bold));
+        keys(&mut e, "Qr");
+        assert_eq!(e.markdown(), "# T\n\n**Qr**\n\nbelow words\n");
     }
 
     /// The finding: the Divider button before a divider chose that one,
