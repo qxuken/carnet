@@ -240,15 +240,15 @@ pub fn coverage(doc: &Doc, c: Caret) -> Coverage {
         let to = if i == ib { b.byte } else { len(doc, s) };
         out.parts.insert(s, (from, to));
     }
-    // A block is covered whole when every slot of it is, end to end — and
-    // the selection is more than one slot, or the block is a divider.
+    // A block is covered whole when every slot of it is, end to end (code,
+    // its lines between the fences) — and the selection is more than one
+    // slot, or the block is a divider.
     if ia != ib || is_atomic(doc, a.slot) {
         for blk in doc.blocks() {
             let ss = block_slots(blk);
             let whole = ss.iter().all(|s| {
-                out.parts
-                    .get(s)
-                    .is_some_and(|&(f, t)| f == 0 && t == len(doc, *s))
+                let (lo, hi) = writable(doc, *s);
+                out.parts.get(s).is_some_and(|&(f, t)| f <= lo && t >= hi)
             });
             if whole {
                 out.whole.insert(blk.id);
@@ -353,6 +353,30 @@ pub fn writable(doc: &Doc, slot: Slot) -> (usize, usize) {
         Some(Kind::Raw(t)) if slot.cell.is_none() => code_body(t).unwrap_or((0, t.len())),
         _ => (0, len(doc, slot)),
     }
+}
+
+/// A slot's words as a line draws them: as [`visible`], but code only
+/// between its fences ([`writable`]), as the web's lines hold it too. A
+/// place on a fence is drawn at the nearer end of the lines between them,
+/// and a place in the drawn words past them (an empty line's) is their end.
+pub fn drawn(doc: &Doc, slot: Slot) -> Visible {
+    match kind_at(doc, slot) {
+        Some(Kind::Raw(_)) if slot.cell.is_none() => {
+            let (lo, hi) = writable(doc, slot);
+            Visible { len: hi, runs: vec![(lo, hi)], atoms: Vec::new() }
+        }
+        _ => visible(doc, slot),
+    }
+}
+
+/// Code's text cut to `a..b`, its fences kept round what is left of the
+/// lines between them ([`code_body`]): what a selection that leaves code
+/// part-way takes or keeps, still code.
+fn code_cut(t: &str, a: usize, b: usize) -> String {
+    let (lo, hi) = code_body(t).unwrap_or((0, t.len()));
+    let a = a.clamp(lo, hi);
+    let b = b.clamp(a, hi);
+    format!("{}{}{}", &t[..lo], &t[a..b], &t[hi..])
 }
 
 /// A slot's text read as its own: a cell's with its pictures among the
@@ -579,11 +603,13 @@ pub fn extend_by(doc: &Doc, clicked: Caret, to: Pos, words: bool) -> Caret {
     }
 }
 
-/// The whole of one slot (a triple click, the first Ctrl+A).
+/// The whole of one slot (a triple click, the first Ctrl+A): in code,
+/// its lines between the fences ([`writable`]).
 pub fn select_slot(doc: &Doc, slot: Slot) -> Caret {
+    let (lo, hi) = writable(doc, slot);
     Caret {
-        anchor: start(slot),
-        head: end(doc, slot),
+        anchor: Pos { slot, byte: lo },
+        head: Pos { slot, byte: hi },
     }
 }
 
@@ -715,8 +741,10 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
             *c = Caret::at(after_removal(doc, i));
             return true;
         }
-        // The words between, their marks kept whole.
+        // The words between, their marks kept whole; in code, its lines
+        // between the fences (a block chosen in the margin), never them.
         let marks = styled(doc, a.slot);
+        let (lo, hi) = writable(doc, a.slot);
         let mut at = a.byte;
         if let Some(t) = text_mut(doc, a.slot) {
             if marks {
@@ -724,7 +752,8 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
                 *t = n;
                 at = caret;
             } else {
-                t.replace_range(a.byte..b.byte, "");
+                at = a.byte.clamp(lo, hi);
+                t.replace_range(at..b.byte.clamp(at, hi), "");
             }
         }
         *c = Caret::at(Pos { byte: at, ..a });
@@ -779,13 +808,23 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
     // it is kept, or taken, whole.
     let first_textual = first_kept && a.slot.cell.is_none() && !is_atomic(doc, a.slot);
     let last_textual = last_kept && b.slot.cell.is_none() && !is_atomic(doc, b.slot);
+    // Code cut at an end keeps its fences round the lines it keeps, and
+    // takes nothing joined after them: what is joined to code goes in
+    // between its fences, and code below is not joined on.
+    let code = |s: Slot| s.cell.is_none() && matches!(kind_at(doc, s), Some(Kind::Raw(_)));
+    let (a_code, b_code) = (code(a.slot), code(b.slot));
     let mut a = a;
     if first_textual && let Some(t) = text_mut(doc, a.slot) {
-        *t = split_text(t, a.byte, a_marks).0;
-        a.byte = t.len();
+        if a_code {
+            *t = code_cut(t, 0, a.byte);
+            a.byte = code_body(t).map_or(t.len(), |(_, hi)| hi);
+        } else {
+            *t = split_text(t, a.byte, a_marks).0;
+            a.byte = t.len();
+        }
     }
     if last_textual && let Some(t) = text_mut(doc, b.slot) {
-        *t = split_text(t, b.byte, b_marks).1;
+        *t = if b_code { code_cut(t, b.byte, t.len()) } else { split_text(t, b.byte, b_marks).1 };
     }
     // Remove the middle, and the ends the selection covers whole.
     let remove_from = if first_kept { ba + 1 } else { ba };
@@ -794,7 +833,7 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
         doc.splice(remove_from..remove_to, []);
     }
     // Two ends of text meet: the last joins the first.
-    if first_textual && last_textual {
+    if first_textual && last_textual && !b_code {
         let joined = remove_from; // the last block now sits right after the first
         if joined < doc.len() {
             let mut rest = tail.unwrap_or_default();
@@ -804,7 +843,11 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
             }
             doc.remove(joined);
             if let Some(t) = text_mut(doc, a.slot) {
-                a.byte = join_text(t, &rest, a_marks);
+                if a_code {
+                    t.insert_str(a.byte, &rest);
+                } else {
+                    a.byte = join_text(t, &rest, a_marks);
+                }
             }
         }
     }
@@ -2794,17 +2837,18 @@ pub fn copy(doc: &Doc, c: Caret) -> Option<String> {
     let r = spanned(doc, c);
     let mut blocks: Vec<Block> = doc.blocks()[r.clone()].iter().map(|b| (**b).clone()).collect();
     let last = blocks.len() - 1;
-    let marks = |b: &Block| !matches!(b.kind, Kind::Raw(_));
+    // Code cut at an end keeps its fences round its lines: still code.
+    let code = |b: &Block| matches!(b.kind, Kind::Raw(_));
     if b.slot.cell.is_none() {
-        let m = marks(&blocks[last]);
+        let raw = code(&blocks[last]);
         if let Some(t) = blocks[last].text_mut() {
-            *t = split_text(t, b.byte.min(t.len()), m).0;
+            *t = if raw { code_cut(t, 0, b.byte) } else { split_text(t, b.byte.min(t.len()), true).0 };
         }
     }
     if a.slot.cell.is_none() {
-        let m = marks(&blocks[0]);
+        let raw = code(&blocks[0]);
         if let Some(t) = blocks[0].text_mut() {
-            *t = split_text(t, a.byte.min(t.len()), m).1;
+            *t = if raw { code_cut(t, a.byte, t.len()) } else { split_text(t, a.byte.min(t.len()), true).1 };
         }
     }
     Some(doc::to_markdown(None, &Doc::new(blocks)))
@@ -4382,6 +4426,62 @@ mod tests {
         assert!(backspace(&mut d, &mut c, false));
         assert_eq!(texts(&d), ["Text:above", "Text:"]);
         assert_eq!(c, at(&d, 0, 5));
+    }
+
+    /// Code is drawn as its lines between the fences ([`drawn`]): a place
+    /// on a fence at the nearer end of them. Chosen by the slot (a triple
+    /// click, Ctrl+A), it is those lines, and typing over them keeps the
+    /// fences; chosen with what is around it, it is covered whole. Cut
+    /// part-way by a selection, copied or taken out, it keeps its fences.
+    #[test]
+    fn code_is_its_lines_between_the_fences_and_cut_keeps_them() {
+        let md = |d: &Doc| crate::doc::to_markdown(None, d);
+        let t = "```rust\nlet x;\nlet y;\n```";
+        let note = || doc(vec![Block::text("Above"), Block::new(Kind::Raw(t.into())), Block::text("Below")]);
+        let code = |d: &Doc| Slot::block(d.blocks()[1].id);
+        let d = note();
+        let v = drawn(&d, code(&d));
+        assert_eq!(v.text(t), "let x;\nlet y;");
+        assert_eq!((v.drawn(0), v.drawn(8), v.drawn(12), v.drawn(t.len())), (0, 0, 4, 13));
+        assert_eq!((v.at(0), v.at(4), v.at(13), v.at(99)), (8, 12, 21, 21));
+        let bare = doc(vec![Block::new(Kind::Raw("```\n```".into()))]);
+        let bv = drawn(&bare, Slot::block(bare.blocks()[0].id));
+        assert_eq!((bv.drawn(7), bv.at(0), bv.at(3)), (0, 4, 4), "an empty line: its place, whatever is drawn on it");
+        // The slot chosen: the lines; typed over, the fences stay.
+        let mut d = note();
+        let mut c = select_slot(&d, code(&d));
+        assert_eq!((c.anchor.byte, c.head.byte), (8, 21));
+        insert(&mut d, &mut c, "z");
+        assert_eq!(text(&d, code(&d)), "```rust\nz\n```");
+        // Chosen whole in the margin, too: only its lines are typed over.
+        let mut d = note();
+        let mut c = select_blocks(&d, 1, 1);
+        insert(&mut d, &mut c, "z");
+        assert_eq!(text(&d, code(&d)), "```rust\nz\n```");
+        // From its first letter on: covered whole, copied whole.
+        let d = note();
+        let c = Caret { anchor: Pos { slot: code(&d), byte: 8 }, head: at(&d, 2, 2).head };
+        assert!(coverage(&d, c).whole.contains(&code(&d).block));
+        assert_eq!(copy(&d, c).as_deref(), Some("```rust\nlet x;\nlet y;\n```\n\nBe\n"));
+        let mut d2 = d.clone();
+        let mut c2 = c;
+        delete_selection(&mut d2, &mut c2);
+        assert_eq!(texts(&d2), ["Text:Above", "Text:low"]);
+        // Part-way: its fences round what is taken, and round what stays.
+        let c = Caret { anchor: at(&d, 0, 2).head, head: Pos { slot: code(&d), byte: 11 } };
+        assert!(!coverage(&d, c).whole.contains(&code(&d).block));
+        assert_eq!(copy(&d, c).as_deref(), Some("ove\n\n```rust\nlet\n```\n"));
+        let mut d2 = d.clone();
+        let mut c2 = c;
+        delete_selection(&mut d2, &mut c2);
+        assert_eq!(md(&d2), "Ab\n\n```rust\n x;\nlet y;\n```\n\nBelow\n", "code below is not joined on");
+        let c = Caret { anchor: Pos { slot: code(&d), byte: 18 }, head: at(&d, 2, 2).head };
+        assert_eq!(copy(&d, c).as_deref(), Some("```rust\n y;\n```\n\nBe\n"));
+        let mut d2 = d.clone();
+        let mut c2 = c;
+        delete_selection(&mut d2, &mut c2);
+        assert_eq!(md(&d2), "Above\n\n```rust\nlet x;\nletlow\n```\n", "what is left below joins the code's lines");
+        assert_eq!(c2.head, Pos { slot: code(&d2), byte: 18 });
     }
 
     /// The finding: code with no line between its fences (`` ```\n``` ``,

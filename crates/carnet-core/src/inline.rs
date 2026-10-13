@@ -970,7 +970,8 @@ pub fn take_initial(text: &str) -> Option<String> {
 /// a place in one is a place in the other.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Visible {
-    /// The source's length.
+    /// Where a place past the words is: the source's length (a code
+    /// block's: the end of its lines, `page::drawn`).
     pub len: usize,
     /// The source's ranges that are words, in order.
     pub runs: Vec<(usize, usize)>,

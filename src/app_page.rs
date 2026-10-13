@@ -768,8 +768,10 @@ impl Carnet {
             }
             Kind::Image { src, alt, width, float, wiki } => self.picture(ui, l, id, src, *wiki, alt, *width, *float, whole),
             Kind::Table(table) => self.table(ui, l, id, table, body, cov),
-            // Code and front matter: kept as written, fences and all,
-            // and edited as plain text on a well of their own.
+            // Code and front matter: kept as written and edited as plain
+            // text on a well of their own — only the lines between their
+            // fences drawn (`line_part`), as on the web: the fences, and
+            // the language after the first, are Markdown.
             Kind::Raw(text) => {
                 let front = text.starts_with("---\n");
                 let style = l.page_type(Type::CODE)
@@ -1541,9 +1543,13 @@ impl Carnet {
         here: bool,
     ) -> Option<Key> {
         let t = &l.t;
-        let byte = self.caret.head.byte.min(text.len());
-        // Code blocks are code: no inline styles in them.
+        // Code blocks are code: no inline styles in them, and only the
+        // lines between their fences drawn, a place on a fence at the
+        // nearer end of them (`page::drawn`).
         let code_block = matches!(self.doc().get(slot.block).map(|b| &b.kind), Some(Kind::Raw(_)));
+        let (lo, hi) = if code_block { page::writable(self.doc(), slot) } else { (lo, hi) };
+        let byte = self.caret.head.byte.min(text.len());
+        let byte = if code_block { byte.clamp(lo, hi) } else { byte };
         // A cell's text as a cell's: its pictures among its words.
         let _cell = page::reading(slot);
         let runs = if code_block {
@@ -1558,7 +1564,9 @@ impl Carnet {
         } else {
             runs.iter().filter(|r| r.2.marker).map(|r| (r.0, r.1)).collect()
         };
-        if !hidden.is_empty() && !text.is_empty() {
+        if code_block {
+            self.shown.insert(slot, page::drawn(self.doc(), slot));
+        } else if !hidden.is_empty() && !text.is_empty() {
             // What is drawn: what a press's byte is read back through.
             self.shown.insert(slot, inline::Visible::of(text));
         }
@@ -1575,7 +1583,7 @@ impl Carnet {
         // all of it is (`cell_line`).
         let drawn = hash(&format!("{hidden:?}{text}"));
         let fresh = self.drawn.get(&slot) == Some(&drawn);
-        if (lo, hi) == (0, text.len()) {
+        if (lo, hi) == (0, text.len()) || code_block {
             self.drawn.insert(slot, drawn);
         }
         let (drawn_byte, drawn_0) = (self.drawn_byte(slot, byte).saturating_sub(d0), 0);
@@ -2947,14 +2955,15 @@ impl Carnet {
     fn line_edge(&mut self, core: &Core, home: bool, extend: bool) {
         let p = self.caret.head;
         let doc = self.doc();
-        let len = page::len(doc, p.slot);
+        let (lo, hi) = page::writable(doc, p.slot);
         let byte = (|| {
             let r = self.rect_at(core, p.slot, p.byte)?;
-            let o = self.rect_at(core, p.slot, 0)?;
+            let o = self.rect_at(core, p.slot, lo)?;
             let x = if home { o.x - 1.0 } else { o.x + 100_000.0 };
             self.byte_under(core, p.slot, Vec2::new(x, r.y + r.h * 0.5))
         })()
-        .unwrap_or(if home { 0 } else { len });
+        .unwrap_or(if home { lo } else { hi })
+        .clamp(lo, hi);
         let head = page::fix(doc, Caret::at(Pos { slot: p.slot, byte })).head;
         let anchor = if extend { self.caret.anchor } else { head };
         self.goal_x = None;
@@ -3158,14 +3167,16 @@ impl Carnet {
         if page::is_atomic(doc, slot) {
             return Some(page::start(slot));
         }
-        let len = page::len(doc, slot);
+        // In code, between its fences: they aren't drawn.
+        let (lo, hi) = page::writable(doc, slot);
         let byte = (|| {
-            let o = self.rect_at(core, slot, 0)?;
-            let e = self.rect_at(core, slot, len).unwrap_or(o);
+            let o = self.rect_at(core, slot, lo)?;
+            let e = self.rect_at(core, slot, hi).unwrap_or(o);
             let py = y.clamp(o.y + 1.0, (e.y + e.h - 1.0).max(o.y + 1.0));
             self.byte_under(core, slot, Vec2::new(x.max(o.x), py))
         })()
-        .unwrap_or(0);
+        .unwrap_or(lo)
+        .clamp(lo, hi);
         Some(page::fix(doc, Caret::at(Pos { slot, byte })).head)
     }
 
