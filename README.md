@@ -126,14 +126,14 @@ The toolbar acts on the blocks the caret touches: turn them into another kind, d
 | Ctrl+N / Ctrl+F / Ctrl+S | new note / search / save now |
 | Ctrl+Shift+N | new folder |
 | Ctrl+Alt+↑ / ↓ | the note above or below in the list |
-| Ctrl+Shift+P / Ctrl+Shift+Backspace | pin the note / move it to the trash |
+| Ctrl+Shift+P / Ctrl+Shift+Backspace | pin the note / move it to Deleted |
 | Ctrl+\\ | show or hide the notes list |
 | Ctrl+. | zen mode: only the note |
 | Ctrl+, | settings |
-| F2, Delete or Backspace on a folder in the list | rename it in place, delete it (one with notes goes to the trash whole, and Undo brings it back) |
+| F2, Delete or Backspace on a folder in the list | rename it in place, delete it (one with notes goes to Deleted whole, and Undo brings it back) |
 | drag a note onto a folder | move it there ("All notes" takes it to the top level) |
-| Shift+click / Ctrl+click in the list | choose several notes and folders, to trash or move together |
-| right-click a note in the list | open, its history, pin, show in Explorer or Finder, copy its path, move to a folder, move to the trash |
+| Shift+click / Ctrl+click in the list | choose several notes and folders, to delete or move together |
+| right-click a note in the list | open, its history, pin, show in Explorer or Finder, copy its path, move to a folder, move to Deleted |
 
 **History** (from a note's menu, or **View → Note History**) lists every version the note has been, newest first: written here, changed in another app, or restored. Click one to read it, with what it changed marked; **Compare with now** shows what restoring it would bring back and take away. **Restore** makes it the note again, and **Restore as a copy** makes it a note of its own.
 

@@ -743,7 +743,7 @@ fn the_library_menu_deletes_the_note_it_was_opened_on() {
         .core
         .nodes()
         .iter()
-        .find(|n| n.text.as_deref() == Some("Move to trash"))
+        .find(|n| n.text.as_deref() == Some("Move to Deleted"))
         .map(|n| n.rect.center())
         .expect("the menu is open");
     d.click(&mut app, trash.x, trash.y);
@@ -2144,7 +2144,7 @@ fn a_folder_with_notes_goes_to_the_trash_whole_and_comes_back() {
     type_in(&mut app, &mut d, "Plans");
     app.save_current();
     let names = |app: &Carnet| app.folder_menu(&folder).iter().map(|i| format!("{i:?}")).collect::<Vec<_>>().join(" ");
-    assert!(names(&app).contains("Move folder to trash"), "{}", names(&app));
+    assert!(names(&app).contains("Move folder to Deleted"), "{}", names(&app));
     app.folder_action(&folder, "delete");
     d.frame(&mut app);
     assert!(!app.store.folders.contains(&folder));
@@ -6062,11 +6062,11 @@ fn deleting_a_folder_with_only_other_files_moves_it_to_the_trash() {
     std::fs::create_dir_all(dir.join("Old").join("Attachments")).unwrap();
     std::fs::write(dir.join("Old").join("Attachments").join("x.png"), "pic").unwrap();
     d.frame(&mut app);
-    assert!(!app.folder_is_bare(&f), "the menu says Move folder to trash");
+    assert!(!app.folder_is_bare(&f), "the menu says Move folder to Deleted");
     app.folder_action(&f, "delete");
     assert!(app.error.is_none(), "{:?}", app.error);
     assert!(!dir.join("Old").exists());
-    assert!(app.notice.as_ref().is_some_and(|n| n.text.starts_with("Moved \u{201c}Old\u{201d} to the trash") && n.undo.is_some()));
+    assert!(app.notice.as_ref().is_some_and(|n| n.text.starts_with("Moved \u{201c}Old\u{201d} to Deleted") && n.undo.is_some()));
     assert!(app.trash.iter().any(|t| t.is_folder && t.name == "Old"));
     // Nothing in it at all: just removed.
     let g = app.store.create_folder("", "Bare").unwrap();
@@ -6770,7 +6770,7 @@ fn several_notes_and_folders_are_chosen_and_go_together() {
     assert!(!dir.join("Other").exists() && !dir.join("One.md").exists() && !dir.join("Three.md").exists());
     assert!(dir.join("Two.md").exists() && dir.join("Box/Inside.md").exists());
     let said = app.notice.as_ref().map(|n| n.text.clone()).unwrap();
-    assert_eq!(said, "Moved a folder and 2 notes to the trash");
+    assert_eq!(said, "Moved a folder and 2 notes to Deleted");
     app.on_plain(Msg::Undo);
     d.frame(&mut app);
     assert!(dir.join("Other/Elsewhere.md").exists() && dir.join("One.md").exists() && dir.join("Three.md").exists());
@@ -6782,7 +6782,7 @@ fn several_notes_and_folders_are_chosen_and_go_together() {
     click_with(&mut app, &mut d, at, cmd);
     assert_eq!(names(&app), ["One", "Two"]);
     let menu: Vec<String> = app.picked_menu().iter().map(|m| m.label.to_string()).collect();
-    assert!(menu.contains(&"Move 2 notes to".to_string()) && menu.contains(&"Move 2 notes to the trash".to_string()), "{menu:?}");
+    assert!(menu.contains(&"Move 2 notes to".to_string()) && menu.contains(&"Move 2 notes to Deleted".to_string()), "{menu:?}");
     let into = app.folder_rects.iter().find(|(f, _)| f == "Box").map(|(_, r)| r.center()).unwrap();
     d.drag(&mut app, at, into);
     d.frame(&mut app);
@@ -8335,7 +8335,7 @@ fn shift_with_the_arrows_chooses_folders_from_the_keyboard() {
     assert!(app.picked.is_empty());
     assert_eq!(app.store.folders, ["D"]);
     assert!(!dir.join("A").exists() && !dir.join("B").exists() && !dir.join("C").exists() && dir.join("D/d.md").exists());
-    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 3 folders to the trash"));
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 3 folders to Deleted"));
     app.on_plain(Msg::Undo);
     d.frame(&mut app);
     assert!(dir.join("A/a.md").exists() && dir.join("B/b.md").exists() && dir.join("C/c.md").exists());
@@ -8377,7 +8377,7 @@ fn shift_with_the_arrows_chooses_notes_from_the_keyboard() {
     key(&mut app, &mut d, "backspace");
     d_frame_twice(&mut app, &mut d);
     assert!(!dir.join("Bravo.md").exists() && !dir.join("Charlie.md").exists() && dir.join("Delta.md").exists());
-    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 2 notes to the trash"));
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 2 notes to Deleted"));
     app.on_plain(Msg::Undo);
     d.frame(&mut app);
     assert!(dir.join("Bravo.md").exists() && dir.join("Charlie.md").exists());

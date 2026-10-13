@@ -1710,13 +1710,13 @@ impl Carnet {
         let folder = self.store.notes[i].folder.clone();
         match self.store.trash(i) {
             Ok(Some(file)) => self.notify(
-                format!("Moved \u{201c}{name}\u{201d} to the trash"),
+                format!("Moved \u{201c}{name}\u{201d} to Deleted"),
                 file_name.map(|name| Undo::Note { file, name, folder }),
             ),
             Ok(None) => {}
             // Nothing was forgotten; the list and the open note are put
             // back in step all the same.
-            Err(e) => self.error = Some(format!("Couldn't move to trash: {e}")),
+            Err(e) => self.error = Some(format!("Couldn't move it to Deleted: {e}")),
         }
         if self.store.notes.is_empty() {
             self.store.notes.push(blank_note());
@@ -2769,7 +2769,7 @@ impl Carnet {
             item("Copy folder path", "copy-path"),
             MenuItem::separator(),
             item("Rename\u{2026}", "rename").accel(crate::keys::RENAME_FOLDER),
-            item(if self.folder_is_bare(folder) { "Delete folder" } else { "Move folder to trash" }, "delete"),
+            item(if self.folder_is_bare(folder) { "Delete folder" } else { "Move folder to Deleted" }, "delete"),
         ]
     }
 
@@ -2799,12 +2799,12 @@ impl Carnet {
                     n => format!(" and its {n} notes"),
                 };
                 self.notify(
-                    format!("Moved \u{201c}{}\u{201d}{what} to the trash", folder_name(folder)),
+                    format!("Moved \u{201c}{}\u{201d}{what} to Deleted", folder_name(folder)),
                     Some(Undo::Folder { from, folder: folder.to_string() }),
                 );
             }
             Err(e) => {
-                self.error = Some(format!("Couldn't move the folder to the trash: {}", store::plain_error(&e)));
+                self.error = Some(format!("Couldn't move the folder to Deleted: {}", store::plain_error(&e)));
                 return;
             }
         }
@@ -2882,7 +2882,7 @@ impl Carnet {
             items.push(MenuItem::submenu("Move to", targets));
         }
         items.push(MenuItem::separator());
-        items.push(item("Move to trash", "delete").accel(crate::keys::TRASH));
+        items.push(item("Move to Deleted", "delete").accel(crate::keys::TRASH));
         items
     }
 

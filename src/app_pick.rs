@@ -175,7 +175,7 @@ impl Carnet {
             items.push(MenuItem::submenu(format!("Move {what} to"), targets));
             items.push(MenuItem::separator());
         }
-        items.push(item(format!("Move {what} to the trash"), None).accel(crate::keys::TRASH));
+        items.push(item(format!("Move {what} to Deleted"), None).accel(crate::keys::TRASH));
         items
     }
 
@@ -208,7 +208,7 @@ impl Carnet {
         }
         if gone_f + gone_n > 0 {
             let what = Self::picked_words(gone_f, gone_n);
-            self.notify(format!("Moved {what} to the trash"), (!undo.is_empty()).then_some(Undo::Many(undo)));
+            self.notify(format!("Moved {what} to Deleted"), (!undo.is_empty()).then_some(Undo::Many(undo)));
         }
     }
 

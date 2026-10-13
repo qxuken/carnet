@@ -77,7 +77,7 @@ impl Carnet {
                 act(reveal_label(), "reveal-note"),
                 MenuItem::separator(),
                 key(if note.pinned { "Unpin Note" } else { "Pin Note" }, keys::PIN),
-                key("Move Note to Trash", keys::TRASH),
+                key("Move Note to Deleted", keys::TRASH),
                 MenuItem::separator(),
                 act("Close Window", "close").accel("mod+w"),
             ],
