@@ -135,7 +135,8 @@ The toolbar acts on the blocks the caret touches: turn them into another kind, d
 | Ctrl+. | zen mode: only the note |
 | Ctrl+, | settings |
 | F2, Delete or Backspace on a folder in the list | rename it in place, delete it (one with notes goes to Deleted whole, and Undo brings it back) |
-| drag a note or a folder onto a folder | move it there ("All notes" takes it to the top level); a folder takes its notes and folders with it |
+| the chevron before a folder, or ← / → on its row | hide or show the folders inside it (Alt: and every folder inside those); → on an open folder goes into it, ← on a closed one goes up to the folder it's in. Which are hidden is kept on each device |
+| drag a note or a folder onto a folder | move it there ("All notes" takes it to the top level); a folder takes its notes and folders with it; held a moment over a folder whose folders are hidden, it opens to let you go deeper |
 | Shift+click / Ctrl+click in the list | choose several notes and folders, to delete or move together |
 | Shift+↑ / ↓ in the list | choose from the folder you're on, or, after a click on a note's card, from that note |
 | right-click a note in the list | open, its history, pin, show in Explorer or Finder, copy its path, move to a folder, move to Deleted |
