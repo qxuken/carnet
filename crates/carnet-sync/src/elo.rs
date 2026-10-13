@@ -13,7 +13,7 @@
 //! A peer is written as its decimal digits, as the Loro Protocol's other
 //! clients write it. The key id names the key's epoch: `e0`, `e1`, ….
 
-use loro_protocol::{BytesReader, BytesWriter};
+use loro_protocol::{BatchId, BytesReader, BytesWriter, CrdtType, ProtocolMessage};
 use loro_protocol::elo::{EloHeader, decode_elo_container, parse_elo_record_header};
 
 use crate::crypto::{Random, Ring, VaultKey};
@@ -143,12 +143,111 @@ pub const MAX_PLAIN: usize = 192 * 1024;
 /// (the Loro Protocol's own limit is 256 KiB a message).
 pub const MAX_BATCH: usize = 240 * 1024;
 
+/// The most a snapshot record may weigh, sealed: the whole doc, history
+/// and all, as compaction writes it (§6). Past [`MAX_PLAIN`] it can't be a
+/// delta's record, nor go in one message: it goes in fragments
+/// ([`messages`]). A doc whose snapshot is past this isn't compacted, and
+/// its owner is told.
+pub const MAX_SNAPSHOT: usize = 32 << 20;
+
+/// How much of an update goes in one of the Loro Protocol's fragments.
+pub const FRAGMENT: usize = 192 * 1024;
+
+/// What a message adds to its update, at most: the magic, the room id
+/// ([`MAX_ROOM`] bytes at most, and its length), the type, the count and
+/// the update's length, the batch id.
+const MESSAGE_OVER: usize = 4 + 2 + MAX_ROOM + 1 + 2 * 10 + 8;
+
+/// The longest room id a message is made for here: a note's is 32 hex
+/// digits, the vault's `vault`; the server takes none past 64 bytes.
+const MAX_ROOM: usize = 128;
+
+/// One update for `room` (an `%ELO` container, [`container`]) as the
+/// messages it goes in: one `DocUpdate` if it fits a message, else the
+/// Loro Protocol's fragments: a `DocUpdateFragmentHeader` saying how many
+/// and how long in all, then each `DocUpdateFragment` in order, all under
+/// `batch_id`. Put back together ([`Pieces`]), they are the update.
+pub fn messages(room: &str, update: Vec<u8>, batch_id: BatchId) -> Vec<ProtocolMessage> {
+    if update.len() + MESSAGE_OVER <= loro_protocol::protocol::MAX_MESSAGE_SIZE {
+        return vec![ProtocolMessage::DocUpdate { crdt: CrdtType::Elo, room_id: room.to_string(), updates: vec![update], batch_id }];
+    }
+    let mut out = vec![ProtocolMessage::DocUpdateFragmentHeader {
+        crdt: CrdtType::Elo,
+        room_id: room.to_string(),
+        batch_id,
+        fragment_count: update.len().div_ceil(FRAGMENT) as u64,
+        total_size_bytes: update.len() as u64,
+    }];
+    for (index, fragment) in update.chunks(FRAGMENT).enumerate() {
+        out.push(ProtocolMessage::DocUpdateFragment {
+            crdt: CrdtType::Elo,
+            room_id: room.to_string(),
+            batch_id,
+            index: index as u64,
+            fragment: fragment.to_vec(),
+        });
+    }
+    out
+}
+
+/// An update coming in fragments, put back together: what a
+/// `DocUpdateFragmentHeader` promised, then each fragment in order.
+#[derive(Debug)]
+pub struct Pieces {
+    pub room: String,
+    pub batch_id: BatchId,
+    count: u64,
+    total: usize,
+    next: u64,
+    bytes: Vec<u8>,
+}
+
+/// The most an update in fragments may weigh: a snapshot at its largest,
+/// in its container.
+pub const MAX_PIECES: usize = MAX_SNAPSHOT + 16;
+
+impl Pieces {
+    /// What a header says is coming, if it can be: no more than
+    /// [`MAX_PIECES`] bytes, in at least one fragment and no more
+    /// fragments than bytes. Nothing is set aside for it until it comes.
+    pub fn start(room: &str, batch_id: BatchId, count: u64, total: u64) -> Option<Pieces> {
+        let total = usize::try_from(total).ok().filter(|&t| t <= MAX_PIECES)?;
+        if count == 0 || count > total as u64 {
+            return None;
+        }
+        Some(Pieces { room: room.to_string(), batch_id, count, total, next: 0, bytes: Vec::new() })
+    }
+
+    /// The next fragment: `Err` if it isn't the next of this update, or
+    /// goes past what was said; `Ok(Some(update))` once the last has come,
+    /// and is exactly as long as was said.
+    pub fn add(&mut self, room: &str, batch_id: BatchId, index: u64, fragment: &[u8]) -> Result<Option<Vec<u8>>, BadRecord> {
+        if room != self.room || batch_id != self.batch_id || index != self.next || self.bytes.len() + fragment.len() > self.total {
+            return Err(BadRecord("a fragment out of place".into()));
+        }
+        self.bytes.extend_from_slice(fragment);
+        self.next += 1;
+        if self.next < self.count {
+            return Ok(None);
+        }
+        if self.bytes.len() != self.total {
+            return Err(BadRecord("fragments short of what was said".into()));
+        }
+        Ok(Some(std::mem::take(&mut self.bytes)))
+    }
+}
+
 /// Records in batches, none over [`MAX_BATCH`] unless one record alone is.
 pub fn batches(records: Vec<Vec<u8>>) -> Vec<Vec<Vec<u8>>> {
+    batches_under(records, MAX_BATCH)
+}
+
+/// Records in batches, none over `max` bytes unless one record alone is.
+pub fn batches_under(records: Vec<Vec<u8>>, max: usize) -> Vec<Vec<Vec<u8>>> {
     let mut out: Vec<Vec<Vec<u8>>> = Vec::new();
     let mut size = 0;
     for r in records {
-        if out.is_empty() || size + r.len() > MAX_BATCH {
+        if out.is_empty() || size + r.len() > max {
             out.push(Vec::new());
             size = 0;
         }
@@ -210,5 +309,45 @@ mod tests {
         // them (found by fuzzing: these four bytes asked for 4 GB).
         assert!(records(&[0xff, 0xff, 0xff, 0x7a]).is_err());
         assert!(header(&[0x01, 0xff, 0xff, 0xff, 0x7a]).is_err());
+    }
+
+    /// An update too big for a message goes in fragments, each one a
+    /// message, and comes back whole; one that fits goes as it is. Out of
+    /// order, short, or past what was said: refused.
+    #[test]
+    fn a_big_update_goes_in_fragments_and_comes_back_whole() {
+        let room = "0000000000000000000000000000beef";
+        let small = vec![7; MAX_BATCH];
+        assert!(matches!(&messages(room, small.clone(), BatchId([1; 8]))[..], [ProtocolMessage::DocUpdate { updates, .. }] if updates[0] == small));
+        let big: Vec<u8> = (0..FRAGMENT * 3 + 5).map(|i| i as u8).collect();
+        let sent = messages(room, big.clone(), BatchId([2; 8]));
+        assert_eq!(sent.len(), 5);
+        for m in &sent {
+            assert!(loro_protocol::encode(m).is_ok(), "each fits a message");
+        }
+        let ProtocolMessage::DocUpdateFragmentHeader { fragment_count, total_size_bytes, .. } = sent[0] else { panic!() };
+        let fragments: Vec<(u64, Vec<u8>)> = sent[1..]
+            .iter()
+            .map(|m| match m {
+                ProtocolMessage::DocUpdateFragment { index, fragment, .. } => (*index, fragment.clone()),
+                _ => panic!(),
+            })
+            .collect();
+        let mut p = Pieces::start(room, BatchId([2; 8]), fragment_count, total_size_bytes).unwrap();
+        let mut whole = None;
+        for (i, f) in &fragments {
+            whole = p.add(room, BatchId([2; 8]), *i, f).unwrap();
+        }
+        assert_eq!(whole, Some(big));
+
+        let mut p = Pieces::start(room, BatchId([2; 8]), fragment_count, total_size_bytes).unwrap();
+        assert!(p.add(room, BatchId([2; 8]), 1, &fragments[1].1).is_err(), "out of order");
+        let mut p = Pieces::start(room, BatchId([2; 8]), 1, 10).unwrap();
+        assert!(p.add(room, BatchId([2; 8]), 0, &[0; 11]).is_err(), "past what was said");
+        let mut p = Pieces::start(room, BatchId([2; 8]), 1, 10).unwrap();
+        assert!(p.add(room, BatchId([2; 8]), 0, &[0; 9]).is_err(), "short of it");
+        assert!(Pieces::start(room, BatchId([2; 8]), 1, MAX_PIECES as u64 + 1).is_none());
+        assert!(Pieces::start(room, BatchId([2; 8]), 0, 10).is_none());
+        assert!(Pieces::start(room, BatchId([2; 8]), 11, 10).is_none());
     }
 }

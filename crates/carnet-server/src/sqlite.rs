@@ -739,6 +739,25 @@ impl Storage for Sharded {
         .unwrap_or_default()
     }
 
+    fn spans_after(&self, account: &[u8], room: &str, seq: u64, bytes: usize) -> Vec<Span> {
+        self.with(account, |db| {
+            let Ok(mut q) =
+                db.prepare_cached("SELECT peer, span_start, span_end, seq, bytes FROM records WHERE room = ?1 AND shelved_by = 0 AND seq > ?2 ORDER BY seq")
+            else {
+                return Vec::new();
+            };
+            // Read as they come, no further than wanted.
+            q.query_map(params![room, int(seq)], |r| {
+                Ok(Span { peer: uint(r.get(0)?), start: uint(r.get(1)?), end: uint(r.get(2)?), seq: uint(r.get(3)?), record: r.get(4)? })
+            })
+            .map(|rows| crate::storage::up_to(rows.flatten(), bytes))
+            .unwrap_or_default()
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    }
+
     fn live(&self, account: &[u8], room: &str) -> Live {
         self.with(account, |db| {
             db.query_row(

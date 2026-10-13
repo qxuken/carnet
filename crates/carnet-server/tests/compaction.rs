@@ -9,7 +9,7 @@ mod common;
 use carnet_server::hub::{KEEP, QUIET};
 use carnet_server::storage::covers;
 use carnet_server::{ConnId, Out, Storage};
-use carnet_sync::crypto::VaultKey;
+use carnet_sync::crypto::{Random, VaultKey};
 use carnet_sync::elo::{self, Header};
 use carnet_sync::session::Event;
 use carnet_sync::wire::{self, CrdtType, Frame};
@@ -165,6 +165,29 @@ fn nobody_compacts_while_others_write_nor_without_the_lease() {
         assert!(outs.iter().any(|o| matches!(o, Out::Send(_, bytes) if matches!(wire::decode(bytes),
             Ok(Frame::Room(ProtocolMessage::Ack { status: wire::UpdateStatusCode::PermissionDenied, .. }))))));
         assert!(net.hub.store().base(ACCOUNT, ROOM).is_none());
+        // Nor in fragments: the header is refused, and nothing after it
+        // is kept to be put together.
+        let header = wire::encode(&Frame::Room(ProtocolMessage::DocUpdateFragmentHeader {
+            crdt: CrdtType::Elo,
+            room_id: ROOM.into(),
+            batch_id: wire::BatchId([8; 8]),
+            fragment_count: 2,
+            total_size_bytes: 2 * elo::FRAGMENT as u64,
+        }));
+        let outs = net.hub.receive(b, &header, &mut net.rng);
+        assert!(outs.iter().any(|o| matches!(o, Out::Send(_, bytes) if matches!(wire::decode(bytes),
+            Ok(Frame::Room(ProtocolMessage::Ack { status: wire::UpdateStatusCode::PermissionDenied, .. }))))));
+        for index in 0..2 {
+            let f = wire::encode(&Frame::Room(ProtocolMessage::DocUpdateFragment {
+                crdt: CrdtType::Elo,
+                room_id: ROOM.into(),
+                batch_id: wire::BatchId([8; 8]),
+                index,
+                fragment: vec![1; elo::FRAGMENT],
+            }));
+            assert!(net.hub.receive(b, &f, &mut net.rng).is_empty());
+        }
+        assert!(net.hub.store().base(ACCOUNT, ROOM).is_none());
 
         // Quiet a while: the next device to join is asked.
         net.hub.tick(NOW + QUIET + 1);
@@ -212,5 +235,78 @@ fn a_device_replaces_the_servers_copy_and_the_inspector_shows_it() {
         assert_eq!(row.held, net.device(a).notes.docs[ROOM].version_vector());
         assert_eq!(row.shelved, 1 + 8, "the junk base and A's eight records, set aside");
         assert_eq!(log.len(), 1);
+    }
+}
+
+/// A note whose snapshot, history and all, is past what a delta's record
+/// may hold (and a message): compacted all the same, the snapshot going in
+/// fragments both ways, and the note syncs on past the most a room keeps
+/// uncompacted. A new device starts from that base, sent it in fragments.
+#[test]
+fn a_note_too_big_for_a_record_is_compacted_and_syncs_on() {
+    for store in stores() {
+        let (mut net, vault) = net(37, store);
+        // Twenty records a room at most, uncompacted.
+        net.hub.room_caps(20, u64::MAX, carnet_server::hub::MAX_ROOMS);
+        let a = net.first_device(&vault);
+        // Letters a compressor can't do much with: well past a record.
+        let big: String = (0..3 * elo::MAX_PLAIN).map(|_| char::from(b'a' + net.rng.bytes::<1>()[0] % 26)).collect();
+        let mut note = format!("# Big\n\n{big}\n");
+        net.write(a, &note);
+        for i in 0..60 {
+            note.push_str(&format!("line {i}\n"));
+            net.write(a, &note);
+        }
+        let base = net.hub.store().base(ACCOUNT, ROOM).expect("compacted");
+        assert!(base.record.len() > elo::MAX_PLAIN && base.record.len() <= elo::MAX_SNAPSHOT, "{}", base.record.len());
+        assert!(net.hub.store().live(ACCOUNT, ROOM).records < 20);
+        let said = std::mem::take(&mut net.device(a).events);
+        assert!(!said.iter().any(|e| matches!(e, Event::Refused(_))), "{said:?}");
+        assert_eq!(net.device(a).session.waiting(), 0, "everything kept");
+
+        // A new device: the base in fragments, checked, and the rest.
+        let b = net.pair(a, b"laptop", 2);
+        assert_eq!(text(&mut net, b), note);
+        assert!(net.hub.store().base(ACCOUNT, ROOM).unwrap().verified, "checked by the new device");
+        note.push_str("from the laptop\n");
+        {
+            let Net { peers, rng, .. } = &mut net;
+            let Some(Peer::Device(d)) = peers.get_mut(&b) else { panic!() };
+            d.notes.docs.get_mut(ROOM).unwrap().record(&note, carnet_sync::Origin::Save);
+            d.session.saved(ROOM, &mut d.notes, rng);
+        }
+        net.pump();
+        assert_eq!(text(&mut net, a), note);
+    }
+}
+
+/// A note whose snapshot is past what a snapshot may weigh (made small
+/// here): asked for it, the device sends none and says why, once, in its
+/// own words; the room fills, and what's written after waits on the
+/// device, said too.
+#[test]
+fn a_note_too_big_to_compact_is_said() {
+    use carnet_server::quota::ROOM_FULL;
+    use carnet_sync::session::{TOO_BIG, refusal_words};
+    for store in stores() {
+        let (mut net, vault) = net(38, store);
+        net.hub.room_caps(20, u64::MAX, carnet_server::hub::MAX_ROOMS);
+        let a = net.first_device(&vault);
+        net.device(a).session.set_max_snapshot(8 * 1024);
+        let big: String = (0..16 * 1024).map(|_| char::from(b'a' + net.rng.bytes::<1>()[0] % 26)).collect();
+        let mut note = format!("# Big\n\n{big}\n");
+        for i in 0..30 {
+            note.push_str(&format!("line {i}\n"));
+            net.write(a, &note);
+        }
+        assert!(net.hub.store().base(ACCOUNT, ROOM).is_none(), "not compacted");
+        let said: Vec<String> = std::mem::take(&mut net.device(a).events)
+            .into_iter()
+            .filter_map(|e| if let Event::Refused(why) = e { Some(why) } else { None })
+            .collect();
+        assert_eq!(said.iter().filter(|w| *w == TOO_BIG).count(), 1, "{said:?}");
+        assert!(said.iter().any(|w| w == ROOM_FULL), "{said:?}");
+        assert_eq!(refusal_words(TOO_BIG), TOO_BIG, "its own words, not the server's");
+        assert_eq!(net.device(a).session.waiting(), 1, "what's written after waits here");
     }
 }

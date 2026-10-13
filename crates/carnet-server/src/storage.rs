@@ -84,6 +84,21 @@ pub struct Logged {
     pub what: String,
 }
 
+/// Spans, as many as come to `bytes`, and at least one if there's any
+/// ([`Storage::spans_after`]).
+pub fn up_to(spans: impl IntoIterator<Item = Span>, bytes: usize) -> Vec<Span> {
+    let mut out = Vec::new();
+    let mut n = 0;
+    for s in spans {
+        if !out.is_empty() && n >= bytes {
+            break;
+        }
+        n += s.record.len();
+        out.push(s);
+    }
+    out
+}
+
 /// Whether `has` holds everything `vv` names.
 pub fn covers(has: &[(u64, u64)], vv: &[(u64, u64)]) -> bool {
     let has: HashMap<u64, u64> = has.iter().copied().collect();
@@ -149,6 +164,13 @@ pub trait Storage {
     /// `room`'s records, in the order they came: the live ones, not those
     /// a base has set aside.
     fn spans(&self, account: &[u8], room: &str) -> Vec<Span>;
+
+    /// `room`'s live records that came after `seq`, in the order they
+    /// came, as many as come to `bytes` (and at least one, if there's
+    /// any): a room's records sent a part at a time (§6).
+    fn spans_after(&self, account: &[u8], room: &str, seq: u64, bytes: usize) -> Vec<Span> {
+        up_to(self.spans(account, room).into_iter().filter(|s| s.seq > seq), bytes)
+    }
 
     /// How many live records `room` has and their bytes, and whether it
     /// has a base: what [`spans`](Storage::spans) and
@@ -313,6 +335,9 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     fn spans(&self, account: &[u8], room: &str) -> Vec<Span> {
         (**self).spans(account, room)
     }
+    fn spans_after(&self, account: &[u8], room: &str, seq: u64, bytes: usize) -> Vec<Span> {
+        (**self).spans_after(account, room, seq, bytes)
+    }
     fn live(&self, account: &[u8], room: &str) -> Live {
         (**self).live(account, room)
     }
@@ -455,7 +480,8 @@ pub fn held(base: Option<&Base>, spans: &[Span]) -> Vec<(u64, u64)> {
 /// The records a device that holds `vv` lacks: the base, if it lacks any
 /// of it, then every span reaching past what it has of its peer (or past
 /// the base, which it will have). One that overlaps what it has is sent
-/// whole: taking in an operation twice changes nothing.
+/// whole: taking in an operation twice changes nothing. (The hub sends
+/// the same, a part at a time: `hub::Backfill`.)
 pub fn backfill(base: Option<&Base>, spans: &[Span], vv: &[(u64, u64)]) -> Vec<Vec<u8>> {
     let mut has: HashMap<u64, u64> = vv.iter().copied().collect();
     let mut out = Vec::new();

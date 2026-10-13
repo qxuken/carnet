@@ -387,8 +387,62 @@ fn a_device_writes_where_it_joined_and_snapshots_when_asked() {
         assert_eq!(acked(&outs, a), Some(UpdateStatusCode::PermissionDenied));
         assert!(raw.hub.store().base(A, ROOM).is_none());
 
-        // (A record past `MAX_RECORD` can't come at all: the Loro
-        // Protocol's own frame stops at the same 256 KiB.)
+        // A record as big as a record may be, in a message past what the
+        // Loro Protocol writes (its decoder takes it): kept, and passed on
+        // to another device in the room in fragments, as a message that
+        // big can't be written. One byte more: refused, not kept.
+        let a2k = raw.a2.clone();
+        let other = raw.login(A, b"a2", &a2k);
+        const BIG: &str = "00000000000000000000000000000b16";
+        raw.send(a, &join(BIG));
+        raw.send(other, &join(BIG));
+        let mut big = Vec::new();
+        for n in [carnet_server::hub::MAX_RECORD, carnet_server::hub::MAX_RECORD + 1] {
+            let mut plain = vec![0; n - 100];
+            let record = loop {
+                let r = elo::seal(&raw.vault, BIG, &Header::Delta { peer: 9, start: 5, end: 6, epoch: 0 }, &plain, &mut raw.rng);
+                if r.len() == n {
+                    break r;
+                }
+                plain.resize(plain.len() + n - r.len(), 0);
+            };
+            big.push(record);
+        }
+        let put_big = |record: &[u8]| {
+            let mut w = loro_protocol::BytesWriter::new();
+            w.push_bytes(b"%ELO");
+            w.push_var_string(BIG);
+            w.push_byte(3);
+            w.push_uleb128(1);
+            w.push_var_bytes(&elo::container(&[record]));
+            w.push_bytes(&[2; 8]);
+            w.finalize()
+        };
+        let bytes = put_big(&big[1]);
+        let outs = raw.worker.done(raw.hub.receive(a, &bytes, &mut raw.rng));
+        assert_eq!(acked(&outs, a), Some(UpdateStatusCode::PayloadTooLarge));
+        assert!(raw.hub.store().spans(A, BIG).is_empty());
+        let bytes = put_big(&big[0]);
+        assert!(loro_protocol::encode(&wire::decode(&bytes).map(|f| match f { Frame::Room(m) => m, _ => panic!() }).unwrap()).is_err(), "past what a message holds");
+        let outs = raw.worker.done(raw.hub.receive(a, &bytes, &mut raw.rng));
+        assert_eq!(acked(&outs, a), Some(UpdateStatusCode::Ok));
+        assert_eq!(raw.hub.store().spans(A, BIG).len(), 1);
+        let theirs = frames(&outs, other);
+        assert!(matches!(theirs.first(), Some(Frame::Room(ProtocolMessage::DocUpdateFragmentHeader { .. }))), "{}", theirs.len());
+        let mut pieces = None;
+        let mut whole = None;
+        for f in theirs {
+            match f {
+                Frame::Room(ProtocolMessage::DocUpdateFragmentHeader { room_id, batch_id, fragment_count, total_size_bytes, .. }) => {
+                    pieces = elo::Pieces::start(&room_id, batch_id, fragment_count, total_size_bytes);
+                }
+                Frame::Room(ProtocolMessage::DocUpdateFragment { room_id, batch_id, index, fragment, .. }) => {
+                    whole = pieces.as_mut().unwrap().add(&room_id, batch_id, index, &fragment).unwrap().or(whole);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(elo::records(&whole.unwrap()).unwrap(), [&big[0][..]]);
         // Not a record at all.
         let outs = raw.send(a, &put(ROOM, &[b"junk".to_vec()]));
         assert_eq!(acked(&outs, a), Some(UpdateStatusCode::InvalidUpdate));

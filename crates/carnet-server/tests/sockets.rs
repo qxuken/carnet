@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use carnet_server::server::{self, Config, SocketLimits};
 use carnet_server::{Sharded, Storage};
 use carnet_sync::crypto::{DeviceKey, OsRandom, login_message};
+use carnet_sync::elo;
 use carnet_sync::wire::{self, Carnet, CrdtType, Frame};
 use futures_util::{SinkExt, StreamExt};
 use loro_protocol::ProtocolMessage;
@@ -39,6 +40,11 @@ fn temp(name: &str) -> PathBuf {
 /// A server with one account and its device `d`, and a room of `room`
 /// records of 2 KiB each, its sockets held to `limits`.
 async fn start(data: &Path, limits: SocketLimits, room: u64) -> Running {
+    start_with(data, limits, room, None).await
+}
+
+/// [`start`], and the room's base, of another peer, if given.
+async fn start_with(data: &Path, limits: SocketLimits, room: u64, base: Option<Vec<u8>>) -> Running {
     let key = DeviceKey::generate(&mut OsRandom);
     {
         let mut db = Sharded::open(data).unwrap();
@@ -46,6 +52,9 @@ async fn start(data: &Path, limits: SocketLimits, room: u64) -> Running {
         db.add_device(ACCOUNT, b"d", key.public()).unwrap();
         for i in 0..room {
             db.put(ACCOUNT, ROOM, 9, i, i + 1, vec![i as u8; 2048]).unwrap();
+        }
+        if let Some(base) = base {
+            db.set_base(ACCOUNT, ROOM, vec![(8, 1)], base, b"d", 0).unwrap();
         }
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -182,6 +191,49 @@ async fn a_socket_that_asks_without_reading_is_held_to_its_pace_not_closed() {
     .await;
     assert!(listed.is_some(), "the socket was closed after {joined} answers");
     assert_eq!(joined, 1000);
+    drop(ws);
+    srv.stop().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A room holding far more than may wait for a socket (1 MiB here; the
+/// room is 4 MiB of records, and a base of 600 KiB, more than a message
+/// holds): a device joining it, and reading only a while after, gets all
+/// of it, the base in fragments, and its socket stays open. The server
+/// sends a part, and the next once most of it is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_room_past_what_may_wait_for_a_socket_comes_a_part_at_a_time() {
+    let data = temp("backfill");
+    let srv = start_with(&data, SocketLimits { queue: 1 << 20, ..SocketLimits::default() }, 2048, Some(vec![7; 600 * 1024])).await;
+    let mut ws = srv.login().await;
+    let join = Frame::Room(ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id: ROOM.into(), auth: Vec::new(), version: wire::encode_vv(&[]) });
+    send(&mut ws, &join).await;
+    // Unread a while: all of it at once would have been past the budget.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (mut records, mut base, mut pieces) = (0, None, None);
+    while records < 2048 || base.is_none() {
+        match next(&mut ws).await.unwrap_or_else(|| panic!("closed after {records} records")) {
+            Frame::Room(ProtocolMessage::DocUpdate { updates, .. }) => {
+                for u in &updates {
+                    records += elo::records(u).unwrap().len();
+                }
+            }
+            Frame::Room(ProtocolMessage::DocUpdateFragmentHeader { room_id, batch_id, fragment_count, total_size_bytes, .. }) => {
+                pieces = elo::Pieces::start(&room_id, batch_id, fragment_count, total_size_bytes);
+            }
+            Frame::Room(ProtocolMessage::DocUpdateFragment { room_id, batch_id, index, fragment, .. }) => {
+                if let Some(whole) = pieces.as_mut().expect("a header first").add(&room_id, batch_id, index, &fragment).unwrap() {
+                    base = Some(elo::records(&whole).unwrap()[0].to_vec());
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(records, 2048);
+    assert_eq!(base, Some(vec![7; 600 * 1024]));
+    // Still open, and answering.
+    send(&mut ws, &list()).await;
+    assert!(until(&mut ws, is_list).await.is_some());
     drop(ws);
     srv.stop().await;
     let _ = std::fs::remove_dir_all(&data);

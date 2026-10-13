@@ -16,7 +16,7 @@ use loro_protocol::ProtocolMessage;
 
 use crate::compat::{Fit, Greeting};
 use crate::crypto::{BlobId, Card, DeviceKey, MAX_BLOB, Random, RecoveryCode, Ring, VaultKey, blob_id, login_message, open_blob, seal_blob, sealed_len};
-use crate::elo::{self, Header};
+use crate::elo::{self, Header, Pieces};
 use crate::note::NoteDoc;
 use crate::pair::{Opener, OpenerOut};
 use crate::rekey::{self, Signer};
@@ -211,11 +211,17 @@ pub fn server_says(words: &str) -> String {
     format!("The server says: {}", server_words(words))
 }
 
+/// What this device says ([`Event::Refused`]) when the server asks for a
+/// note compacted and its snapshot, history and all, is past what a
+/// snapshot may weigh ([`elo::MAX_SNAPSHOT`]): it stays as it is on the
+/// server, and once that's full its new changes wait here.
+pub const TOO_BIG: &str = "A note is too big for the server to tidy up, so once it has as many changes as the server keeps, new ones stay on this device. Split it into smaller notes to sync them.";
+
 /// A refusal ([`Event::Refused`]) as the apps show it: the server's words,
 /// said as its own ([`server_says`]); but for [`FULL`] and [`READ_ONLY`],
 /// which the apps know, and the words of this device's own making.
 pub fn refusal_words(why: &str) -> String {
-    if why == FULL || why == READ_ONLY || why.starts_with(PASSWORD_NOT_SET) { why.to_string() } else { server_says(why) }
+    if why == FULL || why == READ_ONLY || why == TOO_BIG || why.starts_with(PASSWORD_NOT_SET) { why.to_string() } else { server_says(why) }
 }
 
 /// How this device says a password it couldn't set (its own words, not
@@ -226,9 +232,13 @@ const PASSWORD_NOT_SET: &str = "The password couldn't be set: ";
 pub const BLOB_PIECE: usize = 192 * 1024;
 
 /// The last list of devices, as read: each row with its card, if it
-/// opened and says it is that device.
+/// opened under this device's newest key and says it is that device.
 struct Listed {
     epoch: u32,
+    /// This device's newest epoch when the cards were read: only cards
+    /// under it are believed, so a list read before a key came is read
+    /// again before anything is sealed by it.
+    at: u32,
     rows: Vec<(DeviceRow, Option<Card>)>,
     /// The recovery code's card: `Ok(None)` if there is no code, `Err` if
     /// there is one whose card did not open.
@@ -309,6 +319,12 @@ pub struct Session {
     /// New epochs' keys that follow one this device has no key for yet:
     /// taken once it has (`rekey.rs`).
     early: Vec<Vec<u8>>,
+    /// Updates coming in fragments (a big snapshot), by room, until whole.
+    incoming: HashMap<String, Pieces>,
+    /// Rooms too big to compact ([`TOO_BIG`]), said once a session.
+    too_big: HashSet<String>,
+    /// The most a snapshot this device sends may weigh: [`elo::MAX_SNAPSHOT`].
+    max_snapshot: usize,
 }
 
 /// A picture's bytes to move over HTTP, to or from a short-lived signed
@@ -358,7 +374,17 @@ impl Session {
             setting: None,
             server: None,
             early: Vec::new(),
+            incoming: HashMap::new(),
+            too_big: HashSet::new(),
+            max_snapshot: elo::MAX_SNAPSHOT,
         }
+    }
+
+    /// A smaller most a snapshot may weigh than [`elo::MAX_SNAPSHOT`], for
+    /// a test to reach it without a note of that size.
+    #[doc(hidden)]
+    pub fn set_max_snapshot(&mut self, bytes: usize) {
+        self.max_snapshot = bytes.min(elo::MAX_SNAPSHOT);
     }
 
     /// Sets (or changes) the account's password, signing in as `email`
@@ -581,7 +607,18 @@ impl Session {
             self.send(Frame::Carnet(Carnet::Revoke { device: device.to_vec(), epoch: 0, keys: Vec::new(), cards: Vec::new() }));
             return Ok(());
         }
-        let listed = self.listed.as_ref().ok_or("the list of devices has not come yet")?;
+        // The epoch after the newest this device has (§7): the server's
+        // number is only checked against it, never added to.
+        let newest = self.id.ring.current().0;
+        let Some(listed) = self.listed.as_ref() else {
+            return Err("the list of devices has not come yet".into());
+        };
+        // Read before a key came: its cards are the last epoch's, which a
+        // device removed since knows too. Read again.
+        if listed.at != newest {
+            self.list_devices();
+            return Err("the list of devices is out of date: wait a moment, then try again".into());
+        }
         if !listed.rows.iter().any(|(r, _)| r.id == device) {
             return Err("that device is not in the account".into());
         }
@@ -591,9 +628,6 @@ impl Session {
         let Ok(password) = &listed.password else {
             return Err("the password's card did not open: set the password again first".into());
         };
-        // The epoch after the newest this device has (§7): the server's
-        // number is only checked against it, never added to.
-        let newest = self.id.ring.current().0;
         if listed.epoch > newest {
             return Err("this device hasn't the account's newest key yet: wait a moment, then try again".into());
         }
@@ -692,29 +726,32 @@ impl Session {
     }
 
     /// `room` as one snapshot record, history and all, sealed under the
-    /// newest key: what the server asked for (§6). A doc too big for one
-    /// record isn't sent; the lease runs out, and it stays as it is.
+    /// newest key: what the server asked for (§6). One too big for a
+    /// message goes in fragments. One past what a snapshot may weigh
+    /// ([`elo::MAX_SNAPSHOT`]) isn't sent, and that's said ([`TOO_BIG`],
+    /// once a session); the lease runs out, and it stays as it is.
     fn send_snapshot(&mut self, room: &str, docs: &mut impl Docs, rng: &mut impl Random) {
         if self.joined.get(room) != Some(&Join::Joined) {
             return;
         }
         let doc = docs.doc(room);
         let plain = doc.to_bytes();
-        if plain.len() > elo::MAX_PLAIN {
-            return;
-        }
         let (epoch, vault) = self.id.ring.current();
         let header = Header::Snapshot { vv: doc.version_vector(), epoch };
-        let record = elo::seal(vault, room, &header, &plain, rng);
+        let max = self.max_snapshot;
+        let record = (plain.len() <= max).then(|| elo::seal(vault, room, &header, &plain, rng)).filter(|r| r.len() <= max);
+        let Some(record) = record else {
+            if self.too_big.insert(room.to_string()) {
+                self.events.push(Event::Refused(TOO_BIG.into()));
+            }
+            return;
+        };
         self.next_batch += 1;
         let id = BatchId(self.next_batch.to_be_bytes());
         self.unacked.insert(id, room.to_string());
-        self.send(Frame::Room(ProtocolMessage::DocUpdate {
-            crdt: CrdtType::Elo,
-            room_id: room.to_string(),
-            updates: vec![elo::container(&[record])],
-            batch_id: id,
-        }));
+        for m in elo::messages(room, elo::container(&[record]), id) {
+            self.send(Frame::Room(m));
+        }
     }
 
     /// What this device is called in the others' lists, changed: its card
@@ -743,32 +780,41 @@ impl Session {
 
     /// Each row's card, opened, and kept only if it says it is that row's
     /// device: a server cannot pass one device's card off as another's.
+    /// And only under this device's newest key: every card is sealed anew
+    /// under each new epoch (the removal's, then each device's own), and
+    /// one under an older epoch could be any device's that was in the
+    /// account then, the one since removed too. A server handing that one
+    /// back, a slot's or a device's, would have the next key sealed to it
+    /// (§7). A row whose card isn't under the newest key is one that
+    /// hasn't said who it is yet; a slot's, one whose card didn't open.
     fn read_list(&self, epoch: u32, devices: Vec<DeviceRow>, recovery: &[u8], password: &[u8], passkeys: Vec<PasskeyRow>) -> Listed {
+        let (at, _) = self.id.ring.current();
+        let open = |card: &[u8]| Card::open_at(card, &self.id.ring, at).ok();
         let rows = devices
             .into_iter()
             .map(|row| {
-                let card = Card::open(&row.card, &self.id.ring).ok().filter(|c| c.device == row.id && c.public == row.public);
+                let card = open(&row.card).filter(|c| c.device == row.id && c.public == row.public);
                 (row, card)
             })
             .collect();
         let recovery = if recovery.is_empty() {
             Ok(None)
         } else {
-            Card::open(recovery, &self.id.ring).ok().filter(|c| c.device.is_empty()).map(Some).ok_or(())
+            open(recovery).filter(|c| c.device.is_empty()).map(Some).ok_or(())
         };
         let password = if password.is_empty() {
             Ok(None)
         } else {
-            Card::open(password, &self.id.ring).ok().filter(|c| c.device == crate::password::SLOT).map(Some).ok_or(())
+            open(password).filter(|c| c.device == crate::password::SLOT).map(Some).ok_or(())
         };
         let passkeys = passkeys
             .into_iter()
             .map(|row| {
-                let card = Card::open(&row.card, &self.id.ring).ok().filter(|c| c.public == row.public && c.device == crate::passkey::slot(&row.public));
+                let card = open(&row.card).filter(|c| c.public == row.public && c.device == crate::passkey::slot(&row.public));
                 (row, card)
             })
             .collect();
-        Listed { epoch, rows, recovery, password, passkeys }
+        Listed { epoch, at, rows, recovery, password, passkeys }
     }
 
     /// Opens a pairing, to let a new device in (§7): the code to show it
@@ -882,6 +928,7 @@ impl Session {
         self.joined.clear();
         self.held.clear();
         self.unacked.clear();
+        self.incoming.clear();
         // Asked or wanted, and not done: failed, to be tried again. (A put
         // under way still finishes: its answer says it's kept.)
         let mut undone: Vec<BlobId> = self.fetching.drain().collect();
@@ -1300,6 +1347,35 @@ impl Session {
             ProtocolMessage::RoomError { room_id, .. } => {
                 self.joined.remove(&room_id);
                 self.join(&room_id, docs);
+            }
+            // An update in fragments (a big snapshot): put back together,
+            // then taken as if it had come whole. One not as said: the room
+            // is asked for again. Another begun before it ended is the
+            // server sending the room over (joined again): it takes the
+            // place of the first, which it sends again.
+            ProtocolMessage::DocUpdateFragmentHeader { room_id, batch_id, fragment_count, total_size_bytes, .. } => {
+                self.incoming.remove(&room_id);
+                match Pieces::start(&room_id, batch_id, fragment_count, total_size_bytes) {
+                    Some(p) => {
+                        self.incoming.insert(room_id, p);
+                    }
+                    None => self.join(&room_id, docs),
+                }
+            }
+            ProtocolMessage::DocUpdateFragment { room_id, batch_id, index, fragment, .. } => {
+                let Some(p) = self.incoming.get_mut(&room_id) else { return };
+                match p.add(&room_id, batch_id, index, &fragment) {
+                    Ok(None) => {}
+                    Ok(Some(update)) => {
+                        self.incoming.remove(&room_id);
+                        let m = ProtocolMessage::DocUpdate { crdt: CrdtType::Elo, room_id, updates: vec![update], batch_id };
+                        self.room_message(m, docs, rng);
+                    }
+                    Err(_) => {
+                        self.incoming.remove(&room_id);
+                        self.join(&room_id, docs);
+                    }
+                }
             }
             _ => {}
         }

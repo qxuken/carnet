@@ -783,6 +783,26 @@ impl Storage for Postgres {
         })
     }
 
+    fn spans_after(&self, account: &[u8], room: &str, seq: u64, bytes: usize) -> Vec<Span> {
+        self.read(Vec::new(), |c| {
+            // Each with the bytes of those before it: no more read than come
+            // to `bytes`, and the first whatever it weighs.
+            let st = c.st(
+                "SELECT peer, span_start, span_end, seq, bytes FROM (
+                     SELECT peer, span_start, span_end, seq, bytes,
+                            SUM(LENGTH(bytes)) OVER (ORDER BY seq) - LENGTH(bytes) AS before
+                     FROM records WHERE account = $1 AND room = $2 AND shelved_by = 0 AND seq > $3
+                 ) r WHERE before < $4 ORDER BY seq",
+            )?;
+            Ok(c.client
+                .query(&st, &[&account, &room, &int(seq), &(bytes.max(1) as i64)])
+                .map_err(failed)?
+                .iter()
+                .map(|r| Span { peer: uint(r.get(0)), start: uint(r.get(1)), end: uint(r.get(2)), seq: uint(r.get(3)), record: r.get(4) })
+                .collect())
+        })
+    }
+
     fn live(&self, account: &[u8], room: &str) -> Live {
         self.read(Live::default(), |c| {
             let st = c.st(

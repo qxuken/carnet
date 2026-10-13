@@ -324,6 +324,23 @@ impl Card {
         out
     }
 
+    /// The epoch a card is sealed under: in the clear, ahead of it.
+    pub fn epoch(sealed: &[u8]) -> Option<u32> {
+        Some(u32::from_be_bytes(sealed.get(..4)?.try_into().ok()?))
+    }
+
+    /// Opened only if it is sealed under `epoch`. What a device seals a
+    /// new key to is believed only from a card under its newest
+    /// ([`Ring::current`]): one under an older epoch could be any device's
+    /// that was in the account then, the one since removed too (§7).
+    pub fn open_at(sealed: &[u8], ring: &Ring, epoch: u32) -> Result<Card, Sealed> {
+        if Card::epoch(sealed) != Some(epoch) {
+            return Err(Sealed);
+        }
+        Card::open(sealed, ring)
+    }
+
+    /// Opened under whichever of the ring's keys it is sealed under.
     pub fn open(sealed: &[u8], ring: &Ring) -> Result<Card, Sealed> {
         let (epoch, rest) = sealed.split_at_checked(4).ok_or(Sealed)?;
         let (iv, sealed) = rest.split_at_checked(12).ok_or(Sealed)?;
@@ -680,6 +697,11 @@ pub(crate) mod tests {
         let passkey = Card { credential: vec![9; 20], name: "Passkey from Chrome on Mac".into(), ..card.clone() };
         assert_eq!(Card::open(&passkey.seal(&ring, &mut rng), &ring), Ok(passkey));
         assert_eq!(Card::open(&sealed, &Ring::new(k0)), Err(Sealed), "a ring without epoch 1");
+        assert_eq!(Card::epoch(&sealed), Some(1));
+        assert_eq!(Card::open_at(&sealed, &ring, 1), Ok(card.clone()));
+        let old = card.seal(&Ring::new(ring.get(0).unwrap().clone()), &mut rng);
+        assert_eq!(Card::open(&old, &ring), Ok(card.clone()), "an older epoch's opens");
+        assert_eq!(Card::open_at(&old, &ring, 1), Err(Sealed), "but not as the newest's");
         let mut bad = sealed;
         bad[20] ^= 1;
         assert_eq!(Card::open(&bad, &ring), Err(Sealed));
