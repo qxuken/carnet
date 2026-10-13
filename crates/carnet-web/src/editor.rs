@@ -330,6 +330,28 @@ impl Editor {
         changed
     }
 
+    /// A chosen picture or divider made an empty paragraph for an input
+    /// method about to compose over it ([`Typing::make_room`]): its words
+    /// then composed in its place, not at the start of what comes after
+    /// it, where the browser's own caret stands. The same step of the
+    /// history as the words, so one Undo brings the picture back.
+    pub fn make_room(&mut self) -> bool {
+        if !matches!(self.focus, Focus::Body) || page::chosen_atom(&self.doc, self.caret).is_none() {
+            return false;
+        }
+        let before = State::of(&self.doc, self.caret);
+        let mut typing = std::mem::take(&mut self.typing);
+        let changed = typing.make_room(&mut self.doc, &mut self.caret);
+        self.typing = typing;
+        if changed {
+            self.history.seal();
+            self.history.record_at(Step::Typing, self.caret.head.slot.block, before, now());
+            self.doc.ensure_tail();
+        }
+        self.relay();
+        changed
+    }
+
     /// Enter (Shift+Enter: a line break in the paragraph). In the title,
     /// to the note's start.
     pub fn enter(&mut self, soft: bool) -> bool {
@@ -1493,6 +1515,29 @@ mod tests {
         assert!(e.style(inline::Kind::Bold));
         keys(&mut e, "Qr");
         assert_eq!(e.markdown(), "# T\n\n**Qr**\n\nbelow words\n");
+    }
+
+    /// The finding: an input method composing over a chosen picture put
+    /// its words at the start of the paragraph after it. Room is made in
+    /// its place first, the words composed there, bold if Bold was on;
+    /// one Undo brings the picture back.
+    #[test]
+    fn room_made_over_a_chosen_picture_for_an_input_method() {
+        let md = "# T\n\n![](a.png)\n\nBelow.\n";
+        let mut e = Editor::open(md);
+        e.select(1, 0, 1, 1);
+        assert!(e.style(inline::Kind::Bold));
+        assert!(e.make_room());
+        assert_eq!(e.lines()[1].text, "");
+        assert_eq!(e.caret_lc(), (1, 0, 1, 0));
+        keys(&mut e, "あい");
+        assert_eq!(e.markdown(), "# T\n\n**あい**\n\nBelow.\n");
+        assert!(e.undo());
+        assert_eq!(e.markdown(), md, "one step");
+        // Nothing chosen: nothing made.
+        e.select(2, 1, 2, 1);
+        assert!(!e.make_room());
+        assert_eq!(e.markdown(), md);
     }
 
     /// The finding: the Divider button before a divider chose that one,

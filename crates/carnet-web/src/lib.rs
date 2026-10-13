@@ -939,6 +939,11 @@ impl PageEditor {
         self.e.input(s)
     }
 
+    /// A chosen picture or divider made room for an input method's words.
+    pub fn make_room(&mut self) -> bool {
+        self.e.make_room()
+    }
+
     pub fn enter(&mut self, soft: bool) -> bool {
         self.e.enter(soft)
     }
