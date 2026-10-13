@@ -33,8 +33,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use carnet_server::Sharded;
-use carnet_server::server::{self, Config, INVITE_DAYS};
+use carnet_server::{Sharded, Storage};
+use carnet_server::server::{self, Config, INVITE_DAYS, OWNER_INVITE_DAYS};
 
 const HELP: &str = "carnet-server: the sync server for Carnet notes
 
@@ -99,6 +99,7 @@ usage:
                                            (CARNET_BESIDE_OLD_PICTURES=1, off)
 
   invite          print a new invite code: one account, good for a week
+                  (with no account yet, the owner's: good for a day)
   backup DIR      copy every database into DIR (new, or empty), safely
                   while it serves, and the pictures unless a bucket keeps
                   them; all of it is sealed or public, so it can go
@@ -350,15 +351,26 @@ fn main() -> ExitCode {
         };
     }
     if a.invite {
+        // With no account yet, it's the owner's: good for a day.
         let made = match store(&a) {
-            Ok(Some(mut s)) => server::new_invite(&mut s),
-            Ok(None) => Sharded::open(&a.data).and_then(|mut s| server::new_invite(&mut s)),
+            Ok(Some(mut s)) => {
+                let owner = s.accounts() == 0;
+                server::new_invite(&mut s).map(|code| (code, owner))
+            }
+            Ok(None) => Sharded::open(&a.data).and_then(|mut s| {
+                let owner = s.accounts() == 0;
+                server::new_invite(&mut s).map(|code| (code, owner))
+            }),
             Err(e) => return fail(e),
         };
         return match made {
-            Ok(code) => {
+            Ok((code, owner)) => {
                 println!("{}", code.text());
-                eprintln!("carnet-server: single use, good for {INVITE_DAYS} days");
+                if owner {
+                    eprintln!("carnet-server: for the first account (owner); single use, good for {OWNER_INVITE_DAYS} day: if it has run out, run this again for a new one");
+                } else {
+                    eprintln!("carnet-server: single use, good for {INVITE_DAYS} days");
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => fail(e.to_string()),

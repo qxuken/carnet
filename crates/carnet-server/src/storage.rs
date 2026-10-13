@@ -234,6 +234,12 @@ pub trait Storage {
     /// An invite used: gone, whether it was good or not; `Some(owner)` if
     /// it was there and not past its time.
     fn take_invite(&mut self, hash: [u8; 32], now: u64) -> Result<Option<bool>, Failed>;
+    /// An invite not used yet, by hash, run out or not: whether it's for
+    /// the owner's account, and when it stops being good. What an
+    /// enrollment that fails says by it.
+    fn find_invite(&self, hash: [u8; 32]) -> Option<(bool, u64)> {
+        self.invites().into_iter().find(|&(h, _, _)| h == hash).map(|(_, owner, expires)| (owner, expires))
+    }
     /// Invites not used yet, by hash: whether each is for the owner's
     /// account, and when it stops being good (past ones among them: the
     /// caller knows the time).
@@ -402,6 +408,9 @@ impl<T: Storage + ?Sized> Storage for Box<T> {
     }
     fn invites(&self) -> Vec<([u8; 32], bool, u64)> {
         (**self).invites()
+    }
+    fn find_invite(&self, hash: [u8; 32]) -> Option<(bool, u64)> {
+        (**self).find_invite(hash)
     }
     fn drop_invite(&mut self, hash: [u8; 32]) -> Result<bool, Failed> {
         (**self).drop_invite(hash)

@@ -83,7 +83,7 @@ pub struct Config {
 /// Records a room keeps one by one before it's asked for as a snapshot.
 pub const COMPACT_AFTER: usize = 200;
 
-pub use crate::hub::INVITE_DAYS;
+pub use crate::hub::{INVITE_DAYS, OWNER_INVITE_DAYS};
 
 /// The largest frame a socket takes: past it, the socket closes.
 pub const MAX_FRAME: usize = 1 << 20;
@@ -147,20 +147,29 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// A new invite, kept by its hash, good for a week. With no account yet,
-/// it makes the owner's.
+/// A new invite, kept by its hash. With no account yet, it makes the
+/// owner's, good for a day ([`OWNER_INVITE_DAYS`]); else, for a week.
 pub fn new_invite(store: &mut impl Storage) -> Result<InviteCode, Failed> {
     let owner = store.accounts() == 0;
     invite(store, owner)
 }
 
-/// An invite for an account of its own, good for [`INVITE_DAYS`]; the
+/// An invite for an account of its own, good for [`invite_days`]; the
 /// owner's, or not (a hosted service's signups never are).
 pub fn invite(store: &mut (impl Storage + ?Sized), owner: bool) -> Result<InviteCode, Failed> {
     let code = InviteCode::generate(&mut OsRandom);
-    store.add_invite(code.hash(), owner, now() + INVITE_DAYS * 24 * 3600)?;
+    store.add_invite(code.hash(), owner, now() + invite_days(owner) * 24 * 3600)?;
     Ok(code)
 }
+
+/// How many days an invite is good for: the owner's a day, any other a
+/// week.
+pub fn invite_days(owner: bool) -> u64 {
+    if owner { OWNER_INVITE_DAYS } else { INVITE_DAYS }
+}
+
+/// What the server says beside the owner's invite it prints.
+pub const OWNER_INVITE_NOTE: &str = "single use, good for 1 day: if it has run out, restart the server for a new one";
 
 /// What a socket or a request asks of the hub's thread.
 enum ToHub {
@@ -661,7 +670,7 @@ pub async fn serve_started(
         if first_invite && store.accounts() == 0 {
             let code = new_invite(&mut store).map_err(std::io::Error::other)?;
             println!("carnet-server: no accounts yet. Invite code for the first account (owner):");
-            println!("    {}   (single use, good for {INVITE_DAYS} days)", code.text());
+            println!("    {}   ({OWNER_INVITE_NOTE})", code.text());
         }
         Ok((store, blobs))
     })

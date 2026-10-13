@@ -44,10 +44,10 @@ On a start with no accounts, it prints an invite code for the first account, the
 
 ```
 carnet-server: no accounts yet. Invite code for the first account (owner):
-    K7QF-2M9D-XW4H-P3TA   (single use, good for 7 days)
+    K7QF-2M9D-XW4H-P3TA   (single use, good for 1 day: if it has run out, restart the server for a new one)
 ```
 
-`docker logs carnet` shows it. It prints a new one on every start until an account exists. Type the server's address and this code in Carnet's **Settings → Sync** to make the account.
+`docker logs carnet` shows it. It prints a new one on every start until an account exists, and each is good for a day, so a code left in an old log lets no one in: if it has run out, restart the server (`docker restart carnet`) and use the new one. The app says so too when it's given one run out. Once the first account is made, the others are good no more. Type the server's address and this code in Carnet's **Settings → Sync** to make the account.
 
 ### Building it yourself
 
@@ -129,7 +129,7 @@ carnet-server invite --data ./data
 docker exec carnet carnet-server invite
 ```
 
-Each is single-use and good for a week. Only its hash is kept: an invite made in the app never reaches the server at all, only its hash does. The app keeps the code in the account's own end-to-end-encrypted vault, so the owner's devices can show it again; the server can't read it there.
+Each is single-use and good for a week (`carnet-server invite` with no account yet makes the owner's, good for a day, as the one printed at the start). One run out is said so when it's used, in the app too. Only its hash is kept: an invite made in the app never reaches the server at all, only its hash does. The app keeps the code in the account's own end-to-end-encrypted vault, so the owner's devices can show it again; the server can't read it there.
 
 ## TLS: a proxy in front
 

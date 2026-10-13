@@ -181,3 +181,62 @@ fn a_host_refuses_an_invite_it_never_sent_before_it_makes_an_account() {
         assert_eq!(hub.store().accounts(), 1);
     }
 }
+
+/// The server's own invite for the first account is good for a day (it
+/// prints a new one on each start), any other for a week; one run out is
+/// told so, with what gets a new one, in words the apps show as their own.
+#[test]
+fn an_invite_run_out_says_so_and_the_first_lasts_a_day() {
+    use carnet_server::Hub;
+    use carnet_server::server::{self, INVITE_DAYS, OWNER_INVITE_DAYS};
+    use carnet_sync::crypto::Random;
+    use carnet_sync::invite::{InviteCode, RUN_OUT, RUN_OUT_FIRST};
+    assert_eq!((OWNER_INVITE_DAYS, INVITE_DAYS), (1, 7));
+    assert_eq!((server::invite_days(true), server::invite_days(false)), (1, 7));
+    for store in common::stores() {
+        let mut hub = Hub::new(common::ORIGIN, store);
+        let made = server::new_invite(hub.store_mut()).unwrap();
+        let (_, owner, expires) = hub.store().invites().into_iter().find(|(h, _, _)| *h == made.hash()).unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert!(owner, "no account yet: the owner's");
+        assert!(expires.abs_diff(now + 86_400) < 60, "good for a day");
+
+        let mut rng = common::Seeded(9);
+        let (first, other, never) = (InviteCode::generate(&mut rng), InviteCode::generate(&mut rng), InviteCode::generate(&mut rng));
+        hub.store_mut().add_invite(first.hash(), true, 1000).unwrap();
+        hub.store_mut().add_invite(other.hash(), false, 1000).unwrap();
+        hub.tick(1000);
+        let key: [u8; 32] = rng.bytes();
+        assert_eq!(hub.enroll(&first, b"desk", key, &mut rng).unwrap_err(), RUN_OUT_FIRST);
+        assert_eq!(hub.enroll(&other, b"desk", key, &mut rng).unwrap_err(), RUN_OUT);
+        // Taken, it's gone: tried again, it's one never made.
+        assert!(hub.enroll(&first, b"desk", key, &mut rng).unwrap_err().contains("not good"));
+        assert!(hub.enroll(&never, b"desk", key, &mut rng).unwrap_err().contains("not good"));
+        assert_eq!(hub.store().accounts(), 0);
+        // Still good, the printed one makes the owner's account.
+        hub.enroll(&made, b"desk", key, &mut rng).unwrap();
+        assert!(hub.store().is_owner(&hub.store().account_list()[0].0));
+    }
+}
+
+/// An app enrolling by a run-out invite says the server's hint as its own,
+/// not as "The server says: …".
+#[test]
+fn an_app_says_an_invite_run_out_as_its_own() {
+    use carnet_sync::crypto::Random;
+    use carnet_sync::invite::{InviteCode, RUN_OUT_FIRST};
+    use carnet_sync::pair::Joining;
+    for store in common::stores() {
+        let mut net = Net::new(1, store);
+        let code = InviteCode::generate(&mut net.rng);
+        net.hub.store_mut().add_invite(code.hash(), true, 1000).unwrap();
+        net.hub.tick(1000);
+        let key = DeviceKey::generate(&mut net.rng);
+        let device: [u8; 4] = net.rng.bytes();
+        let e = Enroller::new(code.text(), device.to_vec(), key, &mut net.rng);
+        let c = net.connect(Peer::Enroller(e));
+        net.pump();
+        let Some(Peer::Enroller(e)) = net.peers.get(&c) else { panic!() };
+        assert!(matches!(&e.state, Joining::Failed(why) if why == RUN_OUT_FIRST), "{:?}", e.state);
+    }
+}
