@@ -858,7 +858,7 @@ impl Carnet {
                     }
                 });
                 if let Some(p) = &self.connect.problem {
-                    said(ui, "sync-problem", Icon::Warning, t.danger, p.words());
+                    said(ui, "sync-problem", Icon::Warning, t.danger, &p.words());
                     ui.leaf(NodeSpec::row().height(12.0).role(Role::None));
                 }
             }

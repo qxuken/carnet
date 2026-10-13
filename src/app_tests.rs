@@ -4809,11 +4809,15 @@ fn a_server_that_takes_only_codes_goes_straight_to_the_code() {
     check_server(&mut a, &mut d, "http://127.0.0.1:1");
     assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::Unreachable));
     assert_eq!(a.connect.step(), crate::connect::Step::Server);
-    assert!(drawn(&mut d, &mut a, carnet_sync::info::Problem::Unreachable.words()));
+    assert!(drawn(&mut d, &mut a, &carnet_sync::info::Problem::Unreachable.words()));
+    // A name the DNS has no address for: said so, by its name.
+    check_server(&mut a, &mut d, "https://carnet-test.invalid");
+    assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::DomainNotFound("carnet-test.invalid".into())));
+    assert!(drawn(&mut d, &mut a, "Domain not found: carnet-test.invalid. Check the address; a new name can take a few minutes to appear."));
     // Something answers, not Carnet (the server, under a path it hasn't).
     check_server(&mut a, &mut d, &format!("{origin}/elsewhere"));
     assert_eq!(a.connect.problem, Some(carnet_sync::info::Problem::NotCarnet));
-    assert!(drawn(&mut d, &mut a, carnet_sync::info::Problem::NotCarnet.words()));
+    assert!(drawn(&mut d, &mut a, &carnet_sync::info::Problem::NotCarnet.words()));
     assert!(drawn(&mut d, &mut a, "Cloud sync setup"), "still on the first step");
 
     // Codes only: the code's form, straight away.

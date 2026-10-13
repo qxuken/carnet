@@ -189,9 +189,10 @@ async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, bod
 /// ([`server_inner`]); and then it's the address the socket is connected
 /// to, on the link's port, whatever the DNS says now.
 async fn addresses(u: &Url, server: Option<&Server>) -> Result<Vec<SocketAddr>, String> {
-    let at: Vec<SocketAddr> = tokio::net::lookup_host((u.host.as_str(), u.port)).await.map_err(|e| e.to_string())?.collect();
+    let looked = tokio::net::lookup_host((u.host.as_str(), u.port)).await;
+    let at: Vec<SocketAddr> = looked.map_err(|e| if name_not_found(&e) { not_found(&u.host) } else { e.to_string() })?.collect();
     if at.is_empty() {
-        return Err(format!("{}: no address", u.host));
+        return Err(not_found(&u.host));
     }
     let Some(server) = server else { return Ok(at) };
     if !at.iter().any(|a| inner_ip(a.ip())) {
@@ -212,6 +213,41 @@ async fn addresses(u: &Url, server: Option<&Server>) -> Result<Vec<SocketAddr>, 
         }
         None => at,
     })
+}
+
+/// How a request whose host's name the DNS has no address for fails
+/// (no such domain, or none yet): [`domain_not_found`] reads it back.
+fn not_found(host: &str) -> String {
+    format!("{NOT_FOUND}{host}")
+}
+
+const NOT_FOUND: &str = "no such domain: ";
+
+/// The host a failed request named, if the DNS has no address for it:
+/// the name mistyped, or new and not seen everywhere yet. Not a lookup
+/// that couldn't be made (offline), which fails as the rest do.
+pub fn domain_not_found(failed: &str) -> Option<&str> {
+    failed.strip_prefix(NOT_FOUND)
+}
+
+/// Whether a failed lookup says the name has no address (NXDOMAIN, or no
+/// record of the kind asked), in each system's words for it; a lookup
+/// that couldn't be made (no DNS server reached: offline) says otherwise.
+fn name_not_found(e: &std::io::Error) -> bool {
+    // Windows: WSAHOST_NOT_FOUND, WSANO_DATA.
+    if cfg!(windows) && matches!(e.raw_os_error(), Some(11001 | 11004)) {
+        return true;
+    }
+    let said = e.to_string().to_ascii_lowercase();
+    [
+        "nodename nor servname provided", // macOS, BSD: EAI_NONAME
+        "name or service not known",      // glibc: EAI_NONAME
+        "no address associated with",     // glibc, macOS: EAI_NODATA
+        "name does not resolve",          // musl
+        "no such host is known",          // Windows
+    ]
+    .iter()
+    .any(|w| said.contains(w))
 }
 
 /// Whether the server is on this computer or its network: the address
@@ -534,6 +570,33 @@ mod tests {
         assert_eq!(got.status, 200);
         assert!(String::from_utf8(rt.block_on(server).unwrap()).unwrap().starts_with("GET /v1/info HTTP/1.1\r\n"));
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-        assert!(ask(format!("http://{closed}/v1/info"), None, || {}).unwrap().recv_timeout(Duration::from_secs(10)).unwrap().is_err());
+        let refused = ask(format!("http://{closed}/v1/info"), None, || {}).unwrap().recv_timeout(Duration::from_secs(10)).unwrap().unwrap_err();
+        assert_eq!(domain_not_found(&refused), None, "refused, not a name unknown: {refused}");
+    }
+
+    /// A name the DNS has no address for (`.invalid` never has one) is
+    /// told apart from a server that isn't there, by its host.
+    #[test]
+    fn a_name_with_no_address_is_a_domain_not_found() {
+        let failed = ask("https://carnet-test.invalid/v1/info".into(), None, || {}).unwrap().recv_timeout(Duration::from_secs(25)).unwrap().unwrap_err();
+        assert_eq!(domain_not_found(&failed), Some("carnet-test.invalid"), "{failed}");
+    }
+
+    /// Each system's words for a name with no address; a lookup that
+    /// couldn't be made (offline), or anything else, isn't one.
+    #[test]
+    fn each_systems_no_such_name_is_read_as_one() {
+        use std::io::{Error, ErrorKind};
+        let lookup = |detail: &str| Error::other(format!("failed to lookup address information: {detail}"));
+        for no in ["nodename nor servname provided, or not known", "Name or service not known", "No address associated with hostname", "Name does not resolve"] {
+            assert!(name_not_found(&lookup(no)), "{no}");
+        }
+        for other in ["Temporary failure in name resolution", "Try again"] {
+            assert!(!name_not_found(&lookup(other)), "{other}");
+        }
+        assert!(!name_not_found(&Error::from(ErrorKind::ConnectionRefused)));
+        assert!(!name_not_found(&Error::from(ErrorKind::TimedOut)));
+        assert_eq!(domain_not_found(&not_found("notes.example")), Some("notes.example"));
+        assert_eq!(domain_not_found("connection refused"), None);
     }
 }

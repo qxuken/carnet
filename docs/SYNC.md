@@ -727,7 +727,7 @@ Apps update when their owners let them, and a self-hosted server when its owner 
 
 - The app puts its protocol in the socket's address: `/v1/sync?protocol=2`. None means 0: builds from before protocol numbers.
 - The server's challenge carries its **greeting**: its protocol, its `OLDEST` and `DEPRECATED`, and its **features** by name (`compat::feature`: `passwords`, `passkeys`, `account-delete`, `remove`, `usage`, and `signup` where anyone may make an account by email). It's on every challenge, so a device joining by an invite, a code, the words, a password or a passkey reads it too, before it says anything.
-- `/v1/info` says the same, for a page to read before any socket opens.
+- `/v1/info` says the same, for a page to read before any socket opens. The desktop's connect step asks it first (`info::checked`), and what stops it is said: a name the DNS has no address for, "Domain not found: notes.example.com. Check the address; a new name can take a few minutes to appear." (`Problem::DomainNotFound`, read from the lookup's error, `http::domain_not_found`); nothing answering (refused, timed out, offline), "Couldn't reach that server…"; something not Carnet; or a build it can't talk to. In the browser a failed `fetch` can't tell them apart, so it says only that the server couldn't be reached.
 - **App too old:** the server sends the greeting, then `Denied` with the reason `Outdated`, and closes. The app says "Update Carnet to keep syncing" and retries now and then.
 - **Server too old:** a greeting older than the app's `OLDEST`, or none at all. The app sends nothing and says the server needs updating.
 - **Deprecated:** the app syncs as ever, and Settings asks for an update.
