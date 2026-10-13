@@ -14,6 +14,15 @@ describe('footer', () => {
     expect(footer({ ...base, allSent: true })).toEqual({ ok: true, text: 'All sent' });
     expect(footer({ ...base, readOnly: true, changes: 1, waitShown: true }).text).toBe('Read only for now: 1 change waiting');
   });
+  it('says why pictures wait, when they cannot go from here', () => {
+    const held = "The server's picture storage can't be reached from here, so new pictures stay on this device for now.";
+    expect(footer({ ...base, pictures: 1, waitShown: true, held })).toEqual({ ok: false, text: 'Waiting to send 1 picture', why: held });
+    // Said at once: it's no passing wait.
+    expect(footer({ ...base, pictures: 1, held }).why).toBe(held);
+    // None waiting: nothing to say.
+    expect(footer({ ...base, held }).why).toBeUndefined();
+    expect(footer({ ...base, pictures: 1, waitShown: true }).why).toBeUndefined();
+  });
 });
 
 describe('waysBack', () => {

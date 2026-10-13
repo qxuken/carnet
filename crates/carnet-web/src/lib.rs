@@ -317,7 +317,9 @@ impl Vault {
             .collect()
     }
 
-    /// How a transfer went: a fetch's sealed bytes, or `error`.
+    /// How a transfer went: a fetch's sealed bytes, or `error`: `HTTP`
+    /// and the status, `unreachable` for a put that got no answer while
+    /// the socket is up ([`notes::UNREACHABLE`]), or any other words.
     pub fn transferred(&mut self, id: &str, put: bool, bytes: Option<Vec<u8>>, error: Option<String>) {
         let Some(id) = unhex(id).and_then(|i| <[u8; 32]>::try_from(i).ok()) else { return };
         let result = match error {
@@ -487,6 +489,22 @@ impl Vault {
     /// as `uploaded`). Its id; none for one too big.
     pub fn upload(&mut self, path: &str, bytes: &[u8]) -> Option<String> {
         self.notes.upload(path, bytes.to_vec())
+    }
+
+    /// The pictures put in here and not on the server yet, by id.
+    pub fn uploading(&self) -> Vec<String> {
+        self.notes.uploading()
+    }
+
+    /// Why the pictures waiting wait, when it's something that won't mend
+    /// by itself, in words; none else.
+    pub fn pictures_held(&self) -> Option<String> {
+        self.notes.pictures_held().map(str::to_string)
+    }
+
+    /// The pictures waiting, offered again.
+    pub fn retry_pictures(&mut self) {
+        self.notes.retry_pictures();
     }
 
     /// Every picture the vault names, by id: what is worth keeping here.
