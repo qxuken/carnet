@@ -13,6 +13,21 @@ export type MenuItem = {
   items?: MenuItem[];
 };
 
+/// A list open behind one of a menu's ways: its label and items, and
+/// which way of the list before it (by its place there) it's behind.
+export type Level = { label: string; items: MenuItem[]; from: number };
+
+/// The list behind `item`, the `n`th of those shown, opened in their
+/// place.
+export const into = (stack: Level[], item: MenuItem, n: number): Level[] => [...stack, { label: item.label, items: item.items ?? [], from: n }];
+
+/// A step back out of the list shown (Escape, ←, its way back): the
+/// lists left open, and the way to focus in the one shown again, the one
+/// the list was behind ("Move to"), not its first.
+export function back(stack: Level[]): { stack: Level[]; focus: number } {
+  return { stack: stack.slice(0, -1), focus: stack.at(-1)?.from ?? 0 };
+}
+
 type Box = { left: number; top: number; right: number; bottom: number };
 
 /// Where a menu `w` by `h` goes for a button at `at`, in a window `vw` by

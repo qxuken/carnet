@@ -6,21 +6,24 @@
   // that opened it; a press outside closes it too.
   import { onMount, tick } from 'svelte';
   import Icon from './Icon.svelte';
-  import { placeMenu, type MenuItem } from './menu';
+  import { back as stepBack, into, placeMenu, type Level, type MenuItem } from './menu';
 
   /// `heading`: its label said at its top too (a menu with no row beside
   /// it to say what it's for).
   let { anchor, label, items, close, heading = false }: { anchor: HTMLElement; label: string; items: MenuItem[]; close: () => void; heading?: boolean } = $props();
-  let stack = $state<{ label: string; items: MenuItem[] }[]>([]);
+  let stack = $state<Level[]>([]);
   const shown = $derived(stack.at(-1) ?? { label, items });
   let box: HTMLElement | undefined = $state();
   let at = $state({ left: 0, top: 0, maxHeight: 400 });
 
-  async function place(focus = true) {
+  /// Placed at its button; `focus`, the way focused: the first (the
+  /// way back, in a list behind a way), or the `n`th of the ways shown.
+  async function place(focus: boolean | number = true) {
     await tick();
     if (!box) return;
     at = placeMenu(anchor.getBoundingClientRect(), box.offsetWidth, box.scrollHeight, innerWidth, innerHeight);
-    if (focus) box.querySelector<HTMLElement>('[role=menuitem]')?.focus({ preventScroll: true });
+    const to = typeof focus === 'number' ? box.querySelectorAll<HTMLElement>('.item:not(.head)')[focus] : focus ? box.querySelector<HTMLElement>('[role=menuitem]') : null;
+    to?.focus({ preventScroll: true });
   }
 
   function done(back = true) {
@@ -30,9 +33,9 @@
     if (back && opener.isConnected) opener.focus({ preventScroll: true });
   }
 
-  function choose(item: MenuItem) {
+  function choose(item: MenuItem, n: number) {
     if (item.items) {
-      stack = [...stack, { label: item.label, items: item.items }];
+      stack = into(stack, item, n);
       void place();
       return;
     }
@@ -40,9 +43,11 @@
     item.run?.();
   }
 
+  /// Out of the list behind a way, back to that way.
   function back() {
-    stack = stack.slice(0, -1);
-    void place();
+    const out = stepBack(stack);
+    stack = out.stack;
+    void place(out.focus);
   }
 
   function key(e: KeyboardEvent) {
@@ -97,8 +102,8 @@
   {:else if heading}
     <p class="title" aria-hidden="true">{label}</p>
   {/if}
-  {#each shown.items as item (item.label)}
-    <button class="item" class:danger={item.danger} role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked} aria-haspopup={item.items ? 'menu' : undefined} onclick={() => choose(item)}>
+  {#each shown.items as item, n (item.label)}
+    <button class="item" class:danger={item.danger} role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked} aria-haspopup={item.items ? 'menu' : undefined} onclick={() => choose(item, n)}>
       {#if item.icon}<Icon name={item.icon} size={16} />{:else}<span class="gap"></span>{/if}
       <span class="label">{item.label}</span>
       {#if item.items}<Icon name="chevron-right" size={14} />{/if}
