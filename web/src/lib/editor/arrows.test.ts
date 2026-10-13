@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { across, onRow, vertical, type Lines } from './arrows';
+import { across, onRow, sideOn, vertical, type Lines, type Row } from './arrows';
 
 /// Lines of these kinds, each with these words (a picture's or a
 /// divider's line holds one letter, as the page gives CodeMirror).
@@ -94,5 +94,23 @@ describe('onRow', () => {
   it('takes the caret by its middle', () => {
     expect(onRow({ top: 40, bottom: 60 }, { top: 38, bottom: 62 })).toBe(true);
     expect(onRow({ top: 70, bottom: 90 }, { top: 38, bottom: 62 })).toBe(false);
+  });
+});
+
+// The finding: ↑ from the start of a wrapped row skipped a row — a
+// heading's first, a paragraph's third. A paragraph wrapped every 10
+// letters, rows 20 high: place 20 ends row 1 (from its left side) and
+// starts row 2 (from its right).
+describe('sideOn', () => {
+  const rowOf = (n: number): Row => ({ top: n * 20, bottom: n * 20 + 20 });
+  const coords = (pos: number, side: 1 | -1) => rowOf(pos % 10 === 0 && side < 0 && pos > 0 ? pos / 10 - 1 : Math.floor(pos / 10));
+  it('keeps a caret at the start of a row on that row', () => {
+    expect(sideOn(20, rowOf(2), coords)).toBe(1);
+  });
+  it('and one at the end of a row on that one', () => {
+    expect(sideOn(20, rowOf(1), coords)).toBe(-1);
+  });
+  it('either way in the middle of a row', () => {
+    expect(onRow(coords(25, sideOn(25, rowOf(2), coords)), rowOf(2))).toBe(true);
   });
 });

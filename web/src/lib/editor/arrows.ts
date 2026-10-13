@@ -103,3 +103,14 @@ export const onRow = (caret: Row, row: Row) => {
   const mid = (caret.top + caret.bottom) / 2;
   return mid >= row.top && mid <= row.bottom;
 };
+
+/// The side a caret put at `pos` keeps to (CodeMirror's `assoc`) so it is
+/// drawn on `row`, `coords` measuring a place from one side or the other.
+/// Where a wrapped line breaks, one place is both the end of a row and
+/// the start of the next: a caret put at the start of a row and drawn —
+/// and measured by the next ↑ — at the end of the row above would skip
+/// that row.
+export function sideOn(pos: number, row: Row, coords: (pos: number, side: 1 | -1) => Row | null): 1 | -1 {
+  const after = coords(pos, 1);
+  return after && onRow(after, row) ? 1 : -1;
+}
