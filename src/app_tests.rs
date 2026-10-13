@@ -8423,3 +8423,65 @@ fn an_autosave_brings_no_rescan_and_another_apps_write_does() {
     assert!(app.store.notes.iter().any(|n| n.markdown().contains("edited elsewhere")));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+/// A press in the title held over a frame or two, as a hand holds it,
+/// and let go: where it was let go, the title's caret.
+fn press_title(app: &mut Carnet, d: &mut Drive, at: f32) -> Key {
+    let k = app_field(app, Field::Title).expect("the title");
+    let r = d.rect_of(k).unwrap();
+    d.input(app, InputEvent::CursorMoved(Vec2::new(r.x + at.clamp(2.0, r.w - 2.0), r.y + r.h / 2.0)));
+    d.input(app, InputEvent::mouse_down(1));
+    d.frame(app);
+    d.frame(app);
+    d.input(app, InputEvent::mouse_up());
+    d.frame(app);
+    assert_eq!(d.core.focus(), Some(k), "the title has the keyboard");
+    k
+}
+
+/// After a click in the title, its first key acts: Backspace takes a
+/// letter, ← at the start and → at the end go into the note's start (→)
+/// or stay (←, there being nothing before the title), ↓ goes into the
+/// note — not the second press, as when kui's press left the field an
+/// empty selection, which has no edge and is what Backspace took.
+#[test]
+fn the_first_key_after_a_click_in_the_title_acts() {
+    let (mut app, mut d, dir) = fresh("title-click-key");
+    d.text(&mut app, "Plans");
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "First line");
+    // Backspace at the end: a letter goes.
+    let k = press_title(&mut app, &mut d, 1e4);
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some("Plan"));
+    assert_eq!(app.store.notes[app.current].title, "Plan");
+    // → at the end: into the note, at its start.
+    click_page(&mut app, &mut d);
+    press_title(&mut app, &mut d, 1e4);
+    key(&mut app, &mut d, "right");
+    d.frame(&mut app);
+    assert!(page_focused(&app, &d), "→ at the title's end is the note");
+    assert_eq!(app.caret, Caret::at(page::first(app.doc())));
+    // ↓ from the middle: into the note.
+    press_title(&mut app, &mut d, 30.0);
+    key(&mut app, &mut d, "down");
+    d.frame(&mut app);
+    assert!(page_focused(&app, &d), "↓ from the title is the note");
+    // ← from the middle: a letter left, at once.
+    let k = press_title(&mut app, &mut d, 30.0);
+    let at = d.core.edit.selection_cursors(k).unwrap().1;
+    key(&mut app, &mut d, "left");
+    assert_eq!(d.core.edit.selection_cursors(k).unwrap().1 .1 + 1, at.1);
+    // A drag in the title still selects, and Backspace takes what it did.
+    let r = d.rect_of(k).unwrap();
+    d.drag(&mut app, Vec2::new(r.x + 2.0, r.y + r.h / 2.0), Vec2::new(r.x + r.w - 2.0, r.y + r.h / 2.0));
+    d.frame(&mut app);
+    assert!(d.core.edit.has_selection(k));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some(""));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}

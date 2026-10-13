@@ -753,6 +753,9 @@ pub struct Carnet {
     /// The open note's title changed on another device: the title field
     /// takes it on the next frame (kui's field keeps its own words).
     title_from_remote: bool,
+    /// The focused field's caret as the last frame left it: its key, its
+    /// text's version and its two ends (see `settle_field_caret`).
+    field_caret: Option<FieldCaret>,
     /// The search had the keyboard on the last frame: its field shows
     /// whole.
     search_active: bool,
@@ -1043,6 +1046,7 @@ impl Carnet {
             deleted: false,
             title_to: None,
             title_from_remote: false,
+            field_caret: None,
             window_cmd: None,
             search_active: false,
             trash: Vec::new(),
@@ -3853,6 +3857,35 @@ impl Carnet {
         }
     }
 
+    /// A press in a field leaves kui's editor holding an empty selection at
+    /// the caret (the anchor a drag from there would have kept, seeded
+    /// again as the button comes up), not a bare caret; and a field with a
+    /// selection, even an empty one, reports no edge and has Backspace
+    /// take the selection. So the first ↓, → at the title's end, ← at its
+    /// start or Backspace after a click did nothing, and the second
+    /// worked. Once the button is up, a caret the pointer put down —
+    /// nothing edited, nothing selected, nothing being composed — is set
+    /// again as the bare caret it is.
+    fn settle_field_caret(&mut self, core: &mut Core, focused: Option<Key>) {
+        let Some(k) = focused else {
+            self.field_caret = None;
+            return;
+        };
+        let (Some(ends), version) = (core.edit.selection_cursors(k), core.edit.version(k)) else {
+            self.field_caret = None;
+            return;
+        };
+        let held = core.is_pressed(k);
+        let let_go = match self.field_caret {
+            Some(last) if last.key == k => (last.held && !held) || (last.version == version && last.ends != ends),
+            _ => true,
+        };
+        if let_go && !held && ends.0 == ends.1 && core.edit.preedit(k).is_none() {
+            core.edit.set_selection(k, ends.1, ends.1);
+        }
+        self.field_caret = Some(FieldCaret { key: k, version, ends, held });
+    }
+
     /// Hands focus to the field a model change asked for, the frame it is
     /// declared in.
     fn apply_focus(&mut self, ui: &mut Ui<'_>, k: Key, field: Field) {
@@ -3866,6 +3899,19 @@ impl Carnet {
     }
 }
 
+
+/// The focused field's caret as one frame left it.
+#[derive(Clone, Copy)]
+struct FieldCaret {
+    key: Key,
+    /// Its text's version: a caret moved with the text unchanged was put
+    /// there by the pointer or an arrow.
+    version: u64,
+    /// The selection's anchor and its caret, each (line, byte).
+    ends: ((usize, usize), (usize, usize)),
+    /// The pointer's button held on it.
+    held: bool,
+}
 
 /// A folder's own name: the last part of its path.
 pub fn folder_name(folder: &str) -> &str {
@@ -4068,6 +4114,7 @@ impl App for Carnet {
         // Where the keyboard is: the page, a field, or neither.
         let focused = ui.focused();
         let field = focused.and_then(|k| self.fields.get(&k)).copied();
+        self.settle_field_caret(ui.core(), focused.filter(|_| field.is_some()));
         self.search_active = field == Some(Field::Search);
         if focused.is_some() && focused == self.page_key {
             self.editing = true;
