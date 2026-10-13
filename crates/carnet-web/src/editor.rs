@@ -814,6 +814,16 @@ impl Editor {
         }
     }
 
+    /// The Markdown a copy's HTML is made from: [`Editor::copy`]'s, but
+    /// lines from inside one code block in its fences, so the HTML is
+    /// code ([`page::copy_for_html`]).
+    pub fn copy_for_html(&self) -> Option<String> {
+        match self.focus {
+            Focus::Title { .. } => self.copy(),
+            Focus::Body => page::copy_for_html(&self.doc, self.caret),
+        }
+    }
+
     /// Text from the clipboard: one line typed in, several made blocks.
     pub fn paste(&mut self, s: &str) -> bool {
         if matches!(self.focus, Focus::Title { .. }) {
@@ -1583,6 +1593,21 @@ mod tests {
         e.select(2, 4, 2, 4);
         e.select(1, 0, 1, 0);
         assert!(page::chosen_atom(&e.doc, e.caret).is_none());
+    }
+
+    /// As the desktop's: lines copied from inside a code block are the
+    /// bare lines as text, and code (its language named) as HTML.
+    #[test]
+    fn code_copied_is_code_in_its_html() {
+        let mut e = Editor::open("# T\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n");
+        assert_eq!((e.lines()[1].text.as_str(), e.lines()[2].text.as_str()), ("let a = 1;", "let b = 2;"));
+        e.select(1, 0, 2, 10);
+        assert_eq!(e.copy().as_deref(), Some("let a = 1;\nlet b = 2;"));
+        let html = carnet_core::export::html(&e.copy_for_html().unwrap(), |s, _| s.to_string());
+        assert_eq!(html, "<pre><code class=\"language-rust\">let a = 1;\nlet b = 2;</code></pre>");
+        // In the title: its words.
+        e.select(0, 0, 0, 1);
+        assert_eq!(e.copy_for_html().as_deref(), Some("T"));
     }
 
     /// The finding: words with U+202E in, selected, ⌘K, an address and
