@@ -417,7 +417,10 @@ impl Carnet {
                 NodeSpec::row().grow_width().label("Title"),
             );
             self.fields.insert(k, Field::Title);
-            if std::mem::take(&mut self.title_from_remote) {
+            // kui's field keeps its own words: a title changed elsewhere —
+            // by another device, or in the file by another app — is put in
+            // it, unless it's being written here.
+            if ui.focused() != Some(k) && ui.core().edit_text(k).is_some_and(|now| now != title) {
                 ui.set_edit_text(k, &title);
             }
             self.apply_focus(ui, k, Field::Title);
@@ -2716,7 +2719,9 @@ impl Carnet {
         match page::copy(self.doc(), self.caret) {
             Some(md) => {
                 let folder = self.store.notes[self.current].folder.clone();
-                self.copy_markdown(md, &folder);
+                // Lines of code are HTML's code too (`page::copy_for_html`).
+                let html_md = page::copy_for_html(self.doc(), self.caret).unwrap_or_else(|| md.clone());
+                self.copy_markdown_as(md, &html_md, &folder);
                 true
             }
             None => false,

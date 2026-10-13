@@ -175,14 +175,14 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                 out.push_str(&format!("<p><img {} alt=\"{}\"{w}></p>", image(src, *wiki).attr(), escape(alt)));
             }
             Kind::Raw(t) => {
-                // A fence's body, without the fences.
+                // A fence's body, without the fences; its language, as
+                // the fence names it, the code's class.
                 let body: Vec<&str> = t.lines().collect();
-                let inner = if body.len() >= 2 && body[0].trim_start().starts_with(['`', '~']) {
-                    body[1..body.len() - 1].join("\n")
-                } else {
-                    t.clone()
-                };
-                out.push_str(&format!("<pre><code>{}</code></pre>", escape(&inner)));
+                let fenced = body.len() >= 2 && body[0].trim_start().starts_with(['`', '~']);
+                let inner = if fenced { body[1..body.len() - 1].join("\n") } else { t.clone() };
+                let lang = body.first().filter(|_| fenced).and_then(|f| f.trim().trim_start_matches(['`', '~']).split_whitespace().next());
+                let class = lang.map(|l| format!(" class=\"language-{}\"", escape(l))).unwrap_or_default();
+                out.push_str(&format!("<pre><code{class}>{}</code></pre>", escape(&inner)));
             }
             Kind::Item { .. } => {}
         }

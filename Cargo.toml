@@ -32,6 +32,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # events (FSEvents, inotify, ReadDirectoryChangesW), so an idle folder
 # costs nothing (src/watch.rs).
 notify = "8.2"
+# Local time: a pasted picture's file is named for when it was pasted, as
+# the clock on the wall says it.
+jiff = "0.2"
 # The pairing code as a QR code, for a phone's camera (Settings → Sync).
 qrcode = { version = "0.14", default-features = false }
 

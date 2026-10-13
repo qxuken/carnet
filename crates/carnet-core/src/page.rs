@@ -187,6 +187,18 @@ pub fn first(doc: &Doc) -> Pos {
     start(slots(doc).first().copied().unwrap_or(Slot::block(0)))
 }
 
+/// Where ↓ or → from the title's end comes into the note: `at`, on its
+/// first line. A divider or a picture there is chosen whole, as ↓ or →
+/// from a line above it choose one, so what is typed next takes its
+/// place rather than going in above it.
+pub fn from_title(doc: &Doc, at: Pos) -> Caret {
+    if at.slot.cell.is_none() && is_atomic(doc, at.slot) {
+        whole(at.slot, true)
+    } else {
+        Caret::at(at)
+    }
+}
+
 /// The indices of the blocks a caret touches: what a block's tools act
 /// on. A selection that only reaches the very start of a block, or leaves
 /// from the very end of one with words in it, takes nothing of that block:
@@ -2850,22 +2862,63 @@ pub fn copy(doc: &Doc, c: Caret) -> Option<String> {
     }
     let r = spanned(doc, c);
     let mut blocks: Vec<Block> = doc.blocks()[r.clone()].iter().map(|b| (**b).clone()).collect();
+    // Code at an end the selection holds none of the lines of — left from
+    // its very end, or come to at its very start — isn't copied: not as
+    // its fences round nothing.
+    let none_of = |b: &Block, from: usize, to: usize| match &b.kind {
+        Kind::Raw(t) => code_body(t).is_some_and(|(lo, hi)| lo < hi && from.max(lo) >= to.min(hi)),
+        _ => false,
+    };
+    let (drop_first, drop_last) = (
+        a.slot.cell.is_none() && none_of(&blocks[0], a.byte, usize::MAX),
+        b.slot.cell.is_none() && none_of(&blocks[blocks.len() - 1], 0, b.byte),
+    );
+    if drop_last {
+        blocks.pop();
+    }
+    if drop_first && !blocks.is_empty() {
+        blocks.remove(0);
+    }
+    if blocks.is_empty() {
+        return None;
+    }
     let last = blocks.len() - 1;
     // Code cut at an end keeps its fences round its lines: still code.
     let code = |b: &Block| matches!(b.kind, Kind::Raw(_));
-    if b.slot.cell.is_none() {
+    if b.slot.cell.is_none() && !drop_last {
         let raw = code(&blocks[last]);
         if let Some(t) = blocks[last].text_mut() {
             *t = if raw { code_cut(t, 0, b.byte) } else { split_text(t, b.byte.min(t.len()), true).0 };
         }
     }
-    if a.slot.cell.is_none() {
+    if a.slot.cell.is_none() && !drop_first {
         let raw = code(&blocks[0]);
         if let Some(t) = blocks[0].text_mut() {
             *t = if raw { code_cut(t, a.byte, t.len()) } else { split_text(t, a.byte.min(t.len()), true).1 };
         }
     }
     Some(doc::to_markdown(None, &Doc::new(blocks)))
+}
+
+/// The Markdown a copy's HTML is made from: [`copy`]'s, but lines taken
+/// from inside one code block keep its fences, so the HTML is code
+/// (`<pre><code>`, its language named) and not paragraphs. The text a copy
+/// carries stays the bare lines, for an editor to paste.
+pub fn copy_for_html(doc: &Doc, c: Caret) -> Option<String> {
+    let md = copy(doc, c)?;
+    let (a, b) = ordered(doc, c);
+    match kind_at(doc, a.slot) {
+        Some(Kind::Raw(t)) if a.slot == b.slot && a.slot.cell.is_none() => {
+            let Some((lo, hi)) = code_body(t) else { return Some(md) };
+            // The fences as the block writes them, round the lines taken.
+            let open = t[..lo].trim_end_matches('\n');
+            let close = t[hi..].trim_start_matches('\n');
+            let close = if close.is_empty() { &open[..open.len() - open.trim_start_matches(['`', '~']).len()] } else { close };
+            let inner = t[a.byte.clamp(lo, hi)..b.byte.clamp(lo, hi)].trim_end_matches('\n');
+            Some(format!("{open}\n{inner}\n{close}"))
+        }
+        _ => Some(md),
+    }
 }
 
 /// Ctrl+V: one line types in; several lines that read as structure (a
@@ -3490,6 +3543,80 @@ mod tests {
         let chosen = whole(rule, true);
         let from = vertical_from(&end_rule, chosen, false, false);
         assert_eq!(vertical_to(&end_rule, from, from.head, false, false), Caret::at(Pos { slot: rule, byte: 1 }));
+    }
+
+    /// Into the note from its title onto a picture or a divider: chosen
+    /// whole, as from a line above; words typed then take its place. Onto
+    /// words, the caret where it came.
+    #[test]
+    fn from_the_title_a_first_picture_is_chosen_whole() {
+        let pic = Kind::Image { src: "a.png".into(), alt: "x".into(), width: Some(220), float: doc::Float::Left, wiki: false };
+        let mut d = doc(vec![Block::new(pic), Block::new(Kind::Item { style: ListStyle::Todo, indent: 0, done: false, num: 0, text: "Book".into() })]);
+        let pic = Slot::block(d.blocks()[0].id);
+        let mut c = from_title(&d, first(&d));
+        assert_eq!(chosen_atom(&d, c), Some(pic));
+        assert_eq!(c, Caret { anchor: start(pic), head: end(&d, pic) }, "as → from above chooses it");
+        let mut typing = Typing::default();
+        assert!(typing.type_text(&mut d, &mut c, "replaced"));
+        assert!(matches!(&d.blocks()[0].kind, Kind::Text(t) if t == "replaced"), "{:?}", d.blocks()[0].kind);
+        assert_eq!(d.len(), 2, "the picture gone, the checklist after it");
+        let words = doc(vec![Block::text("ab")]);
+        assert_eq!(from_title(&words, at(&words, 0, 1).head), at(&words, 0, 1));
+    }
+
+    /// A selection that holds none of a code block's lines — from its very
+    /// end into a table below, or from a line above to its very start —
+    /// copies no code: not its fences round nothing.
+    #[test]
+    fn a_copy_takes_no_code_it_holds_no_line_of() {
+        let code = "```rust\nlet a = 1;\n```";
+        let mut t = Table::new(2, 2);
+        t.rows[0].cells[0] = "A".into();
+        t.rows[1].cells[0] = "1".into();
+        let d = doc(vec![Block::text("Above"), Block::new(Kind::Raw(code.into())), Block::new(Kind::Table(t))]);
+        let (_, hi) = code_body(code).unwrap();
+        let cells = block_slots(&d.blocks()[2]);
+        // From the code's end (after `1;`) into the table's second row.
+        let c = Caret { anchor: Pos { slot: Slot::block(d.blocks()[1].id), byte: hi }, head: Pos { slot: cells[2], byte: 1 } };
+        let md = copy(&d, c).unwrap();
+        assert!(!md.contains("```"), "{md:?}");
+        assert!(md.contains("| A |") && md.contains("| 1 |"), "{md:?}");
+        // From the paragraph's middle to the code's start: the words alone.
+        let (lo, _) = code_body(code).unwrap();
+        let c = Caret { anchor: Pos { slot: Slot::block(d.blocks()[0].id), byte: 2 }, head: Pos { slot: Slot::block(d.blocks()[1].id), byte: lo } };
+        assert_eq!(copy(&d, c).as_deref(), Some("ove\n"));
+        // Holding one of its letters, the code comes, fenced.
+        let c = Caret { anchor: Pos { slot: Slot::block(d.blocks()[1].id), byte: hi - 1 }, head: Pos { slot: cells[2], byte: 1 } };
+        assert!(copy(&d, c).unwrap().starts_with("```rust\n;\n```"), "{:?}", copy(&d, c));
+    }
+
+    /// Lines copied from inside a code block: the text is the bare lines,
+    /// and the HTML is made from them in the block's own fences — code,
+    /// its language named — not paragraphs.
+    #[test]
+    fn code_copied_is_code_in_its_html() {
+        let code = "```rust\nlet a = 1;\nlet b = 2;\n```";
+        let d = doc(vec![Block::new(Kind::Raw(code.into()))]);
+        let slot = Slot::block(d.blocks()[0].id);
+        let (lo, hi) = code_body(code).unwrap();
+        let c = Caret { anchor: Pos { slot, byte: lo }, head: Pos { slot, byte: hi } };
+        assert_eq!(copy(&d, c).as_deref(), Some("let a = 1;\nlet b = 2;"));
+        let md = copy_for_html(&d, c).unwrap();
+        assert_eq!(md, code);
+        let html = crate::export::html(&md, |s, _| s.to_string());
+        assert_eq!(html, "<pre><code class=\"language-rust\">let a = 1;\nlet b = 2;</code></pre>");
+        // Part of a line, unclosed code with no language: still code.
+        let open = "```\nx < y";
+        let d = doc(vec![Block::new(Kind::Raw(open.into()))]);
+        let slot = Slot::block(d.blocks()[0].id);
+        let c = Caret { anchor: Pos { slot, byte: 4 }, head: Pos { slot, byte: 7 } };
+        let html = crate::export::html(&copy_for_html(&d, c).unwrap(), |s, _| s.to_string());
+        assert_eq!(html, "<pre><code>x &lt;</code></pre>");
+        // Words elsewhere: as `copy` has them.
+        let d = doc(vec![Block::text("plain words")]);
+        let c = at(&d, 0, 0);
+        let c = Caret { head: Pos { byte: 5, ..c.head }, ..c };
+        assert_eq!(copy_for_html(&d, c), copy(&d, c));
     }
 
     /// A picture in a cell is one letter to the caret: the arrows choose

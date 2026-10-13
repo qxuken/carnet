@@ -1161,7 +1161,7 @@ impl Carnet {
                     .draw(ui, &t);
                     // Apart a little: one keeps a note, the other throws it away.
                     gap(ui, 6.0);
-                    Tool::new("t-trash", Icon::Trash, "Delete note", keys::hint("Move this note to the trash", keys::TRASH), Msg::DeleteNote)
+                    Tool::new("t-trash", Icon::Trash, "Delete note", keys::hint("Move this note to Deleted", keys::TRASH), Msg::DeleteNote)
                         .calm(calm)
                         .draw(ui, &t);
                 }

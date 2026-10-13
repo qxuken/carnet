@@ -1053,6 +1053,7 @@ impl Carnet {
                     me.fields.insert(k, f);
                     made = Some(k);
                     if secret {
+                        me.passwords_now.push(k);
                         let (g, word) = if shown { (Icon::EyeOff, "Hide password") } else { (Icon::Eye, "Show password") };
                         ui.with_keyed(
                             &format!("{key}-eye"),
@@ -1244,9 +1245,11 @@ impl Carnet {
                                 setting(ui, l, &name, Some(&what), |ui| {
                                     if d.you {
                                         pill_button(ui, l, "sync-rename", "Rename", false, status == Status::Online, Msg::SyncRename);
+                                    } else if armed {
+                                        pill_button(ui, l, &format!("sync-remove-cancel-{i}"), "Cancel", false, true, Msg::SyncRemoveCancel);
+                                        pill_button(ui, l, &format!("sync-remove-{i}"), "Yes, remove", true, status == Status::Online, Msg::SyncRemove { at: i as u64 });
                                     } else {
-                                        let word = if armed { "Remove for real" } else { "Remove" };
-                                        pill_button(ui, l, &format!("sync-remove-{i}"), word, armed, status == Status::Online, Msg::SyncRemove { at: i as u64 });
+                                        pill_button(ui, l, &format!("sync-remove-{i}"), "Remove", false, status == Status::Online, Msg::SyncRemove { at: i as u64 });
                                     }
                                 });
                             });
@@ -1536,7 +1539,10 @@ impl Carnet {
                             };
                             ui.with_key(ui.child_key("sync-account").index(i as u64), NodeSpec::column().grow_width(), |ui| {
                                 setting(ui, l, "An account", Some(&what), |ui| {
-                                    let word = if armed { "Remove for real" } else { "Remove" };
+                                    if armed {
+                                        pill_button(ui, l, &format!("sync-account-remove-cancel-{i}"), "Cancel", false, true, Msg::SyncAccountRemoveCancel);
+                                    }
+                                    let word = if armed { "Yes, remove" } else { "Remove" };
                                     pill_button(ui, l, &format!("sync-account-remove-{i}"), word, armed, status == Status::Online, Msg::SyncAccountRemove { at: i as u64 });
                                 });
                             });
@@ -1562,7 +1568,10 @@ impl Carnet {
                     "Turned off, this device stops syncing; its notes stay as they are."
                 };
                 setting(ui, l, "On this device", Some(what), |ui| {
-                    pill_button(ui, l, "sync-off", if armed { "Turn off for real" } else { "Turn off" }, armed, true, Msg::SyncOff);
+                    if armed {
+                        pill_button(ui, l, "sync-off-cancel", "Cancel", false, true, Msg::SyncOffCancel);
+                    }
+                    pill_button(ui, l, "sync-off", if armed { "Yes, turn off" } else { "Turn off" }, armed, true, Msg::SyncOff);
                 });
                 // The whole account, from any of its devices; not the
                 // server's owner's, which lets everyone else on.
