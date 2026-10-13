@@ -778,7 +778,7 @@ impl Carnet {
             Kind::Raw(text) => {
                 let front = text.starts_with("---\n");
                 let style = l.page_type(Type::CODE)
-                    .mono()
+                    .family(l.code)
                     .color(if front { t.muted } else { t.fg });
                 ui.with(NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0)), |ui| {
                     ui.with(
@@ -1696,9 +1696,16 @@ impl Carnet {
                             sp = sp.strikethrough();
                         }
                         if s.code {
-                            // Code reads as code: its own ink on a wash of
-                            // the text's colour, clear in either theme.
-                            sp = sp.color(l.c.accent_ink).bg(t.fg.with_alpha(0.09)).bg_radius(4.0);
+                            // Code reads as code: in the code's face, a size
+                            // down as on the web (14px in 16), its own ink on
+                            // a wash of the text's colour, clear in either
+                            // theme.
+                            sp = sp
+                                .family(l.code)
+                                .size((style.size * 0.875).round())
+                                .color(l.c.accent_ink)
+                                .bg(t.fg.with_alpha(0.09))
+                                .bg_radius(4.0);
                         }
                         if s.link {
                             sp = sp.color(t.focus_ring).underline();

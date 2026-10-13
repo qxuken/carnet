@@ -65,12 +65,12 @@ export const theme = EditorView.theme({
   // one line, or being measured, as the rest of its words.
   '.cm-initial.drop2::first-letter': { fontSize: '3.6em' },
   '.cm-initial.drop-none::first-letter, .cm-initial.drop-measure::first-letter': { float: 'none', font: 'inherit', margin: '0', color: 'inherit' },
-  '.cm-code, .cm-front': { font: '14px/1.6 ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', paddingLeft: '12px !important', paddingRight: '12px !important' },
+  '.cm-code, .cm-front': { font: '14px/1.6 var(--mono)', backgroundColor: 'var(--sunken)', paddingLeft: '12px !important', paddingRight: '12px !important' },
   '.cm-front': { color: 'var(--muted)' },
   '.cm-b': { fontWeight: '700' },
   '.cm-i': { fontStyle: 'italic' },
   '.cm-s': { textDecoration: 'line-through' },
-  '.cm-c': { font: '0.85em ui-monospace, Menlo, monospace', backgroundColor: 'var(--sunken)', borderRadius: '4px', padding: '1px 4px' },
+  '.cm-c': { font: '0.85em var(--mono)', backgroundColor: 'var(--sunken)', borderRadius: '4px', padding: '1px 4px' },
   '.cm-l': { color: 'var(--accent-ink)', textDecoration: 'underline', textDecorationColor: 'color-mix(in srgb, var(--accent-ink) 40%, transparent)' },
   '.cm-marked': { borderRadius: '3px' },
   // A divider as the desktop draws it by default (settings `divider =

@@ -136,6 +136,7 @@ impl Carnet {
                 match which {
                     0 => s.font = name,
                     1 => s.heading_font = name,
+                    3 => s.code_font = name,
                     _ => s.initial_font = name,
                 }
                 self.font_pick = None;
@@ -434,6 +435,14 @@ impl Carnet {
                 if self.font_pick == Some(1) {
                     self.font_list(ui, l, 1, &s.heading_font);
                 }
+                // Code, a block or a word of it: a monospaced face.
+                let code_name = if s.code_font.is_empty() { default_font_name(3).to_string() } else { s.code_font.clone() };
+                sub_setting(ui, l, "Code", |ui| {
+                    font_pill(ui, l, "font-code", &code_name, l.code, self.font_pick == Some(3), Msg::FontMenu { which: 3 });
+                });
+                if self.font_pick == Some(3) {
+                    self.font_list(ui, l, 3, &s.code_font);
+                }
             });
         });
         // What a note will look like, at the size and in the faces chosen.
@@ -464,8 +473,16 @@ impl Carnet {
                 // paragraph's from the toolbar.
                 let (cap, rest) = words.split_at(1);
                 let ink = if s.initial_accent { l.c.accent_ink } else { t.fg };
+                // And a word of code, in its face, as the page draws one.
+                let (before, after) = rest.split_once("Markdown").unwrap_or((rest, ""));
+                let code = Span::new(if after.is_empty() { "" } else { "Markdown" })
+                    .family(l.code)
+                    .size((body.size * 0.875).round())
+                    .color(l.c.accent_ink)
+                    .bg(t.fg.with_alpha(0.09))
+                    .bg_radius(4.0);
                 ui.rich_text(
-                    &[Span::new(cap).family(l.initial).color(ink), Span::new(rest)],
+                    &[Span::new(cap).family(l.initial).color(ink), Span::new(before), code, Span::new(after)],
                     body.initial_letter(s.initial_lines),
                 );
             },
@@ -1628,6 +1645,15 @@ impl Carnet {
                 first
             })
             .clone();
+        // Code's: only the families whose every face is monospaced.
+        let families = if which == 3 {
+            let mono = self.mono_families.get_or_insert_with(|| {
+                ui.core().system_fonts().into_iter().filter(|f| f.monospaced).map(|f| f.family).collect()
+            });
+            families.into_iter().filter(|f| mono.contains(f)).collect()
+        } else {
+            families
+        };
         let q = self.font_query.trim().to_lowercase();
         // The built-in face once, as the default: installed under its own
         // name it is the same face.
@@ -1697,6 +1723,7 @@ impl Carnet {
                 let fallback = match which {
                     0 => Self::face_of(&mut self.font_faces, ui, look::BODY_FACE),
                     1 => Self::face_of(&mut self.font_faces, ui, look::HEADING_FACE),
+                    3 => FontFamily::Mono,
                     _ => l.serif,
                 };
                 row(ui, u64::MAX - 1, default_name, fallback, is_built_in(which, current), Msg::SetFont { which, index: ALL });
@@ -1714,7 +1741,7 @@ impl Carnet {
                 }
                 widgets::uniform_list_with(
                     ui,
-                    ["fonts-body", "fonts-head", "fonts-initial"][(which as usize).min(2)],
+                    ["fonts-body", "fonts-head", "fonts-initial", "fonts-code"][(which as usize).min(3)],
                     NodeSpec::column()
                         .grow_width()
                         .height((rows.len() as f32 * FONT_ROW_H).min(FONT_ROW_H * 7.0))
@@ -1737,7 +1764,7 @@ impl Carnet {
 
 /// The face a font list's default row stands for, by its family name:
 /// the text's and the headings' are shipped; the letter's is the
-/// headings', whatever they are.
+/// headings', whatever they are; code's, the system's monospace.
 fn built_in(which: u64) -> Option<&'static str> {
     match which {
         0 => Some(look::BODY_FACE),
@@ -1751,6 +1778,7 @@ fn default_font_name(which: u64) -> &'static str {
     match which {
         0 => "Inter (built in)",
         1 => "Source Serif 4 (built in)",
+        3 => "System monospace",
         _ => "Same as headings",
     }
 }

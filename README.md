@@ -165,7 +165,7 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 
 - **Colors**: Linen (the default), Sage, Harbor, Blossom or Graphite, each light and dark; **Theme**: System, Light or Dark.
 - **Density**: Compact, Comfortable or Airy.
-- **Fonts**: a pairing (Book, Modern, Classic, System); under it, **Text** and **Headings**: any installed family, searchable, each name shown in its own face.
+- **Fonts**: a pairing (Book, Modern, Classic, System); under it, **Text** and **Headings**: any installed family, searchable, each name shown in its own face; and **Code**, for code blocks and `code` words: the system's monospace (SF Mono or Menlo on a Mac, Cascadia Mono or Consolas on Windows, DejaVu Sans Mono or Liberation Mono on Linux), or any installed monospaced family. The web draws code in the browser's system monospace.
 - **Page width**: Narrow, Medium or Wide; **Text size**: 12 to 24 px.
 - **Dividers**: three dots, a short line, three stars, stars in a triangle, a flourish, a printer's leaf (❧), three diamonds, a diamond between lines, or a wave. Only the look changes: the file still says `---`.
 - **Dropped letters**: a paragraph drops its first letter only when you ask, with the toolbar's **Drop the first letter** (Ctrl+Alt+8): a large letter, the first lines beside it, as tall as the paragraph's lines up to a limit: a two-line paragraph drops two, a one-line one none. The file keeps it as `<span class="initial">O</span>nce`, which other Markdown apps show as a plain letter. For every dropped letter: **Up to** (two, three or four lines), **Font** (the heading face, or any other) and **Colour** (the accent's or the text's; a letter given a colour of its own with the text-colour tool keeps it). The settings' preview shows one.
@@ -176,7 +176,7 @@ Ctrl+, or **Settings** at the foot of the library. Every change applies at once 
 - **Notes folder**: change it, show it, copy its path, or go back to `Documents/Carnet`.
 - **Sync**: see below.
 
-Carnet sets its pages in fonts it ships, so they look the same on every machine: **Source Serif 4** for titles and headings and **Inter** for the text, both under the SIL Open Font License.
+Carnet sets its pages in fonts it ships, so they look the same on every machine: **Source Serif 4** for titles and headings and **Inter** for the text, both under the SIL Open Font License. Code is set in the system's own monospace, which every machine has.
 
 ## Sync and self-hosting
 
