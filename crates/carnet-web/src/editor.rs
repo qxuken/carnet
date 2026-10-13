@@ -1556,6 +1556,22 @@ mod tests {
         assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nx\n\n---\n\nNext\n");
     }
 
+    /// The finding: words with U+202E in, selected, ⌘K, an address and
+    /// Enter made no link, and said nothing. A link now, the control kept
+    /// in the file, its words drawn without it; the selection still the
+    /// same words.
+    #[test]
+    fn words_with_a_bidi_control_in_are_made_a_link() {
+        let mut e = Editor::open("# T\n\nsee abc\u{202E}txt here\n");
+        assert_eq!(e.lines()[1].text, "see abc\u{202E}txt here");
+        e.select(1, 4, 1, 11);
+        assert!(e.set_link(Some("https://example.com")));
+        assert_eq!(e.markdown(), "# T\n\nsee [abc\u{202E}txt](https://example.com) here\n");
+        assert_eq!(e.lines()[1].text, "see abctxt here");
+        assert_eq!(e.caret_lc(), (1, 4, 1, 10));
+        assert_eq!(e.link_here().as_deref(), Some("https://example.com"));
+    }
+
     /// Autolinks are links in the editor, a mail's address alone too; a
     /// link's words come without bidi controls, and so does its address
     /// in the link sheet. The note keeps them as written.
