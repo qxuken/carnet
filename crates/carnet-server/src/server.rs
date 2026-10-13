@@ -603,7 +603,7 @@ pub struct Start {
     /// an empty database) on pictures a server kept before. They're kept
     /// either way: the sweep takes only the pictures of accounts removed
     /// here (`blobs::Worker::sweep_unowned`).
-    pub beside_old_pictures: bool,
+    pub keep_untracked_pictures: bool,
 }
 
 /// [`serve_limited`], started as `start` says.
@@ -657,12 +657,12 @@ pub async fn serve_started(
                 Box::new(store)
             }
         };
-        if store.accounts() == 0 && !start.beside_old_pictures {
+        if store.accounts() == 0 && !start.keep_untracked_pictures {
             let strangers = crate::blobs::strangers(blobs.as_mut(), |a| store.has_account(a));
             if !strangers.is_empty() {
                 let (place, other) = if in_bucket { ("The bucket", "another bucket (or another folder in it)") } else { ("The data folder", "another data folder") };
                 return Err(std::io::Error::other(format!(
-                    "{place} holds pictures of {}, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on {other}. To start anyway, with those pictures kept and unused, give --beside-old-pictures (CARNET_BESIDE_OLD_PICTURES=1)",
+                    "{place} holds pictures of {}, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on {other}. To start anyway, with those pictures kept and unused, give --keep-untracked-pictures (CARNET_KEEP_UNTRACKED_PICTURES=1)",
                     accounts(strangers.len())
                 )));
             }

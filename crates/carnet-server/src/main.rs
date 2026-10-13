@@ -4,7 +4,7 @@
 //! ```text
 //! carnet-server [--data DIR] [--listen ADDR] [--origin URL] [--web DIR] [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
 //!               [--tls-cert FILE --tls-key FILE [--tls-client-ca FILE]] [--passwords] [--compact-after N] [--postgres URL] [--s3 URL [--s3-region R] [--s3-virtual-host]]
-//!               [--beside-old-pictures]
+//!               [--keep-untracked-pictures]
 //! carnet-server invite [--data DIR] [--postgres URL]
 //! carnet-server backup DIR [--data DIR]
 //! carnet-server health [--listen ADDR | --metrics ADDR]
@@ -26,7 +26,7 @@
 //! `CARNET_TLS_CLIENT_CA` (TLS on the listener itself; none by default),
 //! `CARNET_POSTGRES` and `CARNET_S3` (with the features
 //! built in; none by default), `CARNET_S3_REGION`, `CARNET_S3_VIRTUAL_HOST`,
-//! `CARNET_S3_CA`, `CARNET_BESIDE_OLD_PICTURES`.
+//! `CARNET_S3_CA`, `CARNET_KEEP_UNTRACKED_PICTURES`.
 //! A bucket's keys come only from the environment: `CARNET_S3_ACCESS_KEY`
 //! and `CARNET_S3_SECRET_KEY` (or AWS's own two names).
 
@@ -43,7 +43,7 @@ usage:
                 [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
                 [--tls-cert FILE --tls-key FILE [--tls-client-ca FILE]]
                 [--passwords] [--compact-after N] [--postgres URL] [--s3 URL]
-                [--beside-old-pictures]
+                [--keep-untracked-pictures]
   carnet-server invite [--data DIR] [--postgres URL]
   carnet-server backup DIR [--data DIR]
   carnet-server health [--listen ADDR | --metrics ADDR]
@@ -92,11 +92,11 @@ usage:
   --s3-ca FILE    the CA (PEM) the bucket's certificate is signed by, for
                   a bucket of one's own: trusted instead of the web's roots
                                                         (CARNET_S3_CA, none)
-  --beside-old-pictures  start with no accounts beside pictures of accounts
-                  this server has no record of: refused otherwise, as
+  --keep-untracked-pictures  start with no accounts beside pictures of
+                  accounts this server has no record of: refused otherwise, as
                   their records were likely not put back (a new data
                   folder, an empty database). The pictures are kept, unused
-                                           (CARNET_BESIDE_OLD_PICTURES=1, off)
+                                           (CARNET_KEEP_UNTRACKED_PICTURES=1, off)
 
   invite          print a new invite code: one account, good for a week
                   (with no account yet, the owner's: good for a day)
@@ -144,7 +144,7 @@ struct Args {
     s3_region: String,
     s3_virtual_host: bool,
     s3_ca: Option<PathBuf>,
-    beside_old_pictures: bool,
+    keep_untracked_pictures: bool,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -169,7 +169,7 @@ fn args() -> Result<Args, String> {
         s3_region: env("CARNET_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
         s3_virtual_host: on("CARNET_S3_VIRTUAL_HOST"),
         s3_ca: env("CARNET_S3_CA").map(PathBuf::from),
-        beside_old_pictures: on("CARNET_BESIDE_OLD_PICTURES"),
+        keep_untracked_pictures: on("CARNET_KEEP_UNTRACKED_PICTURES"),
         ..Args::default()
     };
     if let Some(list) = env("CARNET_TRUSTED_PROXY") {
@@ -206,7 +206,7 @@ fn args() -> Result<Args, String> {
             "--s3-region" => a.s3_region = value("--s3-region")?,
             "--s3-virtual-host" => a.s3_virtual_host = true,
             "--s3-ca" => a.s3_ca = Some(value("--s3-ca")?.into()),
-            "--beside-old-pictures" => a.beside_old_pictures = true,
+            "--keep-untracked-pictures" => a.keep_untracked_pictures = true,
             "--to-postgres" => a.to_postgres = Some(value("--to-postgres")?),
             "--to-s3" => a.to_s3 = Some(value("--to-s3")?),
             "--verify-only" => a.verify_only = true,
@@ -406,7 +406,7 @@ fn main() -> ExitCode {
         };
         let host = server::Host { passwords: a.passwords, store, blobs, ..server::Host::default() };
         let config = Config { data: a.data, origin, compact_after: a.compact_after, web: a.web, trusted: a.trusted, client_header: a.client_header, tls };
-        let start = server::Start { beside_old_pictures: a.beside_old_pictures };
+        let start = server::Start { keep_untracked_pictures: a.keep_untracked_pictures };
         server::serve_started(config, listener, metrics, host, server::SocketLimits::default(), start, stop).await
     });
     match served {

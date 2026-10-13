@@ -969,7 +969,7 @@ async fn only_pictures_of_accounts_removed_here_are_swept() {
 /// invite). Told to start anyway, it does, and keeps them. Pictures of
 /// accounts whose removal is recorded alone don't stop it: they go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn no_accounts_beside_old_pictures_refuses_to_start() {
+async fn no_accounts_beside_untracked_pictures_refuses_to_start() {
     use carnet_server::Storage;
     let data = temp("old-pictures");
     let blobs = data.join("blobs");
@@ -986,16 +986,55 @@ async fn no_accounts_beside_old_pictures_refuses_to_start() {
     let refused = tokio::time::timeout(Duration::from_secs(10), server::serve(config, listener, std::future::pending())).await.expect("refuses at once").expect_err("refused");
     let said = refused.to_string();
     assert!(said.contains("The data folder holds pictures of 1 account, and there are no accounts here"), "{said}");
-    assert!(said.contains("Put the records back first") && said.contains("--beside-old-pictures"), "{said}");
+    assert!(said.contains("Put the records back first") && said.contains("--keep-untracked-pictures"), "{said}");
     assert!(Sharded::open(&data).unwrap().invites().is_empty(), "no invite made");
     assert!(old.exists() && removed.exists(), "nothing deleted");
 
-    let start = server::Start { beside_old_pictures: true };
+    let start = server::Start { keep_untracked_pictures: true };
     let (srv, hub) = start_hosted(&data, start).await;
     assert!(goes(&removed).await, "a removed account's pictures go");
     assert!(old.exists(), "the old pictures kept");
     assert_eq!(hub.run(|hub, _| hub.store().invites().len()).await, Some(1), "the first invite, as on any first start");
     srv.stop().await;
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// The binary, beside pictures of accounts it has no record of: it stops
+/// and names `--keep-untracked-pictures`; given it, or
+/// `CARNET_KEEP_UNTRACKED_PICTURES=1`, it starts, and prints the first
+/// account's invite, good for a day. The flag's name before it is no
+/// option (it was never released).
+#[test]
+fn the_binary_starts_beside_untracked_pictures_when_told() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    let data = temp("keep-untracked");
+    let old = data.join("blobs").join(hex(b"old")).join("07".repeat(32));
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, b"SEALED").unwrap();
+    let server = |args: &[&str], vars: &[(&str, &str)]| {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_carnet-server"));
+        c.env_clear().arg("--data").arg(&data).args(["--listen", "127.0.0.1:0"]).args(args).envs(vars.iter().copied());
+        c
+    };
+    let said = |mut c: Command| {
+        let out = c.output().unwrap();
+        assert!(!out.status.success());
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+    let refused = said(server(&[], &[]));
+    assert!(refused.contains("--keep-untracked-pictures (CARNET_KEEP_UNTRACKED_PICTURES=1)"), "{refused}");
+    let old_name = said(server(&["--beside-old-pictures"], &[]));
+    assert!(old_name.contains("--beside-old-pictures: not an option"), "{old_name}");
+    for (args, vars) in [(&["--keep-untracked-pictures"][..], &[][..]), (&[][..], &[("CARNET_KEEP_UNTRACKED_PICTURES", "1")][..])] {
+        let mut child = server(args, vars).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+        let lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let invite = lines.map_while(Result::ok).find(|l| l.contains("(single use")).unwrap_or_default();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(invite.ends_with("(single use, good for 1 day: if it has run out, restart the server for a new one)"), "{invite:?}");
+    }
+    assert!(old.exists(), "the pictures kept");
     let _ = std::fs::remove_dir_all(&data);
 }
 

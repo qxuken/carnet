@@ -80,7 +80,7 @@ A binary built this way doesn't include the web app; [The web app](#the-web-app)
 | `--tls-client-ca FILE` | `CARNET_TLS_CLIENT_CA` | none | with TLS, only clients showing a certificate this CA signed (Cloudflare's Authenticated Origin Pulls) |
 | `--passwords` | `CARNET_PASSWORDS=1` | off | let devices set an email and password, and sign in with them (OPAQUE: the password never reaches the server). Off, codes and the recovery words are the ways in |
 | `--compact-after N` | `CARNET_COMPACT_AFTER` | `200` | a note kept as this many records is asked to be compacted into one |
-| `--beside-old-pictures` | `CARNET_BESIDE_OLD_PICTURES=1` | off | start with no accounts beside pictures of accounts this server has no record of (see [Restoring](#restoring)); the pictures are kept, unused |
+| `--keep-untracked-pictures` | `CARNET_KEEP_UNTRACKED_PICTURES=1` | off | start with no accounts beside pictures of accounts this server has no record of (see [Restoring](#restoring)); the pictures are kept, unused |
 
 `carnet-server --help` lists them all, with the commands below.
 
@@ -275,10 +275,10 @@ Stop the server, put the copy where `--data` points (or restore the Postgres dat
 A server with **no accounts** (a new data folder, an empty database) beside pictures of accounts it has no record of won't start: the records were likely not put back, and a new first account would be made beside another server's pictures. It says so and stops, before making anything:
 
 ```text
-carnet-server: The bucket holds pictures of 12 accounts, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on another bucket (or another folder in it). To start anyway, with those pictures kept and unused, give --beside-old-pictures (CARNET_BESIDE_OLD_PICTURES=1)
+carnet-server: The bucket holds pictures of 12 accounts, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on another bucket (or another folder in it). To start anyway, with those pictures kept and unused, give --keep-untracked-pictures (CARNET_KEEP_UNTRACKED_PICTURES=1)
 ```
 
-Put the records back, or point it at another bucket (or folder of one), or another data folder. `--beside-old-pictures` starts it anyway: nothing is deleted, the pictures stay there unused, and the flag matters no more once an account is made.
+Put the records back, or point it at another bucket (or folder of one), or another data folder. `--keep-untracked-pictures` starts it anyway: nothing is deleted, the pictures stay there unused, and the flag matters no more once an account is made.
 
 ## Upgrading
 

@@ -131,11 +131,11 @@ async fn a_new_data_folder_on_a_used_bucket_refuses_to_start() {
     assert!(running.is_none());
     let said = refused.expect_err("refused").to_string();
     assert!(said.contains("The bucket holds pictures of 1 account, and there are no accounts here"), "{said}");
-    assert!(said.contains("another bucket (or another folder in it)") && said.contains("--beside-old-pictures"), "{said}");
+    assert!(said.contains("another bucket (or another folder in it)") && said.contains("--keep-untracked-pictures"), "{said}");
     assert!(carnet_server::Sharded::open(&data).unwrap().invites().is_empty(), "no invite made");
     assert_eq!(held(&s3, &[b"old", b"removed"]).await, [1, 1], "nothing deleted");
 
-    let (started, running) = serve(&data, &config, None, Start { beside_old_pictures: true }).await;
+    let (started, running) = serve(&data, &config, None, Start { keep_untracked_pictures: true }).await;
     started.unwrap();
     assert!(goes(&s3, b"removed").await, "the removed account's late picture: gone");
     assert_eq!(held(&s3, &[b"old"]).await, [1], "the other kept");
