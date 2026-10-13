@@ -15,6 +15,8 @@
 
 use crate::doc::{self, Block, Doc, Kind, Table};
 use crate::inline::{self, Visible};
+use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 
 /// The Green hue's wash, as a file writes it (design.rs `HUES`): added.
 pub const ADDED: u32 = 0xd8eac0cc;
@@ -35,8 +37,7 @@ pub fn marked(old: &str, new: &str) -> (Option<String>, Doc) {
     let (before, after) = (before.blocks(), after.blocks());
     let mut out = Vec::new();
     let eq = |i: usize, j: usize| same(&before[i].kind, &after[j].kind);
-    let pair = |i: usize, j: usize| family(&before[i].kind).is_some_and(|f| Some(f) == family(&after[j].kind));
-    for step in align(before.len(), after.len(), eq, pair) {
+    for step in align(before.len(), after.len(), eq, |i| family(&before[i].kind), |j| family(&after[j].kind)) {
         match step {
             Step::Same(_, j) => out.push(Block::new(after[j].kind.clone())),
             Step::Changed(i, j) => out.push(Block::new(changed(&before[i].kind, &after[j].kind))),
@@ -106,10 +107,17 @@ enum Step {
 
 /// The steps from `n` old items to `m` new ones: the longest run of equal
 /// ones kept; between two of those, each new one paired with the next old
-/// one `pair` allows, the old ones it passes removed, and a new one with
-/// none added. Common ends are trimmed first, so a note of 2,000 blocks
-/// with one edited costs one comparison per block.
-fn align(n: usize, m: usize, eq: impl Fn(usize, usize) -> bool, pair: impl Fn(usize, usize) -> bool) -> Vec<Step> {
+/// one of its kind (`old_kind` and `new_kind` the same, none pairing with
+/// nothing), the old ones it passes removed, and a new one with none
+/// added. Common ends are trimmed first, so a note of 2,000 blocks with
+/// one edited costs one comparison per block.
+fn align<K: Eq + Hash>(
+    n: usize,
+    m: usize,
+    eq: impl Fn(usize, usize) -> bool,
+    old_kind: impl Fn(usize) -> Option<K>,
+    new_kind: impl Fn(usize) -> Option<K>,
+) -> Vec<Step> {
     let mut head = 0;
     while head < n && head < m && eq(head, head) {
         head += 1;
@@ -149,10 +157,27 @@ fn align(n: usize, m: usize, eq: impl Fn(usize, usize) -> bool, pair: impl Fn(us
     let (mut i, mut j) = (head, head);
     let ends = matched.into_iter().chain(std::iter::once((n - tail, m - tail)));
     for (mi, mj) in ends {
-        // The gap before this match.
+        // The gap before this match. Its old ones by kind, in order, each
+        // list passed along as the new ones take from it: a gap of the
+        // whole note (every block of it replaced) is read once.
         let mut oi = i;
+        let mut olds: HashMap<K, VecDeque<usize>> = HashMap::new();
+        if j < mj {
+            for p in oi..mi {
+                if let Some(k) = old_kind(p) {
+                    olds.entry(k).or_default().push_back(p);
+                }
+            }
+        }
         for nj in j..mj {
-            match (oi..mi).find(|&p| pair(p, nj)) {
+            let next = new_kind(nj).and_then(|k| {
+                let q = olds.get_mut(&k)?;
+                while q.front().is_some_and(|&p| p < oi) {
+                    q.pop_front();
+                }
+                q.front().copied()
+            });
+            match next {
                 Some(p) => {
                     out.extend((oi..p).map(Step::Removed));
                     out.push(Step::Changed(p, nj));
@@ -326,7 +351,7 @@ fn words(old: &str, new: &str) -> String {
     let (wash_open, wash_close) = tags(Mark::Added);
     let (struck_open, struck_close) = tags(Mark::Removed);
     let mut inserts: Vec<(usize, Put, String)> = Vec::new();
-    let steps = align(a.len(), b.len(), |i, j| a[i] == b[j], |_, _| true);
+    let steps = align(a.len(), b.len(), |i, j| a[i] == b[j], |_| Some(()), |_| Some(()));
     let mut k = 0;
     while k < steps.len() {
         // A run of differences: what went, then what came, at one place.
@@ -418,8 +443,8 @@ fn tokens(s: &str) -> Vec<&str> {
 pub fn carry(old: &Doc, new: &Doc, c: crate::page::Caret) -> crate::page::Caret {
     let (ob, nb) = (old.blocks(), new.blocks());
     let eq = |i: usize, j: usize| same(&ob[i].kind, &nb[j].kind);
-    let pair = |i: usize, j: usize| std::mem::discriminant(&ob[i].kind) == std::mem::discriminant(&nb[j].kind);
-    let steps = align(ob.len(), nb.len(), eq, pair);
+    let kind = |b: &Block| Some(std::mem::discriminant(&b.kind));
+    let steps = align(ob.len(), nb.len(), eq, |i| kind(&ob[i]), |j| kind(&nb[j]));
     let pos = |p: crate::page::Pos| carry_pos(old, new, &steps, p);
     crate::page::Caret { head: pos(c.head), anchor: pos(c.anchor) }
 }
@@ -689,5 +714,19 @@ mod carry_tests {
         let c = carry(&old, &new, c);
         let Kind::Table(t) = &new.blocks()[1].kind else { panic!() };
         assert_eq!(c.head, Pos { slot: Slot { block: new.blocks()[1].id, cell: Some((t.rows[1].id, t.cols[1])) }, byte: 7 });
+    }
+
+    #[test]
+    fn a_note_replaced_whole_is_carried_through_quickly() {
+        // Every block another kind: each new one finds none of its kind
+        // among the old ones.
+        let n = 100_000;
+        let old = parsed(&(0..n).map(|k| format!("Line {k}\n\n")).collect::<String>());
+        let new = parsed(&(0..n).map(|k| format!("## Head {k}\n\n")).collect::<String>());
+        let t0 = std::time::Instant::now();
+        let c = carry(&old, &new, at(&old, n / 2, 2));
+        let took = t0.elapsed();
+        assert!(took.as_millis() < 3000, "{took:?}");
+        assert_eq!(place(&new, c), (n / 2, 2), "turned into a heading: the heading, by its words");
     }
 }

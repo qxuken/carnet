@@ -1685,6 +1685,57 @@ fn a_link_typed_without_a_scheme_is_given_the_webs() {
     assert_eq!(texts(&app)[0], "see [x.test/a](https://x.test/a)", "the words as typed, the address with its scheme");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Ctrl+click (⌘ on a Mac) on a link opens only one a note may follow:
+/// never one that runs (`javascript:`), nor a mail that would attach a
+/// file of this computer's, however it is written.
+#[test]
+fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
+    let (mut app, mut d, dir) = body("link-open");
+    d.core.set_inspect(true);
+    let lines = [
+        "[mail](mailto:a@x.test?attach=/home/u/.ssh/id_ed25519)",
+        "[run](javascript:alert(1))",
+        "[bare](me@x.test?%41ttachment=a.txt)",
+        "[web](https://x.test/a)",
+    ];
+    let mut slots = Vec::new();
+    for line in lines {
+        type_in(&mut app, &mut d, line);
+        slots.push(app.caret.head.slot);
+        key(&mut app, &mut d, "enter");
+    }
+    assert_eq!(texts(&app)[..4], lines);
+    let ctrl_click = |app: &mut Carnet, d: &mut Drive, slot: Slot| {
+        d.input(app, InputEvent::Modifiers(CTRL));
+        click_drawn(app, d, slot, 1);
+        d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+        d.frame(app);
+    };
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take);
+    for (slot, line) in slots[..3].iter().zip(lines) {
+        ctrl_click(&mut app, &mut d, *slot);
+        assert_eq!(opened(), Vec::<String>::new(), "{line} opens nothing");
+        assert!(app.error.take().is_some(), "{line}: and says so");
+    }
+    ctrl_click(&mut app, &mut d, slots[3]);
+    assert_eq!(opened(), ["https://x.test/a"]);
+    assert_eq!(app.error, None);
+    // The menu's Open link and the link editor's go the same way.
+    click_drawn(&mut app, &mut d, slots[0], 2);
+    app.page_action("open-link");
+    assert_eq!(opened(), Vec::<String>::new(), "from the menu");
+    key_with(&mut app, &mut d, "k", CTRL);
+    d.frame(&mut app);
+    assert!(app.link_edit.as_ref().is_some_and(|l| l.url.starts_with("mailto:")));
+    app.link_act(1);
+    assert_eq!(opened(), Vec::<String>::new(), "from the link editor");
+    key(&mut app, &mut d, "escape");
+    click_drawn(&mut app, &mut d, slots[3], 2);
+    app.page_action("open-link");
+    assert_eq!(opened(), ["https://x.test/a"], "and a web one opens from the menu");
+    let _ = std::fs::remove_dir_all(dir);
+}
 #[test]
 fn the_colour_picker_colours_the_selection() {
     let (mut app, mut d, dir) = body("tint");
@@ -4529,6 +4580,69 @@ fn the_accounts_passkeys_are_listed_and_removed() {
     let _ = stop.send(());
     rt.block_on(served).unwrap().unwrap();
     remove_test_dir(dir_a);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A server that says times no day can be (`u64::MAX` seconds since 1970)
+/// and sizes past counting, for devices, passkeys, the plan, invites,
+/// accounts and the inspector: Settings → Sync draws, says such a time is
+/// unknown, and never stops the app.
+#[test]
+fn settings_sync_draws_a_servers_impossible_times() {
+    use carnet_server::server::{self, Config};
+    use carnet_sync::session::{DeviceInfo, PasskeyInfo, Usage};
+    use carnet_sync::wire::{AccountRow, BaseRow, InviteRow, LogRow, RoomRow};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-far-times-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve_hosted(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new() }, listener, None, server::Host::default(), async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, app: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(app) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            d.frame(app);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (mut a, mut d, dir) = tall("far-times");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut d, &|x| x.sync.status == crate::sync::Status::Online);
+    a.settings_open = true;
+    until("listed", &mut a, &mut d, &|x| x.sync.devices.is_some() && x.sync.usage.is_some() && x.sync.invites.is_some());
+    let far = u64::MAX;
+    let mut devices = a.sync.devices.clone().unwrap();
+    devices.push(DeviceInfo { id: vec![9; 16], name: Some("Old phone".into()), seen: far, you: false, online: false });
+    a.sync.devices = Some(devices);
+    a.sync.passkeys = vec![PasskeyInfo { id: [7; 32], name: Some("A far passkey".into()), credential: vec![1], made: far }];
+    a.sync.usage = Some(Usage { notes: far, pictures: far, limit: Some(far), writable: true, plan: "Forever".into(), until: Some(far) });
+    a.sync.invites = Some(crate::sync::Invites {
+        owner: true,
+        waiting: vec![InviteRow { hash: [3; 32], until: far }],
+        accounts: vec![AccountRow { id: vec![4; 16], owner: false, made: far, seen: far, devices: far, you: false }],
+    });
+    let base = BaseRow { by: vec![9; 16], at: far, verified: true, undoable: true, vv: vec![(1, far)], bytes: far };
+    let room = RoomRow { room: "ab12".into(), held: vec![(1, far), (2, far)], live: far, live_bytes: far, base: Some(base), shelved: far, shelved_bytes: far, shelved_since: far };
+    a.sync.inspection = Some((vec![room], vec![LogRow { at: far, device: vec![9; 16], room: "ab12".into(), what: "set the password".into() }]));
+    a.sync_inspector = true;
+    let shows = |d: &Drive, part: &str| d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.contains(part)));
+    let _ = drawn(&mut d, &mut a, "");
+    assert!(shows(&d, "Last seen at an unknown time"), "the device");
+    assert!(shows(&d, "Added at an unknown time"), "the passkey");
+    assert!(shows(&d, "\u{b7} Forever") && !shows(&d, "Forever, until"), "the plan, with no end said");
+    assert!(shows(&d, "last seen at an unknown time"), "the account");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir);
     let _ = std::fs::remove_dir_all(&data);
 }
 

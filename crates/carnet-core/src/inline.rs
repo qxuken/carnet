@@ -263,11 +263,19 @@ fn read_counting(text: &str, count: Count) -> Read {
     // A cell's pictures, outside code: the `!` the word, the rest marks.
     let mut pictures = Vec::new();
     if IN_CELL.get() {
+        // The pairs so far are code's, in order along the line: those
+        // ended before a picture starts are passed for good.
+        let code = pairs.len();
+        let mut past = 0;
+        let mut reader = doc::Pictures::new(text);
         let mut i = 0;
         while let Some(k) = text[i..].find("![") {
             let at = i + k;
-            let p = (!quiet[at] && !quiet[at + 1]).then(|| doc::inline_picture(text, at)).flatten();
-            let Some(p) = p.filter(|p| !pairs.iter().any(|c| c.open.0 < p.at.1 && p.at.0 < c.close.1)) else {
+            let p = (!quiet[at] && !quiet[at + 1]).then(|| reader.at(at)).flatten();
+            while past < code && pairs[past].close.1 <= at {
+                past += 1;
+            }
+            let Some(p) = p.filter(|p| !pairs[past..code].first().is_some_and(|c| c.open.0 < p.at.1)) else {
                 i = at + 2;
                 continue;
             };

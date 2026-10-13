@@ -2,8 +2,9 @@
 //! a document or a chat keeps its headings, lists, tables and styles.
 //! Apps that take only text take the Markdown beside it.
 
-use crate::doc::{Block, Kind, ListStyle, from_markdown, parse_blocks};
+use crate::doc::{Block, CellPicture, Kind, ListStyle, from_markdown, parse_blocks};
 use crate::inline;
+use std::collections::HashMap;
 
 /// `md` as an HTML fragment. `image_url` turns an image's `src` into
 /// something the pasting app can load (a `file:///` URL for a file); it
@@ -201,6 +202,7 @@ fn spans(text: &str, viewer: bool, image: Option<&Where<'_>>) -> String {
     let mut out = String::new();
     let _cell = inline::cell_text(image.is_some());
     let pictures = if image.is_some() { inline::cell_pictures(text) } else { Vec::new() };
+    let pictures: HashMap<usize, &CellPicture> = pictures.iter().map(|p| (p.at.0, p)).collect();
     // A link's target is a marker run between its text and the next text.
     let runs = inline::runs(text);
     let mut i = 0;
@@ -210,7 +212,7 @@ fn spans(text: &str, viewer: bool, image: Option<&Where<'_>>) -> String {
             i += 1;
             continue;
         }
-        if let (true, Some(image), Some(p)) = (s.picture, image, pictures.iter().find(|p| p.at.0 == a)) {
+        if let (true, Some(image), Some(p)) = (s.picture, image, pictures.get(&a)) {
             out.push_str(&format!("<img {} alt=\"{}\">", image(&p.src, p.wiki).attr(), escape(&p.alt)));
             i += 1;
             continue;
