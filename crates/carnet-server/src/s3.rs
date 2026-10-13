@@ -8,6 +8,7 @@
 //! ```text
 //! <prefix><account>/<id>        a picture, sealed (account and id in hex)
 //! <prefix>drop/<account>/<id>   a picture no note shows: when it was said, in seconds
+//! <prefix>gone/<account>        an account removed: when, in seconds (put before its pictures go)
 //! <prefix>served                a server has run on this bucket (`migrate` won't copy over it)
 //! ```
 //!
@@ -40,7 +41,10 @@
 //! A link can't be taken back, though: one given before its account was
 //! deleted may still put, within its five minutes. So the hourly sweep
 //! lists the account folders ([`Blobs::owners`], by S3's delimiter, a
-//! thousand to a call) and takes those of accounts that are no more.
+//! thousand to a call) and takes those of accounts removed: recorded so
+//! under `gone/` when they were, and not in the store. An account folder
+//! the store doesn't know, and whose removal isn't recorded, is kept: the
+//! store may be older than the bucket (restored from a backup), or new.
 //!
 //! The bucket needs CORS for the web app: `PUT` and `GET` from the
 //! server's origin (the README says how).
@@ -74,6 +78,10 @@ pub struct S3Config {
     /// The bucket as the host's first name (`bucket.host`), as AWS likes
     /// for new buckets; otherwise in the path, as everyone takes.
     pub virtual_host: bool,
+    /// The CA (PEM) the bucket's certificate is signed by, trusted for the
+    /// server's own calls to it instead of the web's roots: a bucket of
+    /// one's own with a private CA. None: the web's roots.
+    pub ca: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for S3Config {
@@ -147,8 +155,25 @@ impl S3Blobs {
         endpoint.set_query(None);
         let style = if config.virtual_host { UrlStyle::VirtualHost } else { UrlStyle::Path };
         let bucket = Bucket::new(endpoint, style, name, config.region.clone()).map_err(|e| format!("{}: {e}", config.url))?;
+        let mut tls = ureq::tls::TlsConfig::builder();
+        if let Some(ca) = &config.ca {
+            let pem = std::fs::read(ca).map_err(|e| format!("{}: {e}", ca.display()))?;
+            let certs: Vec<ureq::tls::Certificate<'static>> = ureq::tls::parse_pem(&pem)
+                .filter_map(|item| match item {
+                    Ok(ureq::tls::PemItem::Certificate(c)) => Some(Ok(c)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("{}: {e}", ca.display()))?;
+            if certs.is_empty() {
+                return Err(format!("{}: no certificate in it", ca.display()));
+            }
+            tls = tls.root_certs(ureq::tls::RootCerts::Specific(std::sync::Arc::new(certs)));
+        }
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
+                .tls_config(tls.build())
                 .http_status_as_error(false)
                 .timeout_connect(Some(Duration::from_secs(10)))
                 .timeout_global(Some(Duration::from_secs(300)))
@@ -160,6 +185,10 @@ impl S3Blobs {
     /// Where `account`'s picture `id` is.
     pub fn key(&self, account: &[u8], id: &[u8; 32]) -> String {
         format!("{}{}/{}", self.prefix, hex(account), hex(id))
+    }
+
+    fn removal_key(&self, account: &[u8]) -> String {
+        format!("{}gone/{}", self.prefix, hex(account))
     }
 
     fn mark_key(&self, account: &[u8], id: &[u8; 32]) -> String {
@@ -408,6 +437,11 @@ impl Blobs for S3Blobs {
     }
 
     fn forget(&mut self, account: &[u8]) {
+        // Recorded first: not recorded, not deleted, or the sweep would
+        // never finish it.
+        if Self::said(self.put(&self.removal_key(account), now().to_string().as_bytes())).is_none() {
+            return;
+        }
         for prefix in [format!("{}{}/", self.prefix, hex(account)), format!("{}drop/{}/", self.prefix, hex(account))] {
             if let Some(all) = Self::said(self.list(&prefix)) {
                 let keys: Vec<String> = all.into_iter().map(|o| o.key).collect();
@@ -439,7 +473,12 @@ impl Blobs for S3Blobs {
         gone
     }
 
-    /// Each account's folder (`drop/` isn't one: not hex).
+    fn removed(&mut self) -> std::collections::HashSet<Vec<u8>> {
+        let prefix = format!("{}gone/", self.prefix);
+        Self::said(self.list(&prefix)).unwrap_or_default().iter().filter_map(|o| unhex(o.key.strip_prefix(&prefix)?)).filter(|a| !a.is_empty()).collect()
+    }
+
+    /// Each account's folder (`drop/`, `gone/` aren't: not hex).
     fn owners(&mut self) -> Vec<Vec<u8>> {
         Self::said(self.folders(&self.prefix)).unwrap_or_default().iter().filter_map(|f| unhex(f)).filter(|a| !a.is_empty()).collect()
     }
@@ -464,7 +503,7 @@ mod tests {
     #[test]
     fn the_origin_is_where_links_point() {
         let at = |url: &str, virtual_host: bool| {
-            let config = S3Config { url: url.into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host };
+            let config = S3Config { url: url.into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host, ca: None };
             S3Blobs::new(&config).unwrap().origin()
         };
         assert_eq!(at("https://s3.example:9000/pics/carnet", false).as_deref(), Some("https://s3.example:9000"));
@@ -476,7 +515,7 @@ mod tests {
     /// them, and refuses another. A link to fetch isn't.
     #[test]
     fn a_put_link_is_signed_with_its_length_and_type() {
-        let config = S3Config { url: "https://s3.example.com/pics".into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host: false };
+        let config = S3Config { url: "https://s3.example.com/pics".into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host: false, ca: None };
         let mut b = S3Blobs::new(&config).unwrap();
         let put = b.link(b"\x01", &[2; 32], Some(5036), now() + 300);
         assert!(put.contains("X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost&"), "{put}");
@@ -492,6 +531,23 @@ mod tests {
         assert_ne!(sig(5036), sig(5037));
     }
 
+    /// A bucket of one's own with a private CA: its certificate read and
+    /// trusted; a file that isn't there, or holds none, refused at start.
+    #[test]
+    fn a_private_ca_for_the_bucket_is_read() {
+        let dir = std::env::temp_dir().join(format!("carnet-s3-ca-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ca.pem"), CA).unwrap();
+        std::fs::write(dir.join("empty.pem"), "nothing\n").unwrap();
+        let config = |ca: &str| S3Config { url: "https://s3.example.com/pics".into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host: false, ca: Some(dir.join(ca)) };
+        assert!(S3Blobs::new(&config("ca.pem")).is_ok());
+        assert!(S3Blobs::new(&config("empty.pem")).err().is_some_and(|e| e.contains("no certificate")));
+        assert!(S3Blobs::new(&config("nowhere.pem")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const CA: &str = "-----BEGIN CERTIFICATE-----\nMIIBrzCCARgCCQDyqAd9GmMDoTANBgkqhkiG9w0BAQsFADAcMRowGAYDVQQDDBFh\nIGJ1Y2tldCdzIG93biBDQTAeFw0yNjEwMTMxNzUyMjVaFw0zNjEwMTAxNzUyMjVa\nMBwxGjAYBgNVBAMMEWEgYnVja2V0J3Mgb3duIENBMIGfMA0GCSqGSIb3DQEBAQUA\nA4GNADCBiQKBgQC1v03BrCjRhvzz/qYOEn1xYGABXTjtcHM00UdiRXGsEB17cvwA\n8yyTgA9l176L4UHFA+hM4xGnFGxXGldFfyQySpDhNYtyApwWTfCR1MG8hOqmU6PI\ne2JQ0SApNfkTEoNJkrCyJRgw6AiEgokcqX8W/MEaPcNNxYShU53qkv4WrQIDAQAB\nMA0GCSqGSIb3DQEBCwUAA4GBAJNaLciwFzxCBFLwAeFrfDvHfbXOOZOLOVBTYSX6\nx3qSD+XpghwBjTS6AgI+2V+6g0QuGfBxleo1riGQBaXAtUQBBSd70pk4Wp+9NQNO\nrdfTTaisVJIT5MeQ2n96GODv9G+siuD3IMq41zRI2D/uMRjDRSI0wDvZJOWsGIwl\nLbEk\n-----END CERTIFICATE-----\n";
+
     #[test]
     fn base64_as_s3_reads_it() {
         assert_eq!(base64(b""), "");
@@ -503,7 +559,7 @@ mod tests {
 
     #[test]
     fn a_bucket_and_its_folder_from_the_url() {
-        let config = |url: &str| S3Config { url: url.into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host: false };
+        let config = |url: &str| S3Config { url: url.into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host: false, ca: None };
         let b = S3Blobs::new(&config("https://s3.example.com/pics")).unwrap();
         assert_eq!(b.key(b"\x01", &[2; 32]), format!("01/{}", "02".repeat(32)));
         let b = S3Blobs::new(&config("http://127.0.0.1:9000/pics/carnet/")).unwrap();

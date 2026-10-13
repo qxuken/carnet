@@ -472,6 +472,13 @@ impl Sharded {
     /// user's alone, as the data folder is (`private.rs`): the folders
     /// `0700`, each file `0600`, made so before anything is written to it.
     pub fn backup(&self, to: &Path) -> Result<usize, Failed> {
+        self.backup_with(to, true)
+    }
+
+    /// [`Sharded::backup`], with the pictures or without them: without,
+    /// for a server whose pictures are in a bucket, backed up by its own
+    /// means (a folder of them, if any, is from before, and left out).
+    pub fn backup_with(&self, to: &Path, pictures: bool) -> Result<usize, Failed> {
         let Place::Disk(data) = &self.place else { return Err(Failed("nothing on disk to back up".into())) };
         let io = |e: std::io::Error| Failed(e.to_string());
         crate::private::dir(&to.join("accounts")).map_err(io)?;
@@ -502,7 +509,9 @@ impl Sharded {
         }
         // The pictures, files beside the databases: each written whole
         // and never changed, so a copy while the server runs is whole too.
-        copy_tree(&data.join("blobs"), &to.join("blobs")).map_err(|e| Failed(e.to_string()))?;
+        if pictures {
+            copy_tree(&data.join("blobs"), &to.join("blobs")).map_err(|e| Failed(e.to_string()))?;
+        }
         Ok(ids.len())
     }
 }
@@ -1558,6 +1567,12 @@ mod tests {
         let copy = temp("delete-copy");
         assert_eq!(s.backup(&copy).unwrap(), 2);
         assert_eq!(std::fs::read(copy.join("blobs").join("6132").join("07")).unwrap(), b"SEALED", "pictures too");
+        // Without the pictures (they're in a bucket): the records alone.
+        let records = temp("delete-records");
+        assert_eq!(s.backup_with(&records, false).unwrap(), 2);
+        assert!(records.join("carnet.db").exists() && !records.join("blobs").exists(), "no pictures");
+        assert_eq!(Sharded::open(&records).unwrap().spans(b"a2", "r").len(), 1);
+        let _ = std::fs::remove_dir_all(&records);
         let restored = Sharded::open(&copy).unwrap();
         assert_eq!(restored.spans(b"a2", "r").len(), 1);
         assert_eq!(restored.device(b"a1", b"d").map(|d| d.public), Some([7; 32]));

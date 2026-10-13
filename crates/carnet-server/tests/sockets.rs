@@ -60,7 +60,7 @@ async fn start_with(data: &Path, limits: SocketLimits, room: u64, base: Option<V
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.to_path_buf(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: data.to_path_buf(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let host = server::Host { first_invite: false, ..server::Host::default() };
     let done = tokio::spawn(server::serve_limited(config, listener, None, host, limits, async {
         let _ = rx.await;
@@ -300,7 +300,7 @@ async fn sockets_closed_for_their_limits_are_counted() {
     let metrics = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let maddr = metrics.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let host = server::Host { first_invite: false, ..server::Host::default() };
     let limits = SocketLimits { login: Duration::from_millis(500), ..SocketLimits::default() };
     let done = tokio::spawn(server::serve_limited(config, listener, Some(metrics), host, limits, async {

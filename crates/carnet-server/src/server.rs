@@ -74,6 +74,10 @@ pub struct Config {
     /// Which header the trusted proxies say it in: `X-Forwarded-For`
     /// unless they're Cloudflare's.
     pub client_header: ClientHeader,
+    /// TLS on the listener itself, and the CA a client's certificate must
+    /// be signed by, if any (tls.rs). None: plain HTTP, a proxy in front
+    /// ending TLS.
+    pub tls: Option<crate::tls::Tls>,
 }
 
 /// Records a room keeps one by one before it's asked for as a snapshot.
@@ -132,6 +136,11 @@ impl Default for SocketLimits {
     fn default() -> Self {
         SocketLimits { login: LOGIN_TIMEOUT, idle: IDLE_TIMEOUT, ping: PING_AFTER, queue: MAX_QUEUED }
     }
+}
+
+/// "1 account", "3 accounts".
+fn accounts(n: usize) -> String {
+    format!("{n} account{}", if n == 1 { "" } else { "s" })
 }
 
 fn now() -> u64 {
@@ -573,6 +582,31 @@ pub async fn serve_limited(
     sockets: SocketLimits,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
+    serve_started(config, listener, metrics, host, sockets, Start::default(), stop).await
+}
+
+/// How a server starts on what it finds.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Start {
+    /// Start with no account beside pictures of accounts the store
+    /// doesn't have (and whose removal isn't recorded): refused unless
+    /// said, as the records were likely not put back (a new data folder,
+    /// an empty database) on pictures a server kept before. They're kept
+    /// either way: the sweep takes only the pictures of accounts removed
+    /// here (`blobs::Worker::sweep_unowned`).
+    pub beside_old_pictures: bool,
+}
+
+/// [`serve_limited`], started as `start` says.
+pub async fn serve_started(
+    config: Config,
+    listener: TcpListener,
+    metrics: Option<TcpListener>,
+    host: Host,
+    sockets: SocketLimits,
+    start: Start,
+    stop: impl Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
     let started = now();
     // Its own user's alone, before anything is made in it.
     crate::private::data_dir(&config.data)?;
@@ -583,10 +617,14 @@ pub async fn serve_limited(
     // Pictures: files beside the databases, reached by signed links,
     // unless the host keeps them elsewhere.
     let files = BlobFiles::open(&config.data)?;
+    let signer = Arc::new(Signer::open(&config.data, || OsRandom.bytes())?);
+    let in_bucket = hosted_blobs.is_some();
+    let blobs: Box<dyn Blobs> = hosted_blobs.unwrap_or_else(|| Box::new(FileBlobs::new(files.clone(), &config.origin, signer.clone())));
     // The store made ready off the async threads: a database's client
     // blocks (as the hub does, on its own thread, from then on).
     let (data, kept) = (config.data.clone(), files.clone());
-    let store = tokio::task::spawn_blocking(move || -> std::io::Result<Store> {
+    let (store, blobs) = tokio::task::spawn_blocking(move || -> std::io::Result<(Store, Box<dyn Blobs>)> {
+        let mut blobs = blobs;
         let mut store: Store = match hosted_store {
             Some(store) => store,
             None => {
@@ -610,12 +648,22 @@ pub async fn serve_limited(
                 Box::new(store)
             }
         };
+        if store.accounts() == 0 && !start.beside_old_pictures {
+            let strangers = crate::blobs::strangers(blobs.as_mut(), |a| store.has_account(a));
+            if !strangers.is_empty() {
+                let (place, other) = if in_bucket { ("The bucket", "another bucket (or another folder in it)") } else { ("The data folder", "another data folder") };
+                return Err(std::io::Error::other(format!(
+                    "{place} holds pictures of {}, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on {other}. To start anyway, with those pictures kept and unused, give --beside-old-pictures (CARNET_BESIDE_OLD_PICTURES=1)",
+                    accounts(strangers.len())
+                )));
+            }
+        }
         if first_invite && store.accounts() == 0 {
             let code = new_invite(&mut store).map_err(std::io::Error::other)?;
             println!("carnet-server: no accounts yet. Invite code for the first account (owner):");
             println!("    {}   (single use, good for {INVITE_DAYS} days)", code.text());
         }
-        Ok(store)
+        Ok((store, blobs))
     })
     .await
     .map_err(std::io::Error::other)??;
@@ -623,21 +671,21 @@ pub async fn serve_limited(
     let shutdown = tx.clone();
     let origin = config.origin.clone();
     let compact_after = config.compact_after;
-    let signer = Arc::new(Signer::open(&config.data, || OsRandom.bytes())?);
     let http = Arc::new(BlobHttp::default());
     // The picture worker: its own thread; what it sends goes to the
     // sockets through the hub's queue.
-    let blobs: Box<dyn Blobs> = hosted_blobs.unwrap_or_else(|| Box::new(FileBlobs::new(files.clone(), &config.origin, signer.clone())));
     let csp = web_csp(&config.origin, blobs.origin().as_deref());
     let mut worker = Worker::new(blobs);
     let counts = worker.counts.clone();
     let (jobs, queued) = std::sync::mpsc::channel::<Job>();
     let deliver = tx.clone();
     // Once an hour, pictures dropped more than 30 days ago go, and those
-    // of accounts that are no more (a put by a link given before its
-    // account was deleted): the hub says which, from the store.
+    // of accounts removed (a put by a link given before its account was
+    // deleted): the hub says which accounts the store doesn't have, and
+    // of those, the ones whose removal is recorded go.
     let pictures = std::thread::Builder::new().name("carnet-pictures".into()).spawn(move || {
         let mut swept = Instant::now() - Duration::from_secs(3600);
+        let mut kept_before = 0;
         loop {
             if swept.elapsed() >= Duration::from_secs(3600) {
                 swept = Instant::now();
@@ -653,8 +701,18 @@ pub async fn serve_limited(
                     }
                     answer.blocking_recv().unwrap_or_default()
                 });
-                if unowned > 0 {
-                    println!("carnet-server: pictures of {unowned} accounts that are no more, gone");
+                if unowned.gone > 0 {
+                    println!("carnet-server: pictures of {} removed, gone", accounts(unowned.gone));
+                }
+                // Said when it changes: not every hour.
+                if unowned.kept != kept_before {
+                    kept_before = unowned.kept;
+                    if unowned.kept > 0 {
+                        println!(
+                            "carnet-server: pictures of {} this server has no record of are kept, not deleted (records restored from before they were made?)",
+                            accounts(unowned.kept)
+                        );
+                    }
                 }
             }
             match queued.recv_timeout(Duration::from_secs(3600).saturating_sub(swept.elapsed())) {
@@ -701,7 +759,10 @@ pub async fn serve_limited(
     let metrics_task = match metrics {
         Some(listener) => {
             let watch = Watch { hub: tx.clone(), data: config.data.clone(), started, refused: refused.clone(), counts: counts.clone(), http: http.clone(), closes };
-            let router = Router::new().route("/metrics", get(metrics_route)).with_state(watch).layer(timeout(REQUEST_TIMEOUT));
+            // Health too, in plain HTTP on this private address: what the
+            // machine's own check asks when the public one wants TLS (and
+            // a client certificate it hasn't).
+            let router = Router::new().route("/metrics", get(metrics_route)).route("/v1/health", get(metrics_health)).with_state(watch).layer(timeout(REQUEST_TIMEOUT));
             println!("carnet-server: metrics on http://{}/metrics", listener.local_addr()?);
             Some(tokio::spawn(serve_app(listener, router, until_stopped(stopped.clone()))))
         }
@@ -748,8 +809,13 @@ pub async fn serve_limited(
         res
     }));
     let addr: SocketAddr = listener.local_addr()?;
-    println!("carnet-server: listening on {addr}, origin {}", config.origin);
-    let served = serve_app(listener, router, until_stopped(stopped)).await;
+    let tls = match &config.tls {
+        Some(t) if t.asks_clients() => " (TLS, a client certificate asked of each)",
+        Some(_) => " (TLS)",
+        None => "",
+    };
+    println!("carnet-server: listening on {addr}{tls}, origin {}", config.origin);
+    let served = serve_app_on(listener, router, config.tls.clone(), until_stopped(stopped)).await;
     if let Some(t) = metrics_task {
         let _ = t.await;
     }
@@ -778,6 +844,14 @@ pub fn timeout(limit: Duration) -> tower_http::timeout::TimeoutLayer {
 /// stopped, no more is taken, and what's under way finishes (a socket,
 /// upgraded, is the hub's to let go). A host's other listeners use it too.
 pub async fn serve_app(listener: TcpListener, router: Router, stop: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+    serve_app_on(listener, router, None, stop).await
+}
+
+/// [`serve_app`], over TLS if given: each connection's handshake within
+/// [`HEAD_TIMEOUT`], and one that fails it (no client certificate when
+/// one is asked, one no CA given signed, not TLS at all) let go before
+/// anything of it is read.
+pub async fn serve_app_on(listener: TcpListener, router: Router, tls: Option<crate::tls::Tls>, stop: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
     let (closing, closed) = tokio::sync::watch::channel(false);
     // Each connection holds one: all dropped, all done.
     let (open, mut done) = mpsc::channel::<()>(1);
@@ -795,24 +869,18 @@ pub async fn serve_app(listener: TcpListener, router: Router, stop: impl Future<
             },
             _ = &mut stop => break,
         };
-        let router = router.clone();
-        let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-            let mut req = req.map(axum::body::Body::new);
-            req.extensions_mut().insert(ConnectInfo(peer));
-            tower::ServiceExt::oneshot(router.clone(), req)
-        });
-        let (open, mut closed) = (open.clone(), closed.clone());
+        let (router, tls) = (router.clone(), tls.clone());
+        let (open, closed) = (open.clone(), closed.clone());
         tokio::spawn(async move {
             let _open = open;
-            let mut http = hyper::server::conn::http1::Builder::new();
-            http.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEAD_TIMEOUT);
-            let mut conn = std::pin::pin!(http.serve_connection(hyper_util::rt::TokioIo::new(io), service).with_upgrades());
-            tokio::select! {
-                _ = conn.as_mut() => return,
-                _ = closed.wait_for(|&c| c) => {}
+            match tls {
+                None => connection(io, peer, router, closed).await,
+                Some(tls) => {
+                    if let Ok(Ok(io)) = tokio::time::timeout(HEAD_TIMEOUT, tls.acceptor.accept(io)).await {
+                        connection(io, peer, router, closed).await;
+                    }
+                }
             }
-            conn.as_mut().graceful_shutdown();
-            let _ = conn.await;
         });
     }
     drop(listener);
@@ -821,6 +889,27 @@ pub async fn serve_app(listener: TcpListener, router: Router, stop: impl Future<
     let _ = done.recv().await;
     drop(closed);
     Ok(())
+}
+
+/// One connection served, until it ends or the server stops.
+async fn connection<I>(io: I, peer: SocketAddr, router: Router, mut closed: tokio::sync::watch::Receiver<bool>)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let mut req = req.map(axum::body::Body::new);
+        req.extensions_mut().insert(ConnectInfo(peer));
+        tower::ServiceExt::oneshot(router.clone(), req)
+    });
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEAD_TIMEOUT);
+    let mut conn = std::pin::pin!(http.serve_connection(hyper_util::rt::TokioIo::new(io), service).with_upgrades());
+    tokio::select! {
+        _ = conn.as_mut() => return,
+        _ = closed.wait_for(|&c| c) => {}
+    }
+    conn.as_mut().graceful_shutdown();
+    let _ = conn.await;
 }
 
 /// The web app's Content-Security-Policy (docs/SYNC.md §8): its own
@@ -921,6 +1010,16 @@ struct Watch {
     counts: Arc<Counts>,
     http: Arc<BlobHttp>,
     closes: Arc<Closes>,
+}
+
+/// `/v1/health` on the metrics address: as the public one answers it.
+async fn metrics_health(State(w): State<Watch>) -> impl IntoResponse {
+    let (reply, rx) = oneshot::channel();
+    let _ = w.hub.send(ToHub::Ping { reply });
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(_)) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "ok": false, "error": "the hub is not answering" }))),
+    }
 }
 
 async fn metrics_route(State(w): State<Watch>) -> impl IntoResponse {

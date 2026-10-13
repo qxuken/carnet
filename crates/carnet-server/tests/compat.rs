@@ -41,7 +41,7 @@ async fn apps_of_other_builds_are_told_where_they_stand() {
     let data = temp();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let (stop, rx) = tokio::sync::oneshot::channel::<()>();
     let done = tokio::spawn(server::serve(config, listener, async {
         let _ = rx.await;
