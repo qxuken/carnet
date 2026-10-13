@@ -121,7 +121,7 @@ The toolbar's highlighter and text-colour buttons offer ten calm hues. They are 
 | drag in the margin | select whole blocks |
 | right-click on the page | cut, copy, paste, styles, and what the toolbar does for the block |
 
-The toolbar acts on the blocks the caret touches: turn them into another kind, drop a paragraph's first letter, indent them, move them, remove them. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
+The toolbar acts on the blocks the caret touches: turn them into another kind, drop a paragraph's first letter, indent them, move them, remove them. A paragraph's lines turn one at a time, as a paragraph per line typed here would: in a note whose lines end in line breaks (as Apple Notes exports them), the caret's line becomes the item or heading and the lines around it stay as they were; select several lines to turn them all, one item each. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
 
 ### Notes and folders
 

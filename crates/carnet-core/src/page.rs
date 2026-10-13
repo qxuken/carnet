@@ -1685,38 +1685,128 @@ pub fn move_blocks(doc: &mut Doc, c: Caret, by: i64) -> bool {
     true
 }
 
-/// Every block the caret touches turned into kind `to` — a paragraph of
-/// several lines into a block per line. The caret keeps to the turned
-/// blocks.
+/// Every block the caret touches turned into kind `to`. A paragraph's
+/// lines are lines to the reader, each its own as a block is (an
+/// export's — Apple Notes' — paragraphs are lines ended by line breaks,
+/// where one typed here is a paragraph a line): only the lines the caret
+/// touches are turned, a block each, the lines before and after them
+/// staying a paragraph as they were. A caret on one line turns that
+/// line; a selection, every line it takes. The caret keeps to the turned
+/// blocks: inside the one its line became, or over them all.
 pub fn turn(doc: &mut Doc, c: &mut Caret, to: u64) -> bool {
     let r = touched(doc, *c);
-    let single = c.is_empty() || r.start() == r.end();
-    let (start_i, mut end_i) = (*r.start(), *r.end());
+    let (a, z) = ordered(doc, *c);
+    // Blocks put in so far, above the one being turned.
+    let mut grown = 0;
+    // The turned blocks' first and last index, as the note is after.
+    let mut span: Option<(usize, usize)> = None;
+    // Where the caret goes when both its ends were on the one line turned.
+    let mut moved: Option<Caret> = None;
     let mut changed = false;
-    for i in r.rev() {
-        if let Some(kinds) = turned_lines(&doc.blocks()[i].kind, to)
-            && (kinds.len() != 1 || doc.blocks()[i].kind != kinds[0])
-        {
-            let n = kinds.len();
-            let id = doc.blocks()[i].id;
-            let mut blocks: Vec<Block> = kinds.into_iter().map(Block::new).collect();
-            // The first keeps the id, so a caret in it stays in it.
-            blocks[0].id = id;
-            doc.splice(i..i + 1, blocks);
-            end_i += n - 1;
+    for i0 in r {
+        let i = i0 + grown;
+        let b = (*doc.blocks()[i]).clone();
+        let mut pieces: Vec<Block> = Vec::new();
+        let (mut first, mut n) = (i, 1);
+        let lines = match &b.kind {
+            Kind::Text(t) if to != TURN_TEXT && t.contains('\n') => touched_lines(t, b.id, *c, a, z),
+            _ => None,
+        };
+        match (lines, &b.kind) {
+            (Some((lo, hi)), Kind::Text(t)) => {
+                let all: Vec<&str> = t.split('\n').collect();
+                // A line's spaces at its end are the export's line break
+                // (`  `), which means nothing at the end of an item or a
+                // heading: they go.
+                let mid: Vec<&str> = all[lo..=hi]
+                    .iter()
+                    .map(|l| if to == TURN_QUOTE { l } else { l.trim_end_matches([' ', '\t']) })
+                    .collect();
+                let kinds = match mid.as_slice() {
+                    [one] => turned(&Kind::Text(one.to_string()), to).map(|k| vec![k]),
+                    _ => turned_lines(&Kind::Text(mid.join("\n")), to),
+                };
+                if let Some(kinds) = kinds {
+                    if lo > 0 {
+                        // The lines above keep the paragraph: its id, its
+                        // dropped letter.
+                        let mut before = b.clone();
+                        before.kind = Kind::Text(all[..lo].join("\n"));
+                        pieces.push(before);
+                    }
+                    n = kinds.len();
+                    first = i + pieces.len();
+                    pieces.extend(kinds.into_iter().map(Block::new));
+                    if lo == 0 {
+                        pieces[0].id = b.id;
+                    }
+                    if hi + 1 < all.len() {
+                        pieces.push(Block::text(all[hi + 1..].join("\n")));
+                    }
+                    // Both ends on the line turned, alone: the caret in
+                    // its block, where it was in its words.
+                    let line_start = all[..lo].iter().map(|l| l.len() + 1).sum::<usize>();
+                    if lo == hi && a.slot.block == b.id && z.slot.block == b.id {
+                        let slot = Slot::block(pieces[first - i].id);
+                        let at = |p: Pos| Pos { slot, byte: p.byte.saturating_sub(line_start) };
+                        moved = Some(Caret { anchor: at(c.anchor), head: at(c.head) });
+                    }
+                }
+            }
+            _ => {
+                if let Some(kinds) = turned_lines(&b.kind, to)
+                    && (kinds.len() != 1 || b.kind != kinds[0])
+                {
+                    n = kinds.len();
+                    pieces = kinds.into_iter().map(Block::new).collect();
+                    // The first keeps the id, so a caret in it stays in it.
+                    pieces[0].id = b.id;
+                    if n == 1 && a.slot.block == b.id && z.slot.block == b.id {
+                        moved = Some(*c);
+                    }
+                }
+            }
+        }
+        if !pieces.is_empty() {
+            grown += pieces.len() - 1;
+            doc.splice(i..i + 1, pieces);
             changed = true;
         }
+        let last = first + n - 1;
+        span = Some(span.map_or((first, last), |(f, _)| (f, last)));
     }
     if !changed {
         return false;
     }
-    if single && end_i == start_i {
-        *c = fix(doc, *c);
-    } else {
-        *c = select_blocks(doc, start_i, end_i);
-    }
+    let (f, l) = span.unwrap_or((0, 0));
+    *c = match moved {
+        Some(m) if f == l => fix(doc, m),
+        _ => select_blocks(doc, f, l),
+    };
     doc.ensure_tail();
     true
+}
+
+/// The first and last line of paragraph `t` (block `id`) that a caret
+/// from `a` to `z` touches. As [`touched`] has it for blocks, a selection
+/// that only reaches the very start of a line takes nothing of it, nor
+/// one that leaves from the very end of a line with words in it.
+fn touched_lines(t: &str, id: u64, c: Caret, a: Pos, z: Pos) -> Option<(usize, usize)> {
+    let starts: Vec<usize> = std::iter::once(0).chain(t.match_indices('\n').map(|(k, _)| k + 1)).collect();
+    let last = starts.len() - 1;
+    let line_of = |byte: usize| starts.iter().rposition(|&s| s <= byte).unwrap_or(0);
+    let end_of = |k: usize| if k == last { t.len() } else { starts[k + 1] - 1 };
+    let mut lo = if a.slot.block == id { line_of(a.byte) } else { 0 };
+    let mut hi = if z.slot.block == id { line_of(z.byte) } else { last };
+    if !c.is_empty() {
+        if hi > lo && z.slot.block == id && z.byte == starts[hi] {
+            hi -= 1;
+        }
+        if lo < hi && a.slot.block == id && a.byte == end_of(lo) && a.byte > starts[lo] {
+            lo += 1;
+        }
+    }
+    (lo <= hi).then_some((lo, hi))
 }
 
 /// A toolbar's turn: every block the caret touches made `to`; or, when
@@ -4844,4 +4934,109 @@ mod tests {
     fn set_cell(d: &mut Doc, slot: Slot, to: &str) {
         *text_mut(d, slot).unwrap() = to.to_string();
     }
+
+    /// A note from Apple Notes' export: paragraphs whose lines end in a
+    /// line break (two spaces or more), the way its lines are written.
+    const EXPORT: &str = include_str!("../tests/fixtures/apple-notes.md");
+
+    /// A caret's place in paragraph `i`: `line`, `col` bytes in.
+    fn on_line(d: &Doc, i: usize, line: usize, col: usize) -> Pos {
+        let s = block_slots(&d.blocks()[i])[0];
+        let t = text(d, s);
+        let start: usize = t.split('\n').take(line).map(|l| l.len() + 1).sum();
+        Pos { slot: s, byte: start + col }
+    }
+
+    /// The export with its paragraph `from` written as `to`: everything
+    /// else in the file as it was, byte for byte.
+    fn export_with(from: &str, to: &str) -> String {
+        assert!(EXPORT.contains(from), "{from:?}");
+        EXPORT.replacen(from, to, 1)
+    }
+
+    /// The reader's lines are lines, as they would be typed here a
+    /// paragraph each: the list tools turn the line the caret is on, not
+    /// its whole paragraph, and the note's other words stay as they were
+    /// in the file. Each line a list makes is an item of its own, without
+    /// the spaces that broke it from the next.
+    #[test]
+    fn a_line_of_an_exported_paragraph_is_turned_alone() {
+        let (title, d0) = crate::doc::from_markdown(EXPORT);
+        let md = |d: &Doc| crate::doc::to_markdown(title.as_deref(), d);
+        assert_eq!(md(&d0), EXPORT, "the export reads and writes back as it is");
+
+        // The bullets on the first line: that line, and nothing else.
+        let mut d = d0.clone();
+        let mut c = Caret::at(on_line(&d, 0, 0, 6));
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(texts(&d)[..3], ["[ ]**путь:** жильё", "Text:hostel / ryokan  ", "Text:**путь:** осака  \ndotonbori glico sign — фото на мосту ночью  "]);
+        assert_eq!(md(&d), export_with("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n"));
+        assert_eq!(c, Caret::at(Pos { slot: Slot::block(d.blocks()[0].id), byte: 6 }), "the caret where it was in the words");
+        // Again: a paragraph of its own, as Enter makes a line here.
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(md(&d), export_with("**путь:** жильё   \nhostel / ryokan  \n", "**путь:** жильё\n\nhostel / ryokan  \n"));
+
+        // A line in the middle: the lines above and below stay one
+        // paragraph each. Numbers, a checklist, a heading the same way.
+        let big = d0.blocks().iter().position(|b| b.text_ref().is_some_and(|t| t.starts_with("**дом:** мысли"))).unwrap();
+        for (to, written) in [(TURN_BULLET, "- picture rail"), (TURN_NUMBER, "1. picture rail"), (TURN_TODO, "- [ ] picture rail"), (TURN_H2, "## picture rail")] {
+            let mut d = d0.clone();
+            let mut c = Caret::at(on_line(&d, big, 2, 3));
+            assert!(toggle_turn(&mut d, &mut c, to));
+            assert_eq!(
+                md(&d),
+                export_with(
+                    "полка для книг в коридоре  \npicture rail  \nskylight window  \n",
+                    &format!("полка для книг в коридоре  \n\n{written}\n\nskylight window  \n"),
+                ),
+                "{to}",
+            );
+            assert_eq!(c.head.slot.block, d.blocks()[big + 1].id);
+            assert_eq!((c.head.byte, c.is_empty()), (3, true));
+        }
+
+        // A selection from the second line into the fourth: three items,
+        // all of them selected.
+        let mut d = d0.clone();
+        let mut c = Caret { anchor: on_line(&d, big, 1, 4), head: on_line(&d, big, 3, 2) };
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(
+            md(&d),
+            export_with(
+                "**дом:** мысли  \nполка для книг в коридоре  \npicture rail  \nskylight window  \npocket door  \n",
+                "**дом:** мысли  \n\n- полка для книг в коридоре\n- picture rail\n- skylight window\n\npocket door  \n",
+            )
+        );
+        assert_eq!(touched(&d, c), big + 1..=big + 3);
+        // And back: a paragraph a line.
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(texts(&d)[big + 1..big + 4], ["Text:полка для книг в коридоре", "Text:picture rail", "Text:skylight window"]);
+
+        // A selection that only reaches a line's start takes nothing of it.
+        let mut d = d0.clone();
+        let mut c = Caret { anchor: on_line(&d, big, 1, 0), head: on_line(&d, big, 2, 0) };
+        assert!(toggle_turn(&mut d, &mut c, TURN_TODO));
+        assert_eq!(texts(&d)[big..big + 3], ["Text:**дом:** мысли  ", "[ ]полка для книг в коридоре", "Text:picture rail  \nskylight window  \npocket door  \nстол: дуб снизу, светлый верх  \nплитка: терракота с матовой глазурью  "]);
+
+        // Across paragraphs: the first's lines from the selection's on,
+        // the next's up to it.
+        let mut d = d0.clone();
+        let mut c = Caret { anchor: on_line(&d, 1, 1, 3), head: on_line(&d, 2, 0, 3) };
+        assert!(toggle_turn(&mut d, &mut c, TURN_NUMBER));
+        assert_eq!(
+            md(&d),
+            export_with(
+                "**путь:** осака  \ndotonbori glico sign — фото на мосту ночью  \n\n**путь:**  \ncash",
+                "**путь:** осака  \n\n1. dotonbori glico sign — фото на мосту ночью\n2. **путь:**\n\ncash",
+            )
+        );
+
+        // The whole paragraph selected: an item a line.
+        let mut d = d0.clone();
+        let mut c = select_blocks(&d, 0, 0);
+        assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+        assert_eq!(md(&d), export_with("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n- hostel / ryokan\n"));
+        assert_eq!(touched(&d, c), 0..=1);
+    }
+
 }

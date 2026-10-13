@@ -7491,6 +7491,64 @@ fn list_tools_turn_every_selected_line_and_back() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A note from Apple Notes' export, its lines ended by line breaks: a
+/// click on its first line and the toolbar's Bulleted list make that line
+/// an item, and the rest of the file stays as it was, byte for byte; the
+/// shortcut takes it back to a paragraph of its own, and Ctrl+Z to the
+/// file as it came. ⌥⌘6 numbers a line in the middle of a paragraph.
+#[test]
+fn an_exported_notes_line_is_turned_alone() {
+    const EXPORT: &str = include_str!("../crates/carnet-core/tests/fixtures/apple-notes.md");
+    let (store, dir) = temp_store("export-lines");
+    drop(store);
+    std::fs::write(dir.join("поездки.md"), EXPORT).unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    let i = app.store.notes.iter().position(|n| n.title == "поездки").unwrap();
+    app.open(i);
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let written = |app: &mut Carnet| {
+        app.save_current();
+        std::fs::read_to_string(dir.join("поездки.md")).unwrap()
+    };
+    assert_eq!(written(&mut app), EXPORT);
+    // On the page (not the note's card in the library): the paragraph.
+    let first = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("путь: жильё   \nhostel / ryokan  ")).expect("the first paragraph").rect;
+    d.click(&mut app, first.x + 30.0, first.y + 8.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(page::touched(app.doc(), app.caret), 0..=0);
+    let tool = d.key_of("t-bullet").expect("the toolbar's Bulleted list");
+    d.click_key(&mut app, tool);
+    d_frame_twice(&mut app, &mut d);
+    let one = EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n", 1);
+    assert_eq!(written(&mut app), one);
+    assert!(page::turned_to(app.doc(), app.caret, TURN_BULLET), "the tool shows on");
+    key_with(&mut app, &mut d, "5", CTRL_ALT);
+    let back = EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "**путь:** жильё\n\nhostel / ryokan  \n", 1);
+    assert_eq!(written(&mut app), back);
+    key_with(&mut app, &mut d, "z", CTRL);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(written(&mut app), EXPORT, "undone, the file as it came");
+
+    // A line in the middle of the longest paragraph, by the keyboard.
+    let big = app.doc().blocks().iter().position(|b| b.text_ref().is_some_and(|t| t.starts_with("**дом:** мысли"))).unwrap();
+    let slot = Slot::block(app.doc().blocks()[big].id);
+    let at = page::text(app.doc(), slot).find("picture").unwrap();
+    app.caret = Caret::at(Pos { slot, byte: at + 3 });
+    key_with(&mut app, &mut d, "6", CTRL_ALT);
+    assert_eq!(
+        written(&mut app),
+        EXPORT.replacen("коридоре  \npicture rail  \nskylight", "коридоре  \n\n1. picture rail\n\nskylight", 1)
+    );
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A picture that's the user's own file, beside the note: drawn faint with
 /// a mark, and selected, a bar that says so. Moved into Carnet, it's in
 /// the attachments folder and the note shows it there; the notice's Undo

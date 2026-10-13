@@ -1754,6 +1754,35 @@ mod tests {
         assert!(e.markdown().contains("| azb | ![sea](q.png) |"), "{}", e.markdown());
     }
 
+    /// As on the desktop: a line of an exported paragraph (Apple Notes'
+    /// lines end in line breaks) turned alone, the rest of the file as it
+    /// was; a selection over three lines, three items.
+    #[test]
+    fn a_line_of_an_exported_paragraph_is_turned_alone() {
+        const EXPORT: &str = include_str!("../../carnet-core/tests/fixtures/apple-notes.md");
+        let mut e = Editor::open(EXPORT);
+        assert_eq!(e.markdown(), EXPORT);
+        assert_eq!(e.lines()[1].text, "путь: жильё   ");
+        e.select(1, 3, 1, 3);
+        e.turn(page::TURN_BULLET);
+        assert_eq!(e.markdown(), EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n", 1));
+        assert!(e.turned_to(page::TURN_BULLET));
+        assert_eq!(e.caret_lc(), (1, 3, 1, 3));
+        assert!(e.undo());
+        assert_eq!(e.markdown(), EXPORT);
+        let n = e.lines().iter().position(|l| l.text == "полка для книг в коридоре  ").unwrap();
+        e.select(n, 2, n + 2, 4);
+        e.turn(page::TURN_TODO);
+        assert_eq!(
+            e.markdown(),
+            EXPORT.replacen(
+                "мысли  \nполка для книг в коридоре  \npicture rail  \nskylight window  \npocket",
+                "мысли  \n\n- [ ] полка для книг в коридоре\n- [ ] picture rail\n- [ ] skylight window\n\npocket",
+                1
+            )
+        );
+    }
+
     #[test]
     fn turned_and_back_and_undone() {
         let mut e = Editor::open("# T\n\nmilk\n");
