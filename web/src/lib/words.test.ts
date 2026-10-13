@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { footer, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
+import { footer, joinedSaid, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
 
 const base = { status: 'Up to date', changes: 0, pictures: 0, waitShown: false, allSent: false, readOnly: false };
 
@@ -110,5 +110,18 @@ describe('shownPage', () => {
     }
     expect(shownPage(null, 'https:')).toBe(null);
     expect(shownPage(undefined, 'https:')).toBe(null);
+  });
+});
+
+describe('joinedSaid', () => {
+  // The finding: Settings said "A new device is in: it's in the list
+  // above." long after. Said while the device is listed, and forgotten
+  // once Settings is left having said it (Settings.svelte).
+  it('says a device in by the code shown, while it is in the list', () => {
+    const list = [{ id: 'aa' }, { id: 'bb' }];
+    expect(joinedSaid('bb', list)).toBe(true);
+    expect(joinedSaid('bb', [{ id: 'aa' }])).toBe(false);
+    expect(joinedSaid('bb', null)).toBe(false);
+    expect(joinedSaid(null, list)).toBe(false);
   });
 });

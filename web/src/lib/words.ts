@@ -128,3 +128,9 @@ export function shownPage(page: string | null | undefined, here: string): string
   if (!(secure || plain) || url.username || url.password || !url.hostname) return null;
   return page;
 }
+
+/// Whether Settings says "A new device is in": one came in by the code it
+/// showed (`paired`), and is in the device list above (one that left
+/// since isn't). Said until Settings is left: seen then, and forgotten
+/// (`sync.paired` cleared), not said again each time Settings opens.
+export const joinedSaid = (paired: string | null, devices: { id: string }[] | null) => !!paired && !!devices?.some((d) => d.id === paired);
