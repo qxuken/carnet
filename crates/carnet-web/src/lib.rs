@@ -330,9 +330,16 @@ impl Vault {
         self.notes.transferred(id, put, result, &mut WebRandom);
     }
 
-    /// Rooms changed since last asked.
+    /// Whether a room changed since last asked: cheap, after every frame.
+    pub fn has_changed(&self) -> bool {
+        self.notes.has_changed()
+    }
+
+    /// Rooms changed since last asked; those deleted forever on another
+    /// device forgotten first, the vault read for them once however many
+    /// frames came.
     pub fn take_changed(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.notes.changed)
+        self.notes.take_changed()
     }
 
     pub fn take_errors(&mut self) -> Vec<String> {
@@ -532,6 +539,12 @@ impl Vault {
 
     pub fn save(&self) -> Vec<u8> {
         self.notes.save()
+    }
+
+    /// Up to `most` notes changed since last kept made ready to keep, a
+    /// few at a time ahead of [`Vault::save`]: how many are still to do.
+    pub fn keep_some(&self, most: u32) -> u32 {
+        self.notes.keep_some(most as usize) as u32
     }
 
     /// A name for a new picture in the attachments folder.

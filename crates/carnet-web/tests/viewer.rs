@@ -64,6 +64,15 @@ fn pump(hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, rng: &mut Seede
 
 /// The same, with a new device joining on connection 3.
 fn pump_with(hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, joiner: &mut Option<Joiner>, rng: &mut Seeded) {
+    deliver(hub, desk, web, joiner, rng);
+    // As the page does after frames: what changed taken, the notes
+    // deleted forever elsewhere forgotten with it.
+    web.take_changed();
+}
+
+/// Everything delivered, both ways, until nothing moves; the page not
+/// yet told.
+fn deliver(hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, joiner: &mut Option<Joiner>, rng: &mut Seeded) {
     for _ in 0..1000 {
         let mut moved = false;
         // Pictures' HTTP, done as the server's links would have it.
@@ -752,8 +761,14 @@ fn a_note_deleted_forever_goes_both_ways() {
     desk.docs[vault::ROOM].set_gone(ka);
     desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
     desk.session.remove_room(&album);
-    pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert!(web.notes().iter().all(|l| l.key != album) && web.source(&album).is_none());
+    deliver(&mut hub, &mut desk, &mut web, &mut None, &mut rng);
+    // Not listed, nor written to, even before the page lists the notes
+    // again (which forgets it).
+    assert!(web.notes().iter().all(|l| l.key != album));
+    let (_, base) = web.source(&album).unwrap();
+    assert!(web.edit(&album, &base, "# Album\n\nmore\n", &mut rng).is_none());
+    assert!(web.source(&album).is_none());
+    web.take_changed();
 
     // Offline: kept in what's saved, and said again after a reload.
     let last = write(&mut web, &mut rng, "# Last\n\nwords\n");
@@ -1310,4 +1325,177 @@ fn the_desktops_folders_and_pins_show_in_the_browser() {
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.folders().is_empty());
     assert!(listed(&web, ks[0]).trashed && listed(&web, ks[1]).trashed);
+}
+
+/// What the browser did with what came: its time (and of that, taking
+/// frames in), the frames, and how many times it listed every note.
+#[derive(Default)]
+struct PageWork {
+    took: std::time::Duration,
+    receiving: std::time::Duration,
+    lists: usize,
+    frames: usize,
+    logins: usize,
+}
+
+/// When the page lists every note again, after notes came.
+#[derive(Clone, Copy, Debug)]
+enum Lists {
+    /// After each frame, as sync.svelte.ts did.
+    EachFrame,
+    /// After the frames that came together.
+    EachBatch,
+    /// At most this often (and once at the end), as sync.svelte.ts does.
+    AtMostEvery(std::time::Duration),
+}
+
+/// The desktop makes `n` notes, `tick` at a time (each tick's places in
+/// the vault, sent after the notes, as its sync tick does), while the
+/// browser is in: every frame for it handed over as the hub makes it,
+/// the list made as `lists` says.
+fn intake(n: usize, tick: usize, lists: Lists) -> (Notes, PageWork) {
+    let mut rng = Seeded(21);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    desk.docs.entry(vault::ROOM.to_string()).or_insert_with(|| NoteDoc::new(7));
+    desk.docs[vault::ROOM].set_folder("Bulk", true);
+    let mut page = PageWork::default();
+    let mut listed = std::time::Instant::now();
+    let mut made = 0;
+    while made < n {
+        let mut rooms = Vec::new();
+        for _ in 0..tick.min(n - made) {
+            let k = Key::random();
+            let d = NoteDoc::new(7);
+            d.record(&format!("# Bulk {made}\n\nA small note, number {made}.\n"), Origin::Save);
+            desk.docs[vault::ROOM].set_place(k, &Place { folder: "Bulk".into(), name: format!("Bulk {made}"), pinned: false, trashed: false });
+            desk.docs.insert(k.to_string(), d);
+            rooms.push(k.to_string());
+            made += 1;
+        }
+        rooms.push(vault::ROOM.to_string());
+        for room in &rooms {
+            desk.session.saved(room, &mut DeskDocs(&mut desk.docs), &mut rng);
+        }
+        // Until nothing moves.
+        loop {
+            let mut outs: Vec<Out> = Vec::new();
+            for b in desk.session.take_out() {
+                outs.extend(hub.receive(1, &b, &mut rng));
+            }
+            for b in web.session.take_out() {
+                outs.extend(hub.receive(2, &b, &mut rng));
+            }
+            if outs.is_empty() {
+                break;
+            }
+            let mut batch = 0;
+            for o in outs {
+                let Out::Send(conn, bytes) = o else { continue };
+                if conn == 1 {
+                    desk.session.receive(&bytes, &mut DeskDocs(&mut desk.docs), &mut rng);
+                    continue;
+                }
+                let t = std::time::Instant::now();
+                web.receive(&bytes, &mut rng);
+                page.receiving += t.elapsed();
+                page.frames += 1;
+                batch += 1;
+                if let Lists::EachFrame = lists {
+                    page_after(&mut web, &mut page, true);
+                }
+                page.took += t.elapsed();
+            }
+            if batch > 0 {
+                let t = std::time::Instant::now();
+                match lists {
+                    Lists::EachFrame => {}
+                    Lists::EachBatch => page_after(&mut web, &mut page, true),
+                    Lists::AtMostEvery(gap) => {
+                        let due = listed.elapsed() >= gap;
+                        page_after(&mut web, &mut page, due);
+                        if due {
+                            listed = std::time::Instant::now();
+                        }
+                    }
+                }
+                page.took += t.elapsed();
+            }
+            // More new notes than a login takes: in again, as the page
+            // connects again, for the rest.
+            if std::mem::take(&mut web.said).contains(&Said::MoreToCome) {
+                page.logins += 1;
+                web.session.disconnected();
+                let _ = hub.disconnect(2);
+                web.session.connected();
+                for o in hub.connect(2, &mut rng) {
+                    if let Out::Send(_, b) = o {
+                        web.receive(&b, &mut rng);
+                    }
+                }
+            }
+        }
+    }
+    let t = std::time::Instant::now();
+    page_after(&mut web, &mut page, true);
+    page.took += t.elapsed();
+    (web, page)
+}
+
+/// What the page does after frames: frames out, the counts; and the list
+/// made again if a note changed and it's `due`.
+fn page_after(web: &mut Notes, page: &mut PageWork, due: bool) {
+    let _ = web.session.waiting();
+    let _ = web.unsent(&[]);
+    if web.has_changed() && due && !web.take_changed().is_empty() {
+        let _ = web.notes();
+        let _ = web.folders();
+        page.lists += 1;
+    }
+}
+
+/// Measured, not run by default: `CARNET_INTAKE=10000 cargo test --release
+/// -p carnet-web --test viewer intake_measured -- --ignored --nocapture`
+/// (`CARNET_TICK`: notes the desktop sends at a time; `CARNET_LISTS`:
+/// `frame`, `batch`, or the least milliseconds between lists).
+#[test]
+#[ignore]
+fn intake_measured() {
+    let var = |k: &str| std::env::var(k).ok();
+    let n: usize = var("CARNET_INTAKE").and_then(|s| s.parse().ok()).unwrap_or(2000);
+    let tick: usize = var("CARNET_TICK").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let lists = match var("CARNET_LISTS").as_deref() {
+        Some("frame") => Lists::EachFrame,
+        Some("batch") => Lists::EachBatch,
+        Some(ms) => Lists::AtMostEvery(std::time::Duration::from_millis(ms.parse().unwrap())),
+        None => Lists::AtMostEvery(std::time::Duration::from_millis(250)),
+    };
+    let t = std::time::Instant::now();
+    let (web, page) = intake(n, tick, lists);
+    let all = t.elapsed();
+    let listed = web.notes();
+    assert_eq!(listed.iter().filter(|l| l.folder == "Bulk").count(), n);
+    eprintln!(
+        "{n} notes, {tick} a tick, lists {lists:?}: browser {:?} (receiving {:?}) over {} frames, {} lists, {} logins again; everything {all:?}",
+        page.took, page.receiving, page.frames, page.lists, page.logins
+    );
+}
+
+/// Two thousand notes from the desktop, one a tick, each tick's place
+/// sent after it: the browser reads the vault's every note a few times in
+/// all, as the page lists them, not once for each change of the vault (as
+/// it did, which made taking ten thousand in take minutes). Every note is
+/// listed in its folder.
+#[test]
+fn many_notes_come_in_with_the_vault_read_a_few_times() {
+    let n = 2000;
+    let (web, page) = intake(n, 1, Lists::AtMostEvery(std::time::Duration::from_secs(3600)));
+    assert!(page.frames >= 3 * n, "each note came in frames of its own: {}", page.frames);
+    assert!(web.vault_reads() <= 3, "the vault read {} times", web.vault_reads());
+    let listed = web.notes();
+    assert_eq!(listed.len(), n);
+    assert!(listed.iter().all(|l| l.folder == "Bulk" && l.title.starts_with("Bulk ")));
+    // And listed after each batch of frames, as often as the page might:
+    // once for each list, never more.
+    let (web, page) = intake(300, 1, Lists::EachBatch);
+    assert!(web.vault_reads() <= page.lists + 1, "{} reads for {} lists", web.vault_reads(), page.lists);
 }
