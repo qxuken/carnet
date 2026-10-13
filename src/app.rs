@@ -2318,7 +2318,7 @@ impl Carnet {
     /// anything but a folder into itself or one inside it — of what is
     /// chosen with it too, when it is one of several.
     fn may_take(&self, what: &Pick, to: &str) -> bool {
-        let into_itself = |p: &Pick| matches!(p, Pick::Folder(f) if to == f || to.starts_with(&format!("{f}/")));
+        let into_itself = |p: &Pick| matches!(p, Pick::Folder(f) if carnet_sync::vault::is_inside(to, f));
         if self.is_picked(what) {
             !self.picked.iter().any(into_itself)
         } else {
@@ -3872,7 +3872,7 @@ pub fn folder_name(folder: &str) -> &str {
 
 /// The folder `folder` is in: "" for one at the top level.
 pub fn parent_of(folder: &str) -> &str {
-    folder.rsplit_once('/').map_or("", |(p, _)| p)
+    carnet_sync::vault::parent_of(folder)
 }
 
 fn reveal_label() -> &'static str {

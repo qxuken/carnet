@@ -1149,3 +1149,165 @@ fn what_is_not_sent_is_known_across_a_reload_and_handed_over() {
     assert_eq!(desk.docs[&ks].text(), "# Plan\n\nA walk. Water.\n");
     assert!(web.unsent(&unsent).is_empty(), "the server keeps it now");
 }
+
+/// The desktop's notes, as its session has them: each made, placed, and
+/// sent.
+fn desk_notes(desk: &mut Desk, rng: &mut Seeded, folders: &[&str], notes: &[(&str, &str, &str)]) -> Vec<Key> {
+    let mut keys = Vec::new();
+    let v = desk.docs.entry(vault::ROOM.to_string()).or_insert_with(|| NoteDoc::new(7));
+    for f in folders {
+        v.set_folder(f, true);
+    }
+    for (folder, name, text) in notes {
+        let k = Key::random();
+        desk.docs[vault::ROOM].set_place(k, &Place { folder: folder.to_string(), name: name.to_string(), pinned: false, trashed: false });
+        desk.docs.insert(k.to_string(), NoteDoc::new(7));
+        desk.docs[&k.to_string()].record(text, Origin::Save);
+        keys.push(k);
+    }
+    let rooms: Vec<String> = std::iter::once(vault::ROOM.to_string()).chain(keys.iter().map(Key::to_string)).collect();
+    for room in rooms {
+        desk.session.saved(&room, &mut DeskDocs(&mut desk.docs), rng);
+    }
+    keys
+}
+
+/// Folders made, renamed, nested and deleted in the browser, notes moved
+/// into them and pinned: each reaches the desktop through the vault, as
+/// the desktop itself would have written it. A folder never goes into
+/// itself; one deleted with notes in it sends them to Deleted, as the
+/// desktop's trash takes a folder whole, and comes back with them.
+#[test]
+fn the_browser_makes_renames_nests_and_deletes_folders() {
+    let mut rng = Seeded(11);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let ks = desk_notes(
+        &mut desk,
+        &mut rng,
+        &["Work", "Work/Q4"],
+        &[("Work", "Plan", "# Plan\n\nsoon\n"), ("Work/Q4", "Q4", "# Q4\n\n![](../../attachments/p.png)\n"), ("", "Loose", "# Loose\n\nends\n")],
+    );
+    let (plan, q4, loose) = (ks[0], ks[1], ks[2]);
+    desk.docs[vault::ROOM].set_place(plan, &Place { folder: "Work".into(), name: "Plan".into(), pinned: true, trashed: false });
+    desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.folders(), ["Work", "Work/Q4"]);
+    let on_desk = |desk: &Desk| desk.docs[vault::ROOM].folders().into_iter().collect::<Vec<_>>();
+    let place = |desk: &Desk, k: Key| desk.docs[vault::ROOM].place(k).unwrap();
+
+    // Made, at the top and inside another; the pictures' name refused.
+    assert_eq!(web.make_folder("", "Ideas", &mut rng).as_deref(), Ok("Ideas"));
+    assert_eq!(web.make_folder("Ideas", "Later: maybe", &mut rng).as_deref(), Ok("Ideas/Later- maybe"));
+    assert_eq!(web.make_folder("Ideas", "attachments", &mut rng), Err("that name is kept for pictures; choose another".to_string()));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(on_desk(&desk), ["Ideas", "Ideas/Later- maybe", "Work", "Work/Q4"]);
+
+    // Renamed: its folder and notes with it, a pin kept.
+    assert_eq!(web.rename_folder("Work", "Job", &mut rng).as_deref(), Ok("Job"));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(on_desk(&desk), ["Ideas", "Ideas/Later- maybe", "Job", "Job/Q4"]);
+    assert_eq!((place(&desk, plan).folder.as_str(), place(&desk, plan).pinned), ("Job", true));
+    assert_eq!(place(&desk, q4).folder, "Job/Q4");
+    assert_eq!(desk.docs[&q4.to_string()].text(), "# Q4\n\n![](../../attachments/p.png)\n", "as deep as it was: its picture's path as it was");
+    assert_eq!(web.rename_folder("Job", "ideas", &mut rng), Err("there is a folder called \u{201c}ideas\u{201d} there already".to_string()));
+
+    // Never into itself, or a folder inside it: nothing sent.
+    let before = desk.docs[vault::ROOM].version();
+    assert_eq!(web.move_folder("Job", "Job/Q4", &mut rng), Err("a folder can't go inside itself".to_string()));
+    assert_eq!(web.move_folder("Job", "Job", &mut rng), Err("a folder can't go inside itself".to_string()));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(desk.docs[vault::ROOM].version(), before);
+    // What the "Move to" menu offers: neither, nor where it is.
+    assert_eq!(web.folder_targets("Job"), ["Ideas", "Ideas/Later- maybe"]);
+    assert_eq!(web.folder_targets("Job/Q4"), ["", "Ideas", "Ideas/Later- maybe"]);
+
+    // Nested, then to the top: its note's picture still shown from there.
+    assert_eq!(web.move_folder("Job/Q4", "Ideas", &mut rng).as_deref(), Ok("Ideas/Q4"));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(place(&desk, q4).folder, "Ideas/Q4");
+    assert_eq!(web.move_folder("Ideas/Q4", "", &mut rng).as_deref(), Ok("Q4"));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(on_desk(&desk), ["Ideas", "Ideas/Later- maybe", "Job", "Q4"]);
+    assert_eq!(place(&desk, q4).folder, "Q4");
+    assert_eq!(desk.docs[&q4.to_string()].text(), "# Q4\n\n![](../attachments/p.png)\n");
+    assert_eq!(web.picture_path("Q4", "../attachments/p.png", false).as_deref(), Some("attachments/p.png"));
+
+    // A note moved in, and back out, its picture's path following; pinned.
+    assert!(web.move_note(&q4.to_string(), "Ideas/Later- maybe", &mut rng));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(place(&desk, q4).folder, "Ideas/Later- maybe");
+    assert_eq!(desk.docs[&q4.to_string()].text(), "# Q4\n\n![](../../attachments/p.png)\n");
+    assert!(web.move_note(&loose.to_string(), "Ideas", &mut rng));
+    assert!(!web.move_note(&loose.to_string(), "Ideas", &mut rng), "there already");
+    assert!(!web.move_note(&loose.to_string(), "Nowhere", &mut rng), "no such folder");
+    assert!(web.set_pinned(&loose.to_string(), true, &mut rng));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(place(&desk, loose), Place { folder: "Ideas".into(), name: "Loose".into(), pinned: true, trashed: false });
+    assert_eq!(desk.docs[&loose.to_string()].text(), "# Loose\n\nends\n", "no picture: its words as they were");
+    // Its folder's own notes only, as the desktop counts them.
+    let in_ideas = web.notes().iter().filter(|n| !n.trashed && n.folder == "Ideas").count();
+    assert_eq!(in_ideas, 1);
+
+    // An empty folder is just deleted.
+    assert!(web.folder_is_bare("Q4") && !web.folder_is_bare("Ideas") && !web.folder_is_bare("Job"));
+    assert_eq!(web.delete_folder("Q4", &mut rng), (vec!["Q4".to_string()], vec![]));
+
+    // One with notes: to Deleted whole, its notes unpinned, each going
+    // back to the folder it was in; then put back.
+    let (folders, notes) = web.delete_folder("Ideas", &mut rng);
+    assert_eq!(folders, ["Ideas", "Ideas/Later- maybe"]);
+    let mut notes: Vec<Key> = notes.iter().map(|k| Key::parse(k).unwrap()).collect();
+    notes.sort();
+    let mut want = vec![q4, loose];
+    want.sort();
+    assert_eq!(notes, want);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(on_desk(&desk), ["Job"]);
+    assert_eq!(place(&desk, loose), Place { folder: "Ideas".into(), name: "Loose".into(), pinned: false, trashed: true });
+    assert!(place(&desk, q4).trashed);
+    let keys: Vec<String> = notes.iter().map(Key::to_string).collect();
+    assert!(web.put_back_folder(&folders, &keys, &mut rng));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(on_desk(&desk), ["Ideas", "Ideas/Later- maybe", "Job"]);
+    assert!(!place(&desk, loose).trashed && !place(&desk, q4).trashed);
+
+    // A note of a folder deleted, restored alone: its folder comes back.
+    web.delete_folder("Job", &mut rng);
+    assert!(web.set_trashed(&plan.to_string(), false, &mut rng));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(on_desk(&desk).contains(&"Job".to_string()));
+    assert_eq!(place(&desk, plan), Place { folder: "Job".into(), name: "Plan".into(), pinned: false, trashed: false });
+}
+
+/// The other way: what the desktop does to its folders, pins and notes'
+/// places shows in the browser's library as it comes.
+#[test]
+fn the_desktops_folders_and_pins_show_in_the_browser() {
+    let mut rng = Seeded(12);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let ks = desk_notes(&mut desk, &mut rng, &["Home"], &[("Home", "Shop", "# Shop\n\nmilk\n"), ("", "Plan", "# Plan\n\nwalk\n")]);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let listed = |web: &Notes, k: Key| web.notes().into_iter().find(|n| n.key == k.to_string()).unwrap();
+
+    // Renamed and nested there, as its files were.
+    let v = &desk.docs[vault::ROOM];
+    v.make_folder("", "Life").unwrap();
+    v.rename_folder("Home", "House").unwrap();
+    v.move_folder("House", "Life").unwrap();
+    v.move_note(ks[1], "Life").unwrap();
+    v.set_pinned(ks[1], true);
+    desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.folders(), ["Life", "Life/House"]);
+    assert_eq!(listed(&web, ks[0]).folder, "Life/House");
+    let plan = listed(&web, ks[1]);
+    assert_eq!((plan.folder.as_str(), plan.pinned), ("Life", true));
+    assert_eq!(web.folder_targets("Life/House"), [""]);
+
+    // Moved to the trash whole there: in Deleted here, the folder gone.
+    desk.docs[vault::ROOM].trash_folder("Life");
+    desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.folders().is_empty());
+    assert!(listed(&web, ks[0]).trashed && listed(&web, ks[1]).trashed);
+}

@@ -22,6 +22,12 @@ export type Note = {
   modified: number;
 };
 
+/// A folder made, renamed or moved: its path; or why it wasn't, in words.
+export type FolderDone = { to: string } | { why: string };
+
+/// A folder deleted: the folders that went, and the notes put in Deleted.
+export type FolderGone = { folders: string[]; notes: string[] };
+
 export type Device = { id: string; name: string | null; seen: number; you: boolean; online: boolean };
 
 /// A passkey of the account: `id` names its slot, `credential` is its id
@@ -966,6 +972,83 @@ class Sync {
     this.flush();
     this.refresh();
     this.save();
+    return true;
+  }
+
+  /// After a change to the vault made here: sent, drawn, kept.
+  private changed() {
+    this.flush();
+    this.refresh();
+    this.save();
+  }
+
+  /// A folder made, renamed or moved by `act` (the wasm's, which refuses
+  /// with the reason in words): its path, or why not.
+  private folderDone(act: (v: Vault) => string): FolderDone {
+    if (!this.vault) return { why: 'the notes aren’t open' };
+    try {
+      const to = act(this.vault);
+      this.changed();
+      return { to };
+    } catch (e) {
+      return { why: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /// A new folder named `name` inside `parent` ("" for the top), on every
+  /// device.
+  makeFolder(parent: string, name: string): FolderDone {
+    return this.folderDone((v) => v.make_folder(parent, name));
+  }
+
+  /// `folder` renamed, its folders and notes with it.
+  renameFolder(folder: string, name: string): FolderDone {
+    return this.folderDone((v) => v.rename_folder(folder, name));
+  }
+
+  /// `folder` into `parent` ("" for the top), its folders and notes with
+  /// it. Never into itself or a folder inside it (the vault's rule).
+  moveFolder(folder: string, parent: string): FolderDone {
+    return this.folderDone((v) => v.move_folder(folder, parent));
+  }
+
+  /// Where `folder` may go, as the vault's rule has it: "" (the top)
+  /// first, unless it's there.
+  folderTargets(folder: string): string[] {
+    return this.vault?.folder_targets(folder) ?? [];
+  }
+
+  /// Whether `folder` has nothing in it: deleted outright, where any other
+  /// goes to Deleted whole.
+  folderIsBare(folder: string): boolean {
+    return this.vault?.folder_is_bare(folder) ?? true;
+  }
+
+  /// `folder` and those inside it gone, their notes to Deleted: what went,
+  /// for `putBackFolder`.
+  deleteFolder(folder: string): FolderGone | null {
+    if (!this.vault) return null;
+    const gone = JSON.parse(this.vault.delete_folder(folder)) as FolderGone;
+    this.changed();
+    return gone;
+  }
+
+  /// A folder deleted, put back with its notes.
+  putBackFolder(gone: FolderGone) {
+    if (this.vault?.put_back_folder(gone.folders, gone.notes)) this.changed();
+  }
+
+  /// The note into `folder` ("" for the top), on every device.
+  moveNote(key: string, folder: string): boolean {
+    if (!this.vault?.move_note(key, folder)) return false;
+    this.changed();
+    return true;
+  }
+
+  /// The note pinned to the top of the list, or not, on every device.
+  setPinned(key: string, pinned: boolean): boolean {
+    if (!this.vault?.set_pinned(key, pinned)) return false;
+    this.changed();
     return true;
   }
 

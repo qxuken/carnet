@@ -4,6 +4,7 @@
 
 pub mod editor;
 pub mod notes;
+pub mod relink;
 pub mod zip;
 
 use carnet_core::{inline, page};
@@ -456,6 +457,59 @@ impl Vault {
     /// only it showed go too.
     pub fn delete_forever(&mut self, key: &str) -> bool {
         self.notes.delete_forever(key, &mut WebRandom)
+    }
+
+    /// A new folder named `name` inside `parent` ("" for the top), on
+    /// every device: its path. Refused (the pictures' folder's name) with
+    /// the reason, in words.
+    pub fn make_folder(&mut self, parent: &str, name: &str) -> Result<String, JsError> {
+        self.notes.make_folder(parent, name, &mut WebRandom).map_err(|e| JsError::new(&e))
+    }
+
+    /// `folder` renamed `name`, its folders and notes with it: its new path.
+    pub fn rename_folder(&mut self, folder: &str, name: &str) -> Result<String, JsError> {
+        self.notes.rename_folder(folder, name, &mut WebRandom).map_err(|e| JsError::new(&e))
+    }
+
+    /// `folder` into `parent` ("" for the top), its folders and notes with
+    /// it: its new path. Never into itself or a folder inside it.
+    pub fn move_folder(&mut self, folder: &str, parent: &str) -> Result<String, JsError> {
+        self.notes.move_folder(folder, parent, &mut WebRandom).map_err(|e| JsError::new(&e))
+    }
+
+    /// Where `folder` may go: "" (the top) first, unless it's there, then
+    /// each folder but itself, those inside it and its own.
+    pub fn folder_targets(&self, folder: &str) -> Vec<String> {
+        self.notes.folder_targets(folder)
+    }
+
+    /// Whether `folder` has nothing in it (deleted outright; any other
+    /// goes to Deleted whole).
+    pub fn folder_is_bare(&self, folder: &str) -> bool {
+        self.notes.folder_is_bare(folder)
+    }
+
+    /// `folder` and those inside it gone, their notes to Deleted: what
+    /// went, as JSON, `{folders, notes}`, for [`Vault::put_back_folder`].
+    pub fn delete_folder(&mut self, folder: &str) -> String {
+        let (folders, notes) = self.notes.delete_folder(folder, &mut WebRandom);
+        let list = |v: &[String]| v.iter().map(|s| json(s)).collect::<Vec<_>>().join(",");
+        format!(r#"{{"folders":[{}],"notes":[{}]}}"#, list(&folders), list(&notes))
+    }
+
+    /// A folder deleted, put back with its notes.
+    pub fn put_back_folder(&mut self, folders: Vec<String>, notes: Vec<String>) -> bool {
+        self.notes.put_back_folder(&folders, &notes, &mut WebRandom)
+    }
+
+    /// The note into `folder` ("" for the top), its pictures still shown.
+    pub fn move_note(&mut self, key: &str, folder: &str) -> bool {
+        self.notes.move_note(key, folder, &mut WebRandom)
+    }
+
+    /// The note pinned to the top of the list, or not.
+    pub fn set_pinned(&mut self, key: &str, pinned: bool) -> bool {
+        self.notes.set_pinned(key, pinned, &mut WebRandom)
     }
 
     /// Where a picture is, as a path from the notes folder, for a note in

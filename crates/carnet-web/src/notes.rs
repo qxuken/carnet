@@ -856,7 +856,9 @@ impl Notes {
         true
     }
 
-    /// The note moved to Deleted, or put back: on every device.
+    /// The note moved to Deleted, or put back: on every device. Put back
+    /// into a folder gone meanwhile (moved to Deleted with it), the folder
+    /// comes back too, as on the desktop.
     pub fn set_trashed(&mut self, key: &str, trashed: bool, rng: &mut impl Random) -> bool {
         let Some(k) = Key::parse(key) else { return false };
         let vault = self.rooms.doc(vault::ROOM);
@@ -865,8 +867,105 @@ impl Notes {
         if !vault.set_place(k, &p) {
             return false;
         }
+        if !trashed && !p.folder.is_empty() && !vault.folders().contains(&p.folder) {
+            let (parent, name) = (vault::parent_of(&p.folder), vault::leaf_of(&p.folder));
+            let _ = vault.make_folder(parent, name);
+        }
         self.session.saved(vault::ROOM, &mut self.rooms, rng);
         true
+    }
+
+    /// The vault, changed by `change` as one, and sent if it did change.
+    fn in_vault<T>(&mut self, rng: &mut impl Random, change: impl FnOnce(&NoteDoc) -> T) -> T {
+        let vault = self.rooms.doc(vault::ROOM);
+        let before = vault.version();
+        let out = change(vault);
+        if vault.version() != before {
+            self.session.saved(vault::ROOM, &mut self.rooms, rng);
+        }
+        out
+    }
+
+    /// A new folder named `name` inside `parent` ("" for the top), on
+    /// every device: its path, or why not, in words.
+    pub fn make_folder(&mut self, parent: &str, name: &str, rng: &mut impl Random) -> Result<String, String> {
+        self.in_vault(rng, |v| v.make_folder(parent, name)).map_err(|e| e.to_string())
+    }
+
+    /// `folder` renamed `name`, its folders and notes with it: its new
+    /// path, or why not.
+    pub fn rename_folder(&mut self, folder: &str, name: &str, rng: &mut impl Random) -> Result<String, String> {
+        let r = self.in_vault(rng, |v| v.rename_folder(folder, name)).map_err(|e| e.to_string())?;
+        self.relink(&r.notes, rng);
+        Ok(r.to)
+    }
+
+    /// `folder` into `parent` ("" for the top), its folders and notes with
+    /// it; never into itself or a folder inside it: its new path, or why
+    /// not.
+    pub fn move_folder(&mut self, folder: &str, parent: &str, rng: &mut impl Random) -> Result<String, String> {
+        let r = self.in_vault(rng, |v| v.move_folder(folder, parent)).map_err(|e| e.to_string())?;
+        self.relink(&r.notes, rng);
+        Ok(r.to)
+    }
+
+    /// Where `folder` may go: the top ("") unless it's there, then every
+    /// folder but itself, those inside it, and the one it's in
+    /// ([`vault::may_go`]).
+    pub fn folder_targets(&self, folder: &str) -> Vec<String> {
+        std::iter::once(String::new()).chain(self.folders()).filter(|to| vault::may_go(folder, to)).collect()
+    }
+
+    /// Whether `folder` has nothing in it: deleted outright, where any
+    /// other goes to Deleted whole.
+    pub fn folder_is_bare(&self, folder: &str) -> bool {
+        self.rooms.docs.get(vault::ROOM).is_none_or(|v| v.folder_is_bare(folder))
+    }
+
+    /// `folder` gone, and the folders inside it; their notes to Deleted,
+    /// as the desktop's trash takes a folder whole. What went, for
+    /// [`Notes::put_back_folder`]: the folders, and the notes' keys.
+    pub fn delete_folder(&mut self, folder: &str, rng: &mut impl Random) -> (Vec<String>, Vec<String>) {
+        let gone = self.in_vault(rng, |v| v.trash_folder(folder));
+        (gone.folders, gone.notes.iter().map(Key::to_string).collect())
+    }
+
+    /// A folder deleted put back: its folders, and its notes out of
+    /// Deleted.
+    pub fn put_back_folder(&mut self, folders: &[String], notes: &[String], rng: &mut impl Random) -> bool {
+        let gone = vault::TrashedFolder { folders: folders.to_vec(), notes: notes.iter().filter_map(|k| Key::parse(k)).collect() };
+        self.in_vault(rng, |v| v.put_back_folder(&gone))
+    }
+
+    /// The note into `folder` ("" for the top), its pictures' paths
+    /// rewritten from there ([`crate::relink`]). False if it's in Deleted,
+    /// there already, or the folder is gone.
+    pub fn move_note(&mut self, key: &str, folder: &str, rng: &mut impl Random) -> bool {
+        let Some(k) = Key::parse(key) else { return false };
+        let Some(from) = self.in_vault(rng, |v| v.move_note(k, folder)) else { return false };
+        self.relink(&[(k, from)], rng);
+        true
+    }
+
+    /// The note pinned to the top of its list, or not, on every device.
+    pub fn set_pinned(&mut self, key: &str, pinned: bool, rng: &mut impl Random) -> bool {
+        let Some(k) = Key::parse(key) else { return false };
+        self.in_vault(rng, |v| v.set_pinned(k, pinned))
+    }
+
+    /// Notes moved from the folders given, now in the vault's: each one's
+    /// pictures' paths written from where it is, sent after its place, so
+    /// the other devices learn where it goes before its words come.
+    fn relink(&mut self, moved: &[(Key, String)], rng: &mut impl Random) {
+        let files = self.picture_files();
+        for (key, from) in moved {
+            let room = key.to_string();
+            let (Some(to), Some(d)) = (self.place(&room).map(|p| p.folder), self.rooms.docs.get(&room)) else { continue };
+            if let Some(text) = crate::relink::relinked(&d.text(), from, &to, &files) {
+                d.record(&text, Origin::Save);
+                self.session.saved(&room, &mut self.rooms, rng);
+            }
+        }
     }
 
     /// A name for a new picture in the attachments folder (`stem.ext`,

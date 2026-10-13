@@ -8,6 +8,8 @@
   import { pictures } from '../lib/pictures';
   import { tints } from '../lib/colors';
   import { dropLetters } from '../lib/initial';
+  import Menu from '../lib/Menu.svelte';
+  import { moveItems, pin } from '../lib/noteMenu';
 
   type Props = {
     key: string;
@@ -86,6 +88,9 @@
     deleted();
   }
 
+  // "Move to": where it may go, in a menu at its button.
+  let moveAt = $state<HTMLElement | null>(null);
+
   function click(e: MouseEvent) {
     const t = e.target as HTMLElement;
     if (t instanceof HTMLInputElement && t.dataset.task !== undefined) {
@@ -104,11 +109,18 @@
     {#if editing}
       <button class="done" onclick={done}><Icon name="check" size={17} /> Done</button>
     {:else if note && !note.trashed}
+      <button class="tool" class:on={note.pinned} onclick={() => pin(note)} aria-pressed={note.pinned} aria-label={note.pinned ? 'Unpin' : 'Pin to top'} title={note.pinned ? 'Unpin' : 'Pin to top'}><Icon name="star" size={19} /></button>
+      {#if moveItems(note).length}
+        <button class="tool" onclick={(e) => (moveAt = moveAt ? null : e.currentTarget)} aria-haspopup="menu" aria-expanded={moveAt !== null} aria-label="Move to a folder" title="Move to a folder"><Icon name="folder" size={19} /></button>
+      {/if}
       <button class="tool" onclick={remove} aria-label="Move to Deleted" title="Move to Deleted"><Icon name="trash" size={19} /></button>
       <button class="tool" onclick={history} aria-label="History" title="History"><Icon name="clock" size={19} /></button>
       <button class="tool" onclick={edit} aria-label="Edit" title="Edit"><Icon name="edit" size={19} /></button>
     {/if}
   </header>
+  {#if moveAt && note}
+    <Menu anchor={moveAt} heading label="Move “{note.title}” to" items={moveItems(note)} close={() => (moveAt = null)} />
+  {/if}
   {#if note?.trashed && !editing}
     <div class="deleted" role="region" aria-label="Deleted note">
       {#if sure}
@@ -147,6 +159,9 @@
   .meta { color: var(--muted); font-size: 13.5px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .tool { display: inline-flex; padding: 6px; border: 0; background: none; color: var(--muted); border-radius: var(--radius); cursor: pointer; }
   .tool:hover { background: var(--hover); color: var(--ink); }
+  /* Pinned: the star filled, in the accent, as the desktop draws it. */
+  .tool.on { color: var(--accent-ink); }
+  .tool.on :global(svg path) { fill: currentColor; }
   .done { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--primary); color: var(--on-accent); font-weight: 600; cursor: pointer; }
   .error { color: var(--danger); }
   .deleted { max-width: 648px; margin: 4px auto 0; padding: 12px 20px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; border-bottom: 1px solid var(--line, var(--hover)); }
