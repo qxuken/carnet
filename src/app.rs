@@ -2113,7 +2113,10 @@ impl Carnet {
         // The open note as it was before another device's change reloaded
         // it: what the caret is carried through.
         let mut before = std::mem::take(&mut self.store.before_remote);
-        if remote.is_empty() && !moved {
+        // The account's notes all here (not just the first of them come):
+        // the empty stand-in goes, and the top of the list opens.
+        let here = self.sync_stand_in.is_some() && self.store.notes.len() > 1 && self.sync.caught_up();
+        if remote.is_empty() && !moved && !here {
             return;
         }
         for r in &remote {
@@ -2146,17 +2149,15 @@ impl Carnet {
         if remote.iter().any(|r| matches!(r, store::Remote::Layout)) {
             self.refresh_trash();
         }
-        // The account's notes are here: the empty stand-in goes, if
-        // nobody wrote in it.
-        if !remote.is_empty()
+        // The stand-in goes, if nobody wrote in it; written in, it's a note
+        // like the rest.
+        if here
             && let Some(id) = self.sync_stand_in.take()
             && let Some(i) = self.store.notes.iter().position(|n| n.id == id)
         {
             let n = &self.store.notes[i];
-            if self.store.notes.len() > 1 && n.is_blank() && n.path.is_none() {
+            if n.is_blank() && n.path.is_none() {
                 self.store.notes.remove(i);
-            } else {
-                self.sync_stand_in = Some(id);
             }
         }
         if self.store.notes.is_empty() {

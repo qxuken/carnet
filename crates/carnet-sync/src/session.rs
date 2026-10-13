@@ -325,6 +325,10 @@ pub struct Session {
     /// What the server holds of each room, by peer, as far as this
     /// device knows: told on joining, and grown by what is sent.
     held: HashMap<String, HashMap<u64, u64>>,
+    /// Rooms joined whose words the server has and this device hasn't
+    /// all of yet, with what the server held at the join: they come one
+    /// room after another, well after every join is answered.
+    coming: HashMap<String, Vec<(u64, u64)>>,
     /// Batches sent and not yet acknowledged, with their rooms.
     unacked: HashMap<BatchId, String>,
     /// Rooms with changes made here the server isn't known to keep yet:
@@ -459,6 +463,7 @@ impl Session {
             cursor,
             joined: HashMap::new(),
             held: HashMap::new(),
+            coming: HashMap::new(),
             unacked: HashMap::new(),
             waiting: BTreeSet::new(),
             kept: HashMap::new(),
@@ -592,6 +597,7 @@ impl Session {
     pub fn remove_room(&mut self, room: &str) {
         self.joined.remove(room);
         self.held.remove(room);
+        self.coming.remove(room);
         self.waiting.remove(room);
         self.kept.remove(room);
         if self.removing.insert(room.to_string()) && self.state == State::Ready {
@@ -1011,6 +1017,13 @@ impl Session {
         self.joined.get(room) == Some(&Join::Joined)
     }
 
+    /// Logged in, every room joined, and all the server held of each at
+    /// the join here: the account's notes have come (what's sent from
+    /// here may not be kept yet).
+    pub fn has_caught_up(&self) -> bool {
+        self.state == State::Ready && self.coming.is_empty() && self.joined.values().all(|j| *j == Join::Joined)
+    }
+
     /// Logged in, every room joined, everything sent acknowledged.
     pub fn is_idle(&self) -> bool {
         self.state == State::Ready && self.unacked.is_empty() && self.joined.values().all(|j| *j == Join::Joined)
@@ -1051,6 +1064,7 @@ impl Session {
         }
         self.joined.clear();
         self.held.clear();
+        self.coming.clear();
         self.unacked.clear();
         self.incoming.clear();
         // Asked or wanted, and not done: failed, to be tried again. (A put
@@ -1345,6 +1359,7 @@ impl Session {
                 self.removing.remove(&room);
                 self.joined.remove(&room);
                 self.held.remove(&room);
+                self.coming.remove(&room);
                 self.waiting.remove(&room);
                 self.kept.remove(&room);
                 self.events.push(Event::RoomRemoved(room));
@@ -1391,6 +1406,13 @@ impl Session {
             ProtocolMessage::JoinResponseOk { room_id, .. } if !self.joined.contains_key(&room_id) => {}
             ProtocolMessage::JoinResponseOk { room_id, version, permission, .. } => {
                 let held = wire::decode_vv(&version).unwrap_or_default();
+                // What it holds and this device hasn't: on its way.
+                let have: HashMap<u64, u64> = docs.doc(&room_id).version_vector().into_iter().collect();
+                if covers(&have, &held) {
+                    self.coming.remove(&room_id);
+                } else {
+                    self.coming.insert(room_id.clone(), held.clone());
+                }
                 // A new room the server holds nothing of came empty; one it
                 // holds something of is real once that's read here.
                 if held.is_empty() && self.fresh.remove(&room_id) {
@@ -1424,6 +1446,7 @@ impl Session {
             }
             ProtocolMessage::JoinError { room_id, .. } => {
                 self.joined.remove(&room_id);
+                self.coming.remove(&room_id);
                 if self.fresh.remove(&room_id) {
                     self.fresh_empty += 1;
                     self.more_or_not();
@@ -1483,6 +1506,14 @@ impl Session {
                     }
                     self.more_or_not();
                 }
+                // All it held at the join here now, or none of this taken
+                // (more of it wouldn't make it whole): come.
+                if let Some(vv) = self.coming.get(&room_id) {
+                    let have: HashMap<u64, u64> = docs.doc(&room_id).version_vector().into_iter().collect();
+                    if !took || covers(&have, vv) {
+                        self.coming.remove(&room_id);
+                    }
+                }
                 if took {
                     self.moves += 1;
                     self.settle(&room_id, docs);
@@ -1522,6 +1553,7 @@ impl Session {
             }
             ProtocolMessage::RoomError { room_id, .. } => {
                 self.joined.remove(&room_id);
+                self.coming.remove(&room_id);
                 self.join(&room_id, docs);
             }
             // An update in fragments (a big snapshot): put back together,

@@ -5174,7 +5174,7 @@ fn settings_sync_draws_a_servers_impossible_times() {
     a.on_plain(Msg::SyncStart);
     until("online", &mut a, &mut d, &|x| x.sync.status == crate::sync::Status::Online);
     a.settings_open = true;
-    until("listed", &mut a, &mut d, &|x| x.sync.devices.is_some() && x.sync.usage.is_some() && x.sync.invites.is_some());
+    until("listed", &mut a, &mut d, &|x| x.sync.devices.is_some() && x.sync.usage_settled() && x.sync.invites.is_some());
     let far = u64::MAX;
     let mut devices = a.sync.devices.clone().unwrap();
     devices.push(DeviceInfo { id: vec![9; 16], name: Some("Old phone".into()), seen: far, you: false, online: false });
@@ -5717,8 +5717,10 @@ fn two_apps_sync_through_a_server() {
     // laptop (asked twice): the laptop finds itself out and forgets its
     // keys; the tablet takes the new key and goes on syncing.
     a.settings_open = true;
+    // What the account keeps is asked with them: answered too, or the
+    // answer would take the place of the plan put in below.
     until("A lists three devices", &mut [(&mut a, &mut da), (&mut b, &mut db), (&mut c, &mut dc)], &|x| {
-        x[0].0.sync.devices.as_ref().is_some_and(|l| l.len() == 3 && l.iter().all(|d| d.name.is_some()))
+        x[0].0.sync.devices.as_ref().is_some_and(|l| l.len() == 3 && l.iter().all(|d| d.name.is_some())) && x[0].0.sync.usage_settled()
     });
     let list = a.sync.devices.clone().unwrap();
     let mut names: Vec<(String, bool)> = list.iter().map(|d| (d.name.clone().unwrap(), d.you)).collect();
