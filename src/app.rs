@@ -750,9 +750,6 @@ pub struct Carnet {
     /// body: `None` at its end (← from the note's start), a column for ↑
     /// from the note's first line, under the caret it came from.
     title_to: Option<Option<f32>>,
-    /// The open note's title changed on another device: the title field
-    /// takes it on the next frame (kui's field keeps its own words).
-    title_from_remote: bool,
     /// The focused field's caret as the last frame left it: its key, its
     /// text's version and its two ends (see `settle_field_caret`).
     field_caret: Option<FieldCaret>,
@@ -1045,7 +1042,6 @@ impl Carnet {
             zen: false,
             deleted: false,
             title_to: None,
-            title_from_remote: false,
             field_caret: None,
             window_cmd: None,
             search_active: false,
@@ -2082,10 +2078,6 @@ impl Carnet {
                         && !self.reading()
                     {
                         self.caret = carnet_core::compare::carry(&old, &self.store.notes[i].doc, self.caret);
-                    }
-                    // Its title too, unless it's being written here.
-                    if !self.title_focused {
-                        self.title_from_remote = true;
                     }
                     self.caret = page::fix(self.doc(), self.caret);
                     if matches!(r, store::Remote::Merged(_)) {

@@ -8513,3 +8513,34 @@ fn a_picture_straight_after_the_title_is_typed_over() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// The open note's `# ` line changed from outside: the page draws the new
+/// title, as the list does, and still after another note and back.
+#[test]
+fn a_title_changed_from_outside_is_drawn() {
+    let (mut app, mut d, dir) = library("outside-title", &[("Plans", "words"), ("Other", "more")]);
+    let at = |app: &Carnet, t: &str| app.store.notes.iter().position(|n| n.title == t);
+    app.open(at(&app, "Plans").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    let drawn_title = |app: &Carnet, d: &Drive| app_field(app, Field::Title).and_then(|k| d.core.edit_text(k));
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Plans"));
+    let id = app.store.notes[app.current].id;
+    std::fs::write(dir.join("Plans.md"), "# Plans for June\n\nwords, and more\n").unwrap();
+    let t0 = Instant::now();
+    while app.store.notes[app.current].title != "Plans for June" && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+        d.frame(&mut app);
+    }
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.store.notes[app.current].id, id, "the same note open");
+    assert!(app.store.notes[app.current].markdown().contains("words, and more"), "the body reloaded");
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Plans for June"), "and the title drawn");
+    // Another note, and back: still the new title.
+    app.open(at(&app, "Other").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Other"));
+    app.open(at(&app, "Plans for June").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Plans for June"));
+    let _ = std::fs::remove_dir_all(dir);
+}
