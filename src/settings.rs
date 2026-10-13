@@ -157,6 +157,9 @@ pub struct Settings {
     /// The line being written is held near the middle of the window, the
     /// page scrolling under it, as on a typewriter.
     pub typewriter: bool,
+    /// How a link in a note opens while it's written in: ⌘-click (Ctrl
+    /// elsewhere), a click, or a double-click.
+    pub link_open: carnet_core::page::LinkOpen,
     /// The library shows beside the page; hidden, the page has the
     /// window.
     pub sidebar: bool,
@@ -190,6 +193,7 @@ impl Default for Settings {
             fade_tools: true,
             focus: false,
             typewriter: false,
+            link_open: carnet_core::page::LinkOpen::ModClick,
             sidebar: true,
             colors: Vec::new(),
             dir: None,
@@ -273,6 +277,7 @@ impl Settings {
                 "toolbar" => s.fade_tools = v != "stays",
                 "focus" => s.focus = v == "on",
                 "typewriter" => s.typewriter = v == "on",
+                "links" => s.link_open = carnet_core::page::LinkOpen::from_key(v).unwrap_or_default(),
                 "sidebar" => s.sidebar = v != "hidden",
                 "colors" => {
                     s.colors = v.split(',').filter_map(carnet_core::inline::parse_color).take(10).collect();
@@ -302,7 +307,7 @@ impl Settings {
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nlinks = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
@@ -318,6 +323,7 @@ impl Settings {
             if self.fade_tools { "fades" } else { "stays" },
             if self.focus { "on" } else { "off" },
             if self.typewriter { "on" } else { "off" },
+            self.link_open.key(),
             if self.sidebar { "shown" } else { "hidden" },
             self.colors.iter().map(|&c| carnet_core::inline::css_color(c)).collect::<Vec<_>>().join(","),
         )
@@ -402,6 +408,7 @@ mod tests {
             fade_tools: false,
             focus: true,
             typewriter: true,
+            link_open: carnet_core::page::LinkOpen::DoubleClick,
             sidebar: false,
             colors: vec![0xc0504dff, 0x12345680],
             dir: Some(PathBuf::from("D:\\My notes")),
@@ -421,6 +428,9 @@ mod tests {
         assert!(!old.to_text().contains("initial ="));
         assert_eq!(Settings::parse("initial_lines = 9\n").initial_lines, 4);
         assert_eq!(Settings::parse("initial_lines = 1\n").initial_lines, 2);
+        // How links open: by its word; one not known, ⌘-click.
+        assert_eq!(Settings::parse("links = click\n").link_open, carnet_core::page::LinkOpen::Click);
+        assert_eq!(Settings::parse("links = triple\n").link_open, carnet_core::page::LinkOpen::ModClick);
     }
 
     #[test]

@@ -35,14 +35,24 @@ const on = vi.hoisted(() => {
     }
   }
   const g = globalThis as unknown as Record<string, unknown>;
-  g.document = { createElement: () => new El() };
+  const made: El[] = [];
+  g.document = {
+    createElement: () => {
+      const el = new El();
+      made.push(el);
+      return el;
+    },
+  };
   g.addEventListener = (name: string, f: () => void) => heard.set(name, [...(heard.get(name) ?? []), f]);
-  return { El, said: (name: string) => (heard.get(name) ?? []).forEach((f) => f()) };
+  return { El, made, said: (name: string) => (heard.get(name) ?? []).forEach((f) => f()), sync: { pending: false as boolean, vaultPending: (): boolean => false } };
 });
 
-vi.mock('./sync.svelte', () => ({ NOTES_CHANGED: 'notes-changed', NOT_ON_SERVER: 'not on the server', sync: {} }));
+vi.mock('./sync.svelte', () => {
+  on.sync.vaultPending = () => on.sync.pending;
+  return { NOTES_CHANGED: 'notes-changed', NOT_ON_SERVER: 'not on the server', sync: on.sync };
+});
 
-import { show } from './pictures';
+import { DOWNLOADING, SAY_COMING, show } from './pictures';
 
 /// A picture on the page, not drawn yet; and asks for it, each answered
 /// when the test says.
@@ -86,5 +96,66 @@ describe('a picture not yet on the server', () => {
     await tick();
     expect(p.img.src).toBe('blob:b');
     expect(p.img.isConnected).toBe(true);
+  });
+});
+
+/// What the box in a picture's place says now ('' while it's a quiet
+/// box), the picture shown at `p` asked last.
+function says(from: number) {
+  const place = on.made.slice(from).find((e) => e.className === 'picture-card');
+  return place?.children[1]?.textContent ?? '';
+}
+
+describe('a picture on its way', () => {
+  // The finding: on a device taking in the notes by sync, a note's picture
+  // said "Picture not found" until it came.
+  it('says it is downloading while it comes, then shows', async () => {
+    vi.useFakeTimers();
+    const p = picture();
+    const from = on.made.length;
+    show(p.el, 'attachments/c.png', p.ask);
+    expect(says(from)).toBe('');
+    vi.advanceTimersByTime(SAY_COMING + 1);
+    expect(says(from)).toBe(DOWNLOADING);
+    p.answers[0].ok('blob:c');
+    await vi.runAllTimersAsync();
+    expect(p.img.src).toBe('blob:c');
+    expect(p.img.isConnected).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('says nothing when it comes at once', async () => {
+    vi.useFakeTimers();
+    const p = picture();
+    const from = on.made.length;
+    show(p.el, 'attachments/d.png', p.ask);
+    p.answers[0].ok('blob:d');
+    await vi.runAllTimersAsync();
+    expect(says(from)).toBe('');
+    expect(p.img.isConnected).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('is downloading until the account’s vault has come, and not found only when the server hasn’t it', async () => {
+    on.sync.pending = true;
+    let p = picture();
+    let from = on.made.length;
+    show(p.el, 'attachments/e.png', p.ask);
+    p.answers[0].no(new Error('not in the vault'));
+    await tick();
+    expect(says(from)).toBe(DOWNLOADING);
+    on.sync.pending = false;
+    p = picture();
+    from = on.made.length;
+    show(p.el, 'attachments/f.png', p.ask);
+    p.answers[0].no(new Error('not in the vault'));
+    await tick();
+    expect(says(from)).toBe('This picture hasn’t reached the server yet');
+    p = picture();
+    from = on.made.length;
+    show(p.el, 'attachments/g.png', p.ask);
+    p.answers[0].no(new Error('not on the server'));
+    await tick();
+    expect(says(from)).toBe('Picture not found');
   });
 });

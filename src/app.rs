@@ -154,6 +154,8 @@ pub enum Msg {
     SetFocus { to: u64 },
     /// The caret's line: 0 wherever it is, 1 held near the middle.
     SetTypewriter { to: u64 },
+    /// How links open: `page::LinkOpen::ALL`'s index.
+    SetLinkOpen { to: u64 },
     /// Shows the library beside the page, or hides it.
     ToggleSidebar,
     /// The library shows the Deleted folder: what is in the trash.
@@ -694,6 +696,15 @@ pub struct Carnet {
     /// Each picture's width as last drawn, by block id, and the widths it
     /// would have with none given and at the most.
     pic_w: HashMap<u64, (f32, f32, f32)>,
+    /// Each picture in a row at an edge as last drawn, by block id: the
+    /// row's (its first picture's id), its height, and its shape (height
+    /// over width). A resize snaps to the heights beside it.
+    pic_rows: HashMap<u64, (u64, f32, f32)>,
+    /// While a row of floated pictures is drawn: its first picture's id.
+    float_row: u64,
+    /// A press on a link that opens once let go where it was pressed
+    /// (links opening with a click).
+    link_press: Option<LinkPress>,
     /// While a row of floated pictures is drawn: how many share it, and
     /// the row's width.
     float_count: usize,
@@ -919,6 +930,16 @@ struct Resize {
     w: f32,
     /// A handle on the left edge: going left widens.
     left: bool,
+    /// The height of a picture beside it that it snapped to.
+    snap: Option<f32>,
+}
+
+/// A press on a link that opens it once let go where it was pressed: the
+/// address, where it was pressed, and the caret before, put back.
+struct LinkPress {
+    url: String,
+    at: Vec2,
+    caret: Caret,
 }
 
 /// A drag region of the custom titlebar, except while a menu is up.
@@ -1032,6 +1053,9 @@ impl Carnet {
             scroll_key: None,
             resizing: None,
             pic_w: HashMap::new(),
+            pic_rows: HashMap::new(),
+            float_row: 0,
+            link_press: None,
             float_count: 0,
             float_room: 0.0,
             float_ends: HashMap::new(),
@@ -3426,6 +3450,7 @@ impl Carnet {
             | Msg::SetToolbar { .. }
             | Msg::SetFocus { .. }
             | Msg::SetTypewriter { .. }
+            | Msg::SetLinkOpen { .. }
             | Msg::ToggleSidebar
             | Msg::SetSize { .. }
             | Msg::SetDivider { .. }

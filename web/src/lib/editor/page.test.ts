@@ -1,6 +1,6 @@
 import { EditorSelection, EditorState, type TransactionSpec } from '@codemirror/state';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { initSync, PageEditor } from '../../wasm/carnet_web.js';
+import { initSync, PageEditor, snapped_width } from '../../wasm/carnet_web.js';
 import { looks, pageEditor, roomFor } from './page';
 
 // No window here: what pictures.ts listens for, never sent.
@@ -133,5 +133,16 @@ describe('typed with a picture chosen', () => {
     compose(end, end + 1, 'か');
     compose(end + 1, end + 1, 'ん');
     expect(e.pe.markdown()).toBe('# T\n\nAbove.**かん**\n\nBelow.\n');
+  });
+});
+
+describe('a picture resized beside others', () => {
+  // As the desktop: within a few px of a neighbour's height it takes it,
+  // the width following its shape; further off, as dragged.
+  it('snaps to the height of one in its row', () => {
+    expect([...snapped_width(204, 0.5, Float32Array.of(100, 150), 600)]).toEqual([200, 100]);
+    expect([...snapped_width(296, 0.5, Float32Array.of(100, 150), 600)]).toEqual([300, 150]);
+    expect([...snapped_width(220, 0.5, Float32Array.of(100, 150), 600)]).toEqual([220, 0]);
+    expect([...snapped_width(200, 0.5, new Float32Array(), 600)]).toEqual([200, 0]);
   });
 });

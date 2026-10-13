@@ -16,7 +16,7 @@
 
 import { EditorSelection, type EditorState } from '@codemirror/state';
 import { EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
-import { dragged_width, picture_width, resized_width, type PageEditor } from '../../wasm/carnet_web.js';
+import { dragged_width, picture_width, resized_width, snapped_width, type PageEditor } from '../../wasm/carnet_web.js';
 import { cellAt, offsetAt, pictureAt, type CellAt } from './table';
 
 /// The picture the caret is on: its line (from 0), where it sits (0 its
@@ -107,7 +107,16 @@ export const textWidth = (view: EditorView) => view.contentDOM.clientWidth;
 
 type Run = (f: () => boolean) => (v: EditorView) => boolean;
 
-type Drag = { left: boolean; x0: number; w0: number; w: number; max: number; text: number; img: HTMLImageElement; grip: HTMLElement };
+/// A resize under way. `beside`: the pictures in its row at an edge,
+/// whose heights it snaps to (`carnet_core::page::snapped_width`).
+type Drag = { left: boolean; x0: number; w0: number; w: number; max: number; text: number; img: HTMLImageElement; grip: HTMLElement; beside: HTMLImageElement[] };
+
+/// The pictures beside `img` in its row at an edge, drawn.
+function besideIn(img: HTMLImageElement): HTMLImageElement[] {
+  const row = img.closest('.cm-pics.cm-float');
+  if (!row) return [];
+  return [...row.querySelectorAll<HTMLImageElement>('img.cm-picture')].filter((o) => o !== img && o.naturalWidth > 0);
+}
 
 export function pictureTools(pe: PageEditor, run: Run) {
   return ViewPlugin.fromClass(
@@ -117,6 +126,8 @@ export function pictureTools(pe: PageEditor, run: Run) {
       box: HTMLElement;
       size: HTMLElement;
       corner: HTMLElement;
+      /// The line under the pictures a resize has lined up with.
+      guide: HTMLElement;
       img: HTMLImageElement | null = null;
       drag: Drag | null = null;
 
@@ -149,6 +160,11 @@ export function pictureTools(pe: PageEditor, run: Run) {
         this.corner = grip('cm-grip-corner', () => this.box.classList.contains('right'));
         this.box.append(ring, grip('cm-grip-left', () => true), grip('cm-grip-right', () => false), this.corner, this.size);
         view.dom.append(this.box);
+        this.guide = document.createElement('div');
+        this.guide.className = 'cm-snap-guide';
+        this.guide.hidden = true;
+        this.guide.setAttribute('aria-hidden', 'true');
+        view.dom.append(this.guide);
         view.contentDOM.addEventListener('mousedown', this.press, true);
         view.contentDOM.addEventListener('dragstart', this.noDrag, true);
         this.place();
@@ -162,6 +178,7 @@ export function pictureTools(pe: PageEditor, run: Run) {
         this.view.contentDOM.removeEventListener('mousedown', this.press, true);
         this.view.contentDOM.removeEventListener('dragstart', this.noDrag, true);
         this.box.remove();
+        this.guide.remove();
       }
 
       /// A press on a picture (a mouse's, or a tap's): it selected whole.
@@ -239,7 +256,7 @@ export function pictureTools(pe: PageEditor, run: Run) {
         const row = img.closest('.cm-pics');
         const n = row?.querySelectorAll('.cm-picture-box').length || 1;
         const max = row?.classList.contains('cm-float') ? Math.floor((text - 16 * (n - 1)) / n) : text;
-        this.drag = { left, x0: e.clientX, w0, w: w0, max, text, img, grip };
+        this.drag = { left, x0: e.clientX, w0, w: w0, max, text, img, grip, beside: besideIn(img) };
         // Past what a picture at an edge has with no width given.
         img.style.maxWidth = `${max}px`;
         this.box.classList.add('dragging');
@@ -250,10 +267,29 @@ export function pictureTools(pe: PageEditor, run: Run) {
         const d = this.drag;
         if (!d) return;
         const dx = d.left ? d.x0 - e.clientX : e.clientX - d.x0;
-        d.w = dragged_width(d.w0, dx, d.max);
+        const heights = Float32Array.from(d.beside, (o) => o.getBoundingClientRect().height);
+        // Near the height of a picture beside it, it takes that height:
+        // the row lines up.
+        const [w, snap] = snapped_width(dragged_width(d.w0, dx, d.max), d.img.naturalHeight / d.img.naturalWidth, heights, d.max);
+        d.w = w;
         d.img.style.width = `${d.w}px`;
         this.over(d.img);
         this.show(d.w);
+        this.lineUp(d, snap);
+      }
+
+      /// A thin line under the pictures lined up at height `snap` (none
+      /// when 0), across the gaps between them.
+      lineUp(d: Drag, snap: number) {
+        const lined = snap > 0 ? [d.img, ...d.beside.filter((o) => Math.abs(o.getBoundingClientRect().height - snap) < 0.75)] : [];
+        this.guide.hidden = lined.length < 2;
+        if (this.guide.hidden) return;
+        const rs = lined.map((o) => o.getBoundingClientRect());
+        const o = this.view.dom.getBoundingClientRect();
+        const s = this.guide.style;
+        s.left = `${Math.min(...rs.map((r) => r.left)) - o.left - 8}px`;
+        s.width = `${Math.max(...rs.map((r) => r.right)) - Math.min(...rs.map((r) => r.left)) + 16}px`;
+        s.top = `${Math.max(...rs.map((r) => r.bottom)) - o.top + 9}px`;
       }
 
       /// The size it is, said while dragged.
@@ -268,6 +304,7 @@ export function pictureTools(pe: PageEditor, run: Run) {
         const d = this.drag;
         if (!d) return;
         this.drag = null;
+        this.guide.hidden = true;
         this.box.classList.remove('dragging');
         const p = picked(pe);
         // Drawn as the note has it until the page says otherwise.

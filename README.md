@@ -98,7 +98,7 @@ On a Mac every shortcut below is the same with ⌘ for Ctrl and ⌥ for Alt; too
 | Ctrl+B / Ctrl+I / Ctrl+Shift+X / Ctrl+E | bold / italic / strikethrough / code |
 | Ctrl+Shift+H | highlight, written `==like this==` as Obsidian does |
 | Ctrl+K | add, change or remove a link |
-| Ctrl+click a link | open it |
+| Ctrl+click a link | open it (or a click, or a double-click: Settings → Writing → Open links with) |
 
 The toolbar's highlighter and text-colour buttons offer ten calm hues. They are written as HTML any Markdown viewer shows (`<span style="color: #C0553F">`, `<mark style="background: #F8EBA6CC">`), and Carnet draws each hue in the current theme's own colours.
 

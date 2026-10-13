@@ -151,6 +151,16 @@ pub struct Pictures {
     held: HashMap<BlobId, Instant>,
     /// Asked for, and when.
     asked: HashMap<BlobId, Instant>,
+    /// The vault's pictures not here, by path, as the last round found
+    /// them: on their way, unless given up ([`Pictures::coming`]).
+    missing: HashMap<String, BlobId>,
+    /// Asked for, and answered with nothing to show: the server hasn't
+    /// it, or what came isn't the picture its id names. Asked again all
+    /// the same, in case; forgotten once it comes.
+    gone: HashSet<BlobId>,
+    /// A fetch's failure, as the transfer had it: whether it will last
+    /// (a 4xx), until the session says the fetch failed.
+    get_failed: HashMap<BlobId, bool>,
     /// Sent and failed: offered again once [`Pictures::put_after`].
     failed: HashSet<BlobId>,
     /// When those are offered again, and how long the wait was.
@@ -271,6 +281,9 @@ impl Pictures {
     /// it: a send that failed waits before it's offered again, longer
     /// each time; and why, if trying again won't mend it.
     pub fn transferred(&mut self, id: BlobId, put: bool, result: &Result<Vec<u8>, String>) {
+        if let (false, Err(error)) = (put, result) {
+            self.get_failed.insert(id, lasting(error).is_some());
+        }
         let (true, Err(error)) = (put, result) else { return };
         let now = Instant::now();
         self.failed.insert(id);
@@ -300,6 +313,13 @@ impl Pictures {
     #[cfg(test)]
     pub fn put_wait(&self) -> Duration {
         self.put_wait
+    }
+
+    /// Whether the vault's picture at `rel` (a path from the notes folder),
+    /// not here, is on its way: asked for, and not given up on. None the
+    /// vault doesn't name, or not seen missing yet, is.
+    pub fn coming(&self, rel: &str) -> bool {
+        self.missing.get(rel).is_some_and(|id| !self.gone.contains(id))
     }
 
     /// The pictures being sent, held back, or wanted back: paths from the
@@ -356,6 +376,9 @@ impl Pictures {
         self.sending.clear();
         self.held.clear();
         self.asked.clear();
+        self.missing.clear();
+        self.gone.clear();
+        self.get_failed.clear();
         self.reviving.clear();
         self.put_went();
         self.under = Some(mark);
@@ -447,12 +470,14 @@ impl Pictures {
         }
 
         // In the vault and not here: asked for.
+        self.missing.clear();
         for (rel, id) in &vault {
             // One beside a note is the user's, on the device that has it.
             if present.contains(rel.as_str()) || !syncs(rel) {
                 continue;
             }
             let Some(id) = unhex(id) else { continue };
+            self.missing.insert(rel.clone(), id);
             if self.asked.get(&id).is_some_and(|at| now.duration_since(*at) < RETRY) {
                 continue;
             }
@@ -519,6 +544,9 @@ impl Pictures {
             }
             Event::BlobGot(id, bytes) => {
                 self.asked.remove(id);
+                self.gone.remove(id);
+                self.get_failed.remove(id);
+                self.missing.retain(|_, m| m != id);
                 // Brought back: written where it was, and named again.
                 let mut wrote = false;
                 for rel in self.reviving.remove(id).unwrap_or_default().into_iter().filter(|p| syncs(p)) {
@@ -550,6 +578,13 @@ impl Pictures {
             }
             // Asked, or offered, again later.
             Event::BlobFailed(id) => {
+                // A fetch answered (connected still) with nothing to show,
+                // or failed for good: given up on, for now. One cut off,
+                // or failing a while (offline, the storage busy), isn't.
+                let lasting = self.get_failed.remove(id).unwrap_or_else(|| session.is_ready());
+                if self.asked.contains_key(id) && lasting {
+                    self.gone.insert(*id);
+                }
                 self.offered.remove(id);
                 self.sending.remove(id);
                 self.reviving.remove(id);
