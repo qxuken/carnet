@@ -4385,6 +4385,29 @@ mod tests {
         assert_eq!(c, at(&d, 2, 0));
     }
 
+    /// Typed or pasted over a picture the words run beside, or over a
+    /// divider, words make a paragraph of their own: the list or quote
+    /// after it keeps its words as they were.
+    #[test]
+    fn words_over_a_chosen_float_or_divider_are_a_paragraph_of_their_own() {
+        let item = || Block::new(Kind::Item { style: ListStyle::Todo, indent: 0, done: true, num: 0, text: "Book".into() });
+        let float = || Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: Some(200), float: Float::Left, wiki: false });
+        let quote = || Block::new(Kind::Quote("The light".into()));
+        for pasted in [false, true] {
+            for (atom, after, written) in [(float(), item(), "[x]Book"), (Block::new(Kind::Divider), quote(), "Quot:The light")] {
+                let mut d = doc(vec![Block::text("Plan"), atom, after, Block::text("")]);
+                let mut c = select_blocks(&d, 1, 1);
+                if pasted {
+                    paste(&mut d, &mut c, "replaced");
+                } else {
+                    Typing::default().type_text(&mut d, &mut c, "replaced");
+                }
+                assert_eq!(texts(&d), ["Text:Plan", "Text:replaced", written, "Text:"], "pasted: {pasted}");
+                assert_eq!(c, at(&d, 1, 8));
+            }
+        }
+    }
+
     /// The finding: a picture dragged out of a cell to below a table that
     /// ends the note went in after its last, empty line, which stayed
     /// above it. Out of a cell, or moved on its own, a picture takes the
