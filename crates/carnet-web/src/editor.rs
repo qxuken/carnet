@@ -271,6 +271,11 @@ impl Editor {
         let a = self.pos(a_line, a_col).unwrap_or(first);
         let h = self.pos(h_line, h_col).unwrap_or(first);
         let c = page::fix(&self.doc, Caret { anchor: a, head: h });
+        // Down from the title by a bare caret (CodeMirror's own move, ↓ or
+        // → at its end): onto a picture or a divider there, it's chosen
+        // whole, as from a line above it, so what is typed next takes its
+        // place ([`page::from_title`]).
+        let c = if matches!(self.focus, Focus::Title { .. }) && c.is_empty() { page::from_title(&self.doc, c.head) } else { c };
         if c != self.caret {
             self.history.seal();
             self.typing.moved();
@@ -1554,6 +1559,30 @@ mod tests {
         assert_eq!((hl, hc), (2, 1), "just past the new divider");
         e.input("x");
         assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nx\n\n---\n\nNext\n");
+    }
+
+    /// As the desktop's `a_picture_straight_after_the_title_is_typed_over`:
+    /// a picture straight after the title, come to by ↓ or → from the
+    /// title's end (chosen whole by the editor's arrows, or a bare caret
+    /// put on it), is chosen, and typed over as one with a paragraph
+    /// above it is: the words a paragraph in its place.
+    #[test]
+    fn a_picture_straight_after_the_title_is_typed_over() {
+        let md = "# Title\n\n![x|left|220](attachments/x.png)\n\n- [ ] Book\n";
+        for to in [(1, 0, 1, 1), (1, 1, 1, 0), (1, 0, 1, 0), (1, 1, 1, 1)] {
+            let mut e = Editor::open(md);
+            assert_eq!(e.lines()[1].text, OBJECT.to_string());
+            e.select(0, 5, 0, 5);
+            e.select(to.0, to.1, to.2, to.3);
+            assert!(page::chosen_atom(&e.doc, e.caret).is_some(), "{to:?}: chosen");
+            keys(&mut e, "replaced");
+            assert_eq!(e.markdown(), "# Title\n\nreplaced\n\n- [ ] Book\n", "{to:?}");
+        }
+        // In the body already, a bare caret there is beside it, as ever.
+        let mut e = Editor::open(md);
+        e.select(2, 4, 2, 4);
+        e.select(1, 0, 1, 0);
+        assert!(page::chosen_atom(&e.doc, e.caret).is_none());
     }
 
     /// The finding: words with U+202E in, selected, ⌘K, an address and

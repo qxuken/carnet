@@ -689,6 +689,10 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
             if (was > at[0] && rows) pe.cell_select(at[0], rows - 1, 0, 0, 0);
             queueMicrotask(() => place(tables));
           }
+          // A bare caret the page took for more: down from the title onto
+          // a picture or a divider, chosen whole (`Editor::select`).
+          const page = selectionIn(tr.newDoc.toString(), pe.caret()).main;
+          if (!at && tr.selection.main.empty && !page.empty) return [tr, { selection: EditorSelection.create([page]), annotations: own.of(true), sequential: true }];
         }
         return tr;
       }

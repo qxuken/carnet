@@ -106,4 +106,17 @@ describe('typed with a picture chosen', () => {
     expect(e.state().doc.toString()).toBe('T\nかん\nBelow.');
     expect(roomFor(e.pe, e.state()), 'none chosen now').toBeNull();
   });
+
+  // As the desktop's `a_picture_straight_after_the_title_is_typed_over`:
+  // a bare caret put on it from the title (the arrows choose it whole
+  // themselves) is taken as choosing it, and typing takes its place.
+  it('straight after the title, come to from the title, is chosen and typed over', () => {
+    const e = open('# Title\n\n![x|left|220](attachments/x.png)\n\n- [ ] Book\n');
+    e.update({ selection: { anchor: e.line(1).to } });
+    e.update({ selection: { anchor: e.line(2).from } });
+    expect(e.state().selection.main.from).toBe(e.line(2).from);
+    expect(e.state().selection.main.to).toBe(e.line(2).to);
+    e.update({ changes: { from: e.line(3).from, insert: 'replaced' }, userEvent: 'input.type' });
+    expect(e.pe.markdown()).toBe('# Title\n\nreplaced\n\n- [ ] Book\n');
+  });
 });
