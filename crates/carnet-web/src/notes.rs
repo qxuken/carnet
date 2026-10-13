@@ -262,10 +262,8 @@ pub struct Notes {
 /// of another host put to it is).
 pub const UNREACHABLE: &str = "unreachable";
 
-/// Why pictures wait when the server's picture storage refuses them (an
-/// HTTP 4xx answer other than a timeout or "too many"): its keys, its
-/// clock, a bucket not there.
-pub const TURNED_AWAY: &str = "The server's picture storage turned new pictures away, so they stay on this device for now.";
+/// Why pictures wait when the server's picture storage refuses them.
+pub use carnet_sync::session::PICTURES_TURNED_AWAY as TURNED_AWAY;
 
 /// Why a put that failed (`error`, as [`Notes::transferred`] has it)
 /// won't go however often it's tried, in words; none for a failure that

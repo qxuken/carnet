@@ -112,11 +112,8 @@ const HELD_AGAIN: Duration = Duration::from_secs(5 * 60);
 const PUT_WAIT_FIRST: Duration = Duration::from_secs(15);
 const PUT_WAIT_MOST: Duration = Duration::from_secs(5 * 60);
 
-/// Why pictures wait when the server's picture storage refuses them (an
-/// HTTP 4xx answer other than a timeout or "too many"): its keys, its
-/// clock, a bucket not there. The web viewer's words (carnet-web
-/// `notes::TURNED_AWAY`), for one account to read the same everywhere.
-pub const TURNED_AWAY: &str = "The server's picture storage turned new pictures away, so they stay on this device for now.";
+/// Why pictures wait when the server's picture storage refuses them.
+pub use carnet_sync::session::PICTURES_TURNED_AWAY as TURNED_AWAY;
 
 /// Whether a failed send (`error`, as the transfer has it: `HTTP` and the
 /// status, or other words) won't go however often it's tried: then why,

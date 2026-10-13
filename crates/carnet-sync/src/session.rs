@@ -203,6 +203,11 @@ pub const READ_ONLY: &str = "This account is read only for now: changes stay on 
 /// as any held back is.
 pub const PICTURES_UNREACHABLE: &str = "The server's picture storage can't be reached from here, so new pictures stay on this device for now.";
 
+/// Why pictures wait when the server's picture storage refuses them (an
+/// HTTP 4xx answer other than a timeout or "too many"): its keys, its
+/// clock, a bucket not there. Said by the apps, the same everywhere.
+pub const PICTURES_TURNED_AWAY: &str = "The server's picture storage turned new pictures away, so they stay on this device for now.";
+
 /// The most letters of the server's own words shown at once.
 pub const SAID_MAX: usize = 200;
 
