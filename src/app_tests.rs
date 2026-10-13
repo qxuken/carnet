@@ -1732,7 +1732,8 @@ fn a_link_typed_without_a_scheme_is_given_the_webs() {
 
 /// Ctrl+click (⌘ on a Mac) on a link opens only one a note may follow:
 /// never one that runs (`javascript:`), nor a mail that would attach a
-/// file of this computer's, however it is written.
+/// file of this computer's, however it is written. A mail's address
+/// alone (`<me@x.test>`) opens a mail to it.
 #[test]
 fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
     let (mut app, mut d, dir) = body("link-open");
@@ -1742,6 +1743,7 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
         "[run](javascript:alert(1))",
         "[bare](me@x.test?%41ttachment=a.txt)",
         "[web](https://x.test/a)",
+        "<me@x.test>",
     ];
     let mut slots = Vec::new();
     for line in lines {
@@ -1749,7 +1751,7 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
         slots.push(app.caret.head.slot);
         key(&mut app, &mut d, "enter");
     }
-    assert_eq!(texts(&app)[..4], lines);
+    assert_eq!(texts(&app)[..5], lines);
     let ctrl_click = |app: &mut Carnet, d: &mut Drive, slot: Slot| {
         d.input(app, InputEvent::Modifiers(CTRL));
         click_drawn(app, d, slot, 1);
@@ -1764,6 +1766,10 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
     }
     ctrl_click(&mut app, &mut d, slots[3]);
     assert_eq!(opened(), ["https://x.test/a"]);
+    assert_eq!(app.error, None);
+    // A mail's address alone opens a mail to it.
+    ctrl_click(&mut app, &mut d, slots[4]);
+    assert_eq!(opened(), ["mailto:me@x.test"]);
     assert_eq!(app.error, None);
     // The menu's Open link and the link editor's go the same way.
     click_drawn(&mut app, &mut d, slots[0], 2);
@@ -7813,6 +7819,67 @@ fn a_chosen_divider_is_washed_to_the_texts_width_whichever_arrow_chose_it() {
         assert!((by_up.w - (r.w - 16.0)).abs() < 1.0, "the text's width: {r:?} {by_up:?}");
     }
     assert!(by_up.h < tall.h * 0.7, "a band round the ornament, not its row: {tall:?} {by_up:?}");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Words typed over a picture the words run beside, or over a divider,
+/// chosen by the arrows, make a paragraph of their own in its place, as
+/// carnet-core has it: the checklist or quote after it keeps its words.
+/// So whether typed, typed with Bold switched on (Ctrl+B with it chosen:
+/// the words in its place bold), or pasted (Ctrl+V and the text kui hands
+/// over).
+#[test]
+fn words_over_a_chosen_float_or_divider_are_a_paragraph_of_their_own() {
+    let (mut app, mut d, dir) = body("over-atom");
+    let note = || {
+        carnet_core::doc::Doc::new(vec![
+            Block::text("Plan"),
+            Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: Some(200), float: Float::Left, wiki: false }),
+            Block::new(Kind::Item { style: ListStyle::Todo, indent: 0, done: true, num: 0, text: "Book".into() }),
+            Block::text("Then"),
+            Block::new(Kind::Divider),
+            Block::new(Kind::Quote("The light".into())),
+            Block::text(""),
+        ])
+    };
+    for how in ["typed", "bold", "pasted"] {
+        // The picture chosen by → from the end of the line above it, then
+        // the divider the same way.
+        for (above, atom) in [(0, 1), (3, 4)] {
+            app.edit(Step::Other, |doc, c| {
+                *doc = note();
+                *c = Caret::at(page::end(doc, Slot::block(doc.blocks()[above].id)));
+                true
+            });
+            d.frame(&mut app);
+            key(&mut app, &mut d, "right");
+            let id = blocks(&app)[atom].id;
+            assert_eq!(page::chosen_atom(app.doc(), app.caret), Some(Slot::block(id)), "{how}");
+            match how {
+                "typed" => type_in(&mut app, &mut d, "replaced"),
+                "bold" => {
+                    key_with(&mut app, &mut d, "b", CTRL);
+                    type_in(&mut app, &mut d, "replaced");
+                }
+                _ => {
+                    key_with(&mut app, &mut d, "v", CTRL);
+                    d.input(&mut app, InputEvent::Paste { text: "replaced".into(), marks: Default::default() });
+                    d.frame(&mut app);
+                }
+            }
+            let words = if how == "bold" { "**replaced**" } else { "replaced" };
+            let mut want: Vec<String> = ["Plan", "", "[x]Book", "Then", "---", "The light", ""].map(String::from).to_vec();
+            want[atom] = words.into();
+            assert_eq!(texts(&app), want, "{how}: a paragraph in its place, the words after as they were");
+            assert!(matches!(&blocks(&app)[atom].kind, Kind::Text(_)), "{how}");
+            assert!(blocks(&app).iter().all(|b| b.id != id), "{how}: the picture or divider gone");
+            // The caret after the words, inside the bold's marks.
+            let byte = if how == "bold" { 10 } else { 8 };
+            assert_eq!(app.caret, Caret::at(Pos { slot: Slot::block(blocks(&app)[atom].id), byte }), "{how}");
+        }
+    }
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);

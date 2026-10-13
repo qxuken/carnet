@@ -3071,8 +3071,10 @@ impl Carnet {
             Msg::FocusSearch => self.focus(Field::Search),
             Msg::Style { which } => {
                 let kind = STYLES[(which as usize).min(STYLES.len() - 1)];
-                if self.caret.is_empty() {
-                    // Nothing selected: on (or off) for what is typed next.
+                if page::styles_typing(self.doc(), self.caret) {
+                    // Nothing selected (or a picture or divider chosen, which
+                    // the words typed take the place of): on (or off) for
+                    // what is typed next.
                     let (pre, post) = self.writing.switch(self.doc(), self.caret, kind);
                     self.writing.pend(self.caret, &format!("style{which}"), pre, post);
                 } else {

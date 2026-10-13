@@ -313,7 +313,9 @@ fn styled(doc: &Doc, slot: Slot) -> bool {
 /// The lines of fenced code (or front matter) between its fences: where
 /// they start and end in its text. The caret stands there, the fences
 /// drawn but never written on — typed on, `` ```after `` is no fence.
-/// `None` for code with no line between its fences.
+/// Code with no line between its fences (`` ```\n``` ``) has an empty one
+/// all the same, at the closing fence's start: written in, it is put in
+/// the text ([`open_bare_code`]). `None` for text that is no fenced code.
 pub fn code_body(t: &str) -> Option<(usize, usize)> {
     let first = t.find('\n')?;
     let fence = |line: &str| {
@@ -326,9 +328,22 @@ pub fn code_body(t: &str) -> Option<(usize, usize)> {
     let last = t.rfind('\n').unwrap_or(first);
     let closed = fence(&t[last + 1..]);
     if last == first && closed {
-        return None;
+        return Some((first + 1, first + 1));
     }
     Some((first + 1, if closed { last } else { t.len() }))
+}
+
+/// Code with no line between its fences given the empty one it is drawn
+/// with ([`code_body`]), for what is written there to go between them
+/// rather than onto the closing fence.
+fn open_bare_code(doc: &mut Doc, slot: Slot) {
+    let Some(Kind::Raw(t)) = kind_at(doc, slot) else { return };
+    let Some((lo, hi)) = code_body(t).filter(|_| slot.cell.is_none()) else { return };
+    if lo == hi && lo < t.len() && !t[lo..].starts_with('\n')
+        && let Some(t) = text_mut(doc, slot)
+    {
+        t.insert(lo, '\n');
+    }
 }
 
 /// Where the caret can stand in `slot`: in code, between its fences
@@ -396,6 +411,14 @@ pub fn chosen_cell_picture(doc: &Doc, c: Caret) -> Option<(usize, usize)> {
 pub fn chosen_atom(doc: &Doc, c: Caret) -> Option<Slot> {
     let slot = c.head.slot;
     (c.anchor.slot == slot && is_atomic(doc, slot) && c.anchor.byte.min(c.head.byte) == 0 && c.anchor.byte.max(c.head.byte) == 1).then_some(slot)
+}
+
+/// Whether a style switched on at `c` is for what is typed next
+/// ([`Typing::pend`]) rather than on the selection: with nothing
+/// selected, or a divider or picture chosen, which what is typed takes
+/// the place of.
+pub fn styles_typing(doc: &Doc, c: Caret) -> bool {
+    c.is_empty() || chosen_atom(doc, c).is_some()
 }
 
 /// A divider's or picture's slot chosen whole, the head on the side the
@@ -841,6 +864,7 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     // In code, never on a fence: between them, at the nearer end.
     let (lo, hi) = writable(doc, p.slot);
     let p = Pos { byte: p.byte.clamp(lo, hi), ..p };
+    open_bare_code(doc, p.slot);
     let single = kind_at(doc, p.slot).is_some_and(single_line);
     let s = if single { s.replace('\n', " ") } else { s.to_string() };
     let old = text(doc, p.slot).to_string();
@@ -2538,6 +2562,10 @@ impl Typing {
     /// The marks that switch `kind` on at the caret, or off when it is in
     /// a run of it ([`inline::switch_at`]), for [`Typing::pend`].
     pub fn switch(&self, doc: &Doc, c: Caret, kind: inline::Kind) -> (String, String) {
+        // Over a chosen picture or divider: on, for the line typed there.
+        if chosen_atom(doc, c).is_some() {
+            return inline::switch_at("", 0, kind);
+        }
         let p = self.styled_at(doc, c).head;
         let _r = reading(p.slot);
         inline::switch_at(text(doc, p.slot), p.byte, kind)
@@ -2611,12 +2639,16 @@ impl Typing {
     pub fn type_text(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
         let mut changed = false;
         if !c.is_empty() {
+            // A style switched on over a chosen picture or divider is on
+            // for the words that take its place.
+            let kept = chosen_atom(doc, *c).and(self.pending.take().filter(|q| q.caret == *c));
             self.pending = None;
             self.carry = None;
             if s.is_empty() {
                 return delete_selection(doc, c);
             }
             changed = replace_selection(doc, c);
+            self.pending = kept.map(|q| Pending { caret: *c, ..q });
         }
         if let Some(p) = past_link(doc, *c).filter(|_| !s.is_empty() && self.carry_at(doc, *c).is_none()) {
             if let Some(q) = self.pending.as_mut().filter(|q| q.caret == *c) {
@@ -4295,7 +4327,8 @@ mod tests {
         assert_eq!(code_body("```rust\n\n```"), Some((8, 8)));
         assert_eq!(code_body("---\ntitle: x\n---"), Some((4, 12)));
         assert_eq!(code_body("```\nopen to the end"), Some((4, 19)));
-        assert_eq!(code_body("```\n```"), None);
+        assert_eq!(code_body("```\n```"), Some((4, 4)), "an empty line, not yet written");
+        assert_eq!(code_body("plain"), None);
         let md = |d: &Doc| crate::doc::to_markdown(None, d);
         let note = || doc(vec![Block::new(Kind::Raw("```\nlet x;\n```".into())), Block::text("")]);
         let code = |d: &Doc| Slot::block(d.blocks()[0].id);
@@ -4349,6 +4382,39 @@ mod tests {
         assert!(backspace(&mut d, &mut c, false));
         assert_eq!(texts(&d), ["Text:above", "Text:"]);
         assert_eq!(c, at(&d, 0, 5));
+    }
+
+    /// The finding: code with no line between its fences (`` ```\n``` ``,
+    /// as another app may write it) had nowhere to write but on a fence.
+    /// It has an empty line there, as `/code` makes it: typed in, pasted
+    /// in or broken by Enter, the words go between the fences; Backspace
+    /// on it takes the empty code away.
+    #[test]
+    fn code_with_no_line_between_its_fences_is_written_between_them() {
+        let md = |d: &Doc| crate::doc::to_markdown(None, d);
+        for fence in ["```", "```rust"] {
+            let note = || doc(vec![Block::text("above"), Block::new(Kind::Raw(format!("{fence}\n```"))), Block::text("")]);
+            let code = |d: &Doc| Slot::block(d.blocks()[1].id);
+            let mut d = note();
+            assert_eq!(writable(&d, code(&d)), (fence.len() + 1, fence.len() + 1));
+            // Come to from above (its start, on the fence): its empty line.
+            let mut c = right(&d, at(&d, 0, 5), false, false);
+            Typing::default().type_text(&mut d, &mut c, "let x;");
+            assert_eq!(md(&d), format!("above\n\n{fence}\nlet x;\n```\n"));
+            assert_eq!(c.head, Pos { slot: code(&d), byte: fence.len() + 7 });
+            let mut d = note();
+            let mut c = Caret::at(Pos { slot: code(&d), byte: 0 });
+            paste(&mut d, &mut c, "a\nb");
+            assert_eq!(md(&d), format!("above\n\n{fence}\na\nb\n```\n"));
+            let mut d = note();
+            let mut c = Caret::at(Pos { slot: code(&d), byte: fence.len() + 1 });
+            enter(&mut d, &mut c, false);
+            assert_eq!(md(&d), format!("above\n\n{fence}\n\n\n```\n"), "two empty lines");
+            let mut d = note();
+            let mut c = Caret::at(Pos { slot: code(&d), byte: fence.len() + 1 });
+            assert!(backspace(&mut d, &mut c, false));
+            assert_eq!(texts(&d), ["Text:above", "Text:"]);
+        }
     }
 
     /// The finding: a picture chosen by → with a table after it, "Q"
@@ -4405,6 +4471,19 @@ mod tests {
                 assert_eq!(texts(&d), ["Text:Plan", "Text:replaced", written, "Text:"], "pasted: {pasted}");
                 assert_eq!(c, at(&d, 1, 8));
             }
+        }
+        // Bold switched on with one chosen: on for the words in its place.
+        for (atom, written) in [(Block::new(Kind::Image { src: "a.png".into(), alt: String::new(), width: Some(200), float: Float::Left, wiki: false }), "[x]Book"), (Block::new(Kind::Divider), "Quot:The light")] {
+            let after = if written == "[x]Book" { Block::new(Kind::Item { style: ListStyle::Todo, indent: 0, done: true, num: 0, text: "Book".into() }) } else { Block::new(Kind::Quote("The light".into())) };
+            let mut d = doc(vec![Block::text("Plan"), atom, after, Block::text("")]);
+            let mut c = select_blocks(&d, 1, 1);
+            assert!(styles_typing(&d, c));
+            let mut w = Typing::default();
+            let (pre, post) = w.switch(&d, c, inline::Kind::Bold);
+            w.pend(c, "bold", pre, post);
+            w.type_text(&mut d, &mut c, "replaced");
+            assert_eq!(texts(&d), ["Text:Plan", "Text:**replaced**", written, "Text:"]);
+            assert_eq!(c, at(&d, 1, 10));
         }
     }
 

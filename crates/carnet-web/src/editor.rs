@@ -425,12 +425,13 @@ impl Editor {
     }
 
     /// Bold, italic, struck or code (`inline::Kind`) on the selection; with
-    /// nothing selected, on (or off) for what is typed next.
+    /// nothing selected, or a picture or divider chosen, on (or off) for
+    /// what is typed next.
     pub fn style(&mut self, kind: inline::Kind) -> bool {
         if !matches!(self.focus, Focus::Body) {
             return false;
         }
-        if self.caret.is_empty() {
+        if page::styles_typing(&self.doc, self.caret) {
             let (pre, post) = self.typing.switch(&self.doc, self.caret, kind);
             self.typing.pend(self.caret, &format!("{kind:?}"), pre, post);
             return true;
@@ -1346,6 +1347,25 @@ mod tests {
         assert_eq!(e.caret_lc().2, 2);
     }
 
+    /// The finding: code with no line between its fences showed them,
+    /// there being no line to show. It shows one empty line, as code
+    /// made by `/code` does, and what is typed there goes between them.
+    #[test]
+    fn code_with_no_line_between_its_fences_shows_one_empty_line() {
+        for fence in ["```", "```rust"] {
+            let mut e = Editor::open(&format!("# T\n\nAbove\n\n{fence}\n```\n\nBelow\n"));
+            let texts: Vec<&str> = e.lines().iter().map(|l| l.text.as_str()).collect();
+            assert_eq!(texts, ["T", "Above", "", "Below"]);
+            assert!(!e.text().contains('`'));
+            e.select(2, 0, 2, 0);
+            assert_eq!(e.caret_lc(), (2, 0, 2, 0));
+            keys(&mut e, "let x;");
+            assert_eq!(e.markdown(), format!("# T\n\nAbove\n\n{fence}\nlet x;\n```\n\nBelow\n"));
+            assert_eq!(e.lines()[2].text, "let x;");
+            assert_eq!(e.caret_lc(), (2, 6, 2, 6));
+        }
+    }
+
     /// A picture put in at the end of the words before a table: no empty
     /// line between, the caret on in the table's first cell.
     #[test]
@@ -1467,6 +1487,12 @@ mod tests {
         e.select(1, 1, 1, 0);
         e.input("Q");
         assert_eq!(e.markdown(), "# T\n\nQ\n\nbelow words\n");
+        // Bold switched on with it chosen: on for the words in its place.
+        let mut e = Editor::open("# T\n\n![](a.png)\n\nbelow words\n");
+        e.select(1, 0, 1, 1);
+        assert!(e.style(inline::Kind::Bold));
+        keys(&mut e, "Qr");
+        assert_eq!(e.markdown(), "# T\n\n**Qr**\n\nbelow words\n");
     }
 
     /// The finding: the Divider button before a divider chose that one,
@@ -1485,9 +1511,9 @@ mod tests {
         assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nx\n\n---\n\nNext\n");
     }
 
-    /// Autolinks are links in the editor; a link's words come without
-    /// bidi controls, and so does its address in the link sheet. The note
-    /// keeps them as written.
+    /// Autolinks are links in the editor, a mail's address alone too; a
+    /// link's words come without bidi controls, and so does its address
+    /// in the link sheet. The note keeps them as written.
     #[test]
     fn autolinks_and_bidi_controls_in_links() {
         let md = "# T\n\nsee <https://example.com> and [abc\u{202E}txt.exe](https://x.com/\u{202E}y) end.\n";
@@ -1497,6 +1523,13 @@ mod tests {
         assert_eq!(e.link_here().as_deref(), Some("https://example.com"));
         e.select(1, 30, 1, 30);
         assert_eq!(e.link_here().as_deref(), Some("https://x.com/y"));
+        assert_eq!(e.markdown(), md);
+        // A mail's address alone: its words the address, opening a mail.
+        let md = "# T\n\nwrite to <me@x.com> today\n";
+        let mut e = Editor::open(md);
+        assert_eq!(e.lines()[1].text, "write to me@x.com today");
+        e.select(1, 12, 1, 12);
+        assert_eq!(e.link_to_open().as_deref(), Some("mailto:me@x.com"));
         assert_eq!(e.markdown(), md);
     }
 
