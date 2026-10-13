@@ -25,10 +25,11 @@ fn adds(m: KeyMods) -> bool {
 }
 
 impl Carnet {
-    /// The library's rows as they read, top to bottom: the folders, then
-    /// the notes shown. What a ⇧-click's range runs over.
+    /// The library's rows as they read, top to bottom: the folders in
+    /// sight (none folded away), then the notes shown. What a ⇧-click's
+    /// range runs over.
     fn pick_rows(&self) -> Vec<Pick> {
-        let folders = self.store.folders.iter().cloned().map(Pick::Folder);
+        let folders = self.folders_in_sight().into_iter().map(Pick::Folder);
         let notes = self.order.iter().map(|&i| Pick::Note(self.store.notes[i].id));
         folders.chain(notes).collect()
     }

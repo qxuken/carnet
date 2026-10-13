@@ -600,12 +600,18 @@ impl Carnet {
     /// The folders, under the search: "All notes", then each folder at its
     /// depth with how many notes it holds. Shown once there is a folder (or
     /// one is being named); a click shows its notes, a right-click its menu.
+    /// One with folders inside has a chevron before it, which folds them
+    /// away and back.
     fn folders(&mut self, ui: &mut Ui<'_>, l: &Look) {
         if self.store.folders.is_empty() && self.naming.is_none() && self.trash.is_empty() {
             self.folder_rects.clear();
             return;
         }
+        self.reveal_shown();
+        self.spring_folder(ui);
         let t = l.t;
+        // The folders with folders inside: those with a chevron.
+        let parents: std::collections::HashSet<&str> = self.store.folders.iter().filter_map(|f| f.rsplit_once('/').map(|(p, _)| p)).collect();
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for n in &self.store.notes {
             *counts.entry(n.folder.as_str()).or_default() += 1;
@@ -691,6 +697,11 @@ impl Carnet {
                     k
                 };
                 for (i, f) in self.store.folders.iter().enumerate() {
+                    // Inside a folded folder: not drawn, nor a row for the
+                    // arrows or a drag.
+                    if self.folder_hidden(f) {
+                        continue;
+                    }
                     let depth = f.matches('/').count() + 1;
                     let selected = !self.deleted && self.folder.as_deref() == Some(f.as_str());
                     if let Some(r) = ui.layout_of(ui.child_key_indexed(i as u64)) {
@@ -701,16 +712,53 @@ impl Carnet {
                         name_key = Some(field(ui, depth.min(4), n));
                         continue;
                     }
+                    let parent = parents.contains(f.as_str());
+                    let open = !self.settings.collapsed.contains(f);
+                    let mut spec = lit(row(depth.min(4), selected), f)
+                        // The chevron's room (or a blank as wide) in the
+                        // indent: the folder's icon where it would be
+                        // without one.
+                        .padding(Edges { l: depth.min(4) as f32 * 14.0 - (FOLD_W + 9.0 - 14.0), r: 12.0, t: 0.0, b: 0.0 })
+                        .on_layout(Value::Null)
+                        .on_click(Msg::SelectFolder { index: i as u64 })
+                        // Dragged to another folder row: moved inside it.
+                        .on_drag(Msg::FolderDrag { index: i as u64 })
+                        .on_context_menu(Value::str(format!("folder:{i}")))
+                        .label(folder_name(f));
+                    if parent {
+                        spec = spec.expanded(open);
+                    }
                     let k = ui.with_indexed(
                         i as u64,
-                        lit(row(depth.min(4), selected), f)
-                            .on_layout(Value::Null)
-                            .on_click(Msg::SelectFolder { index: i as u64 })
-                            // Dragged to another folder row: moved inside it.
-                            .on_drag(Msg::FolderDrag { index: i as u64 })
-                            .on_context_menu(Value::str(format!("folder:{i}")))
-                            .label(folder_name(f)),
+                        spec,
                         |ui| {
+                            if parent {
+                                let said = format!("{} the folders inside \u{201c}{}\u{201d}", if open { "Hide" } else { "Show" }, folder_name(f));
+                                ui.with_keyed(
+                                    "fold",
+                                    NodeSpec::row()
+                                        .size(FOLD_W, 22.0)
+                                        .radius(radius::CONTROL)
+                                        .hover_bg(t.pressed)
+                                        .on_click(Msg::FoldFolder { index: i as u64 })
+                                        .label(said.as_str())
+                                        .expanded(open)
+                                        // The rows' ← and → do it from the
+                                        // keyboard: not a Tab stop of its own.
+                                        .focus_region()
+                                        .center(),
+                                    |ui| {
+                                        // Turned a quarter, open; a short
+                                        // turn between.
+                                        ui.with(
+                                            NodeSpec::row().size(12.0, 12.0).rotate(if open { 0.25 } else { 0.0 }).transition(120.0).role(Role::None),
+                                            |ui| icon(ui, Icon::ChevronRight, t.muted, 12.0, false),
+                                        );
+                                    },
+                                );
+                            } else {
+                                gap(ui, FOLD_W);
+                            }
                             icon(ui, Icon::Folder, if selected { t.accent } else { t.muted }, 16.0, false);
                             label(ui, folder_name(f), counts.get(f.as_str()).copied().unwrap_or(0), selected);
                         },
@@ -1505,6 +1553,9 @@ impl<'a> Tool<'a> {
 }
 /// The library's edge: how wide a band the pointer takes it by.
 pub(super) const EDGE_W: f32 = 6.0;
+
+/// A folder's chevron's width, in its row's indent.
+const FOLD_W: f32 = 16.0;
 /// What it does, by the pointer.
 pub(super) const EDGE_HINT: &str = "Drag to make the notes wider or narrower  \u{b7}  double-click for the usual width";
 /// How long the pointer rests on the edge before that shows, seconds.

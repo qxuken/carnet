@@ -87,3 +87,112 @@ export function namingAfter(folders: string[], parent: string): number {
   });
   return at;
 }
+
+// ---- folding: a folder's subfolders hidden in the list, and back
+//
+// Which folders are folded is this browser's view of the list, not the
+// vault's (the desktop keeps its own in its settings): kept in
+// localStorage, by path, and followed when a folder is renamed or moved.
+
+/// Whether `path`'s row is out of sight: a folder it is inside is folded.
+export function hidden(path: string, folded: ReadonlySet<string>): boolean {
+  if (!folded.size) return false;
+  for (let i = path.indexOf('/'); i >= 0; i = path.indexOf('/', i + 1)) if (folded.has(path.slice(0, i))) return true;
+  return false;
+}
+
+/// The folders with folders inside: the ones with a chevron.
+export function withSubfolders(folders: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const f of folders) {
+    const p = parentOf(f);
+    if (p) out.add(p);
+  }
+  return out;
+}
+
+/// The folders as the list shows them: those folded away left out.
+export const inSight = (folders: readonly string[], folded: ReadonlySet<string>) => folders.filter((f) => !hidden(f, folded));
+
+/// `folder` folded (its subfolders hidden) or unfolded (`open`); with
+/// `deep` (⌥/Alt), every folder inside it the same. Only a folder with
+/// folders inside has anything to fold. A new set; the one given as it was.
+export function fold(folded: ReadonlySet<string>, folders: readonly string[], folder: string, open: boolean, deep = false): Set<string> {
+  const out = new Set(folded);
+  const parents = withSubfolders(folders);
+  const these = deep ? folders.filter((f) => isInside(f, folder)) : [folder];
+  if (!these.includes(folder)) these.push(folder);
+  for (const f of these) {
+    if (open) out.delete(f);
+    else if (parents.has(f)) out.add(f);
+  }
+  return out;
+}
+
+/// The folders `path` is inside unfolded, so its row is in sight: the
+/// folder shown never is out of it.
+export function unfoldTo(folded: ReadonlySet<string>, path: string): Set<string> {
+  const out = new Set(folded);
+  for (let p = parentOf(path); p; p = parentOf(p)) out.delete(p);
+  return out;
+}
+
+/// The folded folders once `folder` is now `to` (renamed or moved): it
+/// and the folders inside it folded as they were.
+export function foldsFollow(folded: ReadonlySet<string>, folder: string, to: string): Set<string> {
+  const out = new Set<string>();
+  for (const f of folded) out.add(isInside(f, folder) ? to + f.slice(folder.length) : f);
+  return out;
+}
+
+/// The folder shown, once `folder` is folded: the same, unless it was
+/// inside it — then the folder folded, so what is shown stays in sight.
+export const shownAfterFold = (shown: string | null, folder: string) => (shown !== null && shown !== folder && isInside(shown, folder) ? folder : shown);
+
+/// What ← or → on a folder's row does, as a tree's rows do in Finder: →
+/// unfolds a folded one (⌥/Alt: and every folder inside it), or, open
+/// already, goes to the first folder inside; ← folds an open one, or goes
+/// to the folder it's in. `null`: nothing.
+export function arrow(
+  key: 'ArrowLeft' | 'ArrowRight',
+  alt: boolean,
+  folder: string,
+  folders: readonly string[],
+  folded: ReadonlySet<string>,
+): { fold: boolean; deep: boolean } | { go: string } | null {
+  const parent = withSubfolders(folders).has(folder);
+  const isFolded = folded.has(folder);
+  if (key === 'ArrowRight') {
+    if (!parent) return null;
+    if (isFolded || alt) return { fold: false, deep: alt };
+    const first = folders.find((f) => f !== folder && isInside(f, folder));
+    return first ? { go: first } : null;
+  }
+  if (parent && (!isFolded || alt)) return { fold: true, deep: alt };
+  const up = parentOf(folder);
+  return up ? { go: up } : null;
+}
+
+const FOLDED_KEY = 'carnet.foldedFolders';
+
+/// The folders folded in this browser; none when there is no storage (a
+/// private window, storage refused) or what is kept can't be read.
+export function readFolded(store: Pick<Storage, 'getItem'> | undefined = globalThis.localStorage): Set<string> {
+  try {
+    const v: unknown = JSON.parse(store?.getItem(FOLDED_KEY) ?? '[]');
+    return new Set(Array.isArray(v) ? v.filter((f): f is string => typeof f === 'string' && f !== '') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/// Keeps the folded folders in this browser, when it can: only a
+/// convenience, so nothing is said when it can't.
+export function keepFolded(folded: ReadonlySet<string>, store: Pick<Storage, 'setItem' | 'removeItem'> | undefined = globalThis.localStorage) {
+  try {
+    if (!folded.size) store?.removeItem(FOLDED_KEY);
+    else store?.setItem(FOLDED_KEY, JSON.stringify([...folded].sort()));
+  } catch {
+    // Not kept: a private window, storage refused.
+  }
+}

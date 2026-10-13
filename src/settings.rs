@@ -3,6 +3,7 @@
 //! `key = value` lines in the OS's config folder, read once at start and
 //! written on every change.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -160,6 +161,10 @@ pub struct Settings {
     /// The library shows beside the page; hidden, the page has the
     /// window.
     pub sidebar: bool,
+    /// The folders whose subfolders the library hides, by path: this
+    /// device's view of them, not the notes'. One `collapsed = path` line
+    /// each.
+    pub collapsed: BTreeSet<String>,
     /// Colours given lately, newest first (0xRRGGBBAA): the picker's
     /// recent row.
     pub colors: Vec<u32>,
@@ -191,6 +196,7 @@ impl Default for Settings {
             focus: false,
             typewriter: false,
             sidebar: true,
+            collapsed: BTreeSet::new(),
             colors: Vec::new(),
             dir: None,
             file: None,
@@ -274,6 +280,9 @@ impl Settings {
                 "focus" => s.focus = v == "on",
                 "typewriter" => s.typewriter = v == "on",
                 "sidebar" => s.sidebar = v != "hidden",
+                "collapsed" if !v.is_empty() => {
+                    s.collapsed.insert(v.to_string());
+                }
                 "colors" => {
                     s.colors = v.split(',').filter_map(carnet_core::inline::parse_color).take(10).collect();
                 }
@@ -301,8 +310,9 @@ impl Settings {
             Sort::Created => "created",
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
+        let collapsed: String = self.collapsed.iter().map(|f| format!("collapsed = {f}\n")).collect();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\ncolors = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nsidebar = {}\n{collapsed}colors = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
@@ -334,6 +344,7 @@ impl Settings {
             dates_created: self.dates_created,
             library_w: self.library_w,
             sidebar: self.sidebar,
+            collapsed: std::mem::take(&mut self.collapsed),
             colors: std::mem::take(&mut self.colors),
             dir: self.dir.take(),
             file: self.file.take(),
@@ -403,6 +414,7 @@ mod tests {
             focus: true,
             typewriter: true,
             sidebar: false,
+            collapsed: ["Work".to_string(), "Work/Old, kept = 2".to_string()].into(),
             colors: vec![0xc0504dff, 0x12345680],
             dir: Some(PathBuf::from("D:\\My notes")),
             file: None,
@@ -427,7 +439,7 @@ mod tests {
     fn a_reset_puts_back_the_look_and_keeps_the_rest() {
         let mut s = Settings::parse(
             "theme = dark\npalette = sage\nfont = Georgia\nsize = 20\nwidth = wide\ninitial_lines = 4\nfocus = on\n\
-             window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncolors = #c0504d\ndir = /notes\n",
+             window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncollapsed = Work\ncolors = #c0504d\ndir = /notes\n",
         );
         s.file = Some(PathBuf::from("/c/settings.txt"));
         assert!(!s.look_is_default());
@@ -438,6 +450,7 @@ mod tests {
         assert_eq!((s.initial_lines, s.focus), (3, false));
         assert_eq!(s.translucent, d.translucent, "the window as at first");
         assert_eq!((s.sort, s.dates_created, s.library_w, s.sidebar), (Sort::Title, true, 300, false));
+        assert!(s.collapsed.contains("Work"), "the folders folded stay folded");
         assert_eq!(s.colors, vec![0xc0504dff]);
         assert_eq!(s.dir.as_deref(), Some(Path::new("/notes")));
         assert_eq!(s.file.as_deref(), Some(Path::new("/c/settings.txt")));

@@ -3530,6 +3530,303 @@ fn up_and_down_after_a_click_on_a_folder_walk_from_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+// ------------------------------------------------------------ folding folders
+
+/// A folder's chevron: the one in its row.
+fn chevron(d: &mut Drive, app: &mut Carnet, f: &str) -> Option<Key> {
+    d.core.set_inspect(true);
+    d.frame(app);
+    let row = app.folder_rects.iter().find(|(r, _)| r == f)?.1;
+    d.core.nodes().iter().filter(|n| n.label.as_deref() == Some("fold")).map(|n| n.key).find(|&k| {
+        d.rect_of(k).is_some_and(|r| {
+            let c = r.center();
+            c.y >= row.y && c.y <= row.y + row.h
+        })
+    })
+}
+
+/// Whether a reader hears folder row `name` as open, shut, or neither.
+fn heard_open(d: &mut Drive, name: &str) -> Option<bool> {
+    d.core.access_tree().nodes.iter().find(|n| n.name.as_deref() == Some(name)).and_then(|n| n.expanded)
+}
+
+fn click_chevron(app: &mut Carnet, d: &mut Drive, f: &str, mods: KeyMods) {
+    let k = chevron(d, app, f).unwrap_or_else(|| panic!("a chevron for {f}"));
+    let r = d.rect_of(k).unwrap();
+    d.input(app, InputEvent::Modifiers(mods));
+    d.click(app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+    d_frame_twice(app, d);
+}
+
+/// The folder rows drawn, top to bottom.
+fn rows_drawn(app: &Carnet) -> Vec<String> {
+    app.folder_rows
+        .iter()
+        .filter_map(|(_, r)| match r {
+            FolderRow::Folder(f) => Some(f.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn folded(app: &Carnet) -> Vec<&str> {
+    app.settings.collapsed.iter().map(String::as_str).collect()
+}
+
+/// A folder with folders inside has a chevron; a click on it hides them
+/// and shows them again, the folder shown staying as it was and its count
+/// as it was. A folder with none inside has no chevron.
+#[test]
+fn a_folders_chevron_folds_its_subfolders_away_and_back() {
+    let (mut app, mut d, dir) = on_folder_row("fold-click", &["A", "A/Sub", "A/Sub/Deep", "B"]);
+    app.show_folder(Some("B".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "B"]);
+    assert!(chevron(&mut d, &mut app, "B").is_none(), "nothing inside B: no chevron");
+    assert!(chevron(&mut d, &mut app, "A/Sub/Deep").is_none());
+    assert!(chevron(&mut d, &mut app, "A").is_some());
+    assert_eq!(heard_open(&mut d, "A"), Some(true), "a reader hears it open");
+    assert_eq!(heard_open(&mut d, "B"), None);
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    assert_eq!(folded(&app), ["A"]);
+    assert_eq!(app.folder.as_deref(), Some("B"), "the chevron only folds: the folder shown stays");
+    assert!(app.folder_rects.iter().all(|(f, _)| !f.starts_with("A/")), "nor rows for a drag");
+    assert_eq!(heard_open(&mut d, "A"), Some(false), "and shut now");
+    // The keyboard is not held in the chevron.
+    assert!(d.core.focus().is_none_or(|k| k == Key::ROOT), "{:?}", d.core.focus());
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "B"]);
+    assert!(folded(&app).is_empty());
+    // A click on the folder's name still shows it, and folds nothing.
+    let at = folder_row(&app, "A");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    assert_eq!(app.folder.as_deref(), Some("A"));
+    assert!(folded(&app).is_empty());
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ⌥-click (Alt) on a chevron folds the folder and every folder inside
+/// it, and unfolds them all again.
+#[test]
+fn an_option_click_folds_every_folder_inside() {
+    let (mut app, mut d, dir) = on_folder_row("fold-alt", &["A", "A/Sub", "A/Sub/Deep", "A/Two", "A/Two/More", "B"]);
+    click_chevron(&mut app, &mut d, "A", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub", "A/Two"], "only folders with folders inside");
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    // Unfolded alone: what is inside stays folded.
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Two", "B"]);
+    click_chevron(&mut app, &mut d, "A", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub", "A/Two"]);
+    click_chevron(&mut app, &mut d, "A", ALT);
+    assert!(folded(&app).is_empty());
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "A/Two", "A/Two/More", "B"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ← and → on a folder's row, as in Finder: → unfolds, then goes in; ←
+/// folds, then goes up to the folder it is in. ⌥ with them, every folder
+/// inside too.
+#[test]
+fn left_and_right_fold_unfold_and_walk_the_tree() {
+    let (mut app, mut d, dir) = on_folder_row("fold-keys", &["A", "A/Sub", "A/Sub/Deep", "B"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["A"]);
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    assert_eq!(focused_row(&app, &d), Some(folder("A")), "the keyboard stays on it");
+    // Folded, at the top: ← goes nowhere.
+    key(&mut app, &mut d, "left");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    key(&mut app, &mut d, "right");
+    assert!(folded(&app).is_empty());
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    // Open: → goes to the first folder inside, and shows it.
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub")));
+    assert_eq!(app.folder.as_deref(), Some("A/Sub"));
+    key(&mut app, &mut d, "right");
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub/Deep")));
+    // Nothing inside: → does nothing; ← goes up.
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub/Deep")));
+    key(&mut app, &mut d, "left");
+    assert_eq!(focused_row(&app, &d), Some(folder("A/Sub")));
+    assert_eq!(app.folder.as_deref(), Some("A/Sub"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["A/Sub"]);
+    key(&mut app, &mut d, "left");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    // ⌥←: A and all inside it folded; ⌥→: all open.
+    key_with(&mut app, &mut d, "right", ALT);
+    assert!(folded(&app).is_empty(), "{:?}", folded(&app));
+    key_with(&mut app, &mut d, "left", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub"]);
+    // After a click on the folder, the keyboard on nothing in
+    // particular: the same, from the folder shown.
+    let at = folder_row(&app, "A");
+    d.click(&mut app, at.x, at.y);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "right");
+    assert_eq!(folded(&app), ["A/Sub"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// ↑ and ↓ walk only the rows in sight, and ⇧ with them (and a ⇧-click's
+/// range) chooses only those: a folded folder's subfolders are passed.
+#[test]
+fn the_arrows_and_a_range_pass_folded_folders_by() {
+    let (mut app, mut d, dir) = on_folder_row("fold-arrows", &["A", "A/Sub", "B", "C"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key(&mut app, &mut d, "left");
+    focus_row(&mut app, &mut d, FolderRow::All);
+    key(&mut app, &mut d, "down");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    key(&mut app, &mut d, "down");
+    assert_eq!(focused_row(&app, &d), Some(folder("B")), "past A/Sub, folded away");
+    key(&mut app, &mut d, "up");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    key_with(&mut app, &mut d, "down", SHIFT);
+    assert_eq!(app.picked, [Pick::Folder("A".into()), Pick::Folder("B".into())]);
+    // A ⇧-click from A to C: A, B and C, not what A hides.
+    app.picked.clear();
+    let (a, c) = (folder_row(&app, "A"), folder_row(&app, "C"));
+    d.click(&mut app, a.x, a.y);
+    d.input(&mut app, InputEvent::Modifiers(SHIFT));
+    d.click(&mut app, c.x, c.y);
+    d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+    d.frame(&mut app);
+    assert_eq!(app.picked, ["A", "B", "C"].map(|f| Pick::Folder(f.into())));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The folder shown is never out of sight: shown however it came to be
+/// (a search's note, a move, a link, by hand), the folders it is in
+/// unfold; one folded with the folder shown inside it is shown instead;
+/// a new folder named inside a folded one unfolds it.
+#[test]
+fn the_folder_shown_is_never_folded_away() {
+    let (mut app, mut d, dir) = on_folder_row("fold-reveal", &["A", "A/Sub", "A/Sub/Deep", "B", "B/In"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key_with(&mut app, &mut d, "left", ALT);
+    assert_eq!(folded(&app), ["A", "A/Sub"]);
+    app.show_folder(Some("A/Sub/Deep".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert!(folded(&app).is_empty(), "{:?}", folded(&app));
+    assert!(rows_drawn(&app).contains(&"A/Sub/Deep".to_string()));
+    // Folding a folder the one shown is inside: that one is shown.
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert_eq!(app.folder.as_deref(), Some("A"));
+    assert_eq!(folded(&app), ["A"]);
+    // A new folder inside a folded one: its field in sight, and it shown
+    // once made.
+    click_chevron(&mut app, &mut d, "B", KeyMods::NONE);
+    assert_eq!(folded(&app), ["A", "B"]);
+    app.name_folder("B/In");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["A"], "B unfolded for the field");
+    type_in(&mut app, &mut d, "New");
+    key(&mut app, &mut d, "enter");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.folder.as_deref(), Some("B/In/New"));
+    assert!(rows_drawn(&app).contains(&"B/In/New".to_string()), "{:?}", rows_drawn(&app));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A folder renamed or moved stays folded, and the folders inside it.
+#[test]
+fn a_folder_renamed_or_moved_stays_folded() {
+    let (mut app, mut d, dir) = on_folder_row("fold-rename", &["A", "A/Sub", "A/Sub/Deep", "B"]);
+    focus_row(&mut app, &mut d, folder("A"));
+    key_with(&mut app, &mut d, "left", ALT);
+    app.rename_folder("A", "Z");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["Z", "Z/Sub"]);
+    app.move_folder("Z", "B");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["B/Z", "B/Z/Sub"]);
+    assert_eq!(rows_drawn(&app), ["B", "B/Z"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// What is folded is this device's: kept in its settings file, read back
+/// at the next start; a file from before it reads as all open.
+#[test]
+fn folded_folders_stay_folded_after_a_restart() {
+    let (store, dir) = temp_store("fold-restart");
+    let file = dir.with_extension("settings.txt");
+    let _ = std::fs::remove_file(&file);
+    let mut app = Carnet::with_settings(store, Settings { file: Some(file.clone()), ..Settings::default() });
+    for f in ["A", "A/Sub", "B"] {
+        let (parent, leaf) = f.rsplit_once('/').unwrap_or(("", f));
+        app.store.create_folder(parent, leaf).unwrap();
+    }
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d_frame_twice(&mut app, &mut d);
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("collapsed = A\n"), "{text}");
+    drop(app);
+    // The next start: the same notes, the settings read back.
+    let mut app = Carnet::with_settings(Store::open(dir.clone()).unwrap(), Settings { file: Some(file.clone()), ..Settings::parse(&text) });
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(rows_drawn(&app), ["A", "B"]);
+    click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
+    assert!(!std::fs::read_to_string(&file).unwrap().contains("collapsed"));
+    assert!(Settings::parse("theme = dark\n").collapsed.is_empty(), "an older file: all open");
+    let _ = std::fs::remove_file(file);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A note or folder carried over a folded folder, held there a moment:
+/// it unfolds, and what is carried can go deeper. Passing over does not.
+#[test]
+fn a_folded_folder_springs_open_under_a_drag() {
+    let (mut app, mut d, dir) = library("fold-spring", &[("Work/Plan", "q3"), ("Home/Sub/Deep", "x"), ("Home/Pantry", "rice")]);
+    focus_row(&mut app, &mut d, folder("Home"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["Home"]);
+    let (work, home) = (folder_row(&app, "Work"), folder_row(&app, "Home"));
+    d.input(&mut app, InputEvent::CursorMoved(work));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.move_to(&mut app, home.x, home.y);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["Home"], "not at once");
+    std::thread::sleep(SPRING + Duration::from_millis(50));
+    d_frame_twice(&mut app, &mut d);
+    assert!(folded(&app).is_empty(), "held there, it opens");
+    let sub = folder_row(&app, "Home/Sub");
+    d.move_to(&mut app, sub.x, sub.y);
+    d_frame_twice(&mut app, &mut d);
+    d.input(&mut app, InputEvent::mouse_up());
+    d_frame_twice(&mut app, &mut d);
+    assert!(dir.join("Home/Sub/Work/Plan.md").exists(), "dropped deeper: {:?}", app.store.folders);
+    // Only passing over a folded folder: it stays folded.
+    focus_row(&mut app, &mut d, folder("Home/Sub"));
+    key(&mut app, &mut d, "left");
+    assert_eq!(folded(&app), ["Home/Sub"]);
+    let (pantry, sub) = (folder_row(&app, ""), folder_row(&app, "Home/Sub"));
+    d.input(&mut app, InputEvent::CursorMoved(pantry));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.move_to(&mut app, sub.x, sub.y);
+    d_frame_twice(&mut app, &mut d);
+    d.move_to(&mut app, pantry.x, pantry.y + 2.0);
+    d_frame_twice(&mut app, &mut d);
+    std::thread::sleep(SPRING + Duration::from_millis(50));
+    d_frame_twice(&mut app, &mut d);
+    d.input(&mut app, InputEvent::mouse_up());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["Home/Sub"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// What a server says of itself, listing these features.
 fn server_info(features: &[&str]) -> carnet_sync::info::ServerInfo {
     carnet_sync::info::ServerInfo { greeting: carnet_sync::compat::Greeting::ours(features.iter().map(|f| f.to_string()).collect()), ..Default::default() }
