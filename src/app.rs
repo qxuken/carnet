@@ -3218,7 +3218,9 @@ impl Carnet {
                 let Some(id) = self.sync.devices.as_ref().and_then(|l| l.get(at as usize)).map(|d| d.id.clone()) else { return };
                 if self.sync_remove_armed.as_deref() == Some(id.as_slice()) {
                     self.sync_remove_armed = None;
-                    self.sync.revoke(&id);
+                    if self.sync.revoke(&mut self.store, &id) {
+                        self.notify("Waiting invites were taken back", None);
+                    }
                 } else {
                     self.sync_remove_armed = Some(id);
                 }

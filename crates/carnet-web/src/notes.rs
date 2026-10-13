@@ -372,8 +372,9 @@ impl Notes {
                     Some(message) => self.said.push(Said::Outdated { message, syncing: false }),
                     None => self.said.push(Said::Outdated { message: carnet_sync::compat::UPDATE_SOON, syncing: true }),
                 },
-                // Each waiting with its code, as the vault keeps it; the
-                // codes of the rest (used, taken back, run out) forgotten.
+                // Each waiting with its code, as the vault keeps it. The
+                // codes of the rest forgotten only as the list says (used,
+                // taken back), never on an empty one, and once run out.
                 Event::Invites { owner, invites, accounts } => {
                     let vault = self.rooms.doc(vault::ROOM);
                     let hashes: Vec<[u8; 32]> = invites.iter().map(|i| i.hash).collect();
@@ -404,6 +405,8 @@ impl Notes {
                     }
                     self.errors.push(carnet_sync::session::refusal_words(&why));
                 }
+                // This browser's own words: as they are.
+                Event::Failed(why) => self.errors.push(why),
                 Event::Usage(u) => {
                     // Room again (a plan raised): pictures held back go.
                     if u.has_room() {
@@ -941,10 +944,24 @@ impl Notes {
     }
 
     /// Takes `device` out of the account. Another device: a new key goes
-    /// to every device kept, so it reads nothing written from now on.
-    /// This browser: it leaves.
-    pub fn remove_device(&mut self, device: &[u8], rng: &mut impl Random) -> Result<(), String> {
-        self.session.revoke(device, rng)
+    /// to every device kept, so it reads nothing written from now on, and
+    /// every waiting invite is taken back, as it had their codes (the
+    /// vault's). This browser: it leaves. True if invites were taken back.
+    pub fn remove_device(&mut self, device: &[u8], rng: &mut impl Random) -> Result<bool, String> {
+        self.session.revoke(device, rng)?;
+        if device == self.me.device.as_slice() {
+            return Ok(false);
+        }
+        let taken = self.rooms.doc(vault::ROOM).forget_all_invites();
+        if taken.is_empty() {
+            return Ok(false);
+        }
+        self.session.take_back_invites(&taken);
+        self.session.saved(vault::ROOM, &mut self.rooms, rng);
+        if !self.changed.iter().any(|r| r == vault::ROOM) {
+            self.changed.push(vault::ROOM.to_string());
+        }
+        Ok(true)
     }
 
     /// What this browser is called in the others' lists, changed now; the

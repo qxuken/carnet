@@ -5168,13 +5168,26 @@ fn two_apps_sync_through_a_server() {
     a.sync.usage = Some(carnet_sync::session::Usage { notes: 700, pictures: 41, limit: Some(42), writable: true, plan: "Tiny".into(), until: None });
     assert!(drawn(&mut da, &mut a, "741 bytes of 42 bytes used \u{b7} Tiny"));
     assert!(drawn(&mut da, &mut a, "Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
+    // An invite waiting, its code in the vault, so on the laptop too.
+    a.on_plain(Msg::SyncInvite);
+    let waiting = carnet_sync::invite::InviteCode::parse(&a.sync.invite.clone().expect("an invite")).unwrap();
+    until("the laptop has the invite's code", &mut [(&mut a, &mut da), (&mut b, &mut db), (&mut c, &mut dc)], &|x| {
+        x[1].0.store.invite_code(&waiting.hash()).is_some() && x[0].0.sync.invites.as_ref().is_some_and(|i| i.waiting.len() == 1)
+    });
     let at = list.iter().position(|d| d.name.as_deref() == Some("Laptop")).unwrap() as u64;
     a.on_plain(Msg::SyncRemove { at });
     assert!(b.sync.is_on() && a.sync_remove_armed.is_some(), "asked once: not yet");
     assert!(drawn(&mut da, &mut a, "Remove for real"));
     a.on_plain(Msg::SyncRemove { at });
+    // The laptop had every waiting invite's code: each taken back, and
+    // said so.
+    assert!(a.notice.as_ref().is_some_and(|n| n.text == "Waiting invites were taken back"));
+    assert!(a.sync.invite.is_none() && a.store.invite_code(&waiting.hash()).is_none());
     until("the laptop is out", &mut [(&mut a, &mut da), (&mut b, &mut db), (&mut c, &mut dc)], &|x| {
         !x[1].0.sync.is_on() && x[0].0.sync.devices.as_ref().is_some_and(|l| l.len() == 2)
+    });
+    until("no invite waits, nor its code on the tablet", &mut [(&mut a, &mut da), (&mut c, &mut dc)], &|x| {
+        x[0].0.sync.invites.as_ref().is_some_and(|i| i.waiting.is_empty()) && x[1].0.store.invite_code(&waiting.hash()).is_none()
     });
     assert!(b.sync.error.as_deref().is_some_and(|e| e.contains("removed")), "{:?}", b.sync.error);
     // Off again, its Settings start from the server, its address kept;

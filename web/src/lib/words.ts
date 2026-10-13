@@ -63,3 +63,60 @@ export function linkAction(hash: string, phase: 'loading' | 'setup' | 'ready'): 
 export function overflow(scrollLeft: number, clientWidth: number, scrollWidth: number): { start: boolean; end: boolean } {
   return { start: scrollLeft > 1, end: scrollLeft + clientWidth < scrollWidth - 1 };
 }
+
+/// What a pairing or invite link opened while this page is open does to
+/// the code form. `fill`: nothing is typed (or the same code is), and
+/// nothing is connecting. `ask`: something else is typed, so a link opened
+/// again and again can't change it unasked; the page asks first. `ignore`:
+/// connecting now, or no code.
+export function linkedCode(link: string | null, typed: string, joining: boolean): 'fill' | 'ask' | 'ignore' {
+  if (!link || joining) return 'ignore';
+  const now = typed.trim();
+  return now === '' || now === link ? 'fill' : 'ask';
+}
+
+/// Unicode's format characters (Cf: those that join, hide, tag or turn
+/// text around), and controls: dropped from the server's words.
+const FORMAT = /\p{Cf}/gu;
+const CONTROL = /\p{Cc}/gu;
+
+/// Words the server sent, made fit to show: on one line, no letter that
+/// draws nothing or turns the text around, and at most 200 letters (as
+/// `session::server_words` has it). Format characters go first, as one
+/// (U+FEFF) would otherwise count as a space.
+export function serverWords(words: string): string {
+  const line = words
+    .replace(FORMAT, '')
+    .split(/\s+/)
+    .map((w) => w.replace(CONTROL, ''))
+    .filter(Boolean)
+    .join(' ');
+  const letters = [...line];
+  return letters.length > 200 ? letters.slice(0, 200).join('') + '…' : line;
+}
+
+/// The server's words, said as its own and not Carnet's: "The server
+/// says: …"; nothing for none.
+export function serverSays(words: string): string {
+  const line = serverWords(words);
+  return line ? `The server says: ${line}` : '';
+}
+
+/// A page the server names to be shown (its signup page), as written, if
+/// it's plainly a web page: `https://`, or `http://` when this page is
+/// itself served so; printable ASCII alone, no user in it. Anything else
+/// (`javascript:`, a `data:` page, letters that turn the line around):
+/// `null`, not shown.
+export function shownPage(page: string | null | undefined, here: string): string | null {
+  if (!page || !/^[\x21-\x7e]+$/.test(page)) return null;
+  let url: URL;
+  try {
+    url = new URL(page);
+  } catch {
+    return null;
+  }
+  const secure = url.protocol === 'https:';
+  const plain = url.protocol === 'http:' && here === 'http:';
+  if (!(secure || plain) || url.username || url.password || !url.hostname) return null;
+  return page;
+}

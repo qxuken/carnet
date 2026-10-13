@@ -29,6 +29,13 @@
 //! A Carnet before this one synced the pictures beside notes too. What it
 //! named of those in the vault is let go (dropped there, so the server
 //! may drop it); the files stay where they are, the user's.
+//!
+//! Only pictures sync ([`syncs`]): a file of `attachments/` by a picture's
+//! name, as an import names one. Another device (or one that isn't what
+//! it seems) can't put a program or a script in the notes folder by
+//! naming it in the vault. And on macOS what comes is marked as from
+//! elsewhere ([`quarantine`]), as a download is, so opening it from the
+//! Finder asks first.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -40,6 +47,49 @@ use carnet_sync::crypto::{BlobId, MAX_BLOB, Random};
 use carnet_sync::session::{Event, Session};
 
 use crate::store::{Store, is_owned};
+
+/// Whether a path from the notes folder is one sync puts up or brings
+/// down: Carnet's ([`is_owned`]), and a picture by its name, of the kinds
+/// an import takes ([`carnet_core::doc::is_picture_name`]).
+pub fn syncs(rel: &str) -> bool {
+    is_owned(rel) && carnet_core::doc::is_picture_name(rel)
+}
+
+/// A picture come by sync, written at `path`: whole or not at all, and
+/// on macOS marked as from elsewhere before it's there to open.
+fn write_received(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp-carnet");
+    fs::write(&tmp, bytes)?;
+    quarantine(&tmp);
+    fs::rename(&tmp, path)
+}
+
+/// Marks a file as come from elsewhere (macOS's `com.apple.quarantine`,
+/// as a browser marks a download), so the Finder asks before opening it.
+/// Not marked, it's still a picture; so a failure is let be.
+#[cfg(target_os = "macos")]
+pub fn quarantine(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    unsafe extern "C" {
+        fn setxattr(path: *const std::ffi::c_char, name: *const std::ffi::c_char, value: *const std::ffi::c_void, size: usize, position: u32, options: std::ffi::c_int) -> std::ffi::c_int;
+    }
+    let Ok(p) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return };
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    // Flags (0081: from elsewhere, not yet opened), when, and by whom.
+    let value = format!("0081;{secs:08x};Carnet;");
+    // SAFETY: both names are NUL-terminated and live through the call;
+    // the value is `value.len()` bytes, read only.
+    unsafe {
+        setxattr(p.as_ptr(), c"com.apple.quarantine".as_ptr(), value.as_ptr().cast(), value.len(), 0, 0);
+    }
+}
+
+/// Elsewhere there's no such mark: nothing to do.
+#[cfg(not(target_os = "macos"))]
+pub fn quarantine(_: &Path) {}
 
 /// The index's first line: whose ids it holds ([`Pictures::mark`]).
 const UNDER: &str = "under\t";
@@ -159,7 +209,7 @@ impl Pictures {
             .into_iter()
             .filter_map(|(rel, path)| {
                 let meta = fs::metadata(&path).ok()?;
-                (meta.len() as usize <= MAX_BLOB).then(|| (rel, path, meta.len(), meta.modified().map_or(0, millis)))
+                (syncs(&rel) && meta.len() as usize <= MAX_BLOB).then(|| (rel, path, meta.len(), meta.modified().map_or(0, millis)))
             })
             .collect()
     }
@@ -253,10 +303,10 @@ impl Pictures {
         // Carnet still running would name them again). Their files stay.
         let mut wrote = false;
         let before = self.index.len();
-        self.index.retain(|p, _| is_owned(p));
+        self.index.retain(|p, _| syncs(p));
         changed_index |= self.index.len() != before;
         if !std::mem::replace(&mut self.let_go, true) {
-            for rel in vault.keys().filter(|p| !is_owned(p)) {
+            for rel in vault.keys().filter(|p| !syncs(p)) {
                 wrote |= store.unname(rel);
             }
         }
@@ -323,7 +373,7 @@ impl Pictures {
         // In the vault and not here: asked for.
         for (rel, id) in &vault {
             // One beside a note is the user's, on the device that has it.
-            if present.contains(rel.as_str()) || !is_owned(rel) {
+            if present.contains(rel.as_str()) || !syncs(rel) {
                 continue;
             }
             let Some(id) = unhex(id) else { continue };
@@ -345,7 +395,7 @@ impl Pictures {
     pub fn want_back(&mut self, store: &Store, session: &mut Session, paths: &std::collections::BTreeSet<String>) {
         let Some(replica) = store.replica.as_ref() else { return };
         for path in paths {
-            if !is_owned(path) || store.dir.join(path).exists() {
+            if !syncs(path) || store.dir.join(path).exists() {
                 continue;
             }
             let Some(id) = replica.vault().dropped_id(path).and_then(|h| unhex(&h)) else { continue };
@@ -394,15 +444,10 @@ impl Pictures {
                 self.asked.remove(id);
                 // Brought back: written where it was, and named again.
                 let mut wrote = false;
-                for rel in self.reviving.remove(id).unwrap_or_default().into_iter().filter(|p| is_owned(p)) {
+                for rel in self.reviving.remove(id).unwrap_or_default().into_iter().filter(|p| syncs(p)) {
                     let Ok(path) = store.inside(store.dir.join(&rel)) else { continue };
                     if !path.exists() {
-                        if let Some(dir) = path.parent() {
-                            fs::create_dir_all(dir)?;
-                        }
-                        let tmp = path.with_extension("tmp-carnet");
-                        fs::write(&tmp, bytes)?;
-                        fs::rename(&tmp, &path)?;
+                        write_received(&path, bytes)?;
                         let meta = fs::metadata(&path)?;
                         self.index.insert(rel.clone(), Known { size: meta.len(), modified: meta.modified().map_or(0, millis), id: *id, stored: true });
                         self.arrived = true;
@@ -411,19 +456,14 @@ impl Pictures {
                 }
 
                 let vault = store.replica.as_ref().map(|r| r.vault().pictures()).unwrap_or_default();
-                for rel in vault.iter().filter(|(p, v)| unhex(v) == Some(*id) && is_owned(p)).map(|(p, _)| p) {
+                for rel in vault.iter().filter(|(p, v)| unhex(v) == Some(*id) && syncs(p)).map(|(p, _)| p) {
                     // Its path checked twice over: plain (the vault reads
                     // no other), and in the notes folder once joined.
                     let Ok(path) = store.inside(store.dir.join(rel)) else { continue };
                     if path.exists() {
                         continue;
                     }
-                    if let Some(dir) = path.parent() {
-                        fs::create_dir_all(dir)?;
-                    }
-                    let tmp = path.with_extension("tmp-carnet");
-                    fs::write(&tmp, bytes)?;
-                    fs::rename(&tmp, &path)?;
+                    write_received(&path, bytes)?;
                     let meta = fs::metadata(&path)?;
                     self.index.insert(rel.clone(), Known { size: meta.len(), modified: meta.modified().map_or(0, millis), id: *id, stored: true });
                     self.arrived = true;

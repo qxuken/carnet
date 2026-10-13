@@ -758,12 +758,27 @@ impl Sync {
     }
 
     /// Takes `device` out of the account (§7); the list says when it's
-    /// done, or `error` why not.
-    pub fn revoke(&mut self, device: &[u8]) {
-        if let Phase::On { session, link, .. } = &mut self.phase {
-            match session.revoke(device, &mut OsRandom) {
-                Ok(()) => flush(session, link.as_ref()),
-                Err(e) => self.error = Some(sentence(&e)),
+    /// done, or `error` why not. Every waiting invite goes with it, taken
+    /// back: the device removed had their codes, in the vault. True if
+    /// any was, for the app to say so.
+    pub fn revoke(&mut self, store: &mut Store, device: &[u8]) -> bool {
+        let Phase::On { config, session, link } = &mut self.phase else { return false };
+        match session.revoke(device, &mut OsRandom) {
+            Ok(()) => {
+                let taken = if device != config.device.as_slice() { store.forget_all_invites() } else { Vec::new() };
+                if !taken.is_empty() {
+                    session.take_back_invites(&taken);
+                    send_vault(session, store);
+                    if self.invite.as_deref().and_then(InviteCode::parse).is_some_and(|c| taken.contains(&c.hash())) {
+                        self.invite = None;
+                    }
+                }
+                flush(session, link.as_ref());
+                !taken.is_empty()
+            }
+            Err(e) => {
+                self.error = Some(sentence(&e));
+                false
             }
         }
     }
@@ -1236,6 +1251,8 @@ impl Sync {
                             }
                             self.error = Some(sentence(&session::refusal_words(&why)));
                         }
+                        // This device's own words: as they are.
+                        Event::Failed(why) => self.error = Some(sentence(&why)),
                         Event::Invites { owner, invites, accounts } => {
                             listed = Some(invites.iter().map(|i| i.hash).collect());
                             self.invites = Some(Invites { owner, waiting: invites, accounts });
@@ -1370,7 +1387,8 @@ impl Sync {
                     return changed;
                 }
                 // The invites the server lists as waiting: the codes of the
-                // rest (used, taken back, run out) forgotten in the vault.
+                // rest forgotten in the vault as the list says (used, taken
+                // back), never on an empty one, and once run out.
                 if let Some(waiting) = listed {
                     store.forget_invites_but(&waiting, unix_now());
                 }
@@ -1443,8 +1461,9 @@ impl Sync {
                 flush(session, link.as_ref());
                 // Pictures to put or fetch: over HTTP, by their links.
                 if let Some(http) = &self.http {
+                    let peer = link.as_ref().and_then(Link::peer);
                     for t in session.take_transfers() {
-                        http.send_for(&config.origin, t);
+                        http.send_for(&config.origin, peer, t);
                     }
                 }
                 if session.cursor() != self.saved_cursor {

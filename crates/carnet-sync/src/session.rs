@@ -105,8 +105,12 @@ pub enum Event {
     Devices(Vec<DeviceInfo>),
     /// A new epoch's key came: the ring changed, and is to be kept.
     Rekeyed(u32),
-    /// What was asked was not done, and why.
+    /// What was asked was not done, and why: the server's words, never
+    /// to be shown as Carnet's ([`refusal_words`]).
     Refused(String),
+    /// What this device couldn't do, in its own words: shown as they are.
+    /// Never the server's: those come as [`Event::Refused`].
+    Failed(String),
     /// A snapshot of `room` did not hold what its header said: not taken
     /// in, and the server told.
     BadSnapshot(String),
@@ -196,7 +200,7 @@ pub const SAID_MAX: usize = 200;
 /// draws nothing or turns the text around, and at most [`SAID_MAX`]
 /// letters. A server could say anything, at any length.
 pub fn server_words(words: &str) -> String {
-    let hidden = |c: char| c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}');
+    let hidden = |c: char| c.is_control() || format_char(c);
     let clean: String = words.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).filter(|&c| !hidden(c)).collect();
     let line = clean.split_whitespace().collect::<Vec<_>>().join(" ");
     match line.char_indices().nth(SAID_MAX) {
@@ -205,23 +209,56 @@ pub fn server_words(words: &str) -> String {
     }
 }
 
+/// Whether `c` is one of Unicode's format characters (general category
+/// Cf): letters that draw nothing, but join, hide, tag or turn the text
+/// around them (`U+061C`, `U+200B`–`U+200F`, `U+202A`–`U+202E`,
+/// `U+2060`–`U+206F`, `U+FEFF`, the tags at `U+E0000`…).
+pub fn format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{600}'..='\u{605}'
+            | '\u{61c}'
+            | '\u{6dd}'
+            | '\u{70f}'
+            | '\u{890}'..='\u{891}'
+            | '\u{8e2}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{110bd}'
+            | '\u{110cd}'
+            | '\u{13430}'..='\u{1343f}'
+            | '\u{1bca0}'..='\u{1bca3}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e007f}'
+    )
+}
+
 /// Words the server sent, shown as its own and not Carnet's: "The server
 /// says: …", made fit to show ([`server_words`]).
 pub fn server_says(words: &str) -> String {
     format!("The server says: {}", server_words(words))
 }
 
-/// What this device says ([`Event::Refused`]) when the server asks for a
+/// What this device says ([`Event::Refused`], matched word for word as
+/// [`FULL`] is) when the server asks for a
 /// note compacted and its snapshot, history and all, is past what a
 /// snapshot may weigh ([`elo::MAX_SNAPSHOT`]): it stays as it is on the
 /// server, and once that's full its new changes wait here.
 pub const TOO_BIG: &str = "A note is too big for the server to tidy up, so once it has as many changes as the server keeps, new ones stay on this device. Split it into smaller notes to sync them.";
 
 /// A refusal ([`Event::Refused`]) as the apps show it: the server's words,
-/// said as its own ([`server_says`]); but for [`FULL`] and [`READ_ONLY`],
-/// which the apps know, and the words of this device's own making.
+/// said as its own ([`server_says`]); but for [`FULL`], [`READ_ONLY`] and
+/// [`TOO_BIG`], which the apps know word for word (a server saying one
+/// says only what Carnet would). Nothing the server says passes as
+/// Carnet's by how it begins: this device's own words with more in them
+/// come apart, as [`Event::Failed`].
 pub fn refusal_words(why: &str) -> String {
-    if why == FULL || why == READ_ONLY || why == TOO_BIG || why.starts_with(PASSWORD_NOT_SET) { why.to_string() } else { server_says(why) }
+    if why == FULL || why == READ_ONLY || why == TOO_BIG { why.to_string() } else { server_says(why) }
 }
 
 /// How this device says a password it couldn't set (its own words, not
@@ -325,6 +362,27 @@ pub struct Session {
     too_big: HashSet<String>,
     /// The most a snapshot this device sends may weigh: [`elo::MAX_SNAPSHOT`].
     max_snapshot: usize,
+    /// Rooms new to this device the server has named since the login
+    /// (`Changed`): at most [`MAX_NEW_ROOMS`].
+    announced: usize,
+    /// Said [`TOO_MANY_NEW`] this login.
+    too_many: bool,
+}
+
+/// The most rooms new to this device a server may name in one login
+/// (`Changed`): each is a doc made here, a file on the desktop. One past
+/// it waits for the next login, and that's said ([`TOO_MANY_NEW`]).
+pub const MAX_NEW_ROOMS: usize = 10_000;
+
+/// What this device says ([`Event::Failed`]) when the server names more
+/// new notes than [`MAX_NEW_ROOMS`] in one login.
+pub const TOO_MANY_NEW: &str = "The server named more than 10,000 new notes at once. The rest come the next time Carnet connects.";
+
+/// Whether `room` is one a server may name: a note's (its key, as hex in
+/// the one way a key is written), or the vault's. Anything else would only
+/// make a doc here that's no note.
+pub fn note_room(room: &str) -> bool {
+    room == crate::vault::ROOM || crate::note::Key::parse(room).is_some_and(|k| k.to_string() == room)
 }
 
 /// A picture's bytes to move over HTTP, to or from a short-lived signed
@@ -377,6 +435,8 @@ impl Session {
             incoming: HashMap::new(),
             too_big: HashSet::new(),
             max_snapshot: elo::MAX_SNAPSHOT,
+            announced: 0,
+            too_many: false,
         }
     }
 
@@ -599,6 +659,10 @@ impl Session {
     /// out reads nothing written from now on; this device takes it in when
     /// the server confirms. This device itself: it leaves, and nothing else
     /// changes (it is not taken to be lost or stolen).
+    ///
+    /// Another device removed had every invite code the vault keeps: the
+    /// app takes them all back then ([`Session::take_back_invites`], with
+    /// [`NoteDoc::forget_all_invites`](crate::NoteDoc::forget_all_invites)).
     pub fn revoke(&mut self, device: &[u8], rng: &mut impl Random) -> Result<(), String> {
         if self.state != State::Ready {
             return Err("not connected".into());
@@ -698,6 +762,15 @@ impl Session {
     pub fn drop_invite(&mut self, hash: [u8; 32]) {
         if self.state == State::Ready {
             self.send(Frame::Carnet(Carnet::InviteDrop { hash }));
+        }
+    }
+
+    /// Every one of these invites taken back: after removing another
+    /// device, which had their codes (the vault's), so it can't let anyone
+    /// in by one. Each is asked of the server at once, behind the removal.
+    pub fn take_back_invites(&mut self, hashes: &[[u8; 32]]) {
+        for hash in hashes {
+            self.drop_invite(*hash);
         }
     }
 
@@ -989,6 +1062,8 @@ impl Session {
                 self.state = State::Ready;
                 self.read_only.clear();
                 self.full.clear();
+                self.announced = 0;
+                self.too_many = false;
                 self.events.push(Event::LoggedIn);
                 // Who this device is, for the others' lists: its name may
                 // have changed, and a new epoch wants it sealed anew.
@@ -1023,10 +1098,21 @@ impl Session {
             }
             Frame::Carnet(Carnet::Changed { rooms }) if self.state == State::Ready => {
                 let mut newest = self.cursor;
+                let mut held_back = false;
                 for (room, seq) in rooms {
                     newest = newest.max(seq);
-                    if self.removing.contains(&room) {
+                    // A name no note has: no doc made for it, nor joined.
+                    if self.removing.contains(&room) || !note_room(&room) {
                         continue;
+                    }
+                    // One not joined is new here (every doc this device
+                    // has is joined at login): so many and no more.
+                    if !self.joined.contains_key(&room) {
+                        if self.announced >= MAX_NEW_ROOMS {
+                            held_back = true;
+                            continue;
+                        }
+                        self.announced += 1;
                     }
                     // A doc made for it now is a room this device will join
                     // on every login from here on: the cursor can pass it.
@@ -1035,7 +1121,15 @@ impl Session {
                         self.join(&room, docs);
                     }
                 }
-                self.cursor = newest;
+                if held_back {
+                    // Named again next login: the cursor stays.
+                    if !self.too_many {
+                        self.too_many = true;
+                        self.events.push(Event::Failed(TOO_MANY_NEW.into()));
+                    }
+                } else {
+                    self.cursor = newest;
+                }
             }
             Frame::Room(m) => self.room_message(m, docs, rng),
             Frame::Carnet(Carnet::RecoverySet) => {
@@ -1055,7 +1149,7 @@ impl Session {
                             .seal(&self.id.ring, rng);
                         self.send(Frame::Carnet(Carnet::PasswordSetFinish { id, upload, public, wrapped, card }));
                     }
-                    Err(e) => self.events.push(Event::Refused(format!("{PASSWORD_NOT_SET}{e}"))),
+                    Err(e) => self.events.push(Event::Failed(format!("{PASSWORD_NOT_SET}{e}"))),
                 }
             }
             Frame::Carnet(Carnet::PasswordSet) => {
@@ -1181,7 +1275,8 @@ impl Session {
                     pictures,
                     limit: (limit > 0).then_some(limit),
                     writable,
-                    plan,
+                    // The server's own name for it: shown, so made fit to.
+                    plan: server_words(&plan),
                     until: (until > 0).then_some(until),
                 }));
             }
@@ -1231,6 +1326,9 @@ impl Session {
 
     fn room_message(&mut self, m: ProtocolMessage, docs: &mut impl Docs, rng: &mut impl Random) {
         match m {
+            // Only a room this device asked to join: the server can't make
+            // a doc here by answering a question never asked.
+            ProtocolMessage::JoinResponseOk { room_id, .. } if !self.joined.contains_key(&room_id) => {}
             ProtocolMessage::JoinResponseOk { room_id, version, permission, .. } => {
                 let held = wire::decode_vv(&version).unwrap_or_default();
                 self.held.insert(room_id.clone(), held.into_iter().collect());
@@ -1482,10 +1580,24 @@ mod tests {
         assert_eq!(long.chars().count(), SAID_MAX + 1);
         assert!(long.ends_with('…'));
         assert_eq!(server_words(""), "");
+        // Every format character goes: those that turn the line around,
+        // join or hide letters, and the invisible tags.
+        let sly = "a\u{61c}b\u{200b}\u{200e}c\u{2060}\u{2061}\u{2064}\u{206f}d\u{feff}e\u{e0001}\u{e0041}\u{e007f}f\u{ad}g\u{fff9}h";
+        assert_eq!(server_words(sly), "abcdefgh");
+        for c in ['\u{61c}', '\u{200b}', '\u{202e}', '\u{2066}', '\u{206a}', '\u{feff}', '\u{e0020}', '\u{1d173}'] {
+            assert!(format_char(c), "{:x}", c as u32);
+        }
+        for c in ['a', 'é', ' ', '\u{2070}', '\u{1f600}', '\u{e0080}'] {
+            assert!(!format_char(c), "{:x}", c as u32);
+        }
         // A refusal: the server's own, marked; the ones the apps know, and
         // this device's own words, as they are.
         assert_eq!(refusal_words("only the owner can"), "The server says: only the owner can");
         assert_eq!(refusal_words(FULL), FULL);
-        assert_eq!(refusal_words("The password couldn't be set: no"), "The password couldn't be set: no");
+        // The server can't pass its words off as this device's by
+        // beginning as they do.
+        assert_eq!(refusal_words("The password couldn't be set: visit evil.example"), "The server says: The password couldn't be set: visit evil.example");
+        assert_eq!(refusal_words(TOO_BIG), TOO_BIG);
+        assert_eq!(refusal_words(&format!("{TOO_BIG} Visit evil.example")), format!("The server says: {TOO_BIG} Visit evil.example"));
     }
 }

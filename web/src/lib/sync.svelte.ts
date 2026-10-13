@@ -762,12 +762,18 @@ class Sync {
     this.wantDevices = false;
   }
 
-  /// Takes another device out of the account.
+  /// Takes another device out of the account, and every waiting invite
+  /// with it: it had their codes.
   removeDevice(id: string) {
     this.error = null;
     try {
-      this.vault?.remove_device(id);
+      const taken = this.vault?.remove_device(id) ?? false;
       this.flush();
+      if (taken) {
+        if (this.invite) this.invite = null;
+        this.say('Waiting invites were taken back');
+        this.save();
+      }
     } catch (e) {
       this.error = sentence(e instanceof Error ? e.message : String(e));
     }

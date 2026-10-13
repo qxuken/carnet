@@ -1278,6 +1278,70 @@ fn a_vault_naming_places_outside_the_notes_folder_writes_nothing_there() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A file another device names in `attachments/` that isn't a picture by
+/// its name (a program, a script, an app) is never written here, whatever
+/// its bytes, and isn't sent from here either. A picture that comes is
+/// marked on macOS as from elsewhere, as a download is; one made here
+/// isn't.
+#[test]
+fn only_pictures_come_by_sync() {
+    let mut two = Two::new("only-pictures");
+    let photo: Vec<u8> = (0..20_000u32).map(|i| (i % 239) as u8).collect();
+    let a = &mut two.sides[0].store;
+    let src = a.save_attachment("", "png", &photo).unwrap();
+    let mut n = crate::store::Note::new("Shown", Doc::new(vec![Block::text("a picture")]));
+    n.doc.push(Block::new(carnet_core::doc::Kind::Image { src: src.clone(), alt: String::new(), float: Default::default(), width: None, wiki: false }));
+    a.notes.push(n);
+    let i = a.notes.len() - 1;
+    a.save(i, true).unwrap();
+    // Not a picture by its name: not sent.
+    std::fs::write(a.dir.join("attachments/notes.txt"), b"plain words").unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok(), Some(photo.clone()));
+    assert!(!two.sides[1].dir.join("attachments/notes.txt").exists());
+    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&photo));
+
+    // The picture's id under names that would run, written as no Carnet
+    // writes them.
+    let raw = loro::LoroDoc::new();
+    raw.set_peer_id(0xbad).unwrap();
+    let pictures = raw.get_map("pictures");
+    let bad = ["attachments/run.command", "attachments/Tool.app", "attachments/fix.sh", "attachments/setup.exe", "attachments/readme", "attachments/page.html"];
+    for p in bad {
+        pictures.insert(p, id.as_str()).unwrap();
+    }
+    raw.commit();
+    let bytes = raw.export(loro::ExportMode::all_updates()).unwrap();
+    let a = &mut two.sides[0];
+    let r = a.store.replica.as_mut().unwrap();
+    r.vault().import(&bytes).unwrap();
+    r.persist_vault().unwrap();
+    a.session.saved(vault::ROOM, r, &mut OsRandom);
+    // And the picture asked for again on B, as when it's gone there.
+    std::fs::remove_file(two.sides[1].dir.join(&src)).unwrap();
+    for _ in 0..4 {
+        two.pump();
+    }
+    let b = &two.sides[1];
+    for p in bad {
+        assert!(!b.dir.join(p).exists(), "{p} written");
+    }
+    let got = b.dir.join(&src);
+    assert_eq!(std::fs::read(&got).ok(), Some(photo), "the picture itself comes");
+    #[cfg(target_os = "macos")]
+    {
+        let mark = |p: &std::path::Path| {
+            let out = std::process::Command::new("xattr").args(["-p", "com.apple.quarantine"]).arg(p).output().unwrap();
+            out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        };
+        let m = mark(&got).expect("marked as from elsewhere");
+        assert!(m.starts_with("0081;") && m.ends_with(";Carnet;"), "{m}");
+        assert_eq!(mark(&two.sides[0].dir.join(&src)), None, "made here: not marked");
+    }
+}
+
 /// A name a Mac allows and another system reads as more than a name
 /// (`a:b`, `x\y`): sent as one it reads as a name, and the file here
 /// follows, as one renamed elsewhere would. (Windows names no file so.)
@@ -1340,15 +1404,28 @@ fn an_invites_code_is_known_on_every_device_until_done_with() {
     }
 
     // Used: the server lists it no more. Kept a while, for a list from
-    // before it was made would not name it either; then forgotten, on
-    // both.
+    // before it was made would not name it either. A list naming none is
+    // no news (a server could wipe every code by it): kept still.
     let two_ = make(&mut two);
     two.hub.store_mut().drop_invite(two_.hash()).unwrap();
     assert!(list(&mut two, 1).is_empty());
     assert_eq!(two.sides[0].store.invite_code(&two_.hash()), Some(two_.text()));
     two.now += carnet_sync::vault::INVITE_GRACE;
-    list(&mut two, 1);
+    assert!(list(&mut two, 1).is_empty());
+    for side in 0..2 {
+        assert_eq!(two.sides[side].store.invite_code(&two_.hash()), Some(two_.text()), "kept in {side}'s vault");
+    }
+    // A list naming another: the used one forgotten, on both.
+    let three = make(&mut two);
+    assert_eq!(list(&mut two, 1), [three.hash()]);
     for side in 0..2 {
         assert_eq!(two.sides[side].store.invite_code(&two_.hash()), None, "gone from {side}'s vault");
+        assert_eq!(two.sides[side].store.invite_code(&three.hash()), Some(three.text()));
+    }
+    // Run out: forgotten, whatever the server says.
+    two.now += carnet_sync::vault::INVITE_LIFE;
+    list(&mut two, 0);
+    for side in 0..2 {
+        assert_eq!(two.sides[side].store.invite_code(&three.hash()), None, "gone from {side}'s vault");
     }
 }

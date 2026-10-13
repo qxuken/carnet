@@ -15,9 +15,13 @@
 //! computer or its network by the DNS. So a picture's host is looked up
 //! once, every address it has checked as `link` checks one written out,
 //! and the connection made to those same addresses: a second lookup can't
-//! answer otherwise.
+//! answer otherwise. An address on this computer or its network is only
+//! ever the server's own host's, and only when the socket itself is
+//! connected to one such: then the connection goes to the very address
+//! the socket is, so the DNS, the server's to answer for its own name,
+//! can't send it elsewhere.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -26,7 +30,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc as tmpsc;
 
 use crate::crypto::{BlobId, MAX_BLOB};
-use crate::link::{Url, inner, inner_ip};
+use crate::link::{Url, inner, inner_ip, same_host};
 use crate::session::Transfer;
 
 /// How long a transfer may take, all of it.
@@ -46,7 +50,7 @@ pub struct Done {
 
 /// Transfers, done on a thread of their own, several at once.
 pub struct Http {
-    jobs: tmpsc::UnboundedSender<(Transfer, Option<String>)>,
+    jobs: tmpsc::UnboundedSender<(Transfer, Option<Server>)>,
     done: mpsc::Receiver<Done>,
 }
 
@@ -54,7 +58,7 @@ impl Http {
     /// The thread, trusting these certificates (DER) besides the web's
     /// roots; `wake` is called when a transfer is done.
     pub fn start(trusted: Vec<Vec<u8>>, wake: impl Fn() + Send + Sync + 'static) -> std::io::Result<Self> {
-        let (jobs, mut rx) = tmpsc::unbounded_channel::<(Transfer, Option<String>)>();
+        let (jobs, mut rx) = tmpsc::unbounded_channel::<(Transfer, Option<Server>)>();
         let (tx, done) = mpsc::channel::<Done>();
         let wake = Arc::new(wake);
         std::thread::Builder::new().name("carnet-http".into()).spawn(move || {
@@ -64,11 +68,11 @@ impl Http {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async move {
-                        while let Some((t, origin)) = rx.recv().await {
+                        while let Some((t, server)) = rx.recv().await {
                             let (config, tx, wake) = (config.clone(), tx.clone(), wake.clone());
                             tokio::task::spawn_local(async move {
                                 let (id, put) = (t.id(), matches!(t, Transfer::Put { .. }));
-                                let result = match tokio::time::timeout(TIMEOUT, transfer(config, &t, origin.as_deref())).await {
+                                let result = match tokio::time::timeout(TIMEOUT, transfer(config, &t, server.as_ref())).await {
                                     Ok(r) => r,
                                     Err(_) => Err("timed out".into()),
                                 };
@@ -84,11 +88,12 @@ impl Http {
         Ok(Http { jobs, done })
     }
 
-    /// A transfer for the server at `origin`: its link's host may give
-    /// no address on this computer or its network unless the server's
-    /// own does.
-    pub fn send_for(&self, origin: &str, t: Transfer) {
-        let _ = self.jobs.send((t, Some(origin.to_string())));
+    /// A transfer for the server at `origin`, its socket connected to
+    /// `peer` (`Link::peer`): its link's host may give no address on this
+    /// computer or its network unless it's the server's own host, and the
+    /// socket is to such an address.
+    pub fn send_for(&self, origin: &str, peer: Option<IpAddr>, t: Transfer) {
+        let _ = self.jobs.send((t, Some(Server { origin: origin.to_string(), peer })));
     }
 
     /// A transfer to wherever its link's host is, unchecked: for a link
@@ -103,10 +108,18 @@ impl Http {
     }
 }
 
-async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer, origin: Option<&str>) -> Result<Vec<u8>, String> {
+/// The server a link came from: its origin, and the address its socket
+/// is connected to, when known.
+#[derive(Clone, Debug)]
+struct Server {
+    origin: String,
+    peer: Option<IpAddr>,
+}
+
+async fn transfer(config: Arc<rustls::ClientConfig>, t: &Transfer, server: Option<&Server>) -> Result<Vec<u8>, String> {
     let answer = match t {
-        Transfer::Put { url, sealed, .. } => request(config, "PUT", url, Some(("application/octet-stream", sealed)), origin).await?,
-        Transfer::Get { url, .. } => request(config, "GET", url, None, origin).await?,
+        Transfer::Put { url, sealed, .. } => request(config, "PUT", url, Some(("application/octet-stream", sealed)), server).await?,
+        Transfer::Get { url, .. } => request(config, "GET", url, None, server).await?,
     };
     if !(200..300).contains(&answer.status) {
         return Err(format!("HTTP {}", answer.status));
@@ -153,13 +166,13 @@ pub fn ask(url: String, json: Option<Vec<u8>>, wake: impl Fn() + Send + 'static)
 }
 
 /// One request, with a body of its type if any, and its answer. Given
-/// the server's `origin`, the link is one it gave, and is checked where
-/// it leads ([`addresses`]).
-async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>, origin: Option<&str>) -> Result<Answer, String> {
+/// the server, the link is one it gave, and is checked where it leads
+/// ([`addresses`]).
+async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, body: Option<(&str, &[u8])>, server: Option<&Server>) -> Result<Answer, String> {
     // Read strictly (`link`): nothing in the request line but the link's
     // printable ASCII.
     let u = Url::parse(url)?;
-    let at = addresses(&u, origin).await?;
+    let at = addresses(&u, server).await?;
     let tcp = tokio::net::TcpStream::connect(&at[..]).await.map_err(|e| e.to_string())?;
     if u.tls {
         let name = rustls::pki_types::ServerName::try_from(u.host.clone()).map_err(|e| e.to_string())?;
@@ -170,32 +183,63 @@ async fn request(config: Arc<rustls::ClientConfig>, method: &str, url: &str, bod
     }
 }
 
-/// Where `u`'s host is, looked up once. For a link the server at
-/// `origin` gave, none of its addresses may be on this computer or its
-/// network ([`inner_ip`]) unless the server is on one itself: written so,
-/// or looked up so.
-async fn addresses(u: &Url, origin: Option<&str>) -> Result<Vec<SocketAddr>, String> {
+/// Where `u`'s host is, looked up once. For a link a server gave, none
+/// of its addresses may be on this computer or its network ([`inner_ip`])
+/// unless it's the server's own host and the server is on one itself
+/// ([`server_inner`]); and then it's the address the socket is connected
+/// to, on the link's port, whatever the DNS says now.
+async fn addresses(u: &Url, server: Option<&Server>) -> Result<Vec<SocketAddr>, String> {
     let at: Vec<SocketAddr> = tokio::net::lookup_host((u.host.as_str(), u.port)).await.map_err(|e| e.to_string())?.collect();
     if at.is_empty() {
         return Err(format!("{}: no address", u.host));
     }
-    let Some(origin) = origin else { return Ok(at) };
-    if at.iter().any(|a| inner_ip(a.ip())) && !server_inner(origin).await {
-        return Err(format!("{}: an address on this computer or its network, from a server that isn't", u.host));
+    let Some(server) = server else { return Ok(at) };
+    if !at.iter().any(|a| inner_ip(a.ip())) {
+        return Ok(at);
     }
-    Ok(at)
+    let own = Url::parse(&server.origin).is_ok_and(|s| same_host(&s.host, &u.host));
+    if !own || !server_inner(server).await {
+        return Err(format!("{}: an address on this computer or its network, not the server's own", u.host));
+    }
+    Ok(match server.peer {
+        // The socket's address first; and, the socket on this computer,
+        // this computer's other loopback (`localhost` is `::1` and
+        // `127.0.0.1` both, and a store beside it may listen on one).
+        Some(ip) => {
+            let mut to = vec![SocketAddr::new(ip, u.port)];
+            to.extend(at.into_iter().filter(|a| a.ip() != ip && a.ip().is_loopback() && ip.is_loopback()));
+            to
+        }
+        None => at,
+    })
 }
 
-/// Whether the server at `origin` is on this computer or its network.
-async fn server_inner(origin: &str) -> bool {
-    let Ok(s) = Url::parse(origin) else { return false };
+/// Whether the server is on this computer or its network: the address
+/// its socket is connected to, when known; else its host, written so or
+/// looked up so, every address of it. Any address public, and it isn't:
+/// what a name looks up to is the server's own DNS to say, and a hostile
+/// one could add `127.0.0.1` to its answer.
+async fn server_inner(server: &Server) -> bool {
+    if let Some(ip) = server.peer {
+        return inner_ip(ip);
+    }
+    let Ok(s) = Url::parse(&server.origin) else { return false };
+    if let Ok(ip) = s.host.parse::<IpAddr>() {
+        return inner_ip(ip);
+    }
     if inner(&s.host) {
         return true;
     }
     match tokio::net::lookup_host((s.host.as_str(), s.port)).await {
-        Ok(mut at) => at.any(|a| inner_ip(a.ip())),
+        Ok(at) => all_inner(&at.collect::<Vec<_>>()),
         Err(_) => false,
     }
+}
+
+/// Whether there are addresses, and every one is on this computer or its
+/// network.
+fn all_inner(at: &[SocketAddr]) -> bool {
+    !at.is_empty() && at.iter().all(|a| inner_ip(a.ip()))
 }
 
 async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &str, body: Option<(&str, &[u8])>) -> Result<Answer, String> {
@@ -312,6 +356,15 @@ mod tests {
         crate::net::client_config(&[])
     }
 
+    /// The server at `origin`, its socket's address not known.
+    fn at(origin: &str) -> Server {
+        Server { origin: origin.into(), peer: None }
+    }
+
+    fn at_peer(origin: &str, peer: &str) -> Server {
+        Server { origin: origin.into(), peer: Some(peer.parse().unwrap()) }
+    }
+
     #[test]
     fn chunks_are_read_as_they_say() {
         assert_eq!(unchunk(b"3\r\nabc\r\n2;x=1\r\nde\r\n0\r\n\r\n").unwrap(), b"abcde");
@@ -330,7 +383,7 @@ mod tests {
         rt.block_on(async {
             let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()).await;
             let url = format!("{base}/x HTTP/1.1\r\nHost: evil\r\n\r\nGET /y");
-            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url }, Some(&base)).await.is_err());
+            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url }, Some(&at(&base))).await.is_err());
         });
     }
 
@@ -346,18 +399,82 @@ mod tests {
             let port = base.rsplit(':').next().unwrap();
             let url = format!("http://localhost:{port}/x");
             for elsewhere in ["https://notes.example.com", "https://203.0.113.9"] {
-                let got = transfer(config(), &Transfer::Get { id: [1; 32], url: url.clone() }, Some(elsewhere)).await;
+                let got = transfer(config(), &Transfer::Get { id: [1; 32], url: url.clone() }, Some(&at(elsewhere))).await;
                 assert!(got.unwrap_err().contains("on this computer or its network"), "{elsewhere}");
             }
-            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url }, Some("http://localhost:8787")).await.unwrap(), b"ok");
+            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url }, Some(&at("http://localhost:8787"))).await.unwrap(), b"ok");
         });
         // The addresses a name may be given, as checked.
-        for here in ["127.0.0.1", "10.1.2.3", "192.168.0.9", "172.20.0.1", "169.254.169.254", "100.100.0.1", "0.0.0.0", "255.255.255.255", "::1", "fe80::1", "fd12::1", "::ffff:10.0.0.1"] {
+        for here in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.9",
+            "172.20.0.1",
+            "169.254.169.254",
+            "100.100.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "::1",
+            "fe80::1",
+            "fd12::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::c0a8:101",
+            "64:ff9b:1::808:808",
+        ] {
             assert!(inner_ip(here.parse().unwrap()), "{here}");
         }
-        for public in ["203.0.113.9", "8.8.8.8", "2606:4700::1111", "100.128.0.1"] {
+        for public in ["203.0.113.9", "8.8.8.8", "2606:4700::1111", "100.128.0.1", "64:ff9b::808:808"] {
             assert!(!inner_ip(public.parse().unwrap()), "{public}");
         }
+    }
+
+    /// A server's name the DNS gives an address here and one elsewhere
+    /// is not counted as here: that answer is the server's own to give.
+    /// Only every address here is.
+    #[test]
+    fn a_server_is_here_only_if_all_its_addresses_are() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        assert!(all_inner(&[a("127.0.0.1:80"), a("[::1]:80")]));
+        assert!(all_inner(&[a("192.168.1.5:443")]));
+        assert!(!all_inner(&[a("127.0.0.1:80"), a("203.0.113.9:80")]));
+        assert!(!all_inner(&[a("203.0.113.9:80")]));
+        assert!(!all_inner(&[]));
+    }
+
+    /// A hostile server, its socket somewhere public, whose links lead
+    /// here (to Docker's port, say): never followed, by a name of its
+    /// own looked up here, a name of the server's own looked up anew (the
+    /// DNS turned since the socket connected), nor another host. A server
+    /// whose socket is here: its own host, on any port, at the socket's
+    /// very address; another host here, never.
+    #[test]
+    fn a_hostile_server_cannot_lead_here() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()).await;
+            let port = base.rsplit(':').next().unwrap();
+            let get = |url: String| Transfer::Get { id: [1; 32], url };
+            // The socket to a public address: nothing here, its own name
+            // included.
+            for (origin, url) in [
+                ("http://localhost:8787", format!("http://localhost:{port}/x")),
+                ("http://notes.example.com", format!("http://localhost:{port}/x")),
+                ("http://127.0.0.1:8787", format!("http://127.0.0.1:{port}/x")),
+            ] {
+                let got = transfer(config(), &get(url), Some(&at_peer(origin, "203.0.113.9"))).await;
+                assert!(got.unwrap_err().contains("not the server's own"), "{origin}");
+            }
+            // Here, but another host: refused.
+            let got = transfer(config(), &get(format!("http://localhost:{port}/x")), Some(&at_peer("http://127.0.0.1:8787", "127.0.0.1"))).await;
+            assert!(got.unwrap_err().contains("not the server's own"));
+            let got = transfer(config(), &get(format!("http://localhost:{port}/x")), Some(&at("http://127.0.0.1:8787"))).await;
+            assert!(got.unwrap_err().contains("not the server's own"));
+            // Here, its own host, another port: followed, to the socket's
+            // address (or this computer's other loopback).
+            let got = transfer(config(), &get(format!("http://localhost:{port}/x")), Some(&at_peer("http://localhost:8787", "::1"))).await;
+            assert_eq!(got.unwrap(), b"ok");
+        });
     }
 
     #[test]
@@ -366,25 +483,25 @@ mod tests {
         rt.block_on(async {
             // A fetch, its body by length.
             let (base, server) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello".to_vec()).await;
-            let got = transfer(config(), &Transfer::Get { id: [1; 32], url: format!("{base}/v1/blobs/t?q=1") }, Some(&base)).await;
+            let got = transfer(config(), &Transfer::Get { id: [1; 32], url: format!("{base}/v1/blobs/t?q=1") }, Some(&at(&base))).await;
             assert_eq!(got.unwrap(), b"hello");
             let asked = String::from_utf8(server.await.unwrap()).unwrap();
             assert!(asked.starts_with("GET /v1/blobs/t?q=1 HTTP/1.1\r\n"), "{asked}");
             // In chunks.
             let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nhel\r\n2\r\nlo\r\n0\r\n\r\n".to_vec()).await;
-            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&base)).await.unwrap(), b"hello");
+            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&at(&base))).await.unwrap(), b"hello");
             // A put says its length, and sends its bytes.
             let (base, server) = one_answer(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()).await;
             let put = Transfer::Put { id: [1; 32], url: format!("{base}/v1/blobs/p"), sealed: b"sealed bytes".to_vec() };
-            assert_eq!(transfer(config(), &put, Some(&base)).await.unwrap(), b"");
+            assert_eq!(transfer(config(), &put, Some(&at(&base))).await.unwrap(), b"");
             let asked = String::from_utf8(server.await.unwrap()).unwrap();
             assert!(asked.starts_with("PUT /v1/blobs/p HTTP/1.1\r\n") && asked.contains("Content-Length: 12\r\n") && asked.ends_with("\r\n\r\nsealed bytes"), "{asked}");
             // Refused: said so.
             let (base, _) = one_answer(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\nnope".to_vec()).await;
-            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&base)).await, Err("HTTP 403".into()));
+            assert_eq!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&at(&base))).await, Err("HTTP 403".into()));
             // Cut short.
             let (base, _) = one_answer(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nhal".to_vec()).await;
-            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&base)).await.is_err());
+            assert!(transfer(config(), &Transfer::Get { id: [1; 32], url: base.clone() }, Some(&at(&base))).await.is_err());
         });
     }
 

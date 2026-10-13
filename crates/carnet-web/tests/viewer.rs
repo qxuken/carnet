@@ -299,6 +299,29 @@ fn the_owners_browser_invites_and_takes_back() {
     assert_eq!(desk_code(&desk, &hash), None);
 }
 
+/// A device removed had every waiting invite's code (they're in the
+/// vault): the browser that removes it takes each back, on the server
+/// and in the vault, and says so.
+#[test]
+fn removing_a_device_takes_back_the_invites_it_knew() {
+    let mut rng = Seeded(6);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let code = web.make_invite(&mut rng).expect("connected");
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let hash = carnet_sync::invite::InviteCode::parse(&code).unwrap().hash();
+    assert!(desk.docs[vault::ROOM].invite_code(&hash).is_some(), "the desktop has the code");
+    assert_eq!(hub.store().invites().len(), 1);
+
+    web.list_devices();
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.remove_device(b"desk", &mut rng), Ok(true), "said: invites taken back");
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(web.errors.is_empty(), "{:?}", web.errors);
+    assert!(desk.session.take_events().iter().any(|e| matches!(e, Event::Removed { account: false })), "the desktop is out");
+    assert!(hub.store().invites().is_empty(), "taken back on the server");
+    assert!(web.rooms.doc(vault::ROOM).invites().is_empty(), "and forgotten in the vault");
+}
+
 #[test]
 fn the_browser_shows_a_notes_history_marked_and_restores_one() {
     let mut rng = Seeded(3);

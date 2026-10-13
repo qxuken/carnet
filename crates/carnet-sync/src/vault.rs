@@ -52,6 +52,10 @@ const INVITES: &str = "invites";
 /// clocks of the devices disagree a little.
 pub const INVITE_GRACE: u64 = 3600;
 
+/// How long an invite lasts (the server's `INVITE_DAYS`): past it, its
+/// code is no use, and forgotten here whatever the server says.
+pub const INVITE_LIFE: u64 = 7 * 86_400;
+
 /// An invite this account made, as the vault keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Invite {
@@ -306,17 +310,26 @@ impl NoteDoc {
         true
     }
 
-    /// The server listed `waiting` as the invites still waiting (none, for
-    /// an account not the owner's): every other one kept here, used, taken
-    /// back or run out, is forgotten, but for one made within
-    /// [`INVITE_GRACE`] of `now`. True if any was.
+    /// The server listed `waiting` as the invites still waiting. One kept
+    /// here past its life ([`INVITE_LIFE`]) is forgotten, listed or not.
+    /// One the list leaves out (used, taken back elsewhere) is forgotten
+    /// only if the list names some, and it was made more than
+    /// [`INVITE_GRACE`] before `now`. An empty list is no news: every
+    /// device of the account holds these codes, and a server that wanted
+    /// them gone could otherwise wipe them all by saying nothing. A used
+    /// one then stays until it runs out, though never shown, as only the
+    /// listed are. True if any was forgotten.
     pub fn forget_invites_but(&self, waiting: &[[u8; 32]], now: u64) -> bool {
         let map = self.loro().get_map(INVITES);
         let LoroValue::Map(m) = map.get_deep_value() else { return false };
         let kept: BTreeMap<String, ([u8; 32], Invite)> = self.invites().into_iter().map(|(h, i)| (hex(&h), (h, i))).collect();
         let mut gone = false;
         for k in m.keys() {
-            let keep = kept.get(k).is_some_and(|(h, i)| waiting.contains(h) || i.made.saturating_add(INVITE_GRACE) > now);
+            let keep = kept.get(k).is_some_and(|(h, i)| {
+                let alive = i.made.saturating_add(INVITE_LIFE) > now;
+                let new = i.made.saturating_add(INVITE_GRACE) > now;
+                alive && (waiting.is_empty() || waiting.contains(h) || new)
+            });
             if !keep {
                 let _ = map.delete(k);
                 gone = true;
@@ -326,6 +339,20 @@ impl NoteDoc {
             self.loro().commit();
         }
         gone
+    }
+
+    /// Every invite kept here forgotten (taken back on the server too, by
+    /// the caller): a device removed from the account had their codes.
+    /// Their hashes, to take back.
+    pub fn forget_all_invites(&self) -> Vec<[u8; 32]> {
+        let map = self.loro().get_map(INVITES);
+        let hashes: Vec<[u8; 32]> = self.invites().into_keys().collect();
+        if map.is_empty() {
+            return hashes;
+        }
+        let _ = map.clear();
+        self.loro().commit();
+        hashes
     }
 
     /// A folder there, or not. True if that changed.
@@ -473,12 +500,16 @@ mod tests {
         a.import(&b.updates()).unwrap();
         assert_eq!(a.invite_code(&one.hash()), None);
 
-        // Two used (the server lists none), three made a moment ago.
+        // Two used (the server lists only three), three made a moment ago.
         a.keep_invite(&three, t + 100);
         assert!(!a.forget_invites_but(&[], t + 200), "within the grace: kept");
+        assert!(!a.forget_invites_but(&[three.hash()], t + 200), "within the grace: kept");
         assert!(a.forget_invites_but(&[three.hash()], t + INVITE_GRACE + 50));
         assert_eq!(a.invites().into_keys().collect::<Vec<_>>(), [three.hash()]);
         assert!(!a.forget_invites_but(&[three.hash()], t + 10 * INVITE_GRACE), "still waiting: kept");
+        // Run out: forgotten, listed or not.
+        assert!(a.forget_invites_but(&[three.hash()], t + 100 + INVITE_LIFE));
+        assert!(a.invites().is_empty());
 
         // An entry not a code, or not under its own hash: not there, and
         // cleared away with the rest.
@@ -487,9 +518,51 @@ mod tests {
         map.insert(&hex(&two.hash()), LoroValue::Map(wrong)).unwrap();
         map.insert("junk", "x").unwrap();
         a.loro().commit();
+        a.keep_invite(&three, t + 100);
         assert_eq!(a.invites().len(), 1);
         assert!(a.forget_invites_but(&[three.hash()], t));
         assert_eq!(a.loro().get_map(INVITES).len(), 1);
+    }
+
+    /// A server whose list is empty (by mistake, or to wipe them) takes no
+    /// code away: an empty list is no news. A code still goes once run
+    /// out.
+    #[test]
+    fn an_empty_list_from_the_server_wipes_no_code() {
+        use crate::crypto::tests::Seeded;
+        let a = NoteDoc::new(1);
+        let mut rng = Seeded(4);
+        let (one, two) = (InviteCode::generate(&mut rng), InviteCode::generate(&mut rng));
+        let t = 1_800_000_000;
+        a.keep_invite(&one, t);
+        a.keep_invite(&two, t + 3 * 86_400);
+        for later in [t + INVITE_GRACE + 1, t + 86_400, t + INVITE_LIFE - 1] {
+            assert!(!a.forget_invites_but(&[], later), "{later}");
+            assert_eq!(a.invites().len(), 2);
+        }
+        assert!(a.forget_invites_but(&[], t + INVITE_LIFE));
+        assert_eq!(a.invites().into_keys().collect::<Vec<_>>(), [two.hash()]);
+    }
+
+    /// A device removed had every code: all forgotten at once, their
+    /// hashes given, to take back on the server.
+    #[test]
+    fn every_invite_is_forgotten_on_a_removal() {
+        use crate::crypto::tests::Seeded;
+        let (a, b) = (NoteDoc::new(1), NoteDoc::new(2));
+        let mut rng = Seeded(5);
+        let (one, two) = (InviteCode::generate(&mut rng), InviteCode::generate(&mut rng));
+        a.keep_invite(&one, 1);
+        a.keep_invite(&two, 2);
+        b.import(&a.updates()).unwrap();
+        let mut gone = b.forget_all_invites();
+        gone.sort();
+        let mut want = vec![one.hash(), two.hash()];
+        want.sort();
+        assert_eq!(gone, want);
+        a.import(&b.updates()).unwrap();
+        assert!(a.invites().is_empty() && b.invites().is_empty());
+        assert!(b.forget_all_invites().is_empty());
     }
 
     /// A place, a folder or a picture's path another device wrote that

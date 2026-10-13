@@ -16,9 +16,10 @@ pub struct Signup {
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
     /// The email typed.
     pub email: String,
-    /// An invite being asked for: to this email, and the server's signup
-    /// page if it has one (for a server whose signup is only there).
-    sending: Option<(String, Option<String>, Asked)>,
+    /// An invite being asked for: to this email, of the server at this
+    /// origin, and its signup page if it has one (for a server whose
+    /// signup is only there).
+    sending: Option<(String, String, Option<String>, Asked)>,
     /// The invite was sent to this email.
     pub sent_to: Option<String>,
     /// What the server answered: sent now (with whatever more it said),
@@ -46,11 +47,11 @@ impl Signup {
     /// The server's answer taken. True when an invite has just been sent:
     /// its code is to be typed.
     pub fn tick(&mut self) -> bool {
-        let Some((to, page, rx)) = &self.sending else { return false };
+        let Some((to, origin, page, rx)) = &self.sending else { return false };
         let Ok(answer) = rx.try_recv() else { return false };
-        let (to, page) = (to.clone(), page.clone());
+        let (to, origin, page) = (to.clone(), origin.clone(), page.clone());
         self.sending = None;
-        match answer.map_err(|why| format!("Couldn't reach the server: {why}")).and_then(|a| signup::answered(&a, page.as_deref())) {
+        match answer.map_err(|why| format!("Couldn't reach the server: {why}")).and_then(|a| signup::answered(&a, &origin, page.as_deref())) {
             Ok(sent) => {
                 self.sent_to = Some(to);
                 self.sent = Some(sent);
@@ -86,7 +87,7 @@ impl Signup {
             }
         };
         match ask(signup::signup_url(origin), Some(signup::body(&email)), waker) {
-            Ok(rx) => self.sending = Some((email, page.map(str::to_string), rx)),
+            Ok(rx) => self.sending = Some((email, origin.to_string(), page.map(str::to_string), rx)),
             Err(e) => self.error = Some(e.to_string()),
         }
     }
