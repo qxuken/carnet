@@ -74,6 +74,10 @@ pub struct Config {
     /// Which header the trusted proxies say it in: `X-Forwarded-For`
     /// unless they're Cloudflare's.
     pub client_header: ClientHeader,
+    /// TLS on the listener itself, and the CA a client's certificate must
+    /// be signed by, if any (tls.rs). None: plain HTTP, a proxy in front
+    /// ending TLS.
+    pub tls: Option<crate::tls::Tls>,
 }
 
 /// Records a room keeps one by one before it's asked for as a snapshot.
@@ -701,7 +705,10 @@ pub async fn serve_limited(
     let metrics_task = match metrics {
         Some(listener) => {
             let watch = Watch { hub: tx.clone(), data: config.data.clone(), started, refused: refused.clone(), counts: counts.clone(), http: http.clone(), closes };
-            let router = Router::new().route("/metrics", get(metrics_route)).with_state(watch).layer(timeout(REQUEST_TIMEOUT));
+            // Health too, in plain HTTP on this private address: what the
+            // machine's own check asks when the public one wants TLS (and
+            // a client certificate it hasn't).
+            let router = Router::new().route("/metrics", get(metrics_route)).route("/v1/health", get(metrics_health)).with_state(watch).layer(timeout(REQUEST_TIMEOUT));
             println!("carnet-server: metrics on http://{}/metrics", listener.local_addr()?);
             Some(tokio::spawn(serve_app(listener, router, until_stopped(stopped.clone()))))
         }
@@ -748,8 +755,13 @@ pub async fn serve_limited(
         res
     }));
     let addr: SocketAddr = listener.local_addr()?;
-    println!("carnet-server: listening on {addr}, origin {}", config.origin);
-    let served = serve_app(listener, router, until_stopped(stopped)).await;
+    let tls = match &config.tls {
+        Some(t) if t.asks_clients() => " (TLS, a client certificate asked of each)",
+        Some(_) => " (TLS)",
+        None => "",
+    };
+    println!("carnet-server: listening on {addr}{tls}, origin {}", config.origin);
+    let served = serve_app_on(listener, router, config.tls.clone(), until_stopped(stopped)).await;
     if let Some(t) = metrics_task {
         let _ = t.await;
     }
@@ -778,6 +790,14 @@ pub fn timeout(limit: Duration) -> tower_http::timeout::TimeoutLayer {
 /// stopped, no more is taken, and what's under way finishes (a socket,
 /// upgraded, is the hub's to let go). A host's other listeners use it too.
 pub async fn serve_app(listener: TcpListener, router: Router, stop: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
+    serve_app_on(listener, router, None, stop).await
+}
+
+/// [`serve_app`], over TLS if given: each connection's handshake within
+/// [`HEAD_TIMEOUT`], and one that fails it (no client certificate when
+/// one is asked, one no CA given signed, not TLS at all) let go before
+/// anything of it is read.
+pub async fn serve_app_on(listener: TcpListener, router: Router, tls: Option<crate::tls::Tls>, stop: impl Future<Output = ()> + Send + 'static) -> std::io::Result<()> {
     let (closing, closed) = tokio::sync::watch::channel(false);
     // Each connection holds one: all dropped, all done.
     let (open, mut done) = mpsc::channel::<()>(1);
@@ -795,24 +815,18 @@ pub async fn serve_app(listener: TcpListener, router: Router, stop: impl Future<
             },
             _ = &mut stop => break,
         };
-        let router = router.clone();
-        let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-            let mut req = req.map(axum::body::Body::new);
-            req.extensions_mut().insert(ConnectInfo(peer));
-            tower::ServiceExt::oneshot(router.clone(), req)
-        });
-        let (open, mut closed) = (open.clone(), closed.clone());
+        let (router, tls) = (router.clone(), tls.clone());
+        let (open, closed) = (open.clone(), closed.clone());
         tokio::spawn(async move {
             let _open = open;
-            let mut http = hyper::server::conn::http1::Builder::new();
-            http.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEAD_TIMEOUT);
-            let mut conn = std::pin::pin!(http.serve_connection(hyper_util::rt::TokioIo::new(io), service).with_upgrades());
-            tokio::select! {
-                _ = conn.as_mut() => return,
-                _ = closed.wait_for(|&c| c) => {}
+            match tls {
+                None => connection(io, peer, router, closed).await,
+                Some(tls) => {
+                    if let Ok(Ok(io)) = tokio::time::timeout(HEAD_TIMEOUT, tls.acceptor.accept(io)).await {
+                        connection(io, peer, router, closed).await;
+                    }
+                }
             }
-            conn.as_mut().graceful_shutdown();
-            let _ = conn.await;
         });
     }
     drop(listener);
@@ -821,6 +835,27 @@ pub async fn serve_app(listener: TcpListener, router: Router, stop: impl Future<
     let _ = done.recv().await;
     drop(closed);
     Ok(())
+}
+
+/// One connection served, until it ends or the server stops.
+async fn connection<I>(io: I, peer: SocketAddr, router: Router, mut closed: tokio::sync::watch::Receiver<bool>)
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+        let mut req = req.map(axum::body::Body::new);
+        req.extensions_mut().insert(ConnectInfo(peer));
+        tower::ServiceExt::oneshot(router.clone(), req)
+    });
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(HEAD_TIMEOUT);
+    let mut conn = std::pin::pin!(http.serve_connection(hyper_util::rt::TokioIo::new(io), service).with_upgrades());
+    tokio::select! {
+        _ = conn.as_mut() => return,
+        _ = closed.wait_for(|&c| c) => {}
+    }
+    conn.as_mut().graceful_shutdown();
+    let _ = conn.await;
 }
 
 /// The web app's Content-Security-Policy (docs/SYNC.md §8): its own
@@ -921,6 +956,16 @@ struct Watch {
     counts: Arc<Counts>,
     http: Arc<BlobHttp>,
     closes: Arc<Closes>,
+}
+
+/// `/v1/health` on the metrics address: as the public one answers it.
+async fn metrics_health(State(w): State<Watch>) -> impl IntoResponse {
+    let (reply, rx) = oneshot::channel();
+    let _ = w.hub.send(ToHub::Ping { reply });
+    match tokio::time::timeout(Duration::from_secs(5), rx).await {
+        Ok(Ok(_)) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        _ => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({ "ok": false, "error": "the hub is not answering" }))),
+    }
 }
 
 async fn metrics_route(State(w): State<Watch>) -> impl IntoResponse {

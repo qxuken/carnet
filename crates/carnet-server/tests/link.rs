@@ -88,7 +88,7 @@ fn a_desktop_enrols_pairs_and_syncs_over_its_own_sockets() {
     let listener = rt.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() }, listener, async {
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
         let _ = stopped.await;
     }));
     let url = sync_url(&origin, "test", "0").unwrap();

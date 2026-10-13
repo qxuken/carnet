@@ -27,6 +27,9 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # The PWA (web/), served at `/` from its build: its Brotli and gzip copies
 # as they are when the browser takes them.
 tower-http = { version = "0.6", features = ["fs", "timeout"] }
+# TLS on its own listener, if asked (tls.rs): rustls with ring, as the
+# rest of Carnet's TLS (no OpenSSL).
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 # Served with hyper as axum serves, and a request's head read in a time
 # (`server::serve_app`): a client that sends one slowly is let go.
 hyper = { version = "1", features = ["server", "http1"] }
@@ -65,3 +68,6 @@ tokio-tungstenite = "0.30"
 carnet-sync = { path = "../carnet-sync", features = ["net"] }
 # s3.rs: a put link signed at a moment of the test's own (rusty-s3's clock).
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+# tests/tls.rs: certificates and CAs of the test's own making.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"] }
+

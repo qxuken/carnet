@@ -44,7 +44,7 @@ async fn start(data: &Path, origin: Option<&str>) -> Running {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.to_path_buf(), origin: origin.map_or_else(|| format!("http://{addr}"), str::to_string), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: data.to_path_buf(), origin: origin.map_or_else(|| format!("http://{addr}"), str::to_string), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let done = tokio::spawn(server::serve(config, listener, async {
         let _ = rx.await;
     }));
@@ -282,7 +282,7 @@ async fn the_web_viewer_is_served_beside_the_socket() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: dir.join("data"), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: dir.join("data"), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new(), client_header: Default::default(), tls: None };
     let done = tokio::spawn(server::serve(config, listener, async {
         let _ = rx.await;
     }));
@@ -350,7 +350,7 @@ async fn health_and_metrics_say_how_the_server_is() {
     let metrics = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let maddr = metrics.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let done = tokio::spawn(server::serve_with(config, listener, Some(metrics), async {
         let _ = rx.await;
     }));
@@ -437,7 +437,7 @@ async fn sockets_from_one_address_are_limited_behind_a_trusted_proxy() {
     let maddr = metrics.local_addr().unwrap();
     let (stop, rx) = oneshot::channel::<()>();
     let trusted = carnet_server::limits::networks("127.0.0.1").unwrap();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted, client_header: Default::default() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted, client_header: Default::default(), tls: None };
     let done = tokio::spawn(server::serve_with(config, listener, Some(metrics), async {
         let _ = rx.await;
     }));
@@ -477,7 +477,7 @@ async fn behind_cloudflare_sockets_are_limited_by_its_header() {
     let (stop, rx) = oneshot::channel::<()>();
     let trusted = carnet_server::limits::networks("127.0.0.1").unwrap();
     let client_header = carnet_server::limits::ClientHeader::Cloudflare;
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted, client_header };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted, client_header, tls: None };
     let done = tokio::spawn(server::serve(config, listener, async {
         let _ = rx.await;
     }));
@@ -701,7 +701,7 @@ async fn a_host_adds_routes_and_works_on_the_hub() {
         ..server::Host::default()
     };
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
         let _ = rx.await;
     }));
@@ -750,7 +750,7 @@ async fn a_hosts_pages_keep_their_headers_beside_the_app() {
         ..server::Host::default()
     };
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: dir.join("data"), origin: "https://notes.example".into(), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: dir.join("data"), origin: "https://notes.example".into(), compact_after: server::COMPACT_AFTER, web: Some(web), trusted: Vec::new(), client_header: Default::default(), tls: None };
     let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
         let _ = rx.await;
     }));
@@ -803,7 +803,7 @@ async fn the_data_is_private_and_a_deleted_accounts_link_puts_nothing() {
         ..server::Host::default()
     };
     let (stop, rx) = oneshot::channel::<()>();
-    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default() };
+    let config = Config { data: data.clone(), origin: format!("http://{addr}"), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let done = tokio::spawn(server::serve_hosted(config, listener, None, host, async {
         let _ = rx.await;
     }));
