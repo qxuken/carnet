@@ -14,9 +14,10 @@
 //! is refused (by this server, or by the bucket, whose link is signed with
 //! the length). For an account with a limit, a link given and not yet
 //! used counts against the room left, at that length, until the picture
-//! is kept or the link runs out: an offer of many pictures, or many
-//! offers, can't get more links than there's room for, but one picture
-//! may still take the account over (docs/SYNC.md §11).
+//! is kept or no put by the link can still be going on (its time, then
+//! as long as a put may take: [`PUT_TAKES`]): an offer of many
+//! pictures, or many offers, can't get more links than there's room for,
+//! but one picture may still take the account over (docs/SYNC.md §11).
 //!
 //! A picture no note shows any more is dropped by a device's word
 //! (`BlobDrop`): marked, and gone [`KEEP`] later, unless a device offers,
@@ -36,7 +37,7 @@ use carnet_sync::session::Transfer;
 use carnet_sync::wire::{self, Carnet, Frame};
 
 use crate::hub::{ConnId, KEEP, Out};
-use crate::links::{Grant, LIFETIME, Signer};
+use crate::links::{Grant, LIFETIME, PUT_TAKES, Signer};
 use crate::quota::{FULL, Limit, READ_ONLY};
 
 /// The most a sealed picture may be: the largest picture, sealed.
@@ -415,17 +416,20 @@ pub struct Counts {
     pub swept: AtomicU64,
 }
 
-/// An account's links to put out, by picture: its length, and when its
-/// link runs out.
+/// An account's links to put out, by picture: its length, and when no
+/// put by its link can still be going on (its link's time, and
+/// [`PUT_TAKES`] after: a put begun as the link runs out may go on as
+/// long).
 type Pending = HashMap<[u8; 32], (u64, u64)>;
 
 pub struct Worker<B: Blobs> {
     pub blobs: B,
     pub counts: Arc<Counts>,
     /// Links to put given to accounts with a limit, not yet seen used: by
-    /// account, each picture's length and when its link runs out. Counted
-    /// against the room left until the picture is kept, or the link is
-    /// past.
+    /// account, each picture's length and until when a put by its link
+    /// may go on. Counted against the room left until the picture is kept,
+    /// or no put by the link can be going on: a link run out with puts
+    /// begun before still coming frees no room for another round of them.
     pending: HashMap<Vec<u8>, Pending>,
 }
 
@@ -498,7 +502,7 @@ impl<B: Blobs> Worker<B> {
                         if pending.len() >= PENDING {
                             continue;
                         }
-                        pending.insert(id, (size, expires));
+                        pending.insert(id, (size, expires + PUT_TAKES));
                         used += size;
                     }
                     let url = self.blobs.link(&account, &id, Some(size), expires);
@@ -547,7 +551,7 @@ impl<B: Blobs> Worker<B> {
     }
 
     /// Pictures marked to go more than [`KEEP`] before `now`, gone; links
-    /// out past their time, forgotten.
+    /// out whose puts can't be going on any more, forgotten.
     pub fn sweep(&mut self, now: u64) -> u64 {
         for p in self.pending.values_mut() {
             p.retain(|_, (_, until)| *until > now);
@@ -691,10 +695,11 @@ mod tests {
         assert_eq!(said[0], Carnet::BlobStored { id: id(3) });
         assert_eq!((links(&said), full(&said)), (0, 1));
         assert_eq!(w.pending(&acct), (9, 9000));
-        // The links run out unused: room again, for what's not kept.
-        let said = at(&mut w, offer((7000..7020).map(id).collect(), 1000, 10_000), t + 2 + LIFETIME);
+        // The links run out unused, and no put by one can still be going
+        // on: room again, for what's not kept.
+        let said = at(&mut w, offer((7000..7020).map(id).collect(), 1000, 10_000), t + 2 + LIFETIME + PUT_TAKES);
         assert_eq!((links(&said), full(&said)), (9, 1));
-        assert_eq!(w.sweep(t + 10 * LIFETIME), 0);
+        assert_eq!(w.sweep(t + 10 * (LIFETIME + PUT_TAKES)), 0);
         assert_eq!(w.pending(&acct), (0, 0), "forgotten once past");
 
         // One picture may take it over, never two.
@@ -712,6 +717,35 @@ mod tests {
         let said = at(&mut w, Job::Offer { conn: 1, account: acct.clone(), ids: (0..3000).map(id).collect(), sizes: vec![MAX; 3000], room: None, writable: true }, t);
         assert_eq!(links(&said), 3000);
         assert_eq!(w.pending(&acct), (0, 0));
+    }
+
+    /// A link that has run out may have a put begun before still coming,
+    /// for as long as a put may take: its room stays taken till then, so
+    /// slow puts begun on one round of links, and a second round asked
+    /// for once those run out, can't take an account to twice its limit.
+    #[test]
+    fn a_link_run_out_holds_its_room_while_its_put_may_still_come() {
+        let mut w = Worker::memory();
+        let acct = b"acct".to_vec();
+        let id = |n: u8| [n; 32];
+        let offer = |ids: Vec<[u8; 32]>| Job::Offer { conn: 1, account: b"acct".to_vec(), sizes: vec![1000; ids.len()], ids, room: Some(10_000), writable: true };
+        let links_at = |w: &mut Worker<MemoryBlobs>, job: Job, now: u64| {
+            let mut out = Vec::new();
+            w.run_at(job, now, &mut |o| out.push(o));
+            out.iter().filter(|o| matches!(o, Out::Send(_, b) if matches!(wire::decode(b), Ok(Frame::Carnet(Carnet::BlobLink { put: true, .. }))))).count()
+        };
+        let t = 1_000_000;
+        assert_eq!(links_at(&mut w, offer((0..10).map(id).collect()), t), 10, "the room's worth");
+        // The links have run out, but puts begun on them may still come.
+        for later in [t + LIFETIME, t + LIFETIME + 1, t + LIFETIME + PUT_TAKES - 1] {
+            assert_eq!(links_at(&mut w, offer((10..20).map(id).collect()), later), 0, "at {}", later - t);
+            assert_eq!(w.sweep(later), 0);
+            assert_eq!(w.pending(&acct), (10, 10_000), "still counted at {}", later - t);
+        }
+        // None can be now: the room is free again.
+        assert_eq!(links_at(&mut w, offer((10..20).map(id).collect()), t + LIFETIME + PUT_TAKES), 10);
+        // And this server ends a put by then (`server::BLOB_TIMEOUT`).
+        assert_eq!(crate::server::BLOB_TIMEOUT.as_secs(), PUT_TAKES);
     }
 
     /// Files: kept once, moved in whole; links signed for this server.

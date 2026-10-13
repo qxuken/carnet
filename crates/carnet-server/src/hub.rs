@@ -59,6 +59,17 @@ pub const ROOM_RECORDS: u64 = 10_000;
 pub const ROOM_BYTES: u64 = 64 << 20;
 pub const MAX_ROOMS: u64 = 100_000;
 
+/// Rooms that hold nothing yet, joined by an account's sockets, all told
+/// (§6): a socket may join any room its account has, but one that holds
+/// nothing costs the account nothing, so the hub would keep any number of
+/// made-up ids for it. A note being made is joined before it's written,
+/// and a device's first sync joins every note it has before it writes
+/// any, so an account may have this many such joins out, or as many as
+/// it may still make rooms ([`MAX_ROOMS`] less what it has) if that's
+/// more. A join past it is refused (`JoinError`); one written to, left,
+/// or of a socket gone counts no more.
+pub const NEW_ROOMS: u64 = 256;
+
 /// How long an invite is good for.
 pub const INVITE_DAYS: u64 = 7;
 
@@ -102,6 +113,9 @@ enum State {
 struct Conn {
     state: State,
     rooms: HashSet<String>,
+    /// Of `rooms`, those that held nothing when it joined them, and it
+    /// hasn't written to since: counted for its account ([`NEW_ROOMS`]).
+    new_rooms: HashSet<String>,
     /// Who it is from, as the driver tells (an address): what its tries
     /// are counted against. Empty: not limited.
     client: String,
@@ -281,6 +295,10 @@ pub struct Hub<S: Storage> {
     /// Tries by client: a failed login, an invite, a pairing joined, a
     /// recovery.
     tries: Limiter,
+    /// Password sign-ins by email, from any client
+    /// ([`limits::PASSWORD_TRIES`]): only emails a password signs in as,
+    /// so as many as there are passwords, however many made-up ones come.
+    password_tries: Limiter,
     /// How much each account may keep, and whether it may write.
     quota: std::sync::Arc<dyn Quota>,
     /// Told of each account an invite makes.
@@ -297,6 +315,18 @@ pub struct Hub<S: Storage> {
     /// Sockets with more of a room's records to come, once they've
     /// written what they were sent: [`Hub::take_more`].
     more: BTreeSet<ConnId>,
+    /// By account, its sockets' joins of rooms that held nothing
+    /// ([`NEW_ROOMS`]).
+    new_joins: HashMap<Vec<u8>, NewJoins>,
+}
+
+/// An account's sockets' joins of rooms that held nothing yet, and, once
+/// they're past [`NEW_ROOMS`], how many it may have: counted once, not
+/// at each join, until they're under it again.
+#[derive(Default)]
+struct NewJoins {
+    joins: u64,
+    may: Option<u64>,
 }
 
 impl<S: Storage> Hub<S> {
@@ -320,6 +350,7 @@ impl<S: Storage> Hub<S> {
             notes: HashMap::new(),
             stats: Stats::default(),
             tries: Limiter::new(limits::TRIES),
+            password_tries: Limiter::new(limits::PASSWORD_TRIES),
             quota: std::sync::Arc::new(Unlimited),
             admission: std::sync::Arc::new(ByInvite),
             passwords: None,
@@ -327,6 +358,7 @@ impl<S: Storage> Hub<S> {
             password_emails: PasswordEmails::Any,
             backfill_part: BACKFILL_PART,
             more: BTreeSet::new(),
+            new_joins: HashMap::new(),
         }
     }
 
@@ -418,6 +450,12 @@ impl<S: Storage> Hub<S> {
     /// What it keeps for compaction: rooms' last writes, and leases.
     pub fn compaction_kept(&self) -> (usize, usize) {
         (self.last_write.len(), self.leases.len())
+    }
+
+    /// `account`'s sockets' joins of rooms that held nothing, not yet
+    /// written to ([`NEW_ROOMS`]).
+    pub fn new_joins(&self, account: &[u8]) -> u64 {
+        self.new_joins.get(account).map_or(0, |j| j.joins)
     }
 
     /// What it holds open now.
@@ -575,6 +613,7 @@ impl<S: Storage> Hub<S> {
         self.conns.insert(conn, Conn {
             state: State::Challenged(nonce),
             rooms: HashSet::new(),
+            new_rooms: HashSet::new(),
             client: client.to_string(),
             app,
             told_full: false,
@@ -598,6 +637,61 @@ impl<S: Storage> Hub<S> {
         features(self.passwords.is_some(), self.signup)
     }
 
+    /// A socket forgotten, and its joins of rooms that held nothing with
+    /// it.
+    fn remove_conn(&mut self, conn: ConnId) -> Option<Conn> {
+        let c = self.conns.remove(&conn)?;
+        if let State::Ready { account, .. } = &c.state {
+            self.new_rooms_gone(account, c.new_rooms.len() as u64);
+        }
+        Some(c)
+    }
+
+    /// `conn`'s join of `room`, if it held nothing when joined, counted
+    /// no more: written to, left, or the room removed.
+    fn new_room_gone(&mut self, conn: ConnId, account: &[u8], room: &str) {
+        if self.conns.get_mut(&conn).is_some_and(|c| c.new_rooms.remove(room)) {
+            self.new_rooms_gone(account, 1);
+        }
+    }
+
+    fn new_rooms_gone(&mut self, account: &[u8], n: u64) {
+        if n == 0 {
+            return;
+        }
+        if let Some(j) = self.new_joins.get_mut(account) {
+            j.joins = j.joins.saturating_sub(n);
+            if j.joins < NEW_ROOMS {
+                j.may = None;
+            }
+            if j.joins == 0 {
+                self.new_joins.remove(account);
+            }
+        }
+    }
+
+    /// Whether `conn` may join `room`, which holds nothing: it has
+    /// already, or its account's sockets have fewer such joins out than
+    /// [`NEW_ROOMS`], or than the rooms it may still make if that's more.
+    fn may_join_new(&mut self, conn: ConnId, account: &[u8], room: &str) -> bool {
+        if self.conns.get(&conn).is_some_and(|c| c.new_rooms.contains(room)) {
+            return true;
+        }
+        let joins = self.new_joins.get(account).map_or(0, |j| j.joins);
+        if joins < NEW_ROOMS {
+            return true;
+        }
+        let may = match self.new_joins.get(account).and_then(|j| j.may) {
+            Some(may) => may,
+            None => {
+                let may = NEW_ROOMS.max(self.max_rooms.saturating_sub(self.store.room_count(account)));
+                self.new_joins.entry(account.to_vec()).or_default().may = Some(may);
+                may
+            }
+        };
+        joins < may
+    }
+
     fn challenge(&self, conn: ConnId, nonce: [u8; 32]) -> Out {
         carnet(conn, Carnet::Challenge { nonce, server: Greeting::ours(self.features()) })
     }
@@ -618,7 +712,7 @@ impl<S: Storage> Hub<S> {
     /// online are sent their list again, so none says it's online (§7).
     pub fn disconnect(&mut self, conn: ConnId) -> Vec<Out> {
         self.more.remove(&conn);
-        let gone = self.conns.remove(&conn).and_then(|c| match c.state {
+        let gone = self.remove_conn(conn).and_then(|c| match c.state {
             State::Ready { account, device } => Some((account, device)),
             _ => None,
         });
@@ -724,9 +818,19 @@ impl<S: Storage> Hub<S> {
             // nobody signs in as): the device proves the password next, by
             // a recovery signed with what it comes to.
             (Some(_), None, Frame::Carnet(Carnet::PasswordLogin { id, request })) => {
-                let Some(server) = &self.passwords else { return self.deny(conn, NO_PASSWORDS) };
+                if self.passwords.is_none() {
+                    return self.deny(conn, NO_PASSWORDS);
+                }
                 let id = password::id(&id);
                 let record = self.store.password_of(&id).map(|(_, r)| r);
+                // Counted by the email too, from wherever it's tried: one
+                // that signs in to nothing isn't (there's nothing to
+                // guess, and made-up ones could crowd out real ones).
+                if record.is_some() && !self.password_tries.allow(&id, self.now as f64) {
+                    self.stats.limited += 1;
+                    return self.deny(conn, limits::TOO_MANY_FOR_EMAIL);
+                }
+                let Some(server) = &self.passwords else { return self.deny(conn, NO_PASSWORDS) };
                 match server.login(&id, record.as_deref(), &request, rng) {
                     Ok(response) => vec![carnet(conn, Carnet::PasswordLoginReply { response })],
                     Err(_) => self.deny(conn, "not a sign-in"),
@@ -1068,6 +1172,9 @@ impl<S: Storage> Hub<S> {
             let mine = matches!(&c.state, State::Ready { account: a, .. } if a == account);
             if mine && (c.rooms.remove(&room) || id == conn) {
                 out.push(carnet(id, Carnet::RoomRemoved { room: room.clone() }));
+            }
+            if mine {
+                self.new_room_gone(id, account, &room);
             }
         }
         out
@@ -1559,7 +1666,7 @@ impl<S: Storage> Hub<S> {
     fn deny_as(&mut self, conn: ConnId, reason: &str, why: Deny) -> Vec<Out> {
         self.stats.denied += 1;
         let mut out = self.end_pairing_of(conn, "the other device was turned away");
-        self.conns.remove(&conn);
+        self.remove_conn(conn);
         out.push(carnet(conn, Carnet::Denied { reason: reason.into(), why }));
         out.push(Out::Close(conn));
         out
@@ -1571,18 +1678,13 @@ impl<S: Storage> Hub<S> {
             ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, .. } if self.store.is_removed(account, &room_id) => {
                 vec![carnet(conn, Carnet::RoomRemoved { room: room_id })]
             }
-            // A room id no device makes, or far more rooms on one socket
-            // than an account may have (twice: its own, and as many new
-            // ones refused when written): not joined.
-            ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, .. }
-                if !fair_room(&room_id)
-                    || self.conns.get(&conn).is_some_and(|c| c.rooms.len() as u64 >= self.max_rooms.saturating_mul(2) && !c.rooms.contains(&room_id)) =>
-            {
+            // A room id no device makes: not joined.
+            ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, .. } if !fair_room(&room_id) => {
                 vec![send(conn, ProtocolMessage::JoinError {
                     crdt: CrdtType::Elo,
                     room_id,
                     code: loro_protocol::JoinErrorCode::Unknown,
-                    message: format!("a room id is 1 to {MAX_ROOM_ID} bytes, and a socket joins at most {} rooms", self.max_rooms.saturating_mul(2)),
+                    message: format!("a room id is 1 to {MAX_ROOM_ID} bytes"),
                     receiver_version: None,
                     app_code: None,
                 })]
@@ -1591,11 +1693,31 @@ impl<S: Storage> Hub<S> {
             // device lacks of it (the base, if it isn't past it, and every
             // delta its version vector doesn't cover), a part at a time,
             // after any room joined before whose records are still on their
-            // way. Once it's all gone, it may be asked to compact.
+            // way. Once it's all gone, it may be asked to compact. A room
+            // that holds nothing is joined only while the account's
+            // sockets haven't too many such joins out ([`NEW_ROOMS`]).
             ProtocolMessage::JoinRequest { crdt: CrdtType::Elo, room_id, version, .. } => {
-                let has = wire::decode_vv(&version).unwrap_or_default();
                 let base = self.store.base(account, &room_id);
                 let spans = self.store.spans(account, &room_id);
+                let new = base.is_none() && spans.is_empty();
+                if new && !self.may_join_new(conn, account, &room_id) {
+                    return vec![send(conn, ProtocolMessage::JoinError {
+                        crdt: CrdtType::Elo,
+                        room_id,
+                        code: loro_protocol::JoinErrorCode::Unknown,
+                        message: "too many new notes joined at once: they're joined again as those before them are written".into(),
+                        receiver_version: None,
+                        app_code: None,
+                    })];
+                }
+                if new {
+                    if self.conns.get_mut(&conn).is_some_and(|c| c.new_rooms.insert(room_id.clone())) {
+                        self.new_joins.entry(account.to_vec()).or_default().joins += 1;
+                    }
+                } else {
+                    self.new_room_gone(conn, account, &room_id);
+                }
+                let has = wire::decode_vv(&version).unwrap_or_default();
                 let held = storage::held(base.as_ref(), &spans);
                 let mut b = Backfill { room: room_id.clone(), has: has.iter().copied().collect(), first: None, base_due: true, after: 0, ready: VecDeque::new() };
                 let Some(c) = self.conns.get_mut(&conn) else { return Vec::new() };
@@ -1621,6 +1743,7 @@ impl<S: Storage> Hub<S> {
                 out
             }
             ProtocolMessage::Leave { room_id, .. } => {
+                self.new_room_gone(conn, account, &room_id);
                 if let Some(c) = self.conns.get_mut(&conn) {
                     c.rooms.remove(&room_id);
                     c.backfills.retain(|b| b.room != room_id);
@@ -1734,6 +1857,7 @@ impl<S: Storage> Hub<S> {
                 let status = if failed { UpdateStatusCode::Unknown } else { UpdateStatusCode::Ok };
                 let mut out = vec![send(conn, ack(&room_id, batch_id, status))];
                 if let Some(seq) = newest {
+                    self.new_room_gone(conn, account, &room_id);
                     self.last_write.insert((account.to_vec(), room_id.clone()), self.now);
                     out.extend(self.tell_others(conn, account, &room_id, &kept, seq));
                     // A device writing on alone: the room may be due now,

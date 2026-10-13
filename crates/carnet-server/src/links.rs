@@ -20,8 +20,15 @@ use std::path::Path;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
-/// How long a link is good for.
+/// How long a link is good for: a request by it must begin by then.
 pub const LIFETIME: u64 = 5 * 60;
+
+/// How long a put by a link may go on once it has begun: on this server,
+/// a picture's request has as long (`server::BLOB_TIMEOUT`), so a put
+/// begun as its link runs out is over [`LIFETIME`] and this after the
+/// link was given, at the latest. Until then, what it may put still
+/// counts against its account's room (`blobs::Worker`).
+pub const PUT_TAKES: u64 = 10 * 60;
 
 const VERSION: u8 = 1;
 const MAC: usize = 32;

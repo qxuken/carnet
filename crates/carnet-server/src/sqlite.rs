@@ -370,16 +370,25 @@ impl Sharded {
 
     /// Every database copied into the folder `to`, laid out as the data
     /// folder is (`VACUUM INTO`: consistent while the server runs).
-    /// Returns how many accounts went.
+    /// Returns how many accounts went. What it makes is the server's
+    /// user's alone, as the data folder is (`private.rs`): the folders
+    /// `0700`, each file `0600`, made so before anything is written to it.
     pub fn backup(&self, to: &Path) -> Result<usize, Failed> {
         let Place::Disk(data) = &self.place else { return Err(Failed("nothing on disk to back up".into())) };
-        std::fs::create_dir_all(to.join("accounts")).map_err(|e| Failed(e.to_string()))?;
+        let io = |e: std::io::Error| Failed(e.to_string());
+        crate::private::dir(&to.join("accounts")).map_err(io)?;
         let into = |db: &Connection, path: PathBuf| -> Result<(), Failed> {
-            if path.exists() {
-                return Err(Failed(format!("{} is there already", path.display())));
+            // Made empty, its user's alone, for `VACUUM INTO` to fill (it
+            // takes an empty file): never there for a moment as SQLite
+            // would make it, open to whoever the umask lets.
+            match crate::private::create().truncate(false).create_new(true).open(&path) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(Failed(format!("{} is there already", path.display()))),
+                Err(e) => return Err(io(e)),
             }
-            let path = path.to_str().ok_or_else(|| Failed("a backup path that is not UTF-8".into()))?.to_string();
-            db.execute("VACUUM INTO ?1", params![path]).map(|_| ()).map_err(failed)
+            let name = path.to_str().ok_or_else(|| Failed("a backup path that is not UTF-8".into()))?.to_string();
+            db.execute("VACUUM INTO ?1", params![name]).map(|_| ()).map_err(failed)?;
+            crate::private::file(&path).map_err(io)
         };
         into(&self.directory, Self::directory_path(to))?;
         let ids: Vec<Vec<u8>> = {
@@ -552,15 +561,19 @@ impl Locked {
 }
 
 /// Every file under `from`, copied to the same place under `to`.
+/// The folder `from` copied into `to`, every folder of it `0700` and
+/// every file `0600`, whatever the originals were.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     let Ok(entries) = std::fs::read_dir(from) else { return Ok(()) };
-    std::fs::create_dir_all(to)?;
+    crate::private::dir(to)?;
     for e in entries {
         let e = e?;
         if e.file_type()?.is_dir() {
             copy_tree(&e.path(), &to.join(e.file_name()))?;
         } else {
-            std::fs::copy(e.path(), to.join(e.file_name()))?;
+            let dest = to.join(e.file_name());
+            std::io::copy(&mut std::fs::File::open(e.path())?, &mut crate::private::create().open(&dest)?)?;
+            crate::private::file(&dest)?;
         }
     }
     Ok(())
@@ -1413,6 +1426,45 @@ mod tests {
         assert_eq!(s.device(b"a1", b"d"), None);
         assert_eq!(s.accounts(), 1);
         assert_eq!(s.spans(b"a2", "r").len(), 1, "the other account is untouched");
+        let _ = std::fs::remove_dir_all(&data);
+        let _ = std::fs::remove_dir_all(&copy);
+    }
+
+    /// A backup holds what the data folder does, OPAQUE's records and
+    /// emails among it: the server's user's alone, as the data folder is,
+    /// whatever the umask, and whatever the pictures' files were.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_is_the_servers_user_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let data = temp("private");
+        let mut s = Sharded::open(&data).unwrap();
+        s.add_account(b"a1", false).unwrap();
+        s.put(b"a1", "r", 1, 0, 2, vec![9; 8]).unwrap();
+        let pictures = data.join("blobs").join("6131");
+        std::fs::create_dir_all(&pictures).unwrap();
+        std::fs::write(pictures.join("07"), b"SEALED").unwrap();
+        std::fs::set_permissions(pictures.join("07"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&pictures, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let copy = temp("private-copy");
+        assert_eq!(s.backup(&copy).unwrap(), 1);
+        let mut seen = 0;
+        let mut walk = vec![copy.clone()];
+        while let Some(dir) = walk.pop() {
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "{}", dir.display());
+            for e in std::fs::read_dir(&dir).unwrap().flatten() {
+                if e.file_type().unwrap().is_dir() {
+                    walk.push(e.path());
+                } else {
+                    assert_eq!(e.metadata().unwrap().permissions().mode() & 0o777, 0o600, "{}", e.path().display());
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 3, "the directory, the account and the picture");
+        // A file there already isn't written over.
+        let again = s.backup(&copy).unwrap_err();
+        assert!(again.to_string().contains("is there already"), "{again}");
         let _ = std::fs::remove_dir_all(&data);
         let _ = std::fs::remove_dir_all(&copy);
     }

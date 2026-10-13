@@ -198,3 +198,58 @@ fn a_server_of_ones_own_takes_any_email() {
         assert!(said.contains(&Event::PasswordSet), "{said:?}");
     }
 }
+
+/// Password sign-ins are counted by the email too, from any address: past
+/// twenty, the next is turned away and says so, its password not even
+/// tried, until a few minutes pass; then one more. An email nobody signs
+/// in as isn't counted. The account's devices, already in, never notice.
+#[test]
+fn guesses_at_one_password_are_slowed_from_any_address() {
+    use carnet_server::limits::{PASSWORD_TRIES, TOO_MANY_FOR_EMAIL};
+    use carnet_sync::wire::{self, Carnet, Frame};
+    for store in stores() {
+        let mut net = Net::new(96, store);
+        net.hub.tick(1_000_000);
+        net.hub.set_passwords(password::Server::generate(&mut net.rng));
+        let vault = VaultKey::generate(&mut net.rng);
+        let a = net.first_device(&vault);
+        assert!(set(&mut net, a, "ann@example.com", "correct horse battery").contains(&Event::PasswordSet));
+        // A guess, as many addresses would send it (each socket its own,
+        // never limited by address here): what it's told.
+        let guess = |net: &mut Net, email: &str| {
+            let conn = net.next;
+            net.next += 1;
+            net.hub.connect(conn, &mut net.rng);
+            let outs = net.hub.receive(conn, &wire::encode(&Frame::Carnet(Carnet::PasswordLogin { id: email.into(), request: vec![1; 8] })), &mut net.rng);
+            outs.into_iter()
+                .find_map(|o| match o {
+                    carnet_server::Out::Send(c, b) if c == conn => match wire::decode(&b) {
+                        Ok(Frame::Carnet(Carnet::Denied { reason, .. })) => Some(reason),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        for i in 0..PASSWORD_TRIES.burst as usize {
+            assert_ne!(guess(&mut net, "ANN@example.com "), TOO_MANY_FOR_EMAIL, "try {i}");
+        }
+        assert_eq!(guess(&mut net, "ann@example.com"), TOO_MANY_FOR_EMAIL);
+        // The right password too, for now: turned away the same.
+        let (c, _) = sign_in(&mut net, "ann@example.com", "correct horse battery", b"phone");
+        assert!(net.denied.iter().any(|(d, why)| *d == c && why == TOO_MANY_FOR_EMAIL), "{:?}", net.denied);
+        // An email nobody signs in as: not counted.
+        for _ in 0..30 {
+            assert_ne!(guess(&mut net, "bob@example.com"), TOO_MANY_FOR_EMAIL);
+        }
+        // The device in syncs on.
+        net.write(a, "still here\n");
+        assert!(net.device(a).session.is_ready());
+        // A few minutes on: one more try, and it's the owner's.
+        net.hub.tick(1_000_000 + PASSWORD_TRIES.every as u64);
+        let (n, key) = sign_in(&mut net, "ann@example.com", "correct horse battery", b"phone");
+        net.admit(n, b"phone", key, 9);
+        assert!(net.device(n).session.is_ready());
+        assert_eq!(guess(&mut net, "ann@example.com"), TOO_MANY_FOR_EMAIL, "and only one");
+    }
+}

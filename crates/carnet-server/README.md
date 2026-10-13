@@ -174,6 +174,8 @@ One machine with many addresses (IPv6 hands out whole networks) can still ask as
 
 A socket past the limit is refused with `429`; a try past it, with "too many tries from this address". `carnet_limited_total` in `/metrics` counts both.
 
+Password sign-ins (with `--passwords`) are also counted by the email they name, from whatever address: twenty, then one every three minutes. So guessing at one password goes no faster from many addresses, and someone spending an email's tries keeps its owner out of password sign-in for a few minutes at a time, never for good; the account's devices, already in, don't notice. Past it: "too many sign-ins with this email lately". An email no password signs in as isn't counted.
+
 **Time limits.** A request's headers must come within 30 seconds, and a connection idle between requests is closed after as long. A request is answered within 30 seconds or gets `408`; a picture's upload or download by its link has 10 minutes. A socket, once open, keeps its own limits (30 seconds to sign in, 5 minutes with nothing heard). So a proxy's own timeouts can be generous (`proxy_read_timeout` above).
 
 **Only its own pages open a socket.** A browser says which page opens a socket (`Origin`), and the server refuses one from another site's page (`403`): the web app is at `--origin`, and the apps send none. So set `--origin` to the address the browser shows. On your own machine (`--origin http://127.0.0.1:…`), a page at `localhost` on any port is taken too, as for the web app's development server.
@@ -224,7 +226,7 @@ The disk's free space isn't among them: the machine's own exporter (`node_export
 carnet-server backup ./carnet-backup --data ./data
 ```
 
-It copies every database into a new folder laid out as `data/` is, consistent while the server runs (`VACUUM INTO`), and the pictures with them (each a file written whole and never changed). To restore, point `--data` at the copy. The databases and pictures are all sealed or public, so the copy can go anywhere: another disk, a bucket, a friend's machine.
+It copies every database into a new folder laid out as `data/` is, consistent while the server runs (`VACUUM INTO`), and the pictures with them (each a file written whole and never changed). To restore, point `--data` at the copy. Like `data/`, the copy is the server's user's alone: its folders `0700`, its files `0600` (a folder given that's there already is left as it is; what's made in it isn't). The notes and pictures in it are sealed, but not all of it: who has an account and how much it keeps, and with `--passwords`, the emails passwords sign in as. Keep it where you'd keep those.
 
 The keys are not copied. The link key doesn't matter: a restored server makes a new one, and links last minutes anyway. But with `--passwords`, every password depends on `data/opaque.key`: copy it beside the backup yourself, and keep that copy as safe as the server.
 
@@ -264,7 +266,7 @@ cargo build --release -p carnet-server --features postgres,s3
     ```json
     {"CORSRules": [{"AllowedOrigins": ["https://notes.example.com"], "AllowedMethods": ["GET", "PUT"], "AllowedHeaders": ["content-type"], "MaxAgeSeconds": 3600}]}
     ```
-  - **A put's size.** A device says how long each picture is, sealed, when it offers it, and its `PUT` link is signed with that `Content-Length`: the bucket refuses a put of any other length, so nothing past 32 MiB, or past what was offered, gets in. Within its five minutes a link may put its picture again, over the first: harmless (only the account's own device has the link, and a picture that isn't the one its id names opens on no device), so a conditional put isn't asked for, and CORS needs no more headers.
+  - **A put's size.** A device says how long each picture is, sealed, when it offers it, and its `PUT` link is signed with that `Content-Length`: the bucket refuses a put of any other length, so nothing past 32 MiB, or past what was offered, gets in. Within its five minutes a link may put its picture again, over the first: harmless (only the account's own device has the link, and a picture that isn't the one its id names opens on no device), so a conditional put isn't asked for, and CORS needs no more headers. The link is signed with `Content-Type: application/octet-stream` too, which both apps send, so nothing of another type (a page, a script) is kept on the bucket's origin; CORS lets `content-type` through, as above.
 - **What stays in the data folder:** `opaque.key` (every password depends on it) and `links.key`. Keep `--data` pointing at the folder, and keep it in backups. Postgres holds no secret.
 - **Backup** is the database's and the bucket's own: `pg_dump` (or the host's snapshots) and the bucket's versioning or replication. `carnet-server backup` copies SQLite files only.
 
@@ -334,6 +336,6 @@ cargo test -p carnet-server --features postgres,s3
 ```
 
 - `tests/sim.rs` simulates devices, the server and a faulty network from a seed, on memory and on SQLite alike (and Postgres, given one).
-- `tests/migrate.rs` moves a folder to Postgres and a bucket and compares every answer; refuses a folder in use and a database served; copies the pictures first beside a running server, a picture half put meanwhile, then the rest after the stop; and end to end, fills a server on SQLite through its sockets, moves it, starts it on Postgres and the bucket, and its devices carry on (notes, a picture by the bucket's link, a password, a note deleted for good). `tests/s3.rs` puts and fetches by the bucket's links, marks and sweeps.
+- `tests/migrate.rs` moves a folder to Postgres and a bucket and compares every answer; refuses a folder in use and a database served; copies the pictures first beside a running server, a picture half put meanwhile, then the rest after the stop; and end to end, fills a server on SQLite through its sockets, moves it, starts it on Postgres and the bucket, and its devices carry on (notes, a picture by the bucket's link, a password, a note deleted for good). `tests/s3.rs` puts and fetches by the bucket's links (a put of another length or type refused), marks and sweeps.
 - `tests/server.rs` runs the binary's own path end to end: HTTP, WebSockets, SQLite, a restart, what health and metrics say, and the limits behind a trusted proxy; the data folder's permissions, a deleted account's links and pictures, and sockets from other sites' pages.
 - `tests/auth.rs` sends what an attacker would, frame by frame: everything but a login before one, logins signed with the wrong key, for another nonce or server or account, false invites and recoveries, another account's rooms, devices and pictures, writes and snapshots out of turn, the owner's frames from someone else, and too many tries from one address.

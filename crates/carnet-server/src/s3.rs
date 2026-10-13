@@ -21,6 +21,13 @@
 //! and [`Blobs::held`] find it too big, delete it, and it's never said
 //! kept, linked, or counted.)
 //!
+//! **A put's type.** The link is signed with `Content-Type:
+//! application/octet-stream` too ([`PUT_TYPE`]), as both apps send it, so
+//! the bucket takes a put of no other type: a device can't keep a page
+//! (`text/html`) or a script on the bucket's own origin, for the bucket to
+//! serve as one to whoever opens its link. (A fetch's link asks for that
+//! type back besides, whatever was put.)
+//!
 //! **A put again.** Within its five minutes a link may put its picture
 //! again, over the first. That's harmless, so it isn't stopped (a
 //! conditional put, `If-None-Match`, would need every device to send the
@@ -49,6 +56,10 @@ use crate::blobs::{Blobs, MAX};
 /// How long a call the server makes itself is good for: signed, then
 /// sent at once.
 const CALL: Duration = Duration::from_secs(60);
+
+/// The one type a device's put may say, signed into its link: sealed
+/// bytes, never a page.
+pub const PUT_TYPE: &str = "application/octet-stream";
 
 /// Where a bucket is, and the keys to it.
 #[derive(Clone)]
@@ -352,10 +363,11 @@ impl S3Blobs {
     }
 
     /// A device's put of `size` bytes at `key`, to be signed: with its
-    /// length, so the bucket takes no other.
+    /// length and its type, so the bucket takes no other.
     fn put_action<'a>(&'a self, key: &'a str, size: u64) -> rusty_s3::actions::PutObject<'a> {
         let mut put = self.bucket.put_object(Some(&self.creds), key);
         put.headers_mut().insert("content-length", size.to_string());
+        put.headers_mut().insert("content-type", PUT_TYPE);
         put
     }
 
@@ -459,15 +471,15 @@ mod tests {
         assert_eq!(at("https://s3.example/pics", true).as_deref(), Some("https://pics.s3.example"));
     }
 
-    /// A link to put is signed with the picture's length: the bucket
-    /// checks the `Content-Length` sent against it, and refuses another.
-    /// A link to fetch isn't.
+    /// A link to put is signed with the picture's length and type: the
+    /// bucket checks the `Content-Length` and `Content-Type` sent against
+    /// them, and refuses another. A link to fetch isn't.
     #[test]
-    fn a_put_link_is_signed_with_its_length() {
+    fn a_put_link_is_signed_with_its_length_and_type() {
         let config = S3Config { url: "https://s3.example.com/pics".into(), region: "auto".into(), key: "k".into(), secret: "s".into(), virtual_host: false };
         let mut b = S3Blobs::new(&config).unwrap();
         let put = b.link(b"\x01", &[2; 32], Some(5036), now() + 300);
-        assert!(put.contains("X-Amz-SignedHeaders=content-length%3Bhost&"), "{put}");
+        assert!(put.contains("X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost&"), "{put}");
         let get = b.link(b"\x01", &[2; 32], None, now() + 300);
         assert!(get.contains("X-Amz-SignedHeaders=host&"), "{get}");
         // The same moment, another length: another signature.
