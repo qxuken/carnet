@@ -497,6 +497,11 @@ impl Notes {
                         }
                         if changed {
                             self.session.saved(vault::ROOM, &mut self.rooms, rng);
+                            // The page told: a note it shows with this
+                            // picture "not on the server yet" asks again.
+                            if !self.changed.iter().any(|r| r == vault::ROOM) {
+                                self.changed.push(vault::ROOM.to_string());
+                            }
                         }
                         self.session.drop_blobs(&unused);
                         self.said.push(Said::Uploaded(hex(&id)));

@@ -34,6 +34,15 @@ export class Uploads {
     return this.change(() => null);
   }
 
+  /// The id of the picture on its way to `path`, if one is: the last put
+  /// in there. What this browser shows there until the vault names it,
+  /// from the copy kept here (after a reload, offline, say).
+  async going(path: string): Promise<string | undefined> {
+    const list = await this.list();
+    for (let n = list.length - 1; n >= 0; n--) if (list[n][0] === path) return list[n][1];
+    return undefined;
+  }
+
   /// A picture put in at `path`: kept as on its way. Asked before it's
   /// sent, so its "sent" comes after.
   add(path: string, id: string): Promise<Entry[]> {

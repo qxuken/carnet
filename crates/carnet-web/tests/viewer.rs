@@ -648,8 +648,13 @@ fn a_picture_put_in_here_goes_to_the_server_then_the_vault() {
     assert_eq!(path, "attachments/pasted-2026-10-10-120000.jpg");
     let id = web.upload(&path, bytes.clone()).expect("not too big");
     assert_eq!(web.picture_free("pasted-2026-10-10-120000", "jpg"), "attachments/pasted-2026-10-10-120000-2.jpg", "taken while it goes");
+    web.changed.clear();
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
+    // The page told the vault changed: it names the picture now, so a
+    // note showing "not on the server yet" in its place asks again.
+    assert!(web.changed.iter().any(|r| r == vault::ROOM), "{:?}", web.changed);
+    assert_eq!(web.picture_id(&path).as_deref(), Some(id.as_str()));
     // In the vault, for every device; the desktop fetches it whole.
     assert_eq!(desk.docs[vault::ROOM].pictures().get(&path), Some(&id));
     let blob: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
