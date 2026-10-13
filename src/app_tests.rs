@@ -743,7 +743,7 @@ fn the_library_menu_deletes_the_note_it_was_opened_on() {
         .core
         .nodes()
         .iter()
-        .find(|n| n.text.as_deref() == Some("Move to trash"))
+        .find(|n| n.text.as_deref() == Some("Move to Deleted"))
         .map(|n| n.rect.center())
         .expect("the menu is open");
     d.click(&mut app, trash.x, trash.y);
@@ -937,6 +937,30 @@ fn a_copy_carries_html_beside_the_markdown() {
     let (text, html) = html.expect("a copy");
     assert_eq!(text, "Some **bold** words");
     assert_eq!(html.as_deref(), Some("<p>Some <b>bold</b> words</p>"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Lines copied from a code block: the text is the lines, the HTML is
+/// code (`<pre><code>`, its language named), not paragraphs and `<br>`s.
+#[test]
+fn code_copied_carries_code_as_its_html() {
+    let (mut app, mut d, dir) = note_of("copy-code-html", vec![Kind::Raw("```rust\nlet a = 1;\nlet b = 2;\n```".into()), Kind::Text(String::new())]);
+    let slot = Slot::block(blocks(&app)[0].id);
+    let (lo, hi) = page::code_body(&raw(&app, 0)).unwrap();
+    app.caret = Caret { anchor: Pos { slot, byte: lo }, head: Pos { slot, byte: hi } };
+    d.frame(&mut app);
+    key_with(&mut app, &mut d, "c", CTRL);
+    let (text, html) = d
+        .core
+        .take_menu_actions()
+        .into_iter()
+        .find_map(|a| match a {
+            kui_native::MenuAction::SetClipboard { text, html } => Some((text, html)),
+            _ => None,
+        })
+        .expect("a copy");
+    assert_eq!(text, "let a = 1;\nlet b = 2;");
+    assert_eq!(html.as_deref(), Some("<pre><code class=\"language-rust\">let a = 1;\nlet b = 2;</code></pre>"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -2144,7 +2168,7 @@ fn a_folder_with_notes_goes_to_the_trash_whole_and_comes_back() {
     type_in(&mut app, &mut d, "Plans");
     app.save_current();
     let names = |app: &Carnet| app.folder_menu(&folder).iter().map(|i| format!("{i:?}")).collect::<Vec<_>>().join(" ");
-    assert!(names(&app).contains("Move folder to trash"), "{}", names(&app));
+    assert!(names(&app).contains("Move folder to Deleted"), "{}", names(&app));
     app.folder_action(&folder, "delete");
     d.frame(&mut app);
     assert!(!app.store.folders.contains(&folder));
@@ -4057,12 +4081,30 @@ fn a_new_device_comes_in_by_email_and_password() {
     a.pw_edit = Some(("Ann@Example.com".into(), short.clone()));
     a.on_plain(Msg::SyncPasswordSave);
     assert!(a.sync.password_error.is_some());
-    a.pw_edit = Some(("Ann@Example.com".into(), "correct horse battery".into()));
+    // Typed in the field, as a hand would.
+    a.pw_edit = Some(("Ann@Example.com".into(), String::new()));
+    da.frame(&mut a);
+    let pw_field = app_field(&a, Field::PasswordNew).unwrap();
+    da.core.set_edit_text(pw_field, "");
+    da.focus(&mut a, pw_field);
+    da.text(&mut a, "correct horse battery");
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some("correct horse battery"));
     a.on_plain(Msg::SyncPasswordSave);
     until("set", &mut a, &mut da, &|x| x.notice.as_ref().is_some_and(|n| n.text.starts_with("Password set")));
     assert_eq!((a.sync.password_error.as_deref(), a.sync.error.as_deref()), (None, None));
     assert!(!drawn(&mut da, &mut a, &why));
     until("listed", &mut a, &mut da, &|x| x.sync.password == Some((true, Some("ann@example.com".into()))));
+    // Set, the field put away keeps nothing of it; Change opens it empty.
+    da.frame(&mut a);
+    assert!(a.pw_edit.is_none());
+    assert_eq!(da.core.edit_text(pw_field).as_deref(), Some(""), "nothing kept in the field put away");
+    assert!(drawn(&mut da, &mut a, "Change"));
+    a.on_plain(Msg::SyncPassword);
+    d_frame_twice(&mut a, &mut da);
+    let k = app_field(&a, Field::PasswordNew).unwrap();
+    assert_eq!(da.core.edit_text(k).as_deref(), Some(""), "Change opens empty");
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some(""));
+    a.on_plain(Msg::SyncPasswordCancel);
 
     // A wrong one: nothing let in, and said.
     let (mut c, mut dc, dir_c) = fresh("pw-c");
@@ -4089,6 +4131,7 @@ fn a_new_device_comes_in_by_email_and_password() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(b.sync.is_on());
+    assert!(b.sync_password.is_empty(), "the password signed in with isn't kept");
 
     // Deleted from A: asked first, then gone everywhere; each says so.
     a.settings_open = true;
@@ -5515,9 +5558,13 @@ fn two_apps_sync_through_a_server() {
         x[1].0.store.invite_code(&waiting.hash()).is_some() && x[0].0.sync.invites.as_ref().is_some_and(|i| i.waiting.len() == 1)
     });
     let at = list.iter().position(|d| d.name.as_deref() == Some("Laptop")).unwrap() as u64;
+    // Asked first: Cancel, or Yes, remove. Cancel keeps it.
     a.on_plain(Msg::SyncRemove { at });
     assert!(b.sync.is_on() && a.sync_remove_armed.is_some(), "asked once: not yet");
-    assert!(drawn(&mut da, &mut a, "Remove for real"));
+    assert!(drawn(&mut da, &mut a, "Cancel") && drawn(&mut da, &mut a, "Yes, remove"));
+    a.on_plain(Msg::SyncRemoveCancel);
+    assert!(a.sync_remove_armed.is_none() && !drawn(&mut da, &mut a, "Yes, remove"));
+    a.on_plain(Msg::SyncRemove { at });
     a.on_plain(Msg::SyncRemove { at });
     // The laptop had every waiting invite's code: each taken back, and
     // said so.
@@ -5614,9 +5661,14 @@ fn two_apps_sync_through_a_server() {
     a.on_plain(Msg::SyncInspector);
     a.settings_open = false;
 
-    // Turn off asks twice, and anything between disarms it.
+    // Turn off asks first, and anything between disarms it: Cancel too.
     a.on_plain(Msg::SyncOff);
     assert!(a.sync.is_on() && a.sync_off_armed);
+    a.settings_open = true;
+    assert!(drawn(&mut da, &mut a, "Yes, turn off") && drawn(&mut da, &mut a, "Cancel"));
+    a.on_plain(Msg::SyncOffCancel);
+    assert!(a.sync.is_on() && !a.sync_off_armed);
+    a.on_plain(Msg::SyncOff);
     a.on_plain(Msg::SyncHow { to: 0 });
     a.on_plain(Msg::SyncOff);
     assert!(a.sync.is_on(), "asked again after something else");
@@ -5724,7 +5776,10 @@ fn the_owner_invites_someone_and_removes_their_account() {
     assert!(drawn(&mut da, &mut a, "Other accounts on this server"));
     let at = a.sync.invites.as_ref().unwrap().accounts.iter().position(|x| !x.you).unwrap() as u64;
     a.on_plain(Msg::SyncAccountRemove { at });
-    assert!(a.sync_account_armed.is_some() && drawn(&mut da, &mut a, "Remove for real"), "asked once: not yet");
+    assert!(a.sync_account_armed.is_some() && drawn(&mut da, &mut a, "Yes, remove"), "asked once: not yet");
+    a.on_plain(Msg::SyncAccountRemoveCancel);
+    assert!(a.sync_account_armed.is_none(), "Cancel keeps it");
+    a.on_plain(Msg::SyncAccountRemove { at });
     a.on_plain(Msg::SyncAccountRemove { at });
     until("B's account is gone", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
         !x[1].0.sync.is_on() && x[0].0.sync.invites.as_ref().is_some_and(|i| i.accounts.len() == 1)
@@ -6050,11 +6105,11 @@ fn deleting_a_folder_with_only_other_files_moves_it_to_the_trash() {
     std::fs::create_dir_all(dir.join("Old").join("Attachments")).unwrap();
     std::fs::write(dir.join("Old").join("Attachments").join("x.png"), "pic").unwrap();
     d.frame(&mut app);
-    assert!(!app.folder_is_bare(&f), "the menu says Move folder to trash");
+    assert!(!app.folder_is_bare(&f), "the menu says Move folder to Deleted");
     app.folder_action(&f, "delete");
     assert!(app.error.is_none(), "{:?}", app.error);
     assert!(!dir.join("Old").exists());
-    assert!(app.notice.as_ref().is_some_and(|n| n.text.starts_with("Moved \u{201c}Old\u{201d} to the trash") && n.undo.is_some()));
+    assert!(app.notice.as_ref().is_some_and(|n| n.text.starts_with("Moved \u{201c}Old\u{201d} to Deleted") && n.undo.is_some()));
     assert!(app.trash.iter().any(|t| t.is_folder && t.name == "Old"));
     // Nothing in it at all: just removed.
     let g = app.store.create_folder("", "Bare").unwrap();
@@ -6758,7 +6813,7 @@ fn several_notes_and_folders_are_chosen_and_go_together() {
     assert!(!dir.join("Other").exists() && !dir.join("One.md").exists() && !dir.join("Three.md").exists());
     assert!(dir.join("Two.md").exists() && dir.join("Box/Inside.md").exists());
     let said = app.notice.as_ref().map(|n| n.text.clone()).unwrap();
-    assert_eq!(said, "Moved a folder and 2 notes to the trash");
+    assert_eq!(said, "Moved a folder and 2 notes to Deleted");
     app.on_plain(Msg::Undo);
     d.frame(&mut app);
     assert!(dir.join("Other/Elsewhere.md").exists() && dir.join("One.md").exists() && dir.join("Three.md").exists());
@@ -6770,7 +6825,7 @@ fn several_notes_and_folders_are_chosen_and_go_together() {
     click_with(&mut app, &mut d, at, cmd);
     assert_eq!(names(&app), ["One", "Two"]);
     let menu: Vec<String> = app.picked_menu().iter().map(|m| m.label.to_string()).collect();
-    assert!(menu.contains(&"Move 2 notes to".to_string()) && menu.contains(&"Move 2 notes to the trash".to_string()), "{menu:?}");
+    assert!(menu.contains(&"Move 2 notes to".to_string()) && menu.contains(&"Move 2 notes to Deleted".to_string()), "{menu:?}");
     let into = app.folder_rects.iter().find(|(f, _)| f == "Box").map(|(_, r)| r.center()).unwrap();
     d.drag(&mut app, at, into);
     d.frame(&mut app);
@@ -8323,7 +8378,7 @@ fn shift_with_the_arrows_chooses_folders_from_the_keyboard() {
     assert!(app.picked.is_empty());
     assert_eq!(app.store.folders, ["D"]);
     assert!(!dir.join("A").exists() && !dir.join("B").exists() && !dir.join("C").exists() && dir.join("D/d.md").exists());
-    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 3 folders to the trash"));
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 3 folders to Deleted"));
     app.on_plain(Msg::Undo);
     d.frame(&mut app);
     assert!(dir.join("A/a.md").exists() && dir.join("B/b.md").exists() && dir.join("C/c.md").exists());
@@ -8365,7 +8420,7 @@ fn shift_with_the_arrows_chooses_notes_from_the_keyboard() {
     key(&mut app, &mut d, "backspace");
     d_frame_twice(&mut app, &mut d);
     assert!(!dir.join("Bravo.md").exists() && !dir.join("Charlie.md").exists() && dir.join("Delta.md").exists());
-    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 2 notes to the trash"));
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Moved 2 notes to Deleted"));
     app.on_plain(Msg::Undo);
     d.frame(&mut app);
     assert!(dir.join("Bravo.md").exists() && dir.join("Charlie.md").exists());
@@ -8421,5 +8476,164 @@ fn an_autosave_brings_no_rescan_and_another_apps_write_does() {
     run(&mut app, &mut d, 10, &|a| a.rescans > 1);
     assert_eq!(app.rescans, 2, "another app's edit: one");
     assert!(app.store.notes.iter().any(|n| n.markdown().contains("edited elsewhere")));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+
+/// A press in the title held over a frame or two, as a hand holds it,
+/// and let go: where it was let go, the title's caret.
+fn press_title(app: &mut Carnet, d: &mut Drive, at: f32) -> Key {
+    let k = app_field(app, Field::Title).expect("the title");
+    let r = d.rect_of(k).unwrap();
+    d.input(app, InputEvent::CursorMoved(Vec2::new(r.x + at.clamp(2.0, r.w - 2.0), r.y + r.h / 2.0)));
+    d.input(app, InputEvent::mouse_down(1));
+    d.frame(app);
+    d.frame(app);
+    d.input(app, InputEvent::mouse_up());
+    d.frame(app);
+    assert_eq!(d.core.focus(), Some(k), "the title has the keyboard");
+    k
+}
+
+/// After a click in the title, its first key acts: Backspace takes a
+/// letter, ← at the start and → at the end go into the note's start (→)
+/// or stay (←, there being nothing before the title), ↓ goes into the
+/// note — not the second press, as when kui's press left the field an
+/// empty selection, which has no edge and is what Backspace took.
+#[test]
+fn the_first_key_after_a_click_in_the_title_acts() {
+    let (mut app, mut d, dir) = fresh("title-click-key");
+    d.text(&mut app, "Plans");
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "First line");
+    // Backspace at the end: a letter goes.
+    let k = press_title(&mut app, &mut d, 1e4);
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some("Plan"));
+    assert_eq!(app.store.notes[app.current].title, "Plan");
+    // → at the end: into the note, at its start.
+    click_page(&mut app, &mut d);
+    press_title(&mut app, &mut d, 1e4);
+    key(&mut app, &mut d, "right");
+    d.frame(&mut app);
+    assert!(page_focused(&app, &d), "→ at the title's end is the note");
+    assert_eq!(app.caret, Caret::at(page::first(app.doc())));
+    // ↓ from the middle: into the note.
+    press_title(&mut app, &mut d, 30.0);
+    key(&mut app, &mut d, "down");
+    d.frame(&mut app);
+    assert!(page_focused(&app, &d), "↓ from the title is the note");
+    // ← from the middle: a letter left, at once.
+    let k = press_title(&mut app, &mut d, 30.0);
+    let at = d.core.edit.selection_cursors(k).unwrap().1;
+    key(&mut app, &mut d, "left");
+    assert_eq!(d.core.edit.selection_cursors(k).unwrap().1 .1 + 1, at.1);
+    // A drag in the title still selects, and Backspace takes what it did.
+    let r = d.rect_of(k).unwrap();
+    d.drag(&mut app, Vec2::new(r.x + 2.0, r.y + r.h / 2.0), Vec2::new(r.x + r.w - 2.0, r.y + r.h / 2.0));
+    d.frame(&mut app);
+    assert!(d.core.edit.has_selection(k));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some(""));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A picture straight after the title, chosen by ↓ or → from the title's
+/// end, is typed over as one with a paragraph above it is: the words take
+/// its place, a paragraph of their own.
+#[test]
+fn a_picture_straight_after_the_title_is_typed_over() {
+    for how in ["down", "right"] {
+        let (mut app, mut d, dir) = library(&format!("pic-after-title-{how}"), &[("Title", "![x|left|220](attachments/x.png)\n\n- [ ] Book")]);
+        png_file(&dir.join("attachments"), "x.png");
+        app.open(app.store.notes.iter().position(|n| n.title == "Title").unwrap());
+        d_frame_twice(&mut app, &mut d);
+        assert!(matches!(&blocks(&app)[0].kind, Kind::Image { float: Float::Left, width: Some(220), .. }), "{how}: {:?}", blocks(&app)[0].kind);
+        let pic = blocks(&app)[0].id;
+        press_title(&mut app, &mut d, 1e4);
+        key(&mut app, &mut d, how);
+        d.frame(&mut app);
+        assert!(page_focused(&app, &d), "{how}");
+        assert_eq!(page::chosen_atom(app.doc(), app.caret), Some(Slot::block(pic)), "{how}: the picture chosen");
+        type_in(&mut app, &mut d, "replaced");
+        assert_eq!(texts(&app)[..2], ["replaced", "[ ]Book"], "{how}: a paragraph in its place");
+        assert!(blocks(&app).iter().all(|b| b.id != pic), "{how}: the picture gone");
+        assert!(matches!(&blocks(&app)[0].kind, Kind::Text(_)), "{how}");
+        app.save_current();
+        let md = std::fs::read_to_string(dir.join("Title.md")).unwrap();
+        assert!(md.starts_with("# Title\n\nreplaced\n\n- [ ] Book\n"), "{how}: {md:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// The open note's `# ` line changed from outside: the page draws the new
+/// title, as the list does, and still after another note and back.
+#[test]
+fn a_title_changed_from_outside_is_drawn() {
+    let (mut app, mut d, dir) = library("outside-title", &[("Plans", "words"), ("Other", "more")]);
+    let at = |app: &Carnet, t: &str| app.store.notes.iter().position(|n| n.title == t);
+    app.open(at(&app, "Plans").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    let drawn_title = |app: &Carnet, d: &Drive| app_field(app, Field::Title).and_then(|k| d.core.edit_text(k));
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Plans"));
+    let id = app.store.notes[app.current].id;
+    std::fs::write(dir.join("Plans.md"), "# Plans for June\n\nwords, and more\n").unwrap();
+    let t0 = Instant::now();
+    while app.store.notes[app.current].title != "Plans for June" && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+        d.frame(&mut app);
+    }
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.store.notes[app.current].id, id, "the same note open");
+    assert!(app.store.notes[app.current].markdown().contains("words, and more"), "the body reloaded");
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Plans for June"), "and the title drawn");
+    // Another note, and back: still the new title.
+    app.open(at(&app, "Other").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Other"));
+    app.open(at(&app, "Plans for June").unwrap());
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(drawn_title(&app, &d).as_deref(), Some("Plans for June"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A folder chosen by a click goes with Backspace or Delete, as one with
+/// the keyboard on its row does; on a Mac ⌘Backspace too, on the row or
+/// after the click.
+#[test]
+fn backspace_or_delete_after_a_click_on_a_folder_removes_it() {
+    let (mut app, mut d, dir) = on_folder_row("row-click-backspace", &["A", "B", "C", "D"]);
+    let click = |app: &mut Carnet, d: &mut Drive, f: &str| {
+        let k = app.folder_rows.iter().find(|(_, r)| *r == folder(f)).unwrap().0;
+        let r = d.rect_of(k).unwrap();
+        d.click(app, r.x + 20.0, r.y + r.h / 2.0);
+        d.frame(app);
+        assert_eq!(app.folder.as_deref(), Some(f));
+    };
+    click(&mut app, &mut d, "B");
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(app.store.folders, ["A", "C", "D"]);
+    assert_eq!(focused_row(&app, &d), Some(folder("C")), "the keyboard on the row that took its place");
+    click(&mut app, &mut d, "A");
+    key(&mut app, &mut d, "delete");
+    assert_eq!(app.store.folders, ["C", "D"]);
+    if cfg!(target_os = "macos") {
+        click(&mut app, &mut d, "C");
+        key_with(&mut app, &mut d, "backspace", CMD);
+        assert_eq!(app.store.folders, ["D"]);
+        focus_row(&mut app, &mut d, folder("D"));
+        key_with(&mut app, &mut d, "backspace", CMD);
+        assert!(app.store.folders.is_empty());
+    }
+    // Nothing shown but all notes: nothing goes, and no note either.
+    let notes = app.store.notes.len();
+    app.show_folder(None);
+    d.core.set_focus(None);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(app.store.notes.len(), notes);
     let _ = std::fs::remove_dir_all(dir);
 }

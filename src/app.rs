@@ -200,8 +200,9 @@ pub enum Msg {
     SyncPasskeyRemove { at: u64 },
     SyncPasskeyCancel,
     /// Remove the device at this place in Settings → Sync's list (asked
-    /// twice).
+    /// first: Cancel, or Yes, remove); or not.
     SyncRemove { at: u64 },
+    SyncRemoveCancel,
     /// The sync inspector opened or closed; asked again.
     SyncInspector,
     SyncInspectorRefresh,
@@ -233,8 +234,10 @@ pub enum Msg {
     SyncInviteDrop { at: u64 },
     /// The waiting invite at this place, its code on the clipboard.
     SyncInviteCopy { at: u64 },
-    /// Remove the account at this place in the owner's list (asked twice).
+    /// Remove the account at this place in the owner's list (asked
+    /// first); or not.
     SyncAccountRemove { at: u64 },
+    SyncAccountRemoveCancel,
     /// Make a recovery code, its words shown once (asked first when it
     /// would replace one).
     SyncRecovery,
@@ -242,8 +245,9 @@ pub enum Msg {
     SyncRecoveryCancel,
     /// The words written down: put away.
     SyncRecoveryDone,
-    /// Sync off on this device.
+    /// Sync off on this device (asked first); or not.
     SyncOff,
+    SyncOffCancel,
     /// The version the page shows, compared with the note as it is now,
     /// or (again) with the version before it.
     CompareWithNow,
@@ -750,9 +754,9 @@ pub struct Carnet {
     /// body: `None` at its end (← from the note's start), a column for ↑
     /// from the note's first line, under the caret it came from.
     title_to: Option<Option<f32>>,
-    /// The open note's title changed on another device: the title field
-    /// takes it on the next frame (kui's field keeps its own words).
-    title_from_remote: bool,
+    /// The focused field's caret as the last frame left it: its key, its
+    /// text's version and its two ends (see `settle_field_caret`).
+    field_caret: Option<FieldCaret>,
     /// The search had the keyboard on the last frame: its field shows
     /// whole.
     search_active: bool,
@@ -791,7 +795,7 @@ pub struct Carnet {
     pub sync_words_armed: bool,
     /// Deleting the account was asked once.
     pub delete_account_armed: bool,
-    /// Turn off asked once: the second asks for real.
+    /// Turn off asked once: Cancel, or Yes, turn off.
     pub sync_off_armed: bool,
     /// The device whose Remove was asked once.
     pub sync_remove_armed: Option<Vec<u8>>,
@@ -808,6 +812,10 @@ pub struct Carnet {
     /// when next drawn: a field keeps its own text, so changing ours is not
     /// enough.
     sync_reset_fields: bool,
+    /// The password fields declared on the last frame, and on this one
+    /// so far: one that goes is emptied (`forget_passwords`).
+    passwords_shown: Vec<Key>,
+    passwords_now: Vec<Key>,
     /// The sync inspector is open in Settings → Sync.
     pub sync_inspector: bool,
     /// A rollback (false) or repair (true) of this room, awaiting yes.
@@ -1042,7 +1050,7 @@ impl Carnet {
             zen: false,
             deleted: false,
             title_to: None,
-            title_from_remote: false,
+            field_caret: None,
             window_cmd: None,
             search_active: false,
             trash: Vec::new(),
@@ -1068,6 +1076,8 @@ impl Carnet {
             sync_rename: None,
             pair_qr: None,
             sync_reset_fields: false,
+            passwords_shown: Vec::new(),
+            passwords_now: Vec::new(),
             sync_inspector: false,
             sync_inspect_armed: None,
             sync_inspect_open: None,
@@ -1706,13 +1716,13 @@ impl Carnet {
         let folder = self.store.notes[i].folder.clone();
         match self.store.trash(i) {
             Ok(Some(file)) => self.notify(
-                format!("Moved \u{201c}{name}\u{201d} to the trash"),
+                format!("Moved \u{201c}{name}\u{201d} to Deleted"),
                 file_name.map(|name| Undo::Note { file, name, folder }),
             ),
             Ok(None) => {}
             // Nothing was forgotten; the list and the open note are put
             // back in step all the same.
-            Err(e) => self.error = Some(format!("Couldn't move to trash: {e}")),
+            Err(e) => self.error = Some(format!("Couldn't move it to Deleted: {e}")),
         }
         if self.store.notes.is_empty() {
             self.store.notes.push(blank_note());
@@ -2050,9 +2060,11 @@ impl Carnet {
             self.sync_server = origin;
             self.sync_reset_fields = true;
         }
-        // In: the code, or the twelve words, need not stay on screen.
-        if self.sync.is_on() && !self.sync_code.is_empty() {
+        // In: the code, or the twelve words, need not stay on screen; nor
+        // the password signed in with be kept.
+        if self.sync.is_on() && !(self.sync_code.is_empty() && self.sync_password.is_empty()) {
             self.sync_code.clear();
+            self.sync_password.clear();
             self.sync_reset_fields = true;
         }
         // Joining an account can take a note away, the open one or one
@@ -2078,10 +2090,6 @@ impl Carnet {
                         && !self.reading()
                     {
                         self.caret = carnet_core::compare::carry(&old, &self.store.notes[i].doc, self.caret);
-                    }
-                    // Its title too, unless it's being written here.
-                    if !self.title_focused {
-                        self.title_from_remote = true;
                     }
                     self.caret = page::fix(self.doc(), self.caret);
                     if matches!(r, store::Remote::Merged(_)) {
@@ -2769,7 +2777,7 @@ impl Carnet {
             item("Copy folder path", "copy-path"),
             MenuItem::separator(),
             item("Rename\u{2026}", "rename").accel(crate::keys::RENAME_FOLDER),
-            item(if self.folder_is_bare(folder) { "Delete folder" } else { "Move folder to trash" }, "delete"),
+            item(if self.folder_is_bare(folder) { "Delete folder" } else { "Move folder to Deleted" }, "delete"),
         ]
     }
 
@@ -2799,12 +2807,12 @@ impl Carnet {
                     n => format!(" and its {n} notes"),
                 };
                 self.notify(
-                    format!("Moved \u{201c}{}\u{201d}{what} to the trash", folder_name(folder)),
+                    format!("Moved \u{201c}{}\u{201d}{what} to Deleted", folder_name(folder)),
                     Some(Undo::Folder { from, folder: folder.to_string() }),
                 );
             }
             Err(e) => {
-                self.error = Some(format!("Couldn't move the folder to the trash: {}", store::plain_error(&e)));
+                self.error = Some(format!("Couldn't move the folder to Deleted: {}", store::plain_error(&e)));
                 return;
             }
         }
@@ -2882,7 +2890,7 @@ impl Carnet {
             items.push(MenuItem::submenu("Move to", targets));
         }
         items.push(MenuItem::separator());
-        items.push(item("Move to trash", "delete").accel(crate::keys::TRASH));
+        items.push(item("Move to Deleted", "delete").accel(crate::keys::TRASH));
         items
     }
 
@@ -2940,7 +2948,8 @@ impl Carnet {
     /// A message that needs nothing but itself: a click's, or one the
     /// page's menu and shortcuts send on.
     fn on_plain(&mut self, msg: Msg) {
-        // Turn off, and Remove, ask again after anything else is done.
+        // Turn off, and Remove, ask again after anything else is done
+        // (their Cancel among them).
         if !matches!(msg, Msg::SyncOff) {
             self.sync_off_armed = false;
         }
@@ -3229,7 +3238,8 @@ impl Carnet {
                     self.say = Some("Copied".into());
                 }
             }
-            // Asked twice: everything the account keeps on the server goes.
+            // Asked first: everything the account keeps on the server
+            // goes.
             Msg::SyncAccountRemove { at } => {
                 let Some(id) = self.sync.invites.as_ref().and_then(|i| i.accounts.get(at as usize)).map(|a| a.id.clone()) else { return };
                 if self.sync_account_armed.as_deref() == Some(id.as_slice()) {
@@ -3248,7 +3258,7 @@ impl Carnet {
             }
             Msg::SyncRecoveryCancel => self.sync_words_armed = false,
             Msg::SyncRecoveryDone => self.sync.words = None,
-            // Asked twice: off, this device needs a code or the words to
+            // Asked first: off, this device needs a code or the words to
             // come back, and the last device off leaves only the words.
             Msg::SyncRemove { at } => {
                 let Some(id) = self.sync.devices.as_ref().and_then(|l| l.get(at as usize)).map(|d| d.id.clone()) else { return };
@@ -3293,6 +3303,8 @@ impl Carnet {
                 self.sync.delete_account();
             }
             Msg::SyncDeleteAccountCancel => self.delete_account_armed = false,
+            // (Each disarmed above, as anything else does.)
+            Msg::SyncRemoveCancel | Msg::SyncAccountRemoveCancel | Msg::SyncOffCancel => {}
             Msg::SyncOff if !self.sync_off_armed => self.sync_off_armed = true,
             Msg::SyncOff => {
                 self.sync_off_armed = false;
@@ -3487,8 +3499,14 @@ impl Carnet {
     /// Markdown on the clipboard, with its HTML beside it for apps that
     /// take formatting. Images are linked from where they are on disk.
     fn copy_markdown(&mut self, md: String, folder: &str) {
+        let html_md = md.clone();
+        self.copy_markdown_as(md, &html_md, folder);
+    }
+
+    /// `md` on the clipboard, its HTML made from `html_md`.
+    fn copy_markdown_as(&mut self, md: String, html_md: &str, folder: &str) {
         let store = &self.store;
-        let html = export::html(&md, |src, wiki| match store.picture_file(folder, src, wiki) {
+        let html = export::html(html_md, |src, wiki| match store.picture_file(folder, src, wiki) {
             Some(p) => format!("file:///{}", p.display().to_string().replace('\\', "/").trim_start_matches('/')),
             None => src.to_string(),
         });
@@ -3610,6 +3628,19 @@ impl Carnet {
             && core.focus().is_none_or(|f| f == Key::ROOT)
         {
             self.trash_picked();
+            return;
+        }
+        // Delete or Backspace (or ⌘Backspace, a Mac's) after a click on a
+        // folder, the keyboard on nothing in particular: the folder shown
+        // goes, as from its row with the keyboard on it.
+        if matches!(k.code, KeyCode::Backspace | KeyCode::Delete)
+            && !(m.ctrl || m.alt || m.shift)
+            && self.folders_clicked
+            && !self.deleted
+            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && let Some(f) = self.folder.clone()
+        {
+            self.folder_row_key(&FolderRow::Folder(f), &k);
             return;
         }
         // F2 with the keyboard on nothing in particular — after a click on
@@ -3842,14 +3873,65 @@ impl Carnet {
             return;
         }
         match p.get_str("key") {
+            // A picture or a divider first: chosen whole, as from a line
+            // above it (`page::from_title`).
             Some("down") => {
                 let x = core.edit_caret_rect(key).map(|r| r.x);
                 let at = x.and_then(|x| self.first_line_at(core, x));
-                self.edit_at(at.unwrap_or_else(|| page::first(self.doc())));
+                let at = at.unwrap_or_else(|| page::first(self.doc()));
+                self.edit_at(at);
+                self.caret = page::from_title(self.doc(), at);
                 self.goal_x = x;
             }
-            Some("right") => self.edit_at(page::first(self.doc())),
+            Some("right") => {
+                let at = page::first(self.doc());
+                self.edit_at(at);
+                self.caret = page::from_title(self.doc(), at);
+            }
             _ => {}
+        }
+    }
+
+    /// A press in a field leaves kui's editor holding an empty selection at
+    /// the caret (the anchor a drag from there would have kept, seeded
+    /// again as the button comes up), not a bare caret; and a field with a
+    /// selection, even an empty one, reports no edge and has Backspace
+    /// take the selection. So the first ↓, → at the title's end, ← at its
+    /// start or Backspace after a click did nothing, and the second
+    /// worked. Once the button is up, a caret the pointer put down —
+    /// nothing edited, nothing selected, nothing being composed — is set
+    /// again as the bare caret it is.
+    fn settle_field_caret(&mut self, core: &mut Core, focused: Option<Key>) {
+        let Some(k) = focused else {
+            self.field_caret = None;
+            return;
+        };
+        let (Some(ends), version) = (core.edit.selection_cursors(k), core.edit.version(k)) else {
+            self.field_caret = None;
+            return;
+        };
+        let held = core.is_pressed(k);
+        let let_go = match self.field_caret {
+            Some(last) if last.key == k => (last.held && !held) || (last.version == version && last.ends != ends),
+            _ => true,
+        };
+        if let_go && !held && ends.0 == ends.1 && core.edit.preedit(k).is_none() {
+            core.edit.set_selection(k, ends.1, ends.1);
+        }
+        self.field_caret = Some(FieldCaret { key: k, version, ends, held });
+    }
+
+    /// A password field no longer shown is emptied: kui keeps an editor's
+    /// words while its key is off screen, so a password typed to set one
+    /// came back in the field the next Change opened, and stayed in
+    /// memory until then. Carnet keeps no password: the server's OPAQUE
+    /// needs it only while it is being set or signed in with.
+    fn forget_passwords(&mut self, core: &mut Core) {
+        let shown = std::mem::take(&mut self.passwords_now);
+        for k in std::mem::replace(&mut self.passwords_shown, shown) {
+            if !self.passwords_shown.contains(&k) {
+                core.set_edit_text(k, "");
+            }
         }
     }
 
@@ -3866,6 +3948,19 @@ impl Carnet {
     }
 }
 
+
+/// The focused field's caret as one frame left it.
+#[derive(Clone, Copy)]
+struct FieldCaret {
+    key: Key,
+    /// Its text's version: a caret moved with the text unchanged was put
+    /// there by the pointer or an arrow.
+    version: u64,
+    /// The selection's anchor and its caret, each (line, byte).
+    ends: ((usize, usize), (usize, usize)),
+    /// The pointer's button held on it.
+    held: bool,
+}
 
 /// A folder's own name: the last part of its path.
 pub fn folder_name(folder: &str) -> &str {
@@ -4068,6 +4163,7 @@ impl App for Carnet {
         // Where the keyboard is: the page, a field, or neither.
         let focused = ui.focused();
         let field = focused.and_then(|k| self.fields.get(&k)).copied();
+        self.settle_field_caret(ui.core(), focused.filter(|_| field.is_some()));
         self.search_active = field == Some(Field::Search);
         if focused.is_some() && focused == self.page_key {
             self.editing = true;
@@ -4112,6 +4208,7 @@ impl App for Carnet {
             ui.core().declare_menu_bar(bar);
         }
         self.fields.clear();
+        self.forget_passwords(ui.core());
         self.caret = page::fix(self.doc(), self.caret);
         self.follow_pointer(ui);
         let mut l = self.styler.look(ui, &self.settings);

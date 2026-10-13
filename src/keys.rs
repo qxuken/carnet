@@ -66,7 +66,7 @@ pub const ALL: [(&str, &str); 43] = [
     ("Previous note", PREVIOUS_NOTE),
     ("Next note", NEXT_NOTE),
     ("Pin or unpin", PIN),
-    ("Move note to trash", TRASH),
+    ("Move note to Deleted", TRASH),
     ("Settings", SETTINGS),
     ("Show or hide the notes", SIDEBAR),
     ("Zen mode", ZEN),

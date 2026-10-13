@@ -2081,6 +2081,7 @@ impl Store {
             }
             let path = self.inside(self.free_path(&stem, None, &folder))?;
             write_atomic(&path, &text)?;
+            self.edited_when(key, &path);
             let (mut note, text) = Note::load_text(&path)?;
             note.key = Some(key);
             note.folder = folder;
@@ -2121,10 +2122,28 @@ impl Store {
         }
         self.keep_before_sync(i, &path, &before, &text)?;
         write_atomic(&path, &text)?;
+        self.edited_when(key, &path);
         let (fresh, written) = self.notes[i].reread(&path)?;
         self.reloaded(i, fresh);
         self.track(i, &written, Origin::OtherApp);
         Ok(Remote::Updated(i))
+    }
+
+    /// A note written as another device left it: its file's modified time
+    /// is when it was last edited there, as its history says, not when it
+    /// came — what the list and the page say of it, and sort it by. (Never
+    /// later than now: another device's clock may be ahead.)
+    fn edited_when(&mut self, key: Key, path: &Path) {
+        let Some(secs) = self.replica.as_mut().map(|r| r.modified(key)).filter(|s| *s > 0) else { return };
+        let Some(t) = epoch_time(secs as u64) else { return };
+        let t = t.min(SystemTime::now());
+        if let Ok(f) = fs::File::options().write(true).open(path)
+            && f.set_modified(t).is_ok()
+        {
+            // As the app left it: no other app's change to the watch.
+            drop(f);
+            mark_own(path);
+        }
     }
 
     /// Note `i` reloaded as `fresh` with another device's change: what it
@@ -2774,26 +2793,14 @@ fn free_file(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 
 /// Now, as `2026-10-07-140322` (UTC): a name that sorts by time.
 fn timestamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let (days, rest) = ((secs / 86_400) as i64, secs % 86_400);
-    // Howard Hinnant's civil-from-days.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02}-{:02}{:02}{:02}",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
+    wall_clock(jiff::Timestamp::now(), &jiff::tz::TimeZone::system())
+}
+
+/// `at` as the clock in `tz` says it, "2026-10-13-143626": a pasted
+/// picture's name says when it was pasted as the clock on the wall did,
+/// not as Greenwich's.
+fn wall_clock(at: jiff::Timestamp, tz: &jiff::tz::TimeZone) -> String {
+    at.to_zoned(tz.clone()).strftime("%Y-%m-%d-%H%M%S").to_string()
 }
 
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -3226,6 +3233,27 @@ fn welcome() -> Note {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pasted picture's name is the local time it was pasted at: 11:36
+    /// UTC is 14:36 three hours east, and the day turns at local midnight.
+    #[test]
+    fn a_pasted_pictures_name_is_the_local_time() {
+        let at: jiff::Timestamp = "2026-10-13T11:36:26Z".parse().unwrap();
+        let east = jiff::tz::TimeZone::fixed(jiff::tz::offset(3));
+        assert_eq!(wall_clock(at, &east), "2026-10-13-143626");
+        assert_eq!(wall_clock(at, &jiff::tz::TimeZone::UTC), "2026-10-13-113626");
+        let late: jiff::Timestamp = "2026-10-13T22:10:00Z".parse().unwrap();
+        assert_eq!(wall_clock(late, &east), "2026-10-14-011000");
+        // The name made now is this machine's clock's.
+        let dir = temp_dir("pasted-local");
+        let s = Store::open(dir.clone()).unwrap();
+        let src = s.save_attachment("", "png", b"p").unwrap();
+        let _ = fs::remove_dir_all(dir);
+        let now = jiff::Zoned::now();
+        let hour = now.strftime("%Y-%m-%d-%H").to_string();
+        let hour_before = now.checked_sub(jiff::Span::new().minutes(1)).unwrap().strftime("%Y-%m-%d-%H").to_string();
+        assert!(src.contains(&format!("pasted-{hour}")) || src.contains(&format!("pasted-{hour_before}")), "{src} at {now}");
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("carnet-test-{name}-{}", std::process::id()));
