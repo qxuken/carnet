@@ -18,7 +18,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio_rustls::rustls::pki_types::pem::PemObject;
+use tokio_rustls::rustls::pki_types::pem::{self, PemObject};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{self, RootCertStore, ServerConfig};
@@ -45,7 +45,10 @@ impl Tls {
     pub fn load(cert: &Path, key: &Path, client_ca: Option<&Path>) -> io::Result<Self> {
         let bad = |what: &Path, e: &dyn fmt::Display| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", what.display()));
         let certs = pems(cert).map_err(|e| bad(cert, &e))?;
-        let key_der = PrivateKeyDer::from_pem_file(key).map_err(|e| bad(key, &e))?;
+        let key_der = PrivateKeyDer::from_pem_file(key).map_err(|e| match e {
+            pem::Error::NoItemsFound => bad(key, &"no private key in it"),
+            e => bad(key, &e),
+        })?;
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let builder = ServerConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions().map_err(io::Error::other)?;
         let builder = match client_ca {
@@ -59,7 +62,10 @@ impl Tls {
             }
             None => builder.with_no_client_auth(),
         };
-        let mut config = builder.with_single_cert(certs, key_der).map_err(|e| bad(cert, &e))?;
+        let mut config = builder.with_single_cert(certs, key_der).map_err(|e| match e {
+            rustls::Error::InconsistentKeys(_) => bad(key, &format_args!("not the key of the certificate in {}", cert.display())),
+            e => bad(cert, &e),
+        })?;
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(Tls { acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(config)), clients: client_ca.is_some() })
     }

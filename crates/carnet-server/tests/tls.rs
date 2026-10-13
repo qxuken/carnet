@@ -268,8 +268,13 @@ async fn without_a_client_ca_any_client_is_served_over_tls() {
     assert!(out.starts_with("HTTP/1.1 200") && out.ends_with(r#"{"ok":true}"#), "{out}");
     // A key that isn't the certificate's is refused when loaded.
     std::fs::write(data.join("other.key"), pem("PRIVATE KEY", KeyPair::generate().unwrap().serialized_der())).unwrap();
-    assert!(Tls::load(&data.join("origin.pem"), &data.join("other.key"), None).is_err());
-    assert!(Tls::load(&data.join("origin.pem"), &data.join("nowhere.key"), None).is_err());
+    let refused = |cert: &str, key: &str, ca: Option<&str>| Tls::load(&data.join(cert), &data.join(key), ca.map(|c| data.join(c)).as_deref()).expect_err("refused").to_string();
+    assert!(refused("origin.pem", "other.key", None).contains("other.key: not the key of the certificate in"), "said plainly");
+    assert!(refused("origin.pem", "nowhere.key", None).contains("nowhere.key: I/O error"));
+    assert!(refused("nowhere.pem", "origin.key", None).contains("nowhere.pem: I/O error"));
+    assert!(refused("origin.key", "origin.key", None).contains("origin.key: no certificate in it"));
+    assert!(refused("origin.pem", "origin.pem", None).contains("origin.pem: no private key in it"));
+    assert!(refused("origin.pem", "origin.key", Some("origin.key")).contains("origin.key: no certificate in it"), "a client CA file with none");
     let _ = stop.send(());
     tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&data);
