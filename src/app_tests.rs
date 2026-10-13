@@ -4947,6 +4947,125 @@ fn another_devices_edit_lands_with_only_wakes_to_run_on() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A minimized window draws nothing, and on Windows the platform gives it
+/// no frame at all: kui builds its frame anyway on a wake and at a time
+/// its view asked for, and draws nothing until it is back. So another
+/// device's edits reach this one's file and its list while it sits on
+/// the taskbar, with nothing drawn, and the window brought back shows
+/// them, at the size it had: a minimized window is no size on Windows,
+/// and none reaches the app.
+#[test]
+fn another_devices_edit_lands_in_a_minimized_window() {
+    use carnet_server::server::{self, Config};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-minimized-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&[(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    let (mut a, mut da, dir_a) = fresh("minimized-a");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Errands");
+    key(&mut a, &mut da, "enter");
+    type_in(&mut a, &mut da, "post office");
+    a.save_current();
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+    let (mut b, mut db, dir_b) = fresh("minimized-b");
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let w = wakes.clone();
+    b.sync.set_wake(move || {
+        w.fetch_add(1, Ordering::Relaxed);
+    });
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    until("B has the note", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| x[1].0.store.notes.iter().any(|n| n.title == "Errands"));
+    a.settings_open = false;
+    let i = b.store.notes.iter().position(|n| n.title == "Errands").unwrap();
+    b.open(i);
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_millis(500) {
+        da.frame(&mut a);
+        db.frame(&mut b);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let path = b.store.notes[b.current].path.clone().expect("B's file");
+
+    // Minimized: on Windows the window reports no size.
+    db.hide();
+    db.viewport = kui_native::Size::new(0.0, 0.0);
+    let drawn = db.drawn();
+    for (round, words) in ["the bank", "the library"].into_iter().enumerate() {
+        let i = a.store.notes.iter().position(|n| n.title == "Errands").unwrap();
+        a.open(i);
+        da.frame(&mut a);
+        let note = &mut a.store.notes[a.current];
+        note.doc.insert(1, Block::text(words));
+        note.touch();
+        a.save_current();
+        let mut seen = wakes.load(Ordering::Relaxed);
+        let (mut woken, t0) = (0, Instant::now());
+        while !std::fs::read_to_string(&path).is_ok_and(|t| t.contains(words)) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "round {round}: B's file never had \"{words}\" ({woken} wakes)");
+            da.frame(&mut a);
+            // What the runner does for a window it cannot draw: a frame
+            // on a wake, and at a time the view asked for.
+            let now = wakes.load(Ordering::Relaxed);
+            if now != seen {
+                seen = now;
+                woken += 1;
+                db.wake(&mut b);
+            }
+            db.advance(0.005);
+            db.due(&mut b);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(woken > 0, "round {round}: woken");
+        assert!(b.store.notes[b.current].markdown().contains(words), "round {round}: the open note has it");
+    }
+    assert_eq!(db.drawn(), drawn, "nothing drawn while minimized");
+
+    // Restored, at the size it had: the note drawn with both.
+    db.viewport = kui_native::Size::new(1100.0, 760.0);
+    db.show(&mut b);
+    assert_eq!(db.drawn(), drawn + 1);
+    let shown: Vec<String> = db.core.nodes().iter().filter_map(|n| n.text.clone()).collect();
+    for words in ["the bank", "the library"] {
+        assert!(shown.iter().any(|t| t.contains(words)), "{words} drawn: {shown:?}");
+    }
+    let w = db.warnings();
+    assert!(w.is_empty(), "{w:?}");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// A recovery code's words show once the server says it keeps them, not
 /// before; making another, when there is one, is asked first, as the
 /// words written down stop working. And keys kept in a file, not a
