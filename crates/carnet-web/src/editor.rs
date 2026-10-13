@@ -1346,6 +1346,25 @@ mod tests {
         assert_eq!(e.caret_lc().2, 2);
     }
 
+    /// The finding: code with no line between its fences showed them,
+    /// there being no line to show. It shows one empty line, as code
+    /// made by `/code` does, and what is typed there goes between them.
+    #[test]
+    fn code_with_no_line_between_its_fences_shows_one_empty_line() {
+        for fence in ["```", "```rust"] {
+            let mut e = Editor::open(&format!("# T\n\nAbove\n\n{fence}\n```\n\nBelow\n"));
+            let texts: Vec<&str> = e.lines().iter().map(|l| l.text.as_str()).collect();
+            assert_eq!(texts, ["T", "Above", "", "Below"]);
+            assert!(!e.text().contains('`'));
+            e.select(2, 0, 2, 0);
+            assert_eq!(e.caret_lc(), (2, 0, 2, 0));
+            keys(&mut e, "let x;");
+            assert_eq!(e.markdown(), format!("# T\n\nAbove\n\n{fence}\nlet x;\n```\n\nBelow\n"));
+            assert_eq!(e.lines()[2].text, "let x;");
+            assert_eq!(e.caret_lc(), (2, 6, 2, 6));
+        }
+    }
+
     /// A picture put in at the end of the words before a table: no empty
     /// line between, the caret on in the table's first cell.
     #[test]

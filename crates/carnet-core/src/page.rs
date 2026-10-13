@@ -313,7 +313,9 @@ fn styled(doc: &Doc, slot: Slot) -> bool {
 /// The lines of fenced code (or front matter) between its fences: where
 /// they start and end in its text. The caret stands there, the fences
 /// drawn but never written on — typed on, `` ```after `` is no fence.
-/// `None` for code with no line between its fences.
+/// Code with no line between its fences (`` ```\n``` ``) has an empty one
+/// all the same, at the closing fence's start: written in, it is put in
+/// the text ([`open_bare_code`]). `None` for text that is no fenced code.
 pub fn code_body(t: &str) -> Option<(usize, usize)> {
     let first = t.find('\n')?;
     let fence = |line: &str| {
@@ -326,9 +328,22 @@ pub fn code_body(t: &str) -> Option<(usize, usize)> {
     let last = t.rfind('\n').unwrap_or(first);
     let closed = fence(&t[last + 1..]);
     if last == first && closed {
-        return None;
+        return Some((first + 1, first + 1));
     }
     Some((first + 1, if closed { last } else { t.len() }))
+}
+
+/// Code with no line between its fences given the empty one it is drawn
+/// with ([`code_body`]), for what is written there to go between them
+/// rather than onto the closing fence.
+fn open_bare_code(doc: &mut Doc, slot: Slot) {
+    let Some(Kind::Raw(t)) = kind_at(doc, slot) else { return };
+    let Some((lo, hi)) = code_body(t).filter(|_| slot.cell.is_none()) else { return };
+    if lo == hi && lo < t.len() && !t[lo..].starts_with('\n')
+        && let Some(t) = text_mut(doc, slot)
+    {
+        t.insert(lo, '\n');
+    }
 }
 
 /// Where the caret can stand in `slot`: in code, between its fences
@@ -841,6 +856,7 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     // In code, never on a fence: between them, at the nearer end.
     let (lo, hi) = writable(doc, p.slot);
     let p = Pos { byte: p.byte.clamp(lo, hi), ..p };
+    open_bare_code(doc, p.slot);
     let single = kind_at(doc, p.slot).is_some_and(single_line);
     let s = if single { s.replace('\n', " ") } else { s.to_string() };
     let old = text(doc, p.slot).to_string();
@@ -4295,7 +4311,8 @@ mod tests {
         assert_eq!(code_body("```rust\n\n```"), Some((8, 8)));
         assert_eq!(code_body("---\ntitle: x\n---"), Some((4, 12)));
         assert_eq!(code_body("```\nopen to the end"), Some((4, 19)));
-        assert_eq!(code_body("```\n```"), None);
+        assert_eq!(code_body("```\n```"), Some((4, 4)), "an empty line, not yet written");
+        assert_eq!(code_body("plain"), None);
         let md = |d: &Doc| crate::doc::to_markdown(None, d);
         let note = || doc(vec![Block::new(Kind::Raw("```\nlet x;\n```".into())), Block::text("")]);
         let code = |d: &Doc| Slot::block(d.blocks()[0].id);
@@ -4349,6 +4366,39 @@ mod tests {
         assert!(backspace(&mut d, &mut c, false));
         assert_eq!(texts(&d), ["Text:above", "Text:"]);
         assert_eq!(c, at(&d, 0, 5));
+    }
+
+    /// The finding: code with no line between its fences (`` ```\n``` ``,
+    /// as another app may write it) had nowhere to write but on a fence.
+    /// It has an empty line there, as `/code` makes it: typed in, pasted
+    /// in or broken by Enter, the words go between the fences; Backspace
+    /// on it takes the empty code away.
+    #[test]
+    fn code_with_no_line_between_its_fences_is_written_between_them() {
+        let md = |d: &Doc| crate::doc::to_markdown(None, d);
+        for fence in ["```", "```rust"] {
+            let note = || doc(vec![Block::text("above"), Block::new(Kind::Raw(format!("{fence}\n```"))), Block::text("")]);
+            let code = |d: &Doc| Slot::block(d.blocks()[1].id);
+            let mut d = note();
+            assert_eq!(writable(&d, code(&d)), (fence.len() + 1, fence.len() + 1));
+            // Come to from above (its start, on the fence): its empty line.
+            let mut c = right(&d, at(&d, 0, 5), false, false);
+            Typing::default().type_text(&mut d, &mut c, "let x;");
+            assert_eq!(md(&d), format!("above\n\n{fence}\nlet x;\n```\n"));
+            assert_eq!(c.head, Pos { slot: code(&d), byte: fence.len() + 7 });
+            let mut d = note();
+            let mut c = Caret::at(Pos { slot: code(&d), byte: 0 });
+            paste(&mut d, &mut c, "a\nb");
+            assert_eq!(md(&d), format!("above\n\n{fence}\na\nb\n```\n"));
+            let mut d = note();
+            let mut c = Caret::at(Pos { slot: code(&d), byte: fence.len() + 1 });
+            enter(&mut d, &mut c, false);
+            assert_eq!(md(&d), format!("above\n\n{fence}\n\n\n```\n"), "two empty lines");
+            let mut d = note();
+            let mut c = Caret::at(Pos { slot: code(&d), byte: fence.len() + 1 });
+            assert!(backspace(&mut d, &mut c, false));
+            assert_eq!(texts(&d), ["Text:above", "Text:"]);
+        }
     }
 
     /// The finding: a picture chosen by → with a table after it, "Q"
