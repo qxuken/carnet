@@ -8485,3 +8485,31 @@ fn the_first_key_after_a_click_in_the_title_acts() {
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A picture straight after the title, chosen by ↓ or → from the title's
+/// end, is typed over as one with a paragraph above it is: the words take
+/// its place, a paragraph of their own.
+#[test]
+fn a_picture_straight_after_the_title_is_typed_over() {
+    for how in ["down", "right"] {
+        let (mut app, mut d, dir) = library(&format!("pic-after-title-{how}"), &[("Title", "![x|left|220](attachments/x.png)\n\n- [ ] Book")]);
+        png_file(&dir.join("attachments"), "x.png");
+        app.open(app.store.notes.iter().position(|n| n.title == "Title").unwrap());
+        d_frame_twice(&mut app, &mut d);
+        assert!(matches!(&blocks(&app)[0].kind, Kind::Image { float: Float::Left, width: Some(220), .. }), "{how}: {:?}", blocks(&app)[0].kind);
+        let pic = blocks(&app)[0].id;
+        press_title(&mut app, &mut d, 1e4);
+        key(&mut app, &mut d, how);
+        d.frame(&mut app);
+        assert!(page_focused(&app, &d), "{how}");
+        assert_eq!(page::chosen_atom(app.doc(), app.caret), Some(Slot::block(pic)), "{how}: the picture chosen");
+        type_in(&mut app, &mut d, "replaced");
+        assert_eq!(texts(&app)[..2], ["replaced", "[ ]Book"], "{how}: a paragraph in its place");
+        assert!(blocks(&app).iter().all(|b| b.id != pic), "{how}: the picture gone");
+        assert!(matches!(&blocks(&app)[0].kind, Kind::Text(_)), "{how}");
+        app.save_current();
+        let md = std::fs::read_to_string(dir.join("Title.md")).unwrap();
+        assert!(md.starts_with("# Title\n\nreplaced\n\n- [ ] Book\n"), "{how}: {md:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

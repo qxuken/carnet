@@ -187,6 +187,18 @@ pub fn first(doc: &Doc) -> Pos {
     start(slots(doc).first().copied().unwrap_or(Slot::block(0)))
 }
 
+/// Where ↓ or → from the title's end comes into the note: `at`, on its
+/// first line. A divider or a picture there is chosen whole, as ↓ or →
+/// from a line above it choose one, so what is typed next takes its
+/// place rather than going in above it.
+pub fn from_title(doc: &Doc, at: Pos) -> Caret {
+    if at.slot.cell.is_none() && is_atomic(doc, at.slot) {
+        whole(at.slot, true)
+    } else {
+        Caret::at(at)
+    }
+}
+
 /// The indices of the blocks a caret touches: what a block's tools act
 /// on. A selection that only reaches the very start of a block, or leaves
 /// from the very end of one with words in it, takes nothing of that block:
@@ -3476,6 +3488,25 @@ mod tests {
         let chosen = whole(rule, true);
         let from = vertical_from(&end_rule, chosen, false, false);
         assert_eq!(vertical_to(&end_rule, from, from.head, false, false), Caret::at(Pos { slot: rule, byte: 1 }));
+    }
+
+    /// Into the note from its title onto a picture or a divider: chosen
+    /// whole, as from a line above; words typed then take its place. Onto
+    /// words, the caret where it came.
+    #[test]
+    fn from_the_title_a_first_picture_is_chosen_whole() {
+        let pic = Kind::Image { src: "a.png".into(), alt: "x".into(), width: Some(220), float: doc::Float::Left, wiki: false };
+        let mut d = doc(vec![Block::new(pic), Block::new(Kind::Item { style: ListStyle::Todo, indent: 0, done: false, num: 0, text: "Book".into() })]);
+        let pic = Slot::block(d.blocks()[0].id);
+        let mut c = from_title(&d, first(&d));
+        assert_eq!(chosen_atom(&d, c), Some(pic));
+        assert_eq!(c, Caret { anchor: start(pic), head: end(&d, pic) }, "as → from above chooses it");
+        let mut typing = Typing::default();
+        assert!(typing.type_text(&mut d, &mut c, "replaced"));
+        assert!(matches!(&d.blocks()[0].kind, Kind::Text(t) if t == "replaced"), "{:?}", d.blocks()[0].kind);
+        assert_eq!(d.len(), 2, "the picture gone, the checklist after it");
+        let words = doc(vec![Block::text("ab")]);
+        assert_eq!(from_title(&words, at(&words, 0, 1).head), at(&words, 0, 1));
     }
 
     /// A picture in a cell is one letter to the caret: the arrows choose

@@ -3846,13 +3846,21 @@ impl Carnet {
             return;
         }
         match p.get_str("key") {
+            // A picture or a divider first: chosen whole, as from a line
+            // above it (`page::from_title`).
             Some("down") => {
                 let x = core.edit_caret_rect(key).map(|r| r.x);
                 let at = x.and_then(|x| self.first_line_at(core, x));
-                self.edit_at(at.unwrap_or_else(|| page::first(self.doc())));
+                let at = at.unwrap_or_else(|| page::first(self.doc()));
+                self.edit_at(at);
+                self.caret = page::from_title(self.doc(), at);
                 self.goal_x = x;
             }
-            Some("right") => self.edit_at(page::first(self.doc())),
+            Some("right") => {
+                let at = page::first(self.doc());
+                self.edit_at(at);
+                self.caret = page::from_title(self.doc(), at);
+            }
             _ => {}
         }
     }
