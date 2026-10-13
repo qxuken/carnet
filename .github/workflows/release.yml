@@ -43,7 +43,7 @@ jobs:
   check:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: The tag names Cargo.toml's version
         run: |
           set -eu
@@ -71,13 +71,13 @@ jobs:
       # Docker.
       CARNET_BUILD_ENV: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build environment
         run: |
           sh packaging/build-env.sh
           echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
       # cargo-xwin's copy of Microsoft's CRT and SDK: minutes to fetch.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: /github/home/.cache/cargo-xwin
           key: cargo-xwin-0.23.1
@@ -85,7 +85,7 @@ jobs:
         run: nu scripts/package.nu windows
       - name: Linux
         run: nu scripts/package.nu linux
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-windows
           path: dist/Carnet-*
@@ -95,7 +95,7 @@ jobs:
     needs: check
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Nushell
         run: |
           set -eu
@@ -136,7 +136,7 @@ jobs:
           fi
       - name: The .dmg
         run: nu scripts/package.nu mac
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mac
           path: dist/Carnet-*.dmg
@@ -148,7 +148,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
