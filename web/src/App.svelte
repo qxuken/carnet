@@ -327,10 +327,15 @@
   .error { color: var(--danger); font-size: 13px; padding: 0 18px 10px; margin: 0; }
   .held { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: 13px; line-height: 1.4; padding: 0 18px 10px; margin: 0; }
   .held :global(.icon) { margin-top: 2px; }
+  /* Between the screen's edges, 16px in, as wide as its words: one line
+     where it fits, else its lines across that width. Placed from the
+     middle (left: 50%, pulled back half its width), it could be no wider
+     than half the screen, a word or two a line on a phone. */
   .notice {
-    position: fixed; left: 50%; bottom: max(20px, env(safe-area-inset-bottom)); transform: translateX(-50%); margin: 0;
-    display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 999px;
-    background: var(--ink); color: var(--page); font-size: 14px; box-shadow: 0 6px 24px #00000026; z-index: 10; max-width: calc(100% - 32px);
+    position: fixed; left: 16px; right: 16px; bottom: max(20px, env(safe-area-inset-bottom)); margin: 0 auto;
+    width: fit-content; max-width: 560px; box-sizing: border-box;
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 20px; line-height: 1.4;
+    background: var(--ink); color: var(--page); font-size: 14px; box-shadow: 0 6px 24px #00000026; z-index: 10;
   }
-  .notice button { margin-left: 6px; padding: 2px 4px; border: 0; background: none; color: var(--accent); font-weight: 600; cursor: pointer; }
+  .notice button { flex: none; margin-left: 6px; padding: 2px 4px; border: 0; background: none; color: var(--accent); font-weight: 600; cursor: pointer; white-space: nowrap; }
 </style>
