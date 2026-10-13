@@ -32,6 +32,14 @@ volumes:
 
 The image runs as an unprivileged user, keeps everything in the `/data` volume, listens on port 8080, serves the web app at `/`, and checks its own health (so `docker ps` says `healthy`).
 
+**A folder of your own as `/data`** (a bind mount, as on Unraid or Synology, rather than a Docker volume): the server runs as uid 10001 and keeps its data folder its own alone, so the folder must be that user's, or the server must run as the folder's owner. Either give it the folder:
+
+```bash
+chown -R 10001:10001 /path/to/carnet-data
+```
+
+or run it as the folder's owner (on Unraid, `--user 99:100` in the template's Extra Parameters). Otherwise it stops at the start and says so.
+
 On a start with no accounts, it prints an invite code for the first account, the owner's:
 
 ```
