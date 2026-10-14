@@ -108,7 +108,7 @@ impl Carnet {
                 self.font_pick = None;
                 // The window changes only when the app next starts: said.
                 let said = if s.translucent != window { "Appearance and writing reset; the window from the next start" } else { "Appearance and writing reset" };
-                self.notify(said, None);
+                self.notify_wide(said);
             }
             Msg::ResetLookCancel => {
                 self.reset_armed = false;
@@ -210,7 +210,7 @@ impl Carnet {
         if self.notice.is_none()
             && let Some(v) = self.update_to_tell.take()
         {
-            self.notify(format!("Carnet {v} is out: Settings has the download"), None);
+            self.notify_wide(format!("Carnet {v} is out: Settings has the download"));
             self.settings.told_update = v;
             self.save_settings();
         }
@@ -262,7 +262,7 @@ impl Carnet {
                 next.settings_open = true;
                 *self = next;
                 self.save_settings();
-                self.notify(format!("Notes now live in {}", target.display()), None);
+                self.notify_wide(format!("Notes now live in {}", target.display()));
             }
             Err(e) => self.error = Some(format!("Couldn't open {}: {e}", target.display())),
         }

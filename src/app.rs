@@ -63,6 +63,8 @@ const SAVE_AFTER: Duration = Duration::from_millis(600);
 /// frames, never in the middle of a word.
 const WATCH_QUIET: Duration = Duration::from_secs(2);
 const NOTICE_FOR: Duration = Duration::from_secs(8);
+/// The longest a notice is held while the window is in the background.
+const NOTICE_HELD_MOST: Duration = Duration::from_secs(120);
 /// How far the pointer moves, in px, before typing is taken to be over.
 const POINTER_NUDGE: f32 = 6.0;
 /// How soon a save that failed is tried again.
@@ -391,6 +393,15 @@ pub struct Notice {
     pub text: String,
     pub at: Instant,
     pub undo: Option<Undo>,
+    /// When it came: a window in the background holds it this long at
+    /// most ([`NOTICE_HELD_MOST`]).
+    pub came: Instant,
+    /// About the whole app (Settings reset, an update out, a device in),
+    /// not the note open: it stays when another note is opened.
+    pub wide: bool,
+    /// The note open when it was first drawn: another opened, it goes
+    /// (unless `wide`).
+    pub note: Option<u64>,
 }
 
 /// What a notice's Undo puts back.
@@ -1143,7 +1154,7 @@ impl Carnet {
         if !app.store.skipped.is_empty() {
             let n = app.store.skipped.len();
             let what = if n == 1 { "1 file that isn't".to_string() } else { format!("{n} files that aren't") };
-            app.notify(format!("Left out {what} plain text: {}", app.store.skipped.join(", ")), None);
+            app.notify_wide(format!("Left out {what} plain text: {}", app.store.skipped.join(", ")));
         }
         app.trash = app.store.trashed();
         app.reorder();
@@ -1313,13 +1324,19 @@ impl Carnet {
     }
 
     fn notify(&mut self, text: impl Into<String>, undo: Option<Undo>) {
-        let text = text.into();
+        self.notice_of(text.into(), undo, false);
+    }
+
+    /// A notice about the whole app, not the note open: it stays when
+    /// another note is opened.
+    fn notify_wide(&mut self, text: impl Into<String>) {
+        self.notice_of(text.into(), None, true);
+    }
+
+    fn notice_of(&mut self, text: String, undo: Option<Undo>, wide: bool) {
         self.say = Some(text.clone());
-        self.notice = Some(Notice {
-            text,
-            at: Instant::now(),
-            undo,
-        });
+        let now = Instant::now();
+        self.notice = Some(Notice { text, at: now, undo, came: now, wide, note: None });
     }
 
     /// Pinned first, then newest; the folder's notes — or, while there is
@@ -2103,10 +2120,10 @@ impl Carnet {
                 Some((email, _)) => format!("Password set for {}", carnet_sync::password::id(&email)),
                 None => "Password taken away".to_string(),
             };
-            self.notify(said, None);
+            self.notify_wide(said);
         }
         if self.sync.paired.take().is_some() {
-            self.notify("A new device is in", None);
+            self.notify_wide("A new device is in");
         }
         if let Some(origin) = self.sync.last_origin.take()
             && self.sync_server.is_empty()
@@ -3503,7 +3520,7 @@ impl Carnet {
                 if self.sync_remove_armed.as_deref() == Some(id.as_slice()) {
                     self.sync_remove_armed = None;
                     if self.sync.revoke(&mut self.store, &id) {
-                        self.notify("Waiting invites were taken back", None);
+                        self.notify_wide("Waiting invites were taken back");
                     }
                 } else {
                     self.sync_remove_armed = Some(id);
@@ -3787,7 +3804,7 @@ impl Carnet {
         self.title_clicks = (if n >= 5 { 0 } else { n }, at);
         if n >= 5 {
             self.set_debug(!self.hud, core);
-            self.notify(if self.hud { "Debug information on" } else { "Debug information off" }, None);
+            self.notify_wide(if self.hud { "Debug information on" } else { "Debug information off" });
         }
     }
 
@@ -4282,9 +4299,26 @@ impl App for Carnet {
         // Its while starts again as long as the pointer is on it, on its way
         // to its Undo, or the window is in the background, where it can't
         // be read: it never goes from under a click, nor unseen.
-        let held = !ui.env().focused || self.notice_keys.iter().any(|&k| ui.is_hovered(k));
-        if held && let Some(n) = self.notice.as_mut() {
+        // Held in the background two minutes at most, though: a notice
+        // still there on coming back hours later says nothing of now.
+        let hovered = self.notice_keys.iter().any(|&k| ui.is_hovered(k));
+        let away = !ui.env().focused;
+        if let Some(n) = self.notice.as_mut()
+            && (hovered || (away && n.came.elapsed() < NOTICE_HELD_MOST))
+        {
             n.at = Instant::now();
+        }
+        // About the note it came with: gone once another is open (one about
+        // the whole app stays).
+        let open = self.store.notes.get(self.current).map(|n| n.id);
+        if let Some(n) = self.notice.as_mut()
+            && !n.wide
+        {
+            match n.note {
+                None => n.note = open,
+                Some(id) if Some(id) != open => self.notice = None,
+                Some(_) => {}
+            }
         }
         if self.notice.as_ref().is_some_and(|n| n.at.elapsed() >= NOTICE_FOR) {
             self.notice = None;

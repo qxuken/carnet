@@ -2440,6 +2440,51 @@ fn pictures_on_one_line_are_a_row_of_pictures() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding: "Appearance and writing reset" and "Moved … to …" stayed
+/// for minutes across notes, held while the window was in the background.
+/// A notice about the note goes when another note is opened; one about
+/// the whole app stays; and a window in the background holds one two
+/// minutes at most.
+#[test]
+fn a_notice_goes_with_its_note_and_is_held_two_minutes_at_most() {
+    let (mut app, mut d, dir) = library("notice-scope", &[("One", "a"), ("Two", "b")]);
+    let one = app.store.notes.iter().position(|n| n.title == "One").unwrap();
+    let two = app.store.notes.iter().position(|n| n.title == "Two").unwrap();
+    app.open(one);
+    d_frame_twice(&mut app, &mut d);
+    // About the note: gone once another is open.
+    app.notify("Moved \u{201c}One\u{201d} to Work", None);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_some());
+    app.open(two);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_none(), "gone with its note");
+    // About the whole app: it stays.
+    app.notify_wide("Appearance and writing reset");
+    d_frame_twice(&mut app, &mut d);
+    app.open(one);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_some(), "stays across notes");
+    // In the background: held, but two minutes at most.
+    d.core.env.focused = false;
+    let before = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    if let Some(n) = app.notice.as_mut() {
+        n.came = before;
+        n.at = before;
+    }
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_some(), "held a minute on");
+    let long = std::time::Instant::now() - std::time::Duration::from_secs(150);
+    if let Some(n) = app.notice.as_mut() {
+        n.came = long;
+        n.at = long;
+    }
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.notice.is_none(), "not held past two minutes");
+    d.core.env.focused = true;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn all_notes_has_its_own_menu() {
     let (mut app, mut d, dir) = fresh("all-menu");
