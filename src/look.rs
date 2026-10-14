@@ -3,9 +3,9 @@
 //! as the kui theme so the stock pieces — the caret, selections,
 //! scrollbars, tooltips — wear them too, and the faces the page is set in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use kui_native::{Appearance, Color, FontFamily, Theme, Ui};
+use kui_native::{Appearance, Color, Core, FontFamily, TextStyle, Theme, Ui};
 
 use crate::design::{self, Colors};
 use crate::settings::{Settings, ThemePref};
@@ -98,6 +98,31 @@ pub const HEADING_FACE: &str = "Source Serif 4";
 /// The heading face if the shipped one can't be loaded: the first of
 /// these installed.
 const SERIFS: [&str; 4] = ["Iowan Old Style", "Charter", "Georgia", "Cambria"];
+
+/// The installed families code can be set in, for code's font list: those
+/// whose every face says it is fixed-pitch and that set letters so, ten
+/// i's as wide as ten M's. A face can say it is fixed-pitch and have no
+/// letters at all — Noto Color Emoji on Linux — and code chosen in it
+/// was drawn in the proportional face the letters fell back to. Asks
+/// each fixed-pitch family once (its file loaded, a line shaped), so the
+/// list keeps the answer. The hidden families, `.`- or `@`-named, never
+/// show in a list and are not asked.
+pub fn code_families(core: &mut Core) -> HashSet<String> {
+    let style = TextStyle::new(16.0);
+    core.system_fonts()
+        .into_iter()
+        .filter(|f| f.monospaced && !f.family.starts_with('.') && !f.family.starts_with('@'))
+        .filter(|f| {
+            core.add_system_font(&f.family).is_some_and(|id| {
+                let style = style.family(FontFamily::Custom(id));
+                let i = core.measure_text("iiiiiiiiii", &style, None).width;
+                let m = core.measure_text("MMMMMMMMMM", &style, None).width;
+                i > 0.0 && (i - m).abs() < 0.5
+            })
+        })
+        .map(|f| f.family)
+        .collect()
+}
 
 impl Styler {
     /// A face by family name; `fallback` when it is not installed.

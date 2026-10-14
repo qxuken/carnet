@@ -2363,6 +2363,12 @@ impl Store {
         match from {
             Some((folder, name, pinned)) => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+                // After whatever went in this same millisecond, so the
+                // trash still lists the later first: a note deleted and
+                // its folder straight after came out either way round.
+                // Not past a clock set back, which would date it ahead.
+                let latest = all.values().map(|o| o.2).max().unwrap_or(0);
+                let now = if latest >= now && latest - now < 1000 { latest + 1 } else { now };
                 all.insert(key, (folder.to_string(), name.to_string(), now, pinned));
             }
             None => {

@@ -8218,12 +8218,14 @@ fn code_is_drawn_in_the_code_face() {
     let mono = d.core.measure_text(m, &style, None).width;
     assert!((w[1] - mono).abs() < 0.5, "{} drawn, {mono} measured", w[1]);
 
-    // Another monospaced face installed, one that draws wider or narrower:
-    // chosen, it draws the code.
-    let other = d.core.system_fonts().into_iter().filter(|f| f.monospaced && !f.family.starts_with('.')).find_map(|f| {
-        let id = d.core.add_system_font(&f.family)?;
+    // Another monospaced face installed, one that draws wider or narrower,
+    // from those code's list offers: chosen, it draws the code.
+    let mut offered: Vec<String> = crate::look::code_families(&mut d.core).into_iter().collect();
+    offered.sort();
+    let other = offered.into_iter().find_map(|f| {
+        let id = d.core.add_system_font(&f)?;
         let wide = d.core.measure_text(m, &style.family(kui_native::FontFamily::Custom(id)), None).width;
-        ((wide - mono).abs() > 2.0).then_some((f.family, wide))
+        ((wide - mono).abs() > 2.0).then_some((f, wide))
     });
     if let Some((name, wide)) = other {
         app.settings.code_font = name.clone();
@@ -8254,6 +8256,16 @@ fn the_code_font_is_chosen_from_monospaced_families() {
     let mono: std::collections::HashSet<String> =
         d.core.system_fonts().into_iter().filter(|f| f.monospaced).map(|f| f.family).collect();
     assert!(app.font_rows.iter().all(|f| mono.contains(f)), "monospaced only: {:?}", app.font_rows);
+    // And each sets letters so. A face can say it is fixed-pitch and have
+    // no letters — Noto Color Emoji on Linux — and code chosen in it was
+    // drawn in the proportional face they fell back to.
+    for f in &app.font_rows {
+        let id = d.core.add_system_font(f).unwrap();
+        let style = TextStyle::new(16.0).family(kui_native::FontFamily::Custom(id));
+        let i = d.core.measure_text("iiiiiiiiii", &style, None).width;
+        let m = d.core.measure_text("MMMMMMMMMM", &style, None).width;
+        assert!((i - m).abs() < 0.5, "{f}: ten i's {i}, ten M's {m}");
+    }
     assert!(!app.font_rows.iter().any(|f| f == "Inter" || f == "Source Serif 4"));
     assert!(d.key_named("System monospace").is_some(), "the default row");
     let Some(name) = app.font_rows.first().cloned() else {
