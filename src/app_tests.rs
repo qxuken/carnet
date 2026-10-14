@@ -3788,6 +3788,28 @@ fn click_chevron(app: &mut Carnet, d: &mut Drive, f: &str, mods: KeyMods) {
     d_frame_twice(app, d);
 }
 
+/// A folder's chevron is an easy target: the row's height, and as wide as
+/// the indent lets it be, the folder's icon where it would be without one;
+/// a click on the folder's name beside it chooses the folder, not a fold.
+#[test]
+fn a_folders_chevron_is_an_easy_target() {
+    let (mut app, mut d, dir) = on_folder_row("fold-target", &["A", "A/Sub", "B"]);
+    let k = chevron(&mut d, &mut app, "A").expect("A's chevron");
+    let r = d.rect_of(k).unwrap();
+    let row = folder_row(&app, "A");
+    assert!(r.w >= 19.0 && r.h >= 30.0, "{r:?}");
+    let name_x = |d: &Drive, f: &str| d.core.nodes().iter().find(|n| n.text.as_deref() == Some(f)).map(|n| n.rect.x).unwrap();
+    assert_eq!(name_x(&d, "A"), name_x(&d, "B"), "the names line up, chevron or none");
+    // A click at the chevron's edge folds; one on the name chooses.
+    d.click(&mut app, r.x + 2.0, r.y + r.h / 2.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(folded(&app), ["A"]);
+    d.click(&mut app, r.x + r.w + 40.0, row.y);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!((folded(&app), app.folder.as_deref()), (vec!["A"], Some("A")));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The folder rows drawn, top to bottom.
 fn rows_drawn(app: &Carnet) -> Vec<String> {
     app.folder_rows

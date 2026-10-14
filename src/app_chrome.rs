@@ -736,8 +736,10 @@ impl Carnet {
                                 let said = format!("{} the folders inside \u{201c}{}\u{201d}", if open { "Hide" } else { "Show" }, folder_name(f));
                                 ui.with_keyed(
                                     "fold",
+                                    // The row's height and all the indent
+                                    // there is: an easy target.
                                     NodeSpec::row()
-                                        .size(FOLD_W, 22.0)
+                                        .size(FOLD_W, 30.0)
                                         .radius(radius::CONTROL)
                                         .hover_bg(t.pressed)
                                         .on_click(Msg::FoldFolder { index: i as u64 })
@@ -1556,7 +1558,7 @@ impl<'a> Tool<'a> {
 pub(super) const EDGE_W: f32 = 6.0;
 
 /// A folder's chevron's width, in its row's indent.
-const FOLD_W: f32 = 16.0;
+const FOLD_W: f32 = 19.0;
 /// What it does, by the pointer.
 pub(super) const EDGE_HINT: &str = "Drag to make the notes wider or narrower  \u{b7}  double-click for the usual width";
 /// How long the pointer rests on the edge before that shows, seconds.
