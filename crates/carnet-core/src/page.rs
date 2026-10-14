@@ -2471,9 +2471,62 @@ fn clamp(doc: &Doc, p: Pos) -> Pos {
     Pos { byte: p.byte.min(len(doc, p.slot)), ..p }
 }
 
-/// The style the caret is in: the letter before it (the first one
-/// selected, with a selection) — what typing there would carry on.
+/// The style the caret is in: the letter before it — what typing there
+/// would carry on. With a selection, what all its words have: a style on
+/// only where every letter selected has it (a toolbar's button shows on
+/// just when pressing it would take it off), a colour where all have the
+/// same one. A selection of no words: the first letter's.
 pub fn style_at(doc: &Doc, c: Caret) -> inline::Style {
+    if !c.is_empty()
+        && let Some(s) = selection_style(doc, c)
+    {
+        return s;
+    }
+    letter_style(doc, c)
+}
+
+/// What every letter of a selection has (spaces aside, and code blocks,
+/// which have no styles); `None` when it holds no letter.
+fn selection_style(doc: &Doc, c: Caret) -> Option<inline::Style> {
+    let cov = coverage(doc, c);
+    let mut all: Option<inline::Style> = None;
+    for s in slots(doc) {
+        let Some(&(f, t)) = cov.parts.get(&s) else { continue };
+        if !styled(doc, s) || is_atomic(doc, s) {
+            continue;
+        }
+        let _r = reading(s);
+        let text = text(doc, s);
+        let st = inline::styles(text);
+        let bytes = text.as_bytes();
+        for i in f..t.min(text.len()) {
+            if st[i].marker || bytes[i].is_ascii_whitespace() {
+                continue;
+            }
+            let x = st[i];
+            all = Some(match all {
+                None => x,
+                Some(a) => inline::Style {
+                    bold: a.bold && x.bold,
+                    italic: a.italic && x.italic,
+                    strike: a.strike && x.strike,
+                    underline: a.underline && x.underline,
+                    code: a.code && x.code,
+                    link: a.link && x.link,
+                    mark: if a.mark == x.mark { a.mark } else { 0 },
+                    ink: if a.ink == x.ink { a.ink } else { 0 },
+                    marker: false,
+                    picture: a.picture && x.picture,
+                },
+            });
+        }
+    }
+    all
+}
+
+/// The letter before the caret's style (the first one selected, with a
+/// selection).
+fn letter_style(doc: &Doc, c: Caret) -> inline::Style {
     let (a, _) = ordered(doc, c);
     if !styled(doc, a.slot) {
         return inline::Style::default();
@@ -5473,5 +5526,33 @@ mod tests {
         assert!(!dc.ignores(3, false), "nothing opened: the line");
         assert!(!dc.ignores(2, true) && !dc.ignores(1, true));
         assert!(!LinkOpen::Click.ignores(3, true) && !LinkOpen::ModClick.ignores(3, true));
+    }
+
+    /// The finding: Bold showed on for a selection that only started in
+    /// bold. A style is on for a selection only when all its letters have
+    /// it, across blocks too; a colour, when all have the same.
+    #[test]
+    fn a_selection_has_a_style_only_when_all_its_letters_do() {
+        let d = doc(vec![Block::text("**bold** plain"), Block::text("**more** ==lit== `c`"), Block::text("==all lit==")]);
+        let sel = |i: usize, a: usize, j: usize, b: usize| {
+            let (s, t) = (block_slots(&d.blocks()[i])[0], block_slots(&d.blocks()[j])[0]);
+            Caret { anchor: Pos { slot: s, byte: a }, head: Pos { slot: t, byte: b } }
+        };
+        // "bold plain": started in bold, not all bold.
+        assert!(!style_at(&d, sel(0, 2, 0, 14)).bold);
+        // "bold" alone, and backwards: bold.
+        assert!(style_at(&d, sel(0, 2, 0, 6)).bold);
+        assert!(style_at(&d, sel(0, 6, 0, 2)).bold);
+        // The spaces past it are no letters.
+        assert!(style_at(&d, sel(0, 2, 0, 9)).bold);
+        // Across blocks: "bold" and "more", but not "plain" between.
+        assert!(!style_at(&d, sel(0, 2, 1, 6)).bold);
+        // Highlighted: all of it, or not.
+        assert_eq!(style_at(&d, sel(2, 2, 2, 9)).mark, inline::HIGHLIGHT);
+        assert_eq!(style_at(&d, sel(1, 2, 1, 15)).mark, 0);
+        assert!(!style_at(&d, sel(1, 11, 1, 20)).code);
+        // No selection: the letter before the caret, as ever.
+        assert!(style_at(&d, at(&d, 0, 4)).bold);
+        assert!(!style_at(&d, at(&d, 0, 12)).bold);
     }
 }

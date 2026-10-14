@@ -655,6 +655,30 @@ fn cmd_u_underlines_the_selection_in_the_file_and_on_the_page() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding: Bold showed on for a selection that only started in
+/// bold. The toolbar's styles are on for a selection only when all of it
+/// has them; Bold then makes it all bold, and shows on.
+#[test]
+fn a_style_shows_on_only_when_all_the_selection_has_it() {
+    let (mut app, mut d, dir) = body("mixed-bold");
+    type_in(&mut app, &mut d, "**bold** *it* plain");
+    let slot = app.caret.head.slot;
+    let tool = |d: &mut Drive, name: &str| d.core.access_tree().nodes.iter().find(|n| n.name.as_deref() == Some(name)).and_then(|n| n.checked);
+    app.caret = Caret { anchor: Pos { slot, byte: 2 }, head: Pos { slot, byte: page::text(app.doc(), slot).len() } };
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(tool(&mut d, "Bold"), Some(false), "started in bold, not all bold");
+    assert_eq!(tool(&mut d, "Italic"), Some(false));
+    app.caret = Caret { anchor: Pos { slot, byte: 2 }, head: Pos { slot, byte: 6 } };
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(tool(&mut d, "Bold"), Some(true), "all bold");
+    app.caret = Caret { anchor: Pos { slot, byte: 2 }, head: Pos { slot, byte: page::text(app.doc(), slot).len() } };
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "b", CTRL);
+    d.frame(&mut app);
+    assert_eq!(tool(&mut d, "Bold"), Some(true), "made all bold");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn folders_hold_notes_and_the_library_shows_one_at_a_time() {
     let (mut app, mut d, dir) = fresh("folders");

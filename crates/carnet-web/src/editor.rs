@@ -1868,6 +1868,21 @@ mod tests {
         }
     }
 
+    /// As on the desktop: a selection that only starts in bold isn't
+    /// bold to the toolbar; one all bold is.
+    #[test]
+    fn a_style_is_on_for_a_selection_only_when_all_of_it_has_it() {
+        let mut e = Editor::open("# T\n\n**bold** plain ==lit==\n");
+        e.select(1, 0, 1, 10);
+        assert!(!e.style_here().bold);
+        e.select(1, 0, 1, 4);
+        assert!(e.style_here().bold);
+        e.select(1, 11, 1, 14);
+        assert_ne!(e.style_here().mark, 0);
+        e.select(1, 6, 1, 14);
+        assert_eq!(e.style_here().mark, 0);
+    }
+
     #[test]
     fn turned_and_back_and_undone() {
         let mut e = Editor::open("# T\n\nmilk\n");
