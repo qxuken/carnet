@@ -1,0 +1,83 @@
+// Grafana Alloy: carnet-server's container lines, read through Docker's
+// socket and pushed to Loki. (Promtail, which did this before, is
+// deprecated; Alloy is its successor.)
+//
+// Mount Docker's socket read-only (/var/run/docker.sock:ro) and this file
+// at /etc/alloy/config.alloy. Set Loki's address at the bottom
+// (loki.write). README.md has the rest.
+
+// Every container on this Docker host...
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// ...kept to carnet-server's, and labelled.
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  // Only the container named `carnet`. Named otherwise? Change "/carnet".
+  // For every container on the host, delete this rule (and type .* in the
+  // dashboard's Container box, or another container's name).
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/carnet"
+    action        = "keep"
+  }
+
+  // container="carnet": the name, without Docker's leading slash.
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+
+  // compose_service, for a container started by Docker Compose.
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.containers.output
+  forward_to = [loki.process.carnet.receiver]
+}
+
+loki.process "carnet" {
+  // The first start prints the owner's invite code (single use, good for a
+  // day). It has no business in Loki: masked.
+  stage.replace {
+    expression = "\\b([0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4})\\b"
+    replace    = "XXXX-XXXX-XXXX-XXXX"
+  }
+
+  forward_to = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+  endpoint {
+    // Loki, as Alloy's container reaches it: on the same Docker network,
+    // http://loki:3100/loki/api/v1/push; otherwise its IP and port.
+    url = "http://192.168.50.10:3100/loki/api/v1/push"
+  }
+}
+
+// ---------------------------------------------------------------------
+// Optional, instead of Prometheus scraping the server itself: Alloy
+// reads /metrics and writes what it read to Prometheus. Prometheus must
+// then take writes (start it with --web.enable-remote-write-receiver), and
+// the `carnet` job comes out of prometheus.yml, or you'd have both.
+// Simpler to leave this off and let Prometheus scrape (README.md).
+//
+// prometheus.scrape "carnet" {
+//   targets         = [{"__address__" = "192.168.50.53:9090", "job" = "carnet"}]
+//   scrape_interval = "15s"
+//   forward_to      = [prometheus.remote_write.prometheus.receiver]
+// }
+//
+// prometheus.remote_write "prometheus" {
+//   endpoint {
+//     url = "http://192.168.50.54:9090/api/v1/write"
+//   }
+// }

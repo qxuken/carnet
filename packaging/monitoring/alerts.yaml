@@ -1,0 +1,209 @@
+# Grafana alert rules for carnet-server, in Grafana's provisioning format,
+# and a webhook contact point that hands them to n8n.
+#
+# Goes in Grafana's provisioning/alerting folder (README.md, step 4).
+# Before that, check two things here:
+#
+#   datasourceUid: prometheus   the Prometheus data source's UID. It is
+#                               `prometheus` if datasources.yaml made it;
+#                               otherwise the UID in its page's address
+#                               (connections/datasources/edit/<UID>).
+#   url: under contactPoints    your n8n Webhook node's Production URL.
+#
+# Each rule sends to the contact point `carnet-n8n` by itself
+# (notification_settings), so Grafana's notification policies are left
+# as they are. To route them by policies instead, delete the
+# notification_settings lines; the rules carry service=carnet to match on.
+#
+# Grafana sends n8n a JSON body: `status` (firing or resolved), `title`,
+# `message` (the summaries, ready to forward), and `alerts`, each with
+# its labels and annotations.
+
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: carnet-n8n
+    receivers:
+      - uid: carnet-n8n-webhook
+        type: webhook
+        disableResolveMessage: false # n8n hears when it's well again too
+        settings:
+          url: http://192.168.50.20:5678/webhook/carnet-alerts # your n8n Webhook node
+          httpMethod: POST
+
+groups:
+  - orgId: 1
+    name: carnet-server
+    folder: Carnet
+    interval: 1m
+    rules:
+      # ------------------------------------------------------------------
+      - uid: carnet-down
+        title: Carnet server is down
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              # 0 when Prometheus can't read /metrics: the server is
+              # stopped or out of reach, or its hub stopped answering
+              # (/metrics then answers 503, as /v1/health does).
+              expr: up{job="carnet"}
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        for: 2m
+        # No numbers at all (the target gone from Prometheus) counts as down.
+        noDataState: Alerting
+        execErrState: Error
+        labels: { service: carnet, severity: critical }
+        annotations:
+          summary: carnet-server isn't answering
+          description: >-
+            Prometheus couldn't read carnet-server's numbers at
+            {{ $labels.instance }} for 2 minutes: the server is stopped or
+            out of reach, or it is stuck. Devices can't sync until it's back.
+            Check the container (docker ps, docker logs carnet).
+        notification_settings: { receiver: carnet-n8n }
+
+      # ------------------------------------------------------------------
+      - uid: carnet-storage-failures
+        title: Carnet server can't write
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(increase(carnet_storage_failures_total{job="carnet"}[10m]))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: { service: carnet, severity: critical }
+        annotations:
+          summary: carnet-server failed to write {{ printf "%.0f" $values.A.Value }} times in 10 minutes
+          description: >-
+            Writes to the server's databases (or of pictures) failed. A full
+            disk is the usual reason; a damaged file or a bucket out of reach
+            the others. Devices keep their changes and send them again, but
+            nothing new is kept until it's fixed.
+        notification_settings: { receiver: carnet-n8n }
+
+      # ------------------------------------------------------------------
+      - uid: carnet-hub-lag
+        title: Carnet server is falling behind
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(carnet_hub_queue_seconds{job="carnet"})
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [1] }
+        for: 5m
+        noDataState: OK # the down alert covers no numbers
+        execErrState: Error
+        labels: { service: carnet, severity: warning }
+        annotations:
+          summary: carnet-server's hub is {{ humanizeDuration $values.A.Value }} behind
+          description: >-
+            Every device's messages wait their turn at the server's hub, and
+            for 5 minutes they have waited over a second. Syncing is slow. A
+            slow disk, or far more traffic than usual, are the likely reasons.
+        notification_settings: { receiver: carnet-n8n }
+
+      # ------------------------------------------------------------------
+      - uid: carnet-logins-refused
+        title: Many Carnet logins refused
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: sum(increase(carnet_logins_total{job="carnet",result="refused"}[15m]))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [30] }
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: { service: carnet, severity: warning }
+        annotations:
+          summary: carnet-server refused {{ printf "%.0f" $values.A.Value }} logins in 15 minutes
+          description: >-
+            Logins of devices their account doesn't know. A device taken out
+            of its account that keeps trying is one reason; someone guessing
+            is the other. The server slows down an address that tries too
+            often (carnet_limited_total), so this is to know, not to panic.
+        notification_settings: { receiver: carnet-n8n }
+
+      # ------------------------------------------------------------------
+      # Optional: the databases growing fast. Raise the 1 GiB to taste, or
+      # set isPaused: true. Free disk space is node_exporter's to say.
+      - uid: carnet-disk-growth
+        title: Carnet data growing fast
+        isPaused: false
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: max(delta(carnet_data_bytes{job="carnet"}[1h]))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [1073741824] }
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        labels: { service: carnet, severity: info }
+        annotations:
+          summary: carnet-server's data grew by {{ humanize1024 $values.A.Value }}B in an hour
+          description: >-
+            The databases took over 1 GiB more disk in the last hour: far
+            more than notes usually do. Pictures kept in the databases (no
+            bucket) count here. Check the free space of the data's disk.
+        notification_settings: { receiver: carnet-n8n }

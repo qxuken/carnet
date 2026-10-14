@@ -212,7 +212,7 @@ Password sign-ins (with `--passwords`) are also counted by the email they name, 
 
 `GET /v1/health` answers `200 {"ok":true}` while the server's hub does, and `503` if it doesn't within five seconds: for an uptime monitor, or a load balancer. The container checks it itself (`HEALTHCHECK`, so `docker ps` says `healthy`), through `carnet-server health`, which asks the server on this machine and exits 0 or 1. The metrics address answers `/v1/health` too, and with TLS on, `health` asks it there.
 
-For more, give it a metrics address. `/metrics` is served there in Prometheus' text format, on a listener of its own, so it stays off the public address: keep it on `127.0.0.1`, or a private network, and point Prometheus (or Grafana Agent, or anything that reads the format) at it.
+For more, give it a metrics address. `/metrics` is served there in Prometheus' text format, on a listener of its own, so it stays off the public address: keep it on `127.0.0.1`, or a private network, and point Prometheus (or Grafana Alloy, or anything that reads the format) at it.
 
 ```bash
 carnet-server --data ./data --metrics 127.0.0.1:9090
@@ -247,6 +247,8 @@ They're counts, never what anything held: the server has nothing else to give.
 | `carnet_build_info{version}`, `process_start_time_seconds` | the version, and when it started |
 
 The disk's free space isn't among them: the machine's own exporter (`node_exporter`) has it.
+
+A Grafana dashboard for them, alert rules, and Prometheus and Alloy (the server's lines to Loki) set up to feed them are in [`packaging/monitoring`](../../packaging/monitoring/README.md), step by step for a home server.
 
 ## Backup
 

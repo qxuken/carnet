@@ -215,6 +215,7 @@ nu scripts/package.nu linux
 | `packaging/linux/` | the menu entry and `install.sh` that go in the tarball |
 | `packaging/build-env.sh` | the Linux and Windows build environment, for the Docker image and CI alike |
 | `packaging/server/Dockerfile` | the server's container: one binary, one volume, the web app |
+| `packaging/monitoring/` | the server's Grafana dashboard and alert rules, and Prometheus' and Alloy's configs to feed them; its README is the setup |
 | `.cargo/config.toml` | the C runtime linked into the `.exe`, so it needs no Visual C++ Redistributable |
 
 The Mac build is signed ad hoc unless `CARNET_SIGN_IDENTITY` names a Developer ID; with `CARNET_NOTARY_PROFILE` too (a `xcrun notarytool store-credentials` profile) the `.dmg` is notarized and stapled, and Gatekeeper lets it straight through.

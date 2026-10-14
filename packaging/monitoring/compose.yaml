@@ -1,0 +1,58 @@
+# Prometheus and Alloy beside carnet-server, on Unraid (Compose Manager
+# plugin) or anywhere with Docker Compose. Grafana and Loki you have.
+# README.md says the same as Unraid container templates.
+#
+#   mkdir -p /mnt/user/appdata/prometheus/data /mnt/user/appdata/alloy/data
+#   cp prometheus.yml /mnt/user/appdata/prometheus/
+#   cp config.alloy /mnt/user/appdata/alloy/
+#   docker compose up -d
+#
+# Edit first: the IP Prometheus takes on br0 (a free one on your LAN,
+# outside the router's DHCP range), and the targets in prometheus.yml and
+# Loki's address in config.alloy.
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    container_name: prometheus
+    # Unraid's nobody:users, who owns /mnt/user/appdata: Prometheus' own
+    # user (65534) can't write there.
+    user: "99:100"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      # Only for Alloy's optional remote_write (config.alloy):
+      # - --web.enable-remote-write-receiver
+    volumes:
+      - /mnt/user/appdata/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - /mnt/user/appdata/prometheus/data:/prometheus
+    # On br0 with an IP of its own, like carnet-server: a container on br0
+    # reaches another on br0; one on a bridge network can't (README.md).
+    networks:
+      br0:
+        ipv4_address: 192.168.50.54
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.20.1
+    container_name: alloy
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      # Docker's socket, read-only: how Alloy finds containers and reads
+      # their lines.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /mnt/user/appdata/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Where it got to in each container's lines, kept across restarts.
+      - /mnt/user/appdata/alloy/data:/var/lib/alloy/data
+    ports:
+      - "12345:12345" # its own page: what it found and sent
+    restart: unless-stopped
+
+networks:
+  br0:
+    external: true

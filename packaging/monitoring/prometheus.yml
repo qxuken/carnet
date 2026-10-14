@@ -1,0 +1,22 @@
+# Prometheus, reading carnet-server's numbers every 15 seconds.
+#
+# Put the server's metrics address in `targets`: its LAN IP and the port
+# CARNET_METRICS gives (0.0.0.0:9090 → 9090). Never the public hostname:
+# the tunnel maps that to :8080 only, and that's as it should stay.
+#
+# How long Prometheus keeps what it read (30 days) is a flag, not a
+# setting here: --storage.tsdb.retention.time=30d (compose.yaml has it).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: carnet # the dashboard and alerts.yaml look for job="carnet"
+    static_configs:
+      - targets: ["192.168.50.53:9090"] # <carnet's LAN IP>:<metrics port>
+
+  # Prometheus' own numbers: handy, not needed. Remove if you like.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
