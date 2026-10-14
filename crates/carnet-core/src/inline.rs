@@ -1492,7 +1492,8 @@ pub fn merge(text: &str) -> String {
                 let mut t = text.clone();
                 t.replace_range(q.open.0..q.open.1, "");
                 t.replace_range(p.close.0..p.close.1, "");
-                if self::look(&t) == look {
+                // Shorter each time round, so it ends.
+                if t.len() < text.len() && self::look(&t) == look {
                     text = t;
                     continue 'joints;
                 }
@@ -1514,7 +1515,8 @@ pub fn join(left: &str, right: &str) -> String {
     // opening ones of `right`, while they are the same. Those met are all
     // of `left` past `end` and all of `right` before `start`.
     let (mut end, mut start) = (left.len(), 0);
-    while let Some(p) = lp.iter().find(|p| p.close.1 == end && !matches!(p.kind, Kind::Link | Kind::Picture | Kind::Break)) {
+    // Each pair met has a closing mark, so `end` moves back and it ends.
+    while let Some(p) = lp.iter().find(|p| p.close.1 == end && p.close.0 < end && !matches!(p.kind, Kind::Link | Kind::Picture | Kind::Break)) {
         // Two code spans: one, its marks made for the words of both.
         if p.kind == Kind::Code {
             let Some(q) = rp.iter().find(|q| q.open.0 == start && q.kind == Kind::Code) else { break };
@@ -1681,13 +1683,27 @@ fn unwrap_all(text: &str, kind: Kind) -> String {
 /// already wrap all of it (not inside code), so new marks sit next to the
 /// words and runs on either side can join theirs.
 fn innermost(text: &str) -> (usize, usize) {
-    let ps = pairs(text);
-    let (mut s, mut e) = (0, text.len());
-    while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::Break)) {
-        s = p.open.1;
-        e = p.close.0;
+    wrapping(&pairs(text), text.len()).last().map_or((0, text.len()), |p| (p.open.1, p.close.0))
+}
+
+/// The pairs of `ps` that wrap all of a text `len` long, outermost first,
+/// each just inside the one before: those a new pair over all of it goes
+/// inside. Not code, a picture or a break, whose insides are not words to
+/// wrap; nor a pair with no marks (a bare address), whose inside is its
+/// outside. Each step takes off marks, so it ends.
+fn wrapping(ps: &[Pair], len: usize) -> Vec<&Pair> {
+    let (mut s, mut e) = (0, len);
+    let mut out = Vec::new();
+    while let Some(p) = ps.iter().find(|p| {
+        p.open.0 == s
+            && p.close.1 == e
+            && (p.open.1 > p.open.0 || p.close.1 > p.close.0)
+            && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::Break)
+    }) {
+        (s, e) = (p.open.1, p.close.0);
+        out.push(p);
     }
-    (s, e)
+    out
 }
 
 fn wrap(text: &str, at: (usize, usize), open: &str, close: &str) -> String {
@@ -1762,15 +1778,9 @@ pub fn tint(text: &str, a: usize, b: usize, ink: bool, color: u32) -> Option<(St
         // …then given to the run that is all of it, beside its other
         // colour in its one tag, or to a new run.
         let ps = pairs(&m);
-        let (mut s, mut e) = (0, m.len());
-        let mut whole = None;
-        while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::Break)) {
-            if p.kind == Kind::Tint {
-                whole = Some(p.open.0);
-            }
-            s = p.open.1;
-            e = p.close.0;
-        }
+        let around = wrapping(&ps, m.len());
+        let (s, e) = around.last().map_or((0, m.len()), |p| (p.open.1, p.close.0));
+        let whole = around.iter().rev().find(|p| p.kind == Kind::Tint).map(|p| p.open.0);
         match whole.and_then(|o| tints(&m).into_iter().find(|t| t.open.0 == o)) {
             Some(t) => {
                 let (i, k) = if ink { (Some(c), t.mark) } else { (t.ink, Some(c)) };
@@ -2708,5 +2718,28 @@ mod tests {
         assert_eq!(Visible::of(&u).text(&u), t);
         // Given another address: it, bare.
         assert_eq!(set_link("a https://x.y b", 4, "https://z.w").as_deref(), Some("a https://z.w b"));
+    }
+
+    /// Styling all of a bare address and no more ends. Its pair has no
+    /// marks, so stepping inside it to wrap the words went nowhere, for
+    /// ever: the property tests found it on `http://e.c` chosen whole.
+    #[test]
+    fn styling_all_of_a_bare_address_ends() {
+        let t = "http://e.c";
+        for kind in [Kind::Bold, Kind::Italic, Kind::Strike, Kind::Code, Kind::Underline] {
+            let (out, _, _) = emphasis(t, 0, t.len(), kind).unwrap();
+            assert_eq!(plain(&out), t, "{kind:?}");
+        }
+        assert_eq!(emphasis(t, 0, t.len(), Kind::Bold).unwrap().0, "**http://e.c**");
+        assert_eq!(emphasis("a https://x.y b", 2, 13, Kind::Italic).unwrap().0, "a *https://x.y* b");
+        for ink in [true, false] {
+            for color in [HIGHLIGHT, crate::compare::ADDED, crate::compare::REMOVED, 0] {
+                let _ = tint(t, 0, t.len(), ink, color);
+            }
+        }
+        assert_eq!(tint(t, 0, t.len(), false, HIGHLIGHT).unwrap().0, "==http://e.c==");
+        // As the property test found it, among stray marks.
+        let t = "](https://example.com)|ё<u>!<mark>!</u>>  <mark style=\"background: #D8EAC0CC\"></u>Ünï<span style=\"color: #C0553F; background: #F8EBA6CC\">";
+        assert!(emphasis(t, 2, 25, Kind::Italic).is_some());
     }
 }

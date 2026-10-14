@@ -16,12 +16,18 @@
 //! The `wild_` tests ask the same further: the round trip, joining pairs
 //! and styling on any text at all — a lone `*`, a lone `\r`, a line of
 //! one `\` — and on lines whose pairs sit next to and inside each other.
+//!
+//! A case that never ends fails the run, the case printed (`watch`).
 
 use carnet_core::compare;
 use carnet_core::doc;
 use carnet_core::inline::{self, Kind, Visible};
 use proptest::prelude::*;
 use proptest::sample::{Index, select};
+use std::io::Write;
+use std::sync::{Mutex, Once};
+use std::thread::ThreadId;
+use std::time::{Duration, Instant};
 
 /// Pieces of a line: what text inside one block is made of.
 const INLINE: &[&str] = &[
@@ -155,6 +161,47 @@ fn cases(n: u32) -> ProptestConfig {
     ProptestConfig::with_cases(n)
 }
 
+/// The cases running now, by thread: when each began and what it is.
+static RUNNING: Mutex<Vec<(ThreadId, Instant, String)>> = Mutex::new(Vec::new());
+
+/// A case that runs too long fails instead of spinning: each case says
+/// what it is working on, and a watchdog aborts the run, printing it,
+/// once one has run `PROPTEST_HANG_SECS` seconds (60 if unset). proptest
+/// cannot time a case out without forking, and a hang never shrinks.
+struct Watch;
+
+fn watch(what: impl FnOnce() -> String) -> Watch {
+    static DOG: Once = Once::new();
+    DOG.call_once(|| {
+        let secs = std::env::var("PROPTEST_HANG_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+        let limit = Duration::from_secs(secs);
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(250));
+                let running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((_, _, what)) = running.iter().find(|(_, at, _)| at.elapsed() > limit) {
+                    // Straight to stderr: the test harness keeps what
+                    // `eprintln!` says, and an abort loses it.
+                    let _ = writeln!(std::io::stderr(), "a case has run over {secs} s, so the run stops here. The case:\n{what}");
+                    std::process::abort();
+                }
+            }
+        });
+    });
+    let me = std::thread::current().id();
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    running.retain(|(id, _, _)| *id != me);
+    running.push((me, Instant::now(), what()));
+    Watch
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        let me = std::thread::current().id();
+        RUNNING.lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _, _)| *id != me);
+    }
+}
+
 proptest! {
     #![proptest_config(cases(512))]
 
@@ -162,12 +209,14 @@ proptest! {
     /// written again is byte for byte what it was.
     #[test]
     fn the_markdown_round_trip_settles(s in written_note()) {
+        let _watch = watch(|| format!("s: {s:?}"));
         let once = round_trip(&s);
         prop_assert_eq!(round_trip(&once), once);
     }
 
     #[test]
     fn wild_the_markdown_round_trip_settles(s in note()) {
+        let _watch = watch(|| format!("s: {s:?}"));
         let once = round_trip(&s);
         prop_assert_eq!(round_trip(&once), once);
     }
@@ -183,6 +232,7 @@ proptest! {
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
         let (a, b) = (a.min(b), a.max(b));
+        let _watch = watch(|| format!("text: {text:?}, a: {a}, b: {b}, which: {which}, color: {color:#x}"));
         let _ = match which {
             0 => inline::emphasis(&text, a, b, Kind::Bold),
             1 => inline::emphasis(&text, a, b, Kind::Italic),
@@ -207,6 +257,7 @@ proptest! {
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
         let (a, b) = (a.min(b), a.max(b));
+        let _watch = watch(|| format!("text: {text:?}, a: {a}, b: {b}, which: {which}, color: {color:#x}"));
         let styled = match which {
             0 => inline::emphasis(&text, a, b, Kind::Bold),
             1 => inline::emphasis(&text, a, b, Kind::Italic),
@@ -233,6 +284,7 @@ proptest! {
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
         let (a, b) = (a.min(b), a.max(b));
+        let _watch = watch(|| format!("text: {text:?}, a: {a}, b: {b}, which: {which}, color: {color:#x}"));
         let styled = match which {
             0 => inline::emphasis(&text, a, b, Kind::Bold),
             1 => inline::emphasis(&text, a, b, Kind::Italic),
@@ -263,6 +315,7 @@ proptest! {
     ) {
         let (a, b) = (caret(&text, a), caret(&text, b));
         let (a, b) = (a.min(b), a.max(b));
+        let _watch = watch(|| format!("text: {text:?}, a: {a}, b: {b}, which: {which}, color: {color:#x}"));
         let styled = match which {
             0 => inline::emphasis(&text, a, b, Kind::Bold),
             1 => inline::emphasis(&text, a, b, Kind::Italic),
@@ -281,6 +334,7 @@ proptest! {
     fn cutting_and_typing_never_panic(text in line(), a in any::<Index>(), b in any::<Index>(), typed in line()) {
         let (a, b) = (caret(&text, a), caret(&text, b));
         let (a, b) = (a.min(b), a.max(b));
+        let _watch = watch(|| format!("text: {text:?}, a: {a}, b: {b}, typed: {typed:?}"));
         let _ = inline::cut(&text, a, b);
         let _ = inline::delete(&text, a, b);
         let _ = inline::split(&text, a);
@@ -292,16 +346,19 @@ proptest! {
     /// Pairs left touching are joined, and the words stay.
     #[test]
     fn joining_pairs_keeps_the_words(text in balanced_line()) {
+        let _watch = watch(|| format!("text: {text:?}"));
         prop_assert_eq!(inline::plain(&inline::merge(&text)), inline::plain(&text));
     }
 
     #[test]
     fn wild_joining_pairs_keeps_the_words(text in line()) {
+        let _watch = watch(|| format!("text: {text:?}"));
         prop_assert_eq!(inline::plain(&inline::merge(&text)), inline::plain(&text));
     }
 
     #[test]
     fn comparing_never_panics_and_the_same_marks_nothing(old in note(), edits in changes()) {
+        let _watch = watch(|| format!("old: {old:?}, edits: {edits:?}"));
         let new = apply(&old, &edits);
         let _ = compare::marked(&old, &new);
         let (_, same) = compare::marked(&new, &new);
@@ -321,6 +378,7 @@ proptest! {
         new in prop::collection::vec(select(&["the", "slow", "brown", "fox", "jumps", "é", "名前"][..]), 1..12),
     ) {
         let (old, new) = (old.join(" "), new.join(" "));
+        let _watch = watch(|| format!("old: {old:?}, new: {new:?}"));
         let (_, d) = compare::marked(&format!("# N\n\n{old}\n"), &format!("# N\n\n{new}\n"));
         let text = d.blocks()[0].text_ref().unwrap_or("");
         let left = unmarked(text);
