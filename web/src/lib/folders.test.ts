@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  countByFolder,
+  folderCount,
   afterDelete,
   arrow,
   deleteLabel,
@@ -183,5 +185,26 @@ describe('folders', () => {
     };
     expect(readFolded(refused).size).toBe(0);
     expect(() => keepFolded(new Set(['Work']), refused)).not.toThrow();
+  });
+});
+
+describe('a folder\'s count', () => {
+  // The finding: a folded folder whose notes are all in its subfolders
+  // read 0. Folded, it counts theirs too; open, its own (they show theirs).
+  it('takes in the folders it hides', () => {
+    const counts = countByFolder([
+      { folder: 'Trips' },
+      { folder: 'Trips/Japan' },
+      { folder: 'Trips/Japan' },
+      { folder: 'Trips/Japan/Osaka' },
+      { folder: 'Trips/Japan', trashed: true },
+      { folder: 'Tripsy' },
+      { folder: '' },
+    ]);
+    expect(folderCount(counts, 'Trips', false)).toBe(1);
+    expect(folderCount(counts, 'Trips', true)).toBe(4);
+    expect(folderCount(counts, 'Trips/Japan', true)).toBe(3);
+    expect(folderCount(counts, 'Trips/Japan', false)).toBe(2);
+    expect(folderCount(counts, 'Empty', true)).toBe(0);
   });
 });

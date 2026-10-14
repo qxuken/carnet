@@ -3947,6 +3947,37 @@ fn a_folders_chevron_is_an_easy_target() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding: a folded folder whose notes are all in its subfolders
+/// read 0. Folded, its count takes in the notes of the folders it hides;
+/// open, it's its own, as theirs show beside them.
+#[test]
+fn a_folded_folders_count_takes_in_its_hidden_folders() {
+    let (mut app, mut d, dir) = library("fold-count", &[("Home/Sub/Deep", "x"), ("Home/Sub/Deeper", "y"), ("Home/Other/Z", "z")]);
+    d_frame_twice(&mut app, &mut d);
+    let count = |app: &Carnet, d: &Drive, f: &str| -> String {
+        let row = app.folder_rects.iter().find(|(r, _)| r == f).map(|(_, r)| *r).unwrap();
+        d.core
+            .nodes()
+            .iter()
+            .filter(|n| n.rect.y >= row.y && n.rect.y + n.rect.h <= row.y + row.h + 0.5 && n.rect.x >= row.x && n.rect.x <= row.x + row.w)
+            .filter_map(|n| n.text.clone())
+            .find(|t| t.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or_default()
+    };
+    assert_eq!(count(&app, &d, "Home"), "0", "open: its own");
+    click_chevron(&mut app, &mut d, "Home", KeyMods::NONE);
+    assert_eq!(folded(&app), ["Home"]);
+    assert_eq!(count(&app, &d, "Home"), "3", "folded: the notes it hides too");
+    click_chevron(&mut app, &mut d, "Home", KeyMods::NONE);
+    assert_eq!((count(&app, &d, "Home"), count(&app, &d, "Home/Sub")), ("0".to_string(), "2".to_string()), "open again: each its own");
+    let mut counts = HashMap::new();
+    counts.insert("A", 1);
+    counts.insert("A/B", 2);
+    counts.insert("AB", 5);
+    assert_eq!((super::chrome::folder_count(&counts, "A", true), super::chrome::folder_count(&counts, "A", false)), (3, 1));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The folder rows drawn, top to bottom.
 fn rows_drawn(app: &Carnet) -> Vec<String> {
     app.folder_rows

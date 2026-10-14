@@ -19,9 +19,11 @@
   import {
     afterDelete,
     arrow,
+    countByFolder,
     deleteLabel,
     deletedWords,
     fold,
+    folderCount,
     foldsFollow,
     folderTargets,
     followed,
@@ -71,7 +73,8 @@
     if (list) list.scrollTop = top = 0;
   });
 
-  const count = (f: string) => sync.notes.filter((n) => !n.trashed && n.folder === f).length;
+  const counts = $derived(countByFolder(sync.notes));
+  const count = (f: string) => folderCount(counts, f, folded.has(f));
   const deleted = $derived(sync.notes.filter((n) => n.trashed).length);
   // The last deleted note restored or deleted for good: the Deleted list
   // is gone from the side, so back to all the notes.
