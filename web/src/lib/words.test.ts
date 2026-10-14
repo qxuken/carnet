@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { footer, joinedSaid, offlineStatus, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
+import { footer, inviteSteps, joinedSaid, offlineStatus, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
 
 const base = { status: 'Up to date', changes: 0, pictures: 0, waitShown: false, allSent: false, readOnly: false };
 
@@ -33,6 +33,16 @@ describe('footer', () => {
     // None waiting: nothing to say.
     expect(footer({ ...base, held }).why).toBeUndefined();
     expect(footer({ ...base, pictures: 1, waitShown: true }).why).toBeUndefined();
+  });
+});
+
+describe('inviteSteps', () => {
+  // The finding: the web's invite said only the desktop's way in, in
+  // words the desktop no longer shows. Both ways, as the desktop says them.
+  it('says where the code goes on the web and in the app', () => {
+    expect(inviteSteps('https://notes.example.com/', 'K7QF-2M9D-XW4H-P3TA')).toBe(
+      'Give them this code. On the web, they open https://notes.example.com/#invite=K7QF-2M9D-XW4H-P3TA (or https://notes.example.com, then Enter the code). In the Carnet app: Settings → Sync, Cloud sync setup, the server’s address https://notes.example.com, then Enter the code.',
+    );
   });
 });
 

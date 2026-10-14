@@ -1576,7 +1576,7 @@ impl Carnet {
                             ui.text_in(NodeSpec::row().selectable().label("Invite code"), code, l.page_type(Type::TITLE).family(l.serif).color(t.fg));
                             let origin = self.sync.origin().unwrap_or_default();
                             ui.text(
-                                &format!("Give them this code and the server's address, {origin}. In Carnet's Settings \u{2192} Sync they type both, and Connect."),
+                                &carnet_sync::invite::instructions(origin, code),
                                 TextStyle::new(Type::SMALL.size).color(t.muted),
                             );
                         });

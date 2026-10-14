@@ -8,7 +8,7 @@
   import { ago, dateWords, left } from '../lib/time';
   import Icon from '../lib/Icon.svelte';
   import { pair_link, password_fault, qr_svg } from '../wasm/carnet_web.js';
-  import { joinedSaid, waysBack } from '../lib/words';
+  import { inviteSteps, joinedSaid, waysBack } from '../lib/words';
   import { LINK_OPENS, linkOpen, linkOpenWords, setLinkOpen, type LinkOpen } from '../lib/editor/links';
 
   let { back }: { back: (() => void) | null } = $props();
@@ -429,7 +429,7 @@
         {#if sync.invite}
           <div class="invite">
             <p class="digits" aria-label="Invite code">{sync.invite}</p>
-            <p>Give them this code and the server’s address, {location.origin}. In Carnet’s Settings → Sync they type both, and Connect.</p>
+            <p>{inviteSteps(location.origin, sync.invite)}</p>
           </div>
         {/if}
         {#each sync.invites.waiting as w (w.hash)}

@@ -65,6 +65,15 @@ export function numbered(name: string, taken: (string | null)[]): string {
   return `${name} ${n}`;
 }
 
+/// What to tell someone given invite `code` to the server at `origin`:
+/// where it goes on the web (a link that fills it in) and in the app, in
+/// the words each shows. The desktop says the same
+/// (`carnet_sync::invite::instructions`).
+export function inviteSteps(origin: string, code: string): string {
+  const o = origin.replace(/\/+$/, '');
+  return `Give them this code. On the web, they open ${o}/#invite=${code} (or ${o}, then Enter the code). In the Carnet app: Settings → Sync, Cloud sync setup, the server’s address ${o}, then Enter the code.`;
+}
+
 /// What a link opened in this tab asks for: a pairing code or an invite
 /// to fill in while not yet in an account, or to say this browser is in
 /// one already. `null`: not such a link.
