@@ -7136,6 +7136,85 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// A device joining an account lets its untouched welcome note go, and
+/// once the account's notes are all here, puts it back only if the
+/// account has none of its own: the account has one welcome note, never
+/// two, nor none because a device joined.
+#[test]
+fn a_joining_device_leaves_the_account_one_welcome_note() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let welcomes = |app: &Carnet| app.store.notes.iter().filter(|n| n.title == "Welcome to Carnet").count();
+    for keep in [true, false] {
+        let data = std::env::temp_dir().join(format!("carnet-app-welcome-{keep}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+            let _ = stopped.await;
+        }));
+        #[allow(clippy::type_complexity)]
+        let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&mut [(&mut Carnet, &mut Drive)]) -> bool| {
+            let t0 = Instant::now();
+            while !done(apps) {
+                assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+                for (app, d) in apps.iter_mut() {
+                    d.frame(&mut **app);
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let (mut a, mut da, dir_a) = fresh(&format!("welcome-a-{keep}"));
+        a.sync_server = origin.clone();
+        a.sync_how = 0;
+        a.sync_code = invite.text();
+        a.on_plain(Msg::SyncStart);
+        until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+        type_in(&mut a, &mut da, "Plans");
+        a.save_current();
+        if !keep {
+            // The account's welcome deleted for good before B comes.
+            let i = a.store.notes.iter().position(|n| n.title == "Welcome to Carnet").unwrap();
+            a.store.trash(i).unwrap();
+            let t = a.store.trashed().into_iter().find(|t| t.title == "Welcome to Carnet").unwrap();
+            a.store.delete_forever(&t).unwrap();
+            a.current = a.store.notes.iter().position(|n| n.title == "Plans").unwrap();
+            a.reorder();
+            a.refresh_trash();
+        }
+        until("A caught up", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.caught_up() && x[0].0.sync.waiting() == 0);
+        a.on_plain(Msg::SyncPair);
+        until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+        let (mut b, mut db, dir_b) = fresh(&format!("welcome-b-{keep}"));
+        assert_eq!(welcomes(&b), 1, "B's own, before it joins");
+        b.sync_server = origin.clone();
+        b.sync_code = a.sync.code.clone().unwrap();
+        b.on_plain(Msg::SyncStart);
+        until("B has the account's notes", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
+            x[1].0.sync.caught_up() && x[1].0.store.notes.iter().any(|n| n.title == "Plans") && !x[1].0.sync.welcome_dropped
+        });
+        if keep {
+            for _ in 0..20 {
+                da.frame(&mut a);
+                db.frame(&mut b);
+            }
+            assert_eq!((welcomes(&a), welcomes(&b)), (1, 1), "the account's own, on both");
+        } else {
+            assert_eq!(welcomes(&b), 1, "B's, back: the account had none");
+            until("A has it too", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| welcomes(x[0].0) == 1);
+        }
+        let _ = stop.send(());
+        let _ = rt.block_on(served);
+        drop((a, b));
+        let _ = std::fs::remove_dir_all(dir_a);
+        let _ = std::fs::remove_dir_all(dir_b);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
 /// A note come from another device while its picture is still on its
 /// way (the found: "Picture not found" until it came) shows a quiet box
 /// saying it's downloading, the picture's place; then the picture once

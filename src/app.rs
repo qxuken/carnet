@@ -2131,7 +2131,17 @@ impl Carnet {
         // The account's notes all here (not just the first of them come):
         // the empty stand-in goes, and the top of the list opens.
         let here = self.sync_stand_in.is_some() && self.store.notes.len() > 1 && self.sync.caught_up();
-        if remote.is_empty() && !moved && !here {
+        // The account's notes all here: this device's welcome note, let go
+        // as it joined, back if the account has none of its own.
+        let mut welcomed = false;
+        if self.sync.welcome_dropped && self.sync.caught_up() {
+            self.sync.welcome_dropped = false;
+            match self.store.welcome_unless_the_account_has_one() {
+                Ok(back) => welcomed = back,
+                Err(e) => self.error = Some(format!("Couldn't put the welcome note back: {e}")),
+            }
+        }
+        if remote.is_empty() && !moved && !here && !welcomed {
             return;
         }
         for r in &remote {
