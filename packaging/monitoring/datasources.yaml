@@ -1,0 +1,18 @@
+# Grafana's Prometheus data source, in Grafana's provisioning format: for
+# Grafana's provisioning/datasources folder (README.md, step 4). Its UID,
+# `prometheus`, is what alerts.yaml names.
+#
+# Loki isn't here: you have it in Grafana already. The dashboard asks
+# which Loki to use.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://192.168.50.54:9090 # Prometheus, as Grafana's container reaches it
+    jsonData:
+      timeInterval: 15s # the scrape interval: rates on the dashboard count on it
+    editable: true

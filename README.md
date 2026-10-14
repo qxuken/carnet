@@ -224,7 +224,7 @@ The web app is built with Node and Rust's `wasm32-unknown-unknown` target; [CONT
 | `crates/carnet-server/` | the sync server ([its README](crates/carnet-server/README.md)) |
 | `crates/carnet-web/` | the web app's Rust, compiled to WebAssembly |
 | `web/` | the web app (Svelte 5), served by `carnet-server` |
-| `packaging/` | installers for macOS, Windows and Linux, and the server's container |
+| `packaging/` | installers for macOS, Windows and Linux, the server's container, and a Grafana dashboard and alerts for the server |
 | `fuzz/` | fuzz targets |
 | `docs/` | the sync design ([docs/SYNC.md](docs/SYNC.md)) and the screenshots |
 
