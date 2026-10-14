@@ -4,8 +4,10 @@
 // new tab.
 //
 // Until a picture comes, its place is a box the size it will be laid out
-// at (the page's width, or the width the note gives it), the same box in
-// the reader and the editor, before and after a reload; one a while
+// at (the page's width, or the width the note gives it; a picture's
+// shape, 4:3, as no record says its own), the same box in the reader and
+// the editor, before and after a reload, so the page doesn't jump when it
+// comes; one a while
 // coming (fetched from the server) says it's downloading, as the desktop
 // does. One that doesn't come says so in that same box, and is asked for
 // again when the notes change: a device may have sent it since. Carnet's
@@ -135,11 +137,16 @@ export function unshown(img: HTMLImageElement, name: string) {
   });
 }
 
+/// What a picture's box is while the picture may still come: as tall as
+/// a picture of its width (`.picture-card.coming`).
+const COMING = 'picture-card coming';
+
 /// The box a picture takes until it's drawn: as wide as it will be, the
-/// width the note gives it (at most the page's), or the page's.
+/// width the note gives it (at most the page's), or the page's; and a
+/// picture's height for that width.
 function placeholder(img: HTMLImageElement): HTMLElement {
   const place = document.createElement('span');
-  place.className = 'picture-card';
+  place.className = COMING;
   place.setAttribute('role', 'img');
   place.setAttribute('aria-label', img.alt ? `${img.alt}: loading` : 'A picture, loading');
   const width = img.style.width || (img.getAttribute('width') ? `${img.getAttribute('width')}px` : '');
@@ -150,6 +157,8 @@ function placeholder(img: HTMLImageElement): HTMLElement {
 /// What a box says of a picture it stands for, with the picture's name.
 function fill(place: HTMLElement, why: string, path: string, named = true, glyph = warning) {
   const name = path.split('/').pop() ?? path;
+  // Coming still: the picture's height kept; one that won't, a card.
+  place.className = why === DOWNLOADING ? COMING : 'picture-card';
   place.title = name;
   place.setAttribute('aria-label', named ? `${why}: ${name}` : why);
   const icon = document.createElement('span');

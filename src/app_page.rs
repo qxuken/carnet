@@ -35,6 +35,9 @@ pub(super) const ELSEWHERE: &str = "Not on this device";
 /// What stands in for a picture of Carnet's that sync is bringing here
 /// (another device's, not come yet): the web's words.
 pub(super) const DOWNLOADING: &str = "Downloading\u{2026}";
+/// A picture's height for its width while it's on its way, as the web's
+/// `.picture-card.coming`: 4:3.
+pub(super) const COMING_SHAPE: f32 = 0.75;
 /// How long the writing pauses, in seconds, before an empty line says
 /// what can go on it.
 const HINT_AFTER: f64 = 1.2;
@@ -864,11 +867,14 @@ impl Carnet {
                     // stands in the box the picture takes there, as the web
                     // draws it: the width the note gives it, or the text's
                     // (under half of it at an edge), and a picture's height
-                    // at least.
+                    // at least. One on its way is as tall as a picture of
+                    // that width (4:3, a photo's shape: nothing here says
+                    // its own), so the page doesn't move when it comes.
                     let elsewhere = why == ELSEWHERE || why == DOWNLOADING;
                     let box_w = width.map_or(if floated { (self.text_w * 0.45).max(BESIDE_MIN) } else { max_w }, |w| w as f32).clamp(48.0, max_w);
+                    let box_h = if why == DOWNLOADING { (box_w * COMING_SHAPE).max(120.0) } else { 120.0 };
                     let card = if elsewhere {
-                        NodeSpec::row().min_width(box_w).max_width(box_w).min_height(120.0).center()
+                        NodeSpec::row().min_width(box_w).max_width(box_w).min_height(box_h).center()
                     } else {
                         NodeSpec::row().width(Sizing::Fit).max_width(max_w).cross_align(Align::Center)
                     };

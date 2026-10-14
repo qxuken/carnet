@@ -153,6 +153,9 @@ button { font: inherit; color: inherit; }
    it), in the reader and the editor alike (pictures.ts). */
 .picture-card { display: flex; align-items: center; justify-content: center; gap: 10px; box-sizing: border-box; width: 100%; max-width: 100%; min-height: 120px; margin: 4px 0; padding: 10px 12px; border-radius: var(--radius); background: var(--sunken); color: var(--muted); font: 400 15px/1.4 var(--sans); }
 .note .pictures .picture-card { flex: none; width: min(45cqi, var(--share)); max-width: var(--share); }
+/* While the picture may still come: as tall as a picture of that width
+   (4:3, a photo's shape), so the page doesn't move when it's drawn. */
+.picture-card.coming { aspect-ratio: 4 / 3; min-height: auto; }
 .picture-card-icon { display: inline-flex; flex: none; width: 18px; height: 18px; }
 .picture-card-icon svg { width: 100%; height: 100%; }
 /* A picture carried in the editor (editor/picture.ts), small under the pointer. */

@@ -7051,6 +7051,17 @@ fn a_picture_on_its_way_by_sync_says_so_then_shows() {
         .filter(|r| r.x <= words.x && r.y <= words.y && r.x + r.w >= words.x + words.w && r.y + r.h >= words.y + words.h && r.h >= 100.0)
         .min_by(|p, q| (p.w * p.h).total_cmp(&(q.w * q.h)));
     assert!(card.is_some_and(|c| c.h >= 120.0), "{card:?}");
+    // As tall as a picture its width (the finding: 120px tall, where the
+    // picture came 456px, and the page jumped).
+    let card = db
+        .core
+        .nodes()
+        .iter()
+        .map(|n| n.rect)
+        .filter(|r| r.x <= words.x && r.y <= words.y && r.x + r.w >= words.x + words.w && r.y + r.h >= words.y + words.h && r.w >= 300.0)
+        .min_by(|p, q| (p.w * p.h).total_cmp(&(q.w * q.h)))
+        .unwrap();
+    assert!((card.h - card.w * super::page_view::COMING_SHAPE).abs() <= 2.0, "{card:?}");
 
     // Let through: the picture.
     b.sync.hold_fetches = false;
