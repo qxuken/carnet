@@ -106,6 +106,12 @@ pub enum Kind {
     /// A picture among a cell's words: nothing opens it, its `!` is its
     /// word, and the rest its closing marks.
     Picture,
+    /// A line break written as Markdown's hard one: two spaces or more, or
+    /// a backslash, at the end of a line that goes on. They are its
+    /// opening marks, its `\n` its one word, and nothing closes it; so the
+    /// line ends at its last letter, and an edit that takes the break
+    /// takes its marks with it.
+    Break,
 }
 
 impl Kind {
@@ -123,7 +129,7 @@ impl Kind {
             Kind::Strike => ("~~", "~~"),
             Kind::Underline => ("<u>", "</u>"),
             Kind::Code => ("`", "`"),
-            Kind::Link | Kind::Tint | Kind::Picture => ("", ""),
+            Kind::Link | Kind::Tint | Kind::Picture | Kind::Break => ("", ""),
         }
     }
 
@@ -138,6 +144,7 @@ impl Kind {
             Kind::Link => s.link,
             Kind::Tint => s.ink != 0 || s.mark != 0,
             Kind::Picture => s.picture,
+            Kind::Break => false,
         }
     }
 }
@@ -166,6 +173,8 @@ struct Read {
     tints: Vec<Tint>,
     pairs: Vec<Pair>,
     pictures: Vec<CellPicture>,
+    /// The marks of every line break ([`breaks`]).
+    breaks: Vec<(usize, usize)>,
 }
 
 /// The line as runs of one style each: `(start, end, style)`, in order,
@@ -270,6 +279,22 @@ fn read_counting(text: &str, count: Count) -> Read {
                 i = j + n;
             }
             None => i += n,
+        }
+    }
+
+    // Line breaks as Markdown writes a hard one, outside code: marks,
+    // hidden as any other, so the line ends at its last letter. The `\n`
+    // after them is the break's word ([`Kind::Break`]). Spaces at the very
+    // end, which end nothing, are marks too, of no pair: a paragraph's
+    // last line, as a file had it.
+    let breaks = line_breaks(text, &quiet);
+    for &(s, e) in &breaks {
+        for k in s..e {
+            st[k].marker = true;
+            quiet[k] = true;
+        }
+        if e < b.len() {
+            pairs.push(Pair { kind: Kind::Break, open: (s, e), close: (e + 1, e + 1) });
         }
     }
 
@@ -616,7 +641,58 @@ fn read_counting(text: &str, count: Count) -> Read {
             };
         }
     }
-    Read { styles: st, tints: found, pairs, pictures }
+    Read { styles: st, tints: found, pairs, pictures, breaks }
+}
+
+/// The marks of each hard line break in `text`, outside code (`quiet`):
+/// a line's last two spaces or more before its `\n`, or its last `\`
+/// (not itself escaped), each after a letter on its line — a line of
+/// spaces alone, or of one backslash, is what it says, as the writer
+/// writes them (`doc::escape_line`). And spaces, two or more, at the end
+/// of the last line. Each `(start, end)`, `end` the `\n`'s place.
+fn line_breaks(text: &str, quiet: &[bool]) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let ends = text.match_indices('\n').map(|(k, _)| k).chain(std::iter::once(b.len()));
+    for e in ends {
+        let line = &b[start..e];
+        let last = e == b.len();
+        start = e + 1;
+        if !last && quiet[e] {
+            continue;
+        }
+        let spaces = line.iter().rev().take_while(|&&c| c == b' ').count();
+        let lettered = |n: usize| line[..line.len() - n].iter().any(|c| !c.is_ascii_whitespace());
+        let calm = |n: usize| !quiet[e - n..e].iter().any(|&q| q);
+        if spaces >= 2 && lettered(spaces) && calm(spaces) {
+            out.push((e - spaces, e));
+        } else if !last && line.last() == Some(&b'\\') && lettered(1) && calm(1) {
+            out.push((e - 1, e));
+        }
+    }
+    out
+}
+
+/// The marks of each line break of `text` ([`Kind::Break`]), and those of
+/// spaces ending its last line: `(start, end)`, in order.
+pub fn breaks(text: &str) -> Vec<(usize, usize)> {
+    read(text).breaks
+}
+
+/// The lines of `text`, each without the marks of the break that ends it
+/// ([`breaks`]): what a line is once it stands alone — an item, a
+/// heading, a line of a page exported.
+pub fn lines(text: &str) -> Vec<&str> {
+    let breaks = breaks(text);
+    let mut out = Vec::new();
+    let mut start = 0;
+    for e in text.match_indices('\n').map(|(k, _)| k).chain(std::iter::once(text.len())) {
+        let end = breaks.iter().find(|r| r.1 == e).map_or(e, |r| r.0);
+        out.push(&text[start..end]);
+        start = e + 1;
+    }
+    out
 }
 
 /// The `>` of a CommonMark autolink opening at `at` (`<scheme:…>`, no
@@ -1160,6 +1236,12 @@ fn cut_keeping(text: &str, a: usize, b: usize, keep: Option<Kind>) -> (String, u
         if is_autolink(text, p) {
             continue;
         }
+        // A line break's marks are its line's: cut at it, they stay where
+        // they are, before the cut or after it. Only an edit taking its
+        // `\n` takes them.
+        if p.kind == Kind::Break && a == b {
+            continue;
+        }
         // Code is never kept whole around a change: its words are literal,
         // so a style goes outside it, not as marks inside; nor a picture,
         // whose one word is never parted from its marks.
@@ -1260,7 +1342,7 @@ pub fn merge(text: &str) -> String {
             opening.entry(q.open.0).or_default().push(q);
         }
         for p in &ps {
-            if matches!(p.kind, Kind::Link | Kind::Code | Kind::Picture) {
+            if matches!(p.kind, Kind::Link | Kind::Code | Kind::Picture | Kind::Break) {
                 continue;
             }
             let same = |q: &&Pair| {
@@ -1295,7 +1377,7 @@ pub fn join(left: &str, right: &str) -> String {
     // opening ones of `right`, while they are the same. Those met are all
     // of `left` past `end` and all of `right` before `start`.
     let (mut end, mut start) = (left.len(), 0);
-    while let Some(p) = lp.iter().find(|p| p.close.1 == end && !matches!(p.kind, Kind::Link | Kind::Picture)) {
+    while let Some(p) = lp.iter().find(|p| p.close.1 == end && !matches!(p.kind, Kind::Link | Kind::Picture | Kind::Break)) {
         // Two code spans: one, its marks made for the words of both.
         if p.kind == Kind::Code {
             let Some(q) = rp.iter().find(|q| q.open.0 == start && q.kind == Kind::Code) else { break };
@@ -1464,7 +1546,7 @@ fn unwrap_all(text: &str, kind: Kind) -> String {
 fn innermost(text: &str) -> (usize, usize) {
     let ps = pairs(text);
     let (mut s, mut e) = (0, text.len());
-    while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture)) {
+    while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::Break)) {
         s = p.open.1;
         e = p.close.0;
     }
@@ -1545,7 +1627,7 @@ pub fn tint(text: &str, a: usize, b: usize, ink: bool, color: u32) -> Option<(St
         let ps = pairs(&m);
         let (mut s, mut e) = (0, m.len());
         let mut whole = None;
-        while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture)) {
+        while let Some(p) = ps.iter().find(|p| p.open.0 == s && p.close.1 == e && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::Break)) {
             if p.kind == Kind::Tint {
                 whole = Some(p.open.0);
             }
@@ -2385,5 +2467,35 @@ mod tests {
         let (out, _) = delete("<u>one</u> mid <u>two</u>", 10, 18);
         assert_eq!(out, "<u>onetwo</u>");
         assert_eq!(merge("<u>a</u><u>b</u>"), "<u>ab</u>");
+    }
+
+    /// Markdown's hard line break — two spaces or more, or a backslash,
+    /// at the end of a line that goes on — is marks, hidden; in code, or
+    /// a backslash escaped, or a line of nothing else, it is what it says.
+    #[test]
+    fn a_hard_line_break_is_marks() {
+        let words = |t: &str| Visible::of(t).text(t);
+        assert_eq!(words("stay  \napart"), "stay\napart");
+        assert_eq!(words("stay     \napart"), "stay\napart");
+        assert_eq!(words("stay\\\napart"), "stay\napart");
+        assert_eq!(words("**stay**  \napart"), "stay\napart");
+        assert_eq!(words("stay \napart"), "stay \napart", "one space is a space");
+        assert_eq!(words("stay\\\\\napart"), "stay\\\napart", "an escaped backslash");
+        assert_eq!(words("`a  \nb`  \nc"), "a  \nb\nc", "in code");
+        assert_eq!(words("a\n\\\nb"), "a\n\\\nb", "a line of one backslash");
+        assert_eq!(words("a\n   \nb"), "a\n   \nb", "a line of spaces");
+        assert_eq!(words("ends  "), "ends", "spaces at the end end nothing");
+        assert_eq!(words("ends\\"), "ends\\", "a backslash at the end is one");
+        assert_eq!(breaks("one  \ntwo\\\nthree  "), [(3, 5), (9, 10), (16, 18)]);
+        assert_eq!(lines("one  \ntwo\\\nthree  "), ["one", "two", "three"]);
+        // The break is a pair: its marks open it, its `\n` its word.
+        let p: Vec<Pair> = pairs("a  \nb").into_iter().filter(|p| p.kind == Kind::Break).collect();
+        assert_eq!(p, [Pair { kind: Kind::Break, open: (1, 3), close: (4, 4) }]);
+        // Taken out with the `\n`; cut at it, left where they are.
+        assert_eq!(delete("a  \nb", 3, 4).0, "ab");
+        assert_eq!(split("a  \nb", 1), ("a".to_string(), "  \nb".to_string()));
+        assert_eq!(split("a  \nb", 3), ("a  ".to_string(), "\nb".to_string()));
+        // Bold across it: one pair round both lines.
+        assert_eq!(emphasis("a  \nb", 0, 5, Kind::Bold).map(|r| r.0), Some("**a  \nb**".to_string()));
     }
 }

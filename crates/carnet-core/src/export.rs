@@ -115,17 +115,17 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                     (f..to).any(|i| !st[i].marker && st[i].ink != 0)
                 });
                 out.push_str(if own && viewer { "<p class=\"initial own\">" } else { "<p class=\"initial\">" });
-                out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
+                out.push_str(&inline::lines(t).into_iter().map(spans).collect::<Vec<_>>().join("<br>"));
                 out.push_str("</p>");
             }
             Kind::Text(t) => {
                 out.push_str("<p>");
-                out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
+                out.push_str(&inline::lines(t).into_iter().map(spans).collect::<Vec<_>>().join("<br>"));
                 out.push_str("</p>");
             }
             Kind::Quote(t) => {
                 out.push_str("<blockquote><p>");
-                out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
+                out.push_str(&inline::lines(t).into_iter().map(spans).collect::<Vec<_>>().join("<br>"));
                 out.push_str("</p></blockquote>");
             }
             Kind::Heading { level, text } => {

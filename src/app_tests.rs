@@ -8448,7 +8448,7 @@ fn an_exported_notes_line_is_turned_alone() {
     };
     assert_eq!(written(&mut app), EXPORT);
     // On the page (not the note's card in the library): the paragraph.
-    let first = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("путь: жильё   \nhostel / ryokan  ")).expect("the first paragraph").rect;
+    let first = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("путь: жильё\nhostel / ryokan")).expect("the first paragraph").rect;
     d.click(&mut app, first.x + 30.0, first.y + 8.0);
     d_frame_twice(&mut app, &mut d);
     assert_eq!(page::touched(app.doc(), app.caret), 0..=0);
@@ -8478,6 +8478,51 @@ fn an_exported_notes_line_is_turned_alone() {
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A line broken as Markdown's hard break (two spaces, a backslash): the
+/// page draws no mark of it; End puts the caret after the line's last
+/// letter, what is typed there goes before the marks, → crosses the break
+/// in one step, and Backspace there takes it, marks and all. Untouched,
+/// the file is written back as it was.
+#[test]
+fn a_hard_line_break_is_one_break_on_the_page() {
+    for (n, mark) in ["  ", "\\"].into_iter().enumerate() {
+        let md = format!("# Breaks\n\nstay{mark}\napart\n");
+        let (store, dir) = temp_store(&format!("hard-break-{n}"));
+        drop(store);
+        std::fs::write(dir.join("Breaks.md"), &md).unwrap();
+        let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+        let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+        d.core.set_inspect(true);
+        d.frame(&mut app);
+        let i = app.store.notes.iter().position(|n| n.title == "Breaks").unwrap();
+        app.open(i);
+        for _ in 0..4 {
+            d.frame(&mut app);
+        }
+        let written = |app: &mut Carnet| {
+            app.save_current();
+            std::fs::read_to_string(dir.join("Breaks.md")).unwrap()
+        };
+        assert_eq!(written(&mut app), md);
+        let para = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("stay\napart")).expect("the paragraph, its marks hidden").rect;
+        d.click(&mut app, para.x + 10.0, para.y + 6.0);
+        d_frame_twice(&mut app, &mut d);
+        key(&mut app, &mut d, "end");
+        let slot = app.caret.head.slot;
+        assert_eq!(app.caret.head.byte, 4, "End: after the line's last letter");
+        type_in(&mut app, &mut d, "s");
+        assert_eq!(page::text(app.doc(), slot), format!("stays{mark}\napart"));
+        key(&mut app, &mut d, "right");
+        assert_eq!(app.caret.head.byte, 5 + mark.len() + 1, "one step over the break");
+        key(&mut app, &mut d, "backspace");
+        assert_eq!(page::text(app.doc(), slot), "staysapart");
+        assert_eq!(written(&mut app), "# Breaks\n\nstaysapart\n");
+        let w = d.warnings();
+        assert!(w.is_empty(), "{w:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
 
 /// A picture that's the user's own file, beside the note: drawn faint with
