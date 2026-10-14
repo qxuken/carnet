@@ -1388,56 +1388,62 @@ impl Carnet {
                         );
                     });
                 }
-                rule(ui, l);
-                let words = self.sync.words.clone();
-                let armed = self.sync_words_armed;
-                let making = self.sync.making_recovery();
-                // One there already (or not known not to be): what the
-                // button does is replace it, and the confirm asks first.
-                let has = self.sync.has_recovery();
-                let what = if armed {
-                    "Replace the recovery code? The words you have now will stop working."
-                } else if has {
-                    "This account has one: twelve words that let a new device in when none of yours is left."
-                } else {
-                    "Twelve words that let a new device in when none of yours is left."
-                };
-                setting(ui, l, "Recovery code", Some(what), |ui| {
-                    if words.is_some() {
-                        pill_button(ui, l, "sync-words-done", "Done", true, true, Msg::SyncRecoveryDone);
-                    } else if armed {
-                        pill_button(ui, l, "sync-words-cancel", "Cancel", false, true, Msg::SyncRecoveryCancel);
-                        pill_button(ui, l, "sync-words-yes", "Yes, replace", true, status == Status::Online, Msg::SyncRecovery);
-                    } else if making {
-                        pill_button(ui, l, "sync-words", "Making one\u{2026}", false, false, Msg::SyncRecovery);
+                // The recovery code, only by the server's answer about this
+                // device's own account: not before it comes, nor once the
+                // server turned this device away (an answer from before
+                // then, of an account it isn't let in to, is none).
+                if self.sync.words.is_some() || self.sync.making_recovery() || self.sync.recovery_known().is_some() {
+                    rule(ui, l);
+                    let words = self.sync.words.clone();
+                    let armed = self.sync_words_armed;
+                    let making = self.sync.making_recovery();
+                    // One there already (or not known not to be): what the
+                    // button does is replace it, and the confirm asks first.
+                    let has = self.sync.has_recovery();
+                    let what = if armed {
+                        "Replace the recovery code? The words you have now will stop working."
+                    } else if has {
+                        "This account has one: twelve words that let a new device in when none of yours is left."
                     } else {
-                        pill_button(ui, l, "sync-words", if has { "Replace" } else { "Make one" }, false, status == Status::Online, Msg::SyncRecovery);
-                    }
-                });
-                if let Some(words) = &words {
-                    ui.with(NodeSpec::column().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).gap(6.0), |ui| {
-                        // Numbered, four to a row: written down by hand, a
-                        // place is easy to lose in one long line.
-                        let words: Vec<&str> = words.split_whitespace().collect();
-                        ui.with(NodeSpec::column().grow_width().gap(6.0).selectable().label("Recovery words"), |ui| {
-                            for (r, row) in words.chunks(4).enumerate() {
-                                ui.with(NodeSpec::row().grow_width(), |ui| {
-                                    for (c, w) in row.iter().enumerate() {
-                                        ui.with(NodeSpec::row().width(kui_native::Sizing::Percent(0.25)).gap(8.0).cross_align(Align::Baseline), |ui| {
-                                            ui.with(NodeSpec::row().width(kui_native::Sizing::Fixed(20.0)).main_align(Align::End), |ui| {
-                                                ui.text(&format!("{}", r * 4 + c + 1), TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
-                                            });
-                                            ui.text(w, l.page_type(Type::BODY).family(l.serif).color(t.fg).nowrap());
-                                        });
-                                    }
-                                });
-                            }
-                        });
-                        ui.text(
-                            "Write them down and keep them somewhere safe: they are shown this once, and kept nowhere on this device. A new code replaces this one.",
-                            TextStyle::new(Type::SMALL.size).color(t.muted),
-                        );
+                        "Twelve words that let a new device in when none of yours is left."
+                    };
+                    setting(ui, l, "Recovery code", Some(what), |ui| {
+                        if words.is_some() {
+                            pill_button(ui, l, "sync-words-done", "Done", true, true, Msg::SyncRecoveryDone);
+                        } else if armed {
+                            pill_button(ui, l, "sync-words-cancel", "Cancel", false, true, Msg::SyncRecoveryCancel);
+                            pill_button(ui, l, "sync-words-yes", "Yes, replace", true, status == Status::Online, Msg::SyncRecovery);
+                        } else if making {
+                            pill_button(ui, l, "sync-words", "Making one\u{2026}", false, false, Msg::SyncRecovery);
+                        } else {
+                            pill_button(ui, l, "sync-words", if has { "Replace" } else { "Make one" }, false, status == Status::Online, Msg::SyncRecovery);
+                        }
                     });
+                    if let Some(words) = &words {
+                        ui.with(NodeSpec::column().grow_width().padding(Edges { l: 18.0, r: 18.0, t: 0.0, b: 14.0 }).gap(6.0), |ui| {
+                            // Numbered, four to a row: written down by hand, a
+                            // place is easy to lose in one long line.
+                            let words: Vec<&str> = words.split_whitespace().collect();
+                            ui.with(NodeSpec::column().grow_width().gap(6.0).selectable().label("Recovery words"), |ui| {
+                                for (r, row) in words.chunks(4).enumerate() {
+                                    ui.with(NodeSpec::row().grow_width(), |ui| {
+                                        for (c, w) in row.iter().enumerate() {
+                                            ui.with(NodeSpec::row().width(kui_native::Sizing::Percent(0.25)).gap(8.0).cross_align(Align::Baseline), |ui| {
+                                                ui.with(NodeSpec::row().width(kui_native::Sizing::Fixed(20.0)).main_align(Align::End), |ui| {
+                                                    ui.text(&format!("{}", r * 4 + c + 1), TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
+                                                });
+                                                ui.text(w, l.page_type(Type::BODY).family(l.serif).color(t.fg).nowrap());
+                                            });
+                                        }
+                                    });
+                                }
+                            });
+                            ui.text(
+                                "Write them down and keep them somewhere safe: they are shown this once, and kept nowhere on this device. A new code replaces this one.",
+                                TextStyle::new(Type::SMALL.size).color(t.muted),
+                            );
+                        });
+                    }
                 }
                 // An email and password to come in by (a server that takes
                 // them: a hosted one), beside codes and the words.

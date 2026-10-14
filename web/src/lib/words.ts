@@ -74,6 +74,13 @@ export function inviteSteps(origin: string, code: string): string {
   return `Give them this code. On the web, they open ${o}/#invite=${code} (or ${o}, then Enter the code). In the Carnet app: Settings → Sync, Cloud sync setup, the server’s address ${o}, then Enter the code.`;
 }
 
+/// Whether Settings shows the recovery code's row: by the server's answer
+/// about this browser's own account (`known`, null before it comes and
+/// once the server turned this browser away), or with words just made or
+/// being made. A browser the server won't let in can't say whether "this
+/// account has one".
+export const recoveryShown = (known: boolean | null, words: boolean, making: boolean) => known !== null || words || making;
+
 /// What a link opened in this tab asks for: a pairing code or an invite
 /// to fill in while not yet in an account, or to say this browser is in
 /// one already. `null`: not such a link.

@@ -1158,6 +1158,10 @@ impl Session {
             }
             Frame::Carnet(Carnet::Denied { reason, why }) => {
                 self.state = State::Offline;
+                // What the account's list said is no answer any more: this
+                // device isn't let in to it (its recovery code, its
+                // devices, shown as if it were).
+                self.listed = None;
                 self.events.push(match why {
                     Deny::DeviceRemoved => Event::Removed { account: false },
                     Deny::AccountRemoved => Event::Removed { account: true },
@@ -1709,5 +1713,38 @@ mod tests {
         assert_eq!(refusal_words("The password couldn't be set: visit evil.example"), "The server says: The password couldn't be set: visit evil.example");
         assert_eq!(refusal_words(TOO_BIG), TOO_BIG);
         assert_eq!(refusal_words(&format!("{TOO_BIG} Visit evil.example")), format!("The server says: {TOO_BIG} Visit evil.example"));
+    }
+
+    /// The finding: a device the server turned away said "This account has
+    /// one" of the recovery code, by a list from before. Turned away, it
+    /// knows nothing of the account's list.
+    #[test]
+    fn a_device_turned_away_knows_no_recovery_code() {
+        use crate::crypto::{DeviceKey, OsRandom, Ring, VaultKey};
+        let id = Identity {
+            origin: "https://notes.example".into(),
+            account: b"acct".to_vec(),
+            device: b"desk".to_vec(),
+            key: DeviceKey::generate(&mut OsRandom),
+            ring: Ring::new(VaultKey::generate(&mut OsRandom)),
+            name: "Desk".into(),
+        };
+        let mut s = Session::new(id, 0);
+        assert_eq!(s.has_recovery(), None, "not known before the list");
+        s.listed = Some(Listed { epoch: 0, at: 0, rows: Vec::new(), recovery: Err(()), password: Ok(None), passkeys: Vec::new() });
+        assert_eq!(s.has_recovery(), Some(true));
+        s.connected();
+        struct NoDocs;
+        impl Docs for NoDocs {
+            fn rooms(&self) -> Vec<String> {
+                Vec::new()
+            }
+            fn doc(&mut self, _: &str) -> &crate::NoteDoc {
+                unreachable!()
+            }
+        }
+        let denied = wire::encode(&Frame::Carnet(Carnet::Denied { reason: "not this device".into(), why: Deny::Other }));
+        s.receive(&denied, &mut NoDocs, &mut OsRandom);
+        assert_eq!(s.has_recovery(), None);
     }
 }

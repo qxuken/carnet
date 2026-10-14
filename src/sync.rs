@@ -1111,9 +1111,16 @@ impl Sync {
     /// Whether the account has a recovery code, as far as is known: one
     /// made would replace it. Not known yet: taken to.
     pub fn has_recovery(&self) -> bool {
+        self.recovery_known() != Some(false)
+    }
+
+    /// Whether the account has a recovery code, by the server's answer
+    /// about this device's own account in this run: `None` before one,
+    /// or once the server turned this device away.
+    pub fn recovery_known(&self) -> Option<bool> {
         match &self.phase {
-            Phase::On { session, .. } => session.has_recovery() != Some(false),
-            _ => false,
+            Phase::On { session, .. } => session.has_recovery(),
+            _ => None,
         }
     }
 

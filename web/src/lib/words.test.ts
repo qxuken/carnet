@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { footer, inviteSteps, joinedSaid, offlineStatus, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
+import { footer, inviteSteps, joinedSaid, offlineStatus, recoveryShown, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
 
 const base = { status: 'Up to date', changes: 0, pictures: 0, waitShown: false, allSent: false, readOnly: false };
 
@@ -43,6 +43,18 @@ describe('inviteSteps', () => {
     expect(inviteSteps('https://notes.example.com/', 'K7QF-2M9D-XW4H-P3TA')).toBe(
       'Give them this code. On the web, they open https://notes.example.com/#invite=K7QF-2M9D-XW4H-P3TA (or https://notes.example.com, then Enter the code). In the Carnet app: Settings → Sync, Cloud sync setup, the server’s address https://notes.example.com, then Enter the code.',
     );
+  });
+});
+
+describe('recoveryShown', () => {
+  // The finding: a browser the server turned away said "This account has
+  // one" while the account's own device offered "Make one".
+  it('is shown only by an answer about this account', () => {
+    expect(recoveryShown(null, false, false)).toBe(false);
+    expect(recoveryShown(true, false, false)).toBe(true);
+    expect(recoveryShown(false, false, false)).toBe(true);
+    expect(recoveryShown(null, true, false)).toBe(true);
+    expect(recoveryShown(null, false, true)).toBe(true);
   });
 });
 
