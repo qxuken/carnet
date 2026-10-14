@@ -8035,6 +8035,45 @@ fn a_font_list_opens_with_its_search_empty() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding: Esc in an open font list closed all of Settings. Esc
+/// closes the innermost thing open first — the list, the keyboard in its
+/// search or not; a question asked (Cancel / Yes) — and only then
+/// Settings. A font list opens with the keyboard in its search.
+#[test]
+fn escape_closes_a_font_list_before_settings() {
+    let (store, dir) = temp_store("font-escape");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings_open = true;
+    d_frame_twice(&mut app, &mut d);
+    for which in [0, 1, 3] {
+        app.on_settings(Msg::FontMenu { which });
+        d_frame_twice(&mut app, &mut d);
+        let k = app_field(&app, Field::Font).expect("the search");
+        assert_eq!(d.core.focus(), Some(k), "the keyboard in the search ({which})");
+        key(&mut app, &mut d, "escape");
+        assert_eq!(app.font_pick, None, "the list closed");
+        assert!(app.settings_open, "Settings still open");
+    }
+    // The search let go of first: Esc still closes the list alone.
+    app.on_settings(Msg::FontMenu { which: 3 });
+    d_frame_twice(&mut app, &mut d);
+    d.focus(&mut app, Key::ROOT);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "escape");
+    assert_eq!((app.font_pick, app.settings_open), (None, true));
+    // A question asked: Esc is its Cancel.
+    app.on_settings(Msg::ResetLook);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.reset_armed);
+    key(&mut app, &mut d, "escape");
+    assert!(!app.reset_armed && app.settings_open);
+    // Nothing open inside: Settings closes.
+    key(&mut app, &mut d, "escape");
+    assert!(!app.settings_open);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn app_field(app: &Carnet, f: Field) -> Option<Key> {
     app.fields.iter().find(|(_, x)| **x == f).map(|(k, _)| *k)
 }

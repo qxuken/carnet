@@ -1757,8 +1757,11 @@ impl Carnet {
                             &EditOptions { style, placeholder: Some("Search fonts".into()), ..Default::default() },
                             NodeSpec::row().grow_width().label("Search fonts"),
                         );
+                        // Opened: emptied, and the keyboard in it, to type
+                        // a font's name at once.
                         if std::mem::take(&mut self.font_search_reset) {
                             ui.set_edit_text(k, "");
+                            ui.focus(k);
                         }
                         self.fields.insert(k, Field::Font);
                     },

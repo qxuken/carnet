@@ -3900,6 +3900,11 @@ impl Carnet {
             self.pick_head = None;
             return;
         }
+        // Escape closes what is open innermost first: a font's list, or a
+        // question asked (Cancel / Yes), before Settings itself.
+        if k.code == KeyCode::Escape && self.settings_open && self.close_innermost() {
+            return;
+        }
         if k.code == KeyCode::Escape && self.settings_open {
             self.settings_open = false;
             return;
@@ -3919,6 +3924,20 @@ impl Carnet {
         if m.ctrl || m.super_key {
             self.chord(&k);
         }
+    }
+
+    /// Settings' innermost open thing closed, if one is open: a font's
+    /// list, or a question waiting for Cancel or Yes. True if one was.
+    fn close_innermost(&mut self) -> bool {
+        if self.font_pick.take().is_some() {
+            return true;
+        }
+        let armed = [&mut self.reset_armed, &mut self.sync_off_armed, &mut self.pw_remove_armed, &mut self.sync_words_armed, &mut self.delete_account_armed];
+        let mut any = false;
+        for a in armed {
+            any |= std::mem::take(a);
+        }
+        any
     }
 
     /// The shortcuts that work anywhere a sink hears them. True when the
@@ -4532,6 +4551,10 @@ impl App for Carnet {
             // search typed is cleared, the keyboard kept there for the
             // next (a second Esc lets go of it).
             Some("cancel") => {
+                // In a font list's search: the list closes, Settings stays.
+                if self.fields.get(&ev.key) == Some(&Field::Font) {
+                    self.font_pick = None;
+                }
                 if self.fields.get(&ev.key) == Some(&Field::Search) && !self.query.is_empty() {
                     self.on_plain(Msg::ClearSearch);
                 }
