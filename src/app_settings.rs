@@ -1719,11 +1719,9 @@ impl Carnet {
                 first
             })
             .clone();
-        // Code's: only the families whose every face is monospaced.
+        // Code's: only the families that set code monospaced.
         let families = if which == 3 {
-            let mono = self.mono_families.get_or_insert_with(|| {
-                ui.core().system_fonts().into_iter().filter(|f| f.monospaced).map(|f| f.family).collect()
-            });
+            let mono = self.mono_families.get_or_insert_with(|| look::code_families(ui.core()));
             families.into_iter().filter(|f| mono.contains(f)).collect()
         } else {
             families
