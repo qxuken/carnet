@@ -1883,6 +1883,16 @@ mod tests {
         assert_eq!(e.style_here().mark, 0);
     }
 
+    /// As on the desktop: pictures one after another on a line are a row
+    /// of pictures, not words with marks showing.
+    #[test]
+    fn pictures_on_one_line_are_pictures() {
+        let e = Editor::open("# T\n\n![a|left|200](x.png)![b|left|200](y.png)\n\nWords\n");
+        let pics: Vec<usize> = (0..e.lines().len()).filter(|&n| e.look(n).kind == "image").collect();
+        assert_eq!(pics.len(), 2, "{:?}", (0..e.lines().len()).map(|n| e.look(n).kind).collect::<Vec<_>>());
+        assert!(!e.text().contains('!'), "{}", e.text());
+    }
+
     #[test]
     fn turned_and_back_and_undone() {
         let mut e = Editor::open("# T\n\nmilk\n");

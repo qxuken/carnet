@@ -838,6 +838,7 @@ fn escape_line(line: &str) -> String {
         || is_setext_eq(body)
         || fence_of(body).is_some()
         || image_line(body).is_some()
+        || image_row(body).is_some()
         || body.starts_with('>')
         || body == "\\";
     if !special {
@@ -994,6 +995,39 @@ pub fn image_line(line: &str) -> Option<Kind> {
     }
     let (alt, width, float) = alt_parts(alt);
     Some(Kind::Image { src: src.to_string(), alt: alt.to_string(), width, float, wiki: false })
+}
+
+/// Pictures one after another on a line of their own, nothing but spaces
+/// between (`![a](x.png)![b|left|200](y.png)`): a row of them, as other
+/// apps draw such a line, side by side. One with no side written stands
+/// at the left, as the others in the row do. Written back (only once the
+/// note is edited), a picture a line, each with its side, as Carnet
+/// writes a row. `None` for fewer than two, or anything else on the line.
+pub fn image_row(line: &str) -> Option<Vec<Kind>> {
+    let pics = inline_pictures(line);
+    if pics.len() < 2 {
+        return None;
+    }
+    let mut at = 0;
+    let mut out = Vec::new();
+    for p in &pics {
+        if !line[at..p.at.0].trim().is_empty() {
+            return None;
+        }
+        out.push(image_line(&line[p.at.0..p.at.1])?);
+        at = p.at.1;
+    }
+    if !line[at..].trim().is_empty() {
+        return None;
+    }
+    for k in &mut out {
+        if let Kind::Image { float, .. } = k
+            && *float == Float::None
+        {
+            *float = Float::Left;
+        }
+    }
+    Some(out)
 }
 
 /// A picture among a table cell's words, as the cell's text has it: the
@@ -1620,6 +1654,15 @@ fn parse(src: &str, whole_note: bool) -> (Option<String>, Vec<Block>) {
             i += 1;
             continue;
         }
+        // Several pictures on the line first: read whole, `![a](<x>)![b](<y>)`
+        // could pass for one whose source runs on.
+        if let Some(row) = image_row(line) {
+            flush(&mut para, &mut blocks);
+            list.clear();
+            blocks.extend(row.into_iter().map(Block::new));
+            i += 1;
+            continue;
+        }
         if let Some(image) = image_line(line) {
             flush(&mut para, &mut blocks);
             list.clear();
@@ -1881,6 +1924,41 @@ mod tests {
         assert_eq!(written("*\r"), "- \n");
         let once = written("<mér1. k># \r");
         assert_eq!(written(&once), once);
+    }
+
+    /// The finding: pictures one after another on a line were read as
+    /// words, `!a|left|200` and all. They are a row of pictures, each with
+    /// its side (the left, where none is written); the line is the file's
+    /// until the note is edited, then written a picture a line.
+    #[test]
+    fn pictures_on_one_line_are_a_row() {
+        let (_, d) = from_markdown("Above\n\n![a](x.png)![b|left|200](y.png) ![[z.png|120]]\n\nBelow\n");
+        let pics: Vec<(String, Option<u32>, Float)> = d
+            .blocks()
+            .iter()
+            .filter_map(|b| match &b.kind {
+                Kind::Image { src, width, float, .. } => Some((src.clone(), *width, *float)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pics, [("x.png".into(), None, Float::Left), ("y.png".into(), Some(200), Float::Left), ("z.png".into(), Some(120), Float::Left)]);
+        assert_eq!(kinds(&d).len(), 5);
+        let once = to_markdown(None, &d);
+        assert_eq!(once, "Above\n\n![a|left](x.png)\n\n![b|left|200](y.png)\n\n![[z.png|left|120]]\n\nBelow\n");
+        assert_eq!(written(&once), once);
+        // Sides kept as written; sources in brackets read apart.
+        let (_, d) = from_markdown("![a|right](<x y.png>)  ![b](<z.png>)\n");
+        assert!(matches!(&d.blocks()[0].kind, Kind::Image { src, float: Float::Right, .. } if src == "x y.png"));
+        assert!(matches!(&d.blocks()[1].kind, Kind::Image { src, float: Float::Left, .. } if src == "z.png"));
+        // Anything else on the line: words, as ever.
+        for words in ["see ![a](x.png)![b](y.png)", "![a](x.png)![b](y.png) after", "![a](x.png)"] {
+            let (_, d) = from_markdown(words);
+            assert!(!d.blocks().iter().all(|b| matches!(b.kind, Kind::Image { .. })) || words == "![a](x.png)", "{words}");
+        }
+        // Typed so in a paragraph: kept words, written so they read back.
+        let d = Doc::new(vec![Block::text("![a](x.png)![b](y.png)")]);
+        let md = to_markdown(None, &d);
+        assert_eq!(from_markdown(&md).1.blocks()[0].text_ref(), Some("![a](x.png)![b](y.png)"), "{md}");
     }
 
     /// Found by the property tests: a paragraph of one `\` read as the

@@ -2389,6 +2389,31 @@ fn a_resize_handle_pressed_and_let_go_changes_nothing() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding: `![a|left|200](x)![b|left|200](y)` on one line showed as
+/// words ("!a|left|200"). It is a row of two pictures, and the file stays
+/// as it is until the note is edited.
+#[test]
+fn pictures_on_one_line_are_a_row_of_pictures() {
+    let line = "![a|left|200](attachments/a.png)![b|left|200](attachments/b.png)";
+    let (mut app, mut d, dir) = library("pic-line", &[("Line", &format!("{line}\n\nWords beside them"))]);
+    png_file(&dir.join("attachments"), "a.png");
+    png_file(&dir.join("attachments"), "b.png");
+    app.store.index_files();
+    app.images.retry_failed();
+    app.open(app.store.notes.iter().position(|n| n.title == "Line").unwrap());
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let pics: Vec<u64> = blocks(&app).iter().filter(|b| matches!(b.kind, Kind::Image { float: Float::Left, width: Some(200), .. })).map(|b| b.id).collect();
+    assert_eq!(pics.len(), 2);
+    assert!(pics.iter().all(|id| app.pic_w.contains_key(id)), "both drawn as pictures");
+    assert!(!d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.contains("left|200"))), "no marks drawn");
+    app.save_current();
+    let md = std::fs::read_to_string(dir.join("Line.md")).unwrap();
+    assert_eq!(md, format!("# Line\n\n{line}\n\nWords beside them\n"), "the file as it was");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn all_notes_has_its_own_menu() {
     let (mut app, mut d, dir) = fresh("all-menu");
