@@ -18,13 +18,19 @@ export type Footer = {
   held?: string | null;
 };
 
+/// What the socket's state says once it's down: the browser offline, or
+/// online and the server not answering.
+export const offlineStatus = (online: boolean) => (online ? 'Offline: trying again' : 'Offline');
+
 /// The footer's line: up to date only when nothing waits to be sent;
 /// else how many changes and pictures wait, and, offline or read only,
 /// why. (The desktop's Settings says it in the same words.) Pictures
-/// that can't go from here: why too, under it (`why`).
-export function footer(f: Footer): { ok: boolean; text: string; why?: string } {
+/// that can't go from here: why too, under it (`why`). Its icon: a check
+/// when all's well, a cloud struck through offline, else a clock.
+export function footer(f: Footer): { ok: boolean; text: string; icon: string; why?: string } {
   const line = footerLine(f);
-  return f.held && f.pictures > 0 ? { ...line, why: f.held } : line;
+  const icon = line.ok ? 'check' : f.status.startsWith('Offline') ? 'cloud-off' : 'clock';
+  return f.held && f.pictures > 0 ? { ...line, icon, why: f.held } : { ...line, icon };
 }
 
 function footerLine(f: Footer): { ok: boolean; text: string } {

@@ -9,7 +9,9 @@
 //! It connects, and when the socket drops, connects again, waiting longer
 //! each time (1 s, 2 s, 4 s … a minute at most), the wait cut short when
 //! asked. It sends a text `ping` every 30 s, as the Loro Protocol does,
-//! so a proxy does not close a quiet socket. TLS is rustls with ring and
+//! so a proxy does not close a quiet socket; and a socket that then hears
+//! nothing back for 10 s (the network gone, which closes nothing) is
+//! dropped, so the app says it's offline rather than up to date. TLS is rustls with ring and
 //! the web's roots built in, and, for a server with a certificate of its
 //! own (a home server, a private CA), the one certificate given to trust
 //! besides.
@@ -44,6 +46,11 @@ enum Command {
 /// The longest wait between tries.
 const MAX_WAIT: Duration = Duration::from_secs(60);
 const KEEPALIVE: Duration = Duration::from_secs(30);
+/// How long a ping may go unanswered (the server says `pong`) before the
+/// socket is taken for gone.
+const ANSWER: Duration = Duration::from_secs(10);
+/// What a socket that stopped answering says when it's dropped.
+pub const NO_ANSWER: &str = "no answer from the server";
 
 /// A socket to one server, kept open by its thread.
 pub struct Link {
@@ -104,6 +111,12 @@ impl Link {
     /// [`start`](Link::start), trusting these certificates (DER) besides
     /// the web's roots: a self-hosted server's own, or its private CA's.
     pub fn start_trusting(url: String, trusted: Vec<Vec<u8>>, wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
+        Self::start_timed(url, trusted, (KEEPALIVE, ANSWER), wake)
+    }
+
+    /// [`start_trusting`](Link::start_trusting), pinging every `keepalive`
+    /// and dropping a socket that hasn't answered `answer` after a ping.
+    fn start_timed(url: String, trusted: Vec<Vec<u8>>, (keepalive, answer): (Duration, Duration), wake: impl Fn() + Send + 'static) -> std::io::Result<Self> {
         let (commands, mut rx) = tmpsc::unbounded_channel::<Command>();
         let (tx, events) = mpsc::channel::<NetEvent>();
         let peer = Arc::new(Mutex::new(None));
@@ -131,8 +144,12 @@ impl Link {
                                 return;
                             }
                             let (mut sink, mut stream) = ws.split();
-                            let mut ping = tokio::time::interval(KEEPALIVE);
+                            let mut ping = tokio::time::interval(keepalive);
                             ping.tick().await;
+                            // Since a ping went unanswered: when it's given up on.
+                            let deadline = tokio::time::sleep(Duration::MAX / 4);
+                            tokio::pin!(deadline);
+                            let mut asked = false;
                             loop {
                                 tokio::select! {
                                     c = rx.recv() => match c {
@@ -145,24 +162,35 @@ impl Link {
                                         // The Link is gone: so is the thread.
                                         None => return,
                                     },
-                                    m = stream.next() => match m {
-                                        Some(Ok(Message::Binary(b))) => {
-                                            if !emit(NetEvent::Frame(b.to_vec())) {
-                                                return;
+                                    m = stream.next() => {
+                                        // Anything heard: the socket is there.
+                                        if matches!(m, Some(Ok(_))) {
+                                            asked = false;
+                                        }
+                                        match m {
+                                            Some(Ok(Message::Binary(b))) => {
+                                                if !emit(NetEvent::Frame(b.to_vec())) {
+                                                    return;
+                                                }
                                             }
+                                            Some(Ok(Message::Close(f))) => {
+                                                break f.map_or_else(|| "closed".to_string(), |f| f.reason.to_string());
+                                            }
+                                            Some(Ok(_)) => {}
+                                            Some(Err(e)) => break e.to_string(),
+                                            None => break "closed".to_string(),
                                         }
-                                        Some(Ok(Message::Close(f))) => {
-                                            break f.map_or_else(|| "closed".to_string(), |f| f.reason.to_string());
-                                        }
-                                        Some(Ok(_)) => {}
-                                        Some(Err(e)) => break e.to_string(),
-                                        None => break "closed".to_string(),
-                                    },
+                                    }
                                     _ = ping.tick() => {
                                         if let Err(e) = sink.send(Message::Text("ping".into())).await {
                                             break e.to_string();
                                         }
+                                        if !asked {
+                                            asked = true;
+                                            deadline.as_mut().reset(tokio::time::Instant::now() + answer);
+                                        }
                                     }
+                                    _ = &mut deadline, if asked => break NO_ANSWER.to_string(),
                                 }
                             }
                         }
@@ -310,5 +338,36 @@ mod tests {
         }
         assert!(matches!(seen.first(), Some(NetEvent::Disconnected(_))), "{seen:?}");
         drop(link);
+    }
+
+    /// The finding: offline, the line kept saying "Up to date" — the
+    /// network gone closes no socket. A server that stops answering its
+    /// pings is dropped once one goes unanswered long enough, and said so.
+    #[test]
+    fn a_socket_that_stops_answering_is_dropped() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let url = format!("ws://{}/v1/sync", listener.local_addr().unwrap());
+        // Takes the socket, then never reads from it again: no pong.
+        let server = std::thread::spawn(move || {
+            rt.block_on(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                drop(ws);
+            })
+        });
+        let link = Link::start_timed(url, Vec::new(), (Duration::from_millis(100), Duration::from_millis(300)), || {}).unwrap();
+        let t0 = std::time::Instant::now();
+        let mut seen = Vec::new();
+        while t0.elapsed() < Duration::from_secs(4) && !seen.iter().any(|e| matches!(e, NetEvent::Disconnected(_))) {
+            seen.extend(link.poll());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(seen.first(), Some(&NetEvent::Connected));
+        assert!(seen.contains(&NetEvent::Disconnected(NO_ANSWER.into())), "{seen:?}");
+        assert!(t0.elapsed() < Duration::from_secs(2), "dropped once a ping went unanswered");
+        drop(link);
+        server.join().unwrap();
     }
 }
