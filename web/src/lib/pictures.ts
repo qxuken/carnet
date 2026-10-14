@@ -10,7 +10,9 @@
 // comes; one a while
 // coming (fetched from the server) says it's downloading, as the desktop
 // does. One that doesn't come says so in that same box, and is asked for
-// again when the notes change: a device may have sent it since. Carnet's
+// again when the notes change (a device may have sent it since), and
+// now and then besides: 30 s on, then twice as long each time, every 10
+// minutes at most — one sent with no note changed comes all the same. Carnet's
 // own, before the account's vault has come, is still on its way: "not
 // found" only once the server says it hasn't it. One on the web isn't loaded
 // (as the desktop doesn't, and the page's CSP wouldn't): its box says so.
@@ -71,6 +73,7 @@ export function show(img: HTMLImageElement, name: string, ask: () => Promise<str
     fill(place, said, name, true, icon);
     if (e instanceof Error && e.message === ON_THE_WEB) return;
     waiting.set(place, () => ask().then(shown));
+    later();
     // The notes changed while it was asked for (the vault came to name
     // it, say): asked again now, not at the next change.
     if (changes !== asked) askAgain();
@@ -105,8 +108,31 @@ addEventListener(NOTES_CHANGED, () => {
   askAgain();
 });
 
+/// How long a picture not found waits before it's asked for again with
+/// nothing changed, the first time; and at most, the wait doubling.
+export const RETRY_FIRST = 30_000;
+export const RETRY_MOST = 600_000;
+let retryWait = RETRY_FIRST;
+let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+/// Pictures not found asked for again a while on, while any are on the
+/// page: the wait doubles each time, back to the first once none wait.
+function later() {
+  if (retryTimer !== undefined) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = undefined;
+    askAgain();
+    if (!waiting.size) {
+      retryWait = RETRY_FIRST;
+      return;
+    }
+    retryWait = Math.min(retryWait * 2, RETRY_MOST);
+    later();
+  }, retryWait);
+}
+
 /// Every picture not found asked for again: the notes changed (a device
-/// may have sent it, or the vault names it now).
+/// may have sent it, or the vault names it now), or a while went by.
 export function askAgain() {
   for (const [place, ask] of waiting) {
     if (!place.isConnected) {
