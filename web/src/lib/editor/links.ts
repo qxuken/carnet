@@ -12,7 +12,7 @@
 
 import { ViewPlugin, type EditorView } from '@codemirror/view';
 import type { EditorSelection } from '@codemirror/state';
-import { link_hand, link_opens, type PageEditor } from '../../wasm/carnet_web.js';
+import { link_hand, link_ignores, link_opens, type PageEditor } from '../../wasm/carnet_web.js';
 
 export type LinkOpen = 'cmd-click' | 'click' | 'double-click';
 export const LINK_OPENS: LinkOpen[] = ['cmd-click', 'click', 'double-click'];
@@ -55,11 +55,25 @@ const openTab = (url: string) => void window.open(url, '_blank', 'noopener,noref
 
 type Press = { url: string; x: number; y: number; sel: EditorSelection };
 
+/// What a press does to the link under it (`url`, or none), the
+/// settings opening links `how`, `clicks` in a row: opens it now, once
+/// let go, nothing of its own (`null`: what a press does anywhere), or
+/// goes nowhere — a triple-click's third press after a double-click
+/// opened the link (`opened`), which would choose its line.
+export function pressed(how: LinkOpen, clicks: number, cmd: boolean, shift: boolean, url: () => string | null, opened: boolean): 'open' | 'release' | 'ignore' | null {
+  if (link_ignores(how, clicks, opened)) return 'ignore';
+  const when = link_opens(how, clicks, cmd, shift);
+  if (!when || !url()) return null;
+  return when === 1 ? 'open' : 'release';
+}
+
 export function linkOpening(pe: PageEditor, open: (url: string) => void = openTab) {
   return ViewPlugin.fromClass(
     class {
       /// A press on a link that opens once let go where it was pressed.
       press: Press | null = null;
+      /// The last press opened a link (`pressed`).
+      opened = false;
       /// Where the pointer is over the page, for a key pressed or let go.
       at: { x: number; y: number } | null = null;
 
@@ -97,17 +111,16 @@ export function linkOpening(pe: PageEditor, open: (url: string) => void = openTa
       down = (e: MouseEvent) => {
         this.press = null;
         if (e.button !== 0) return;
-        const when = link_opens(how, e.detail, apple() ? e.metaKey : e.ctrlKey, e.shiftKey);
-        if (!when) return;
-        const url = this.linkAt(e.clientX, e.clientY, e.target);
-        if (!url) return;
-        if (when === 1) {
+        let url: string | null = null;
+        const does = pressed(how, e.detail, apple() ? e.metaKey : e.ctrlKey, e.shiftKey, () => (url = this.linkAt(e.clientX, e.clientY, e.target)), this.opened);
+        this.opened = does === 'open' || (does === 'ignore' && this.opened);
+        if (does === 'open' || does === 'ignore') {
           e.preventDefault();
           e.stopPropagation();
-          open(url);
+          if (does === 'open' && url) open(url);
           return;
         }
-        this.press = { url, x: e.clientX, y: e.clientY, sel: this.view.state.selection };
+        if (does === 'release' && url) this.press = { url, x: e.clientX, y: e.clientY, sel: this.view.state.selection };
       };
 
       /// Let go where it was pressed: the link opens, and the caret goes

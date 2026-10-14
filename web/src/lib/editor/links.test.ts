@@ -13,7 +13,7 @@ const kept = vi.hoisted(() => {
   return m;
 });
 
-import { linkOpen, linkOpenWords, setLinkOpen } from './links';
+import { linkOpen, linkOpenWords, pressed, setLinkOpen } from './links';
 
 beforeAll(async () => {
   const fs = await import(/* @vite-ignore */ ['node', 'fs'].join(':'));
@@ -61,5 +61,22 @@ describe('how links open', () => {
     expect(pe.link_under(1, 2, 'click')).toBeUndefined();
     expect(pe.link_under(1, 11, 'click')).toBeUndefined();
     expect(pe.link_under(1, 11, 'cmd-click')).toBeUndefined();
+  });
+
+  // The finding: in Double-click, the second press of a triple-click
+  // opened the link and the third chose its line. The third goes nowhere.
+  it('takes a triple-click on a link for the double-click that opened it', () => {
+    const link = (): string | null => 'https://a.test';
+    let opened = false;
+    const press = (n: number, url = link) => {
+      const does = pressed('double-click', n, false, false, url, opened);
+      opened = does === 'open' || (does === 'ignore' && opened);
+      return does;
+    };
+    expect([press(1), press(2), press(3), press(4)]).toEqual([null, 'open', 'ignore', 'ignore']);
+    // Not on a link: three presses choose the line, as anywhere.
+    expect([press(1, () => null), press(2, () => null), press(3, () => null)]).toEqual([null, null, null]);
+    expect(pressed('click', 1, false, false, link, false)).toBe('release');
+    expect(pressed('click', 3, false, false, link, true)).toBe(null);
   });
 });

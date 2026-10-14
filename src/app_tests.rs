@@ -2190,12 +2190,27 @@ fn links_open_as_the_settings_say() {
     d.frame(&mut app);
     assert_eq!(opened(), ["https://x.test/d"]);
     assert!(app.caret.is_empty(), "no word chosen");
-    // Elsewhere two clicks still choose a word.
+    // A third press, a triple-click's: nothing — the line isn't chosen
+    // (the finding: it was, once the link had opened), nor the link
+    // opened again.
+    let caret = app.caret;
+    let p = point(&app, &d, 6);
+    d.double_click(&mut app, p.x, p.y);
+    d.input(&mut app, InputEvent::mouse_down(3));
+    d.input(&mut app, InputEvent::mouse_up());
+    d.frame(&mut app);
+    assert_eq!(opened(), ["https://x.test/d"], "opened once");
+    assert_eq!(app.caret, caret, "nothing chosen");
+    // Elsewhere two clicks still choose a word, and three the line.
     let p = point(&app, &d, 1);
     d.double_click(&mut app, p.x, p.y);
     d.frame(&mut app);
     assert_eq!(opened(), Vec::<String>::new());
     assert!(!app.caret.is_empty());
+    d.input(&mut app, InputEvent::mouse_down(3));
+    d.input(&mut app, InputEvent::mouse_up());
+    d.frame(&mut app);
+    assert_eq!(page::ordered(app.doc(), app.caret).1.byte, page::text(app.doc(), slot).len(), "the line chosen");
     assert!(hand(&mut app, &mut d, 6, KeyMods::NONE));
     let _ = std::fs::remove_dir_all(dir);
 }

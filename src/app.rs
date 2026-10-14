@@ -725,6 +725,9 @@ pub struct Carnet {
     /// A press on a link that opens once let go where it was pressed
     /// (links opening with a click).
     link_press: Option<LinkPress>,
+    /// The last press opened a link: a triple-click's third press after a
+    /// double-click that opened one goes nowhere (`LinkOpen::ignores`).
+    link_opened: bool,
     /// While a row of floated pictures is drawn: how many share it, and
     /// the row's width.
     float_count: usize,
@@ -1079,6 +1082,7 @@ impl Carnet {
             pic_rows: HashMap::new(),
             float_row: 0,
             link_press: None,
+            link_opened: false,
             float_count: 0,
             float_room: 0.0,
             float_ends: HashMap::new(),

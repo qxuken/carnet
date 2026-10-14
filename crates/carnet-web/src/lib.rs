@@ -1246,6 +1246,13 @@ pub fn link_opens(how: &str, clicks: u32, cmd: bool, shift: bool) -> u8 {
     }
 }
 
+/// Whether a press goes nowhere, the one before it, in a row, having
+/// opened a link ([`page::LinkOpen::ignores`]).
+#[wasm_bindgen]
+pub fn link_ignores(how: &str, clicks: u32, opened: bool) -> bool {
+    page::LinkOpen::from_key(how).unwrap_or_default().ignores(clicks, opened)
+}
+
 /// Whether the pointer is a hand over a link with these keys held
 /// ([`page::LinkOpen::hand`]).
 #[wasm_bindgen]

@@ -2565,6 +2565,14 @@ impl LinkOpen {
         }
     }
 
+    /// Whether a press, `clicks` in a row, goes nowhere: links opening on
+    /// a double-click, the third press of a triple-click (and on) after the
+    /// second opened one. It would choose the line the link is on; the link
+    /// opened is what the presses were for.
+    pub fn ignores(self, clicks: u32, opened: bool) -> bool {
+        self == LinkOpen::DoubleClick && opened && clicks >= 3
+    }
+
     /// Whether the pointer is a hand over a link with these keys held: a
     /// press (or two, as it opens) there would open it.
     pub fn hand(self, cmd: bool, shift: bool) -> bool {
@@ -5452,5 +5460,18 @@ mod tests {
             keys(&mut t, &mut d, &mut c, "- ");
             assert_eq!(texts(&d)[..3], [format!("Text:{above}"), "[ ]two".to_string(), "Text:three".to_string()], "{mark:?}");
         }
+    }
+
+    /// Links opening on a double-click: the third press of a triple-click
+    /// whose second opened one goes nowhere, so the line isn't chosen;
+    /// a triple-click that opened nothing chooses it as ever.
+    #[test]
+    fn a_triple_click_after_a_link_opened_goes_nowhere() {
+        let dc = LinkOpen::DoubleClick;
+        assert_eq!(dc.opens(2, false, false), Some(OpensOn::Press));
+        assert!(dc.ignores(3, true) && dc.ignores(4, true));
+        assert!(!dc.ignores(3, false), "nothing opened: the line");
+        assert!(!dc.ignores(2, true) && !dc.ignores(1, true));
+        assert!(!LinkOpen::Click.ignores(3, true) && !LinkOpen::ModClick.ignores(3, true));
     }
 }

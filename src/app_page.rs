@@ -3071,6 +3071,13 @@ impl Carnet {
                 let cmd = m.ctrl || m.super_key;
                 let how = self.settings.link_open;
                 self.link_press = None;
+                // The rest of a triple-click whose second press opened a
+                // link: nothing, the line not chosen.
+                if how.ignores(clicks.max(0) as u32, self.link_opened) {
+                    self.drag = None;
+                    return;
+                }
+                self.link_opened = false;
                 let pos = self.hit(core, x, y).filter(|_| !self.in_margin(x, y));
                 let url = |doc: &Doc| match pos {
                     Some(pos) if cmd => page::link_at(doc, Caret::at(pos)).map(|l| l.2),
@@ -3081,6 +3088,7 @@ impl Carnet {
                     Some(page::OpensOn::Press) => {
                         if let Some(url) = url(self.doc()) {
                             self.drag = None;
+                            self.link_opened = true;
                             self.open_url(&url);
                             return;
                         }
