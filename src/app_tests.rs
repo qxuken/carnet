@@ -2239,6 +2239,32 @@ fn links_open_as_the_settings_say() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A bare address (`https://…`, `www.…`, a mail's), as GitHub links one:
+/// drawn as a link and opened as one, the note's words as they were.
+#[test]
+fn a_bare_address_is_a_link_on_the_page() {
+    let (mut app, mut d, dir) = body("bare-link");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "see www.x.test/d, or me@y.test.");
+    let slot = app.caret.head.slot;
+    let point = |app: &Carnet, d: &Drive, at: usize| {
+        let r = d.core.caret_rect(*app.slot_keys.get(&slot).unwrap(), at).unwrap();
+        Vec2::new(r.x + 1.0, r.y + r.h / 2.0)
+    };
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take);
+    assert!(page::style_at(app.doc(), Caret::at(Pos { slot, byte: 7 })).link, "drawn as a link");
+    for (at, url) in [(7, "https://www.x.test/d"), ("see www.x.test/d, or m".len(), "mailto:me@y.test")] {
+        let p = point(&app, &d, at);
+        d.input(&mut app, InputEvent::Modifiers(CTRL));
+        d.click(&mut app, p.x, p.y);
+        d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+        d.frame(&mut app);
+        assert_eq!(opened(), [url]);
+    }
+    assert_eq!(texts(&app)[0], "see www.x.test/d, or me@y.test.");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_colour_picker_colours_the_selection() {
     let (mut app, mut d, dir) = body("tint");

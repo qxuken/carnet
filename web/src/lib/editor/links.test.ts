@@ -63,6 +63,15 @@ describe('how links open', () => {
     expect(pe.link_under(1, 11, 'cmd-click')).toBeUndefined();
   });
 
+  // A bare address, as GitHub links one: a link here too.
+  it('finds a bare address under a press', () => {
+    const pe = new PageEditor('# T\n\nsee www.x.test/d, or me@y.test.\n');
+    expect(pe.text().split('\n')[1]).toBe('see www.x.test/d, or me@y.test.');
+    expect(pe.link_under(1, 6, 'click')).toBe('https://www.x.test/d');
+    expect(pe.link_under(1, 24, 'cmd-click')).toBe('mailto:me@y.test');
+    expect(pe.link_under(1, 2, 'click')).toBeUndefined();
+  });
+
   // The finding: in Double-click, the second press of a triple-click
   // opened the link and the third chose its line. The third goes nowhere.
   it('takes a triple-click on a link for the double-click that opened it', () => {

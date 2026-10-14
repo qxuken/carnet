@@ -400,6 +400,21 @@ fn read_counting(text: &str, count: Count) -> Read {
         i = k + 1;
     }
 
+    // Bare addresses, as GitHub's Markdown links them (GFM's autolinks,
+    // extended): `https://…`, `www.…`, `me@example.com`, `mailto:…`,
+    // outside code and other links. Their words are the address, with no
+    // marks: a pair of empty ones ([`is_bare`]).
+    for (s, e) in bare_links(text) {
+        if (s..e).any(|k| quiet[k] || st[k].link || st[k].marker) {
+            continue;
+        }
+        for k in s..e {
+            st[k].link = true;
+            quiet[k] = true;
+        }
+        pairs.push(Pair { kind: Kind::Link, open: (s, s), close: (e, e) });
+    }
+
     // Colour: `<mark …>…</mark>` and `<span style="…">…</span>`, nested
     // as HTML nests, and underline's `<u>…</u>` (`<ins>…</ins>`) among
     // them; then `==…==`.
@@ -730,6 +745,128 @@ fn is_mail_address(s: &str) -> bool {
             && !l.ends_with('-')
     };
     !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || b".!#$&'*+=^_{|}~-".contains(&c)) && host.split('.').all(label)
+}
+
+/// The bare addresses in `text`, as GFM's autolink extension finds them:
+/// `http://` or `https://` and a domain, or `www.` and one (a domain:
+/// labels of letters, digits, `_` and `-`, a `.` between, two at least,
+/// no `_` in the last two), each starting the text or after a space, `*`,
+/// `_`, `~`, `(` or a quote, and running to a space or `<` — less what ends it as
+/// punctuation (`?!.,:*_~'"`), a `)` with no `(` for it, or an entity
+/// (`&amp;`); and mail addresses (`me@example.com`, `mailto:` before one
+/// or not). Only those a page may follow ([`crate::export::safe_href`]).
+/// Each `(start, end)`, in order.
+fn bare_links(text: &str) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    // GFM's, and quotes, as other apps link an address in quotes too.
+    let starts_here = |i: usize| i == 0 || text[..i].chars().next_back().is_some_and(|c| c.is_whitespace() || "*_~(\"'«“‘„".contains(c));
+    let lower = |i: usize, p: &str| b.len() >= i + p.len() && b[i..i + p.len()].eq_ignore_ascii_case(p.as_bytes());
+    let mut i = 0;
+    while i < b.len() {
+        let head = ["https://", "http://", "www."].into_iter().find(|p| lower(i, p));
+        let Some(head) = head.filter(|_| starts_here(i)) else {
+            i += text[i..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        };
+        let from = if head == "www." { i } else { i + head.len() };
+        match web_link_end(text, from) {
+            Some(end) if crate::export::safe_href(&bare_href(&text[i..end])).is_some() => {
+                out.push((i, end));
+                i = end;
+            }
+            _ => i += head.len(),
+        }
+    }
+    // Mail: around each `@`, outside the addresses found.
+    let mut taken = out.clone();
+    for (at, _) in text.match_indices('@') {
+        if taken.iter().any(|&(s, e)| s <= at && at < e) {
+            continue;
+        }
+        let local = |c: u8| c.is_ascii_alphanumeric() || b".+-_".contains(&c);
+        let mut s = at;
+        while s > 0 && local(b[s - 1]) {
+            s -= 1;
+        }
+        if s == at {
+            continue;
+        }
+        // `mailto:` before it: part of the link.
+        if s >= 7 && lower(s - 7, "mailto:") {
+            s -= 7;
+        }
+        if !starts_here(s) {
+            continue;
+        }
+        let host = |c: u8| c.is_ascii_alphanumeric() || b"-_.".contains(&c);
+        let mut e = at + 1;
+        while e < b.len() && host(b[e]) {
+            e += 1;
+        }
+        while e > at + 1 && b[e - 1] == b'.' {
+            e -= 1;
+        }
+        let domain = &text[at + 1..e];
+        let ok = domain.contains('.')
+            && domain.split('.').all(|l| !l.is_empty() && !l.starts_with('-') && !l.ends_with('-'))
+            && !domain.ends_with(['-', '_'])
+            && !text[s..at].ends_with('.');
+        if ok && crate::export::safe_href(&bare_href(&text[s..e])).is_some() {
+            taken.push((s, e));
+        }
+    }
+    taken.sort_unstable();
+    taken
+}
+
+/// Where a bare web address whose domain starts at `from` ends, as GFM
+/// has it ([`bare_links`]); `None` when it has no domain.
+fn web_link_end(text: &str, from: usize) -> Option<usize> {
+    let rest = &text[from..];
+    let dlen = rest.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.')).unwrap_or(rest.len());
+    let domain = rest[..dlen].trim_end_matches('.');
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) || labels[labels.len() - 2..].iter().any(|l| l.contains('_')) {
+        return None;
+    }
+    let all = rest.find(|c: char| c.is_whitespace() || c == '<').unwrap_or(rest.len());
+    let mut end = all;
+    loop {
+        let link = &rest[..end];
+        let Some(last) = link.chars().next_back() else { break };
+        let unpaired = last == ')' && link.matches(')').count() > link.matches('(').count();
+        if "?!.,:*_~'\"".contains(last) || unpaired {
+            end -= 1;
+        } else if last == ';'
+            && let Some(amp) = link.rfind('&')
+            && link[amp + 1..end - 1].bytes().all(|c| c.is_ascii_alphanumeric())
+            && end - 1 > amp + 1
+        {
+            end = amp;
+        } else {
+            break;
+        }
+    }
+    (end >= domain.len()).then_some(from + end)
+}
+
+/// Whether a link's pair is a bare address's: no marks at all, its words
+/// the address.
+fn is_bare(p: &Pair) -> bool {
+    p.kind == Kind::Link && p.open.0 == p.open.1 && p.close.0 == p.close.1
+}
+
+/// What a bare address opens: `www.` on the web (`https://`), a mail's
+/// with `mailto:`, any other as written.
+fn bare_href(words: &str) -> String {
+    if words.len() >= 4 && words[..4].eq_ignore_ascii_case("www.") {
+        format!("https://{words}")
+    } else if is_mail_address(words) {
+        format!("mailto:{words}")
+    } else {
+        words.to_string()
+    }
 }
 
 /// What an autolink's words open: the address as written, or a mail's
@@ -1670,7 +1807,13 @@ pub fn link_at(text: &str, at: usize) -> Option<(Pair, String)> {
         .into_iter()
         .find(|p| p.kind == Kind::Link && p.open.1 <= at && at <= p.close.0)
         .map(|p| {
-            let url = if is_autolink(text, &p) { autolink_href(&text[p.open.1..p.close.0]) } else { text[p.close.0 + 2..p.close.1 - 1].to_string() };
+            let url = if is_bare(&p) {
+                bare_href(&text[p.open.1..p.close.0])
+            } else if is_autolink(text, &p) {
+                autolink_href(&text[p.open.1..p.close.0])
+            } else {
+                text[p.close.0 + 2..p.close.1 - 1].to_string()
+            };
             (p, url)
         })
 }
@@ -1731,6 +1874,19 @@ pub fn set_link(text: &str, at: usize, url: &str) -> Option<String> {
     let (p, _) = link_at(text, at)?;
     let mut out = text.to_string();
     let target = link_target(url);
+    if is_bare(&p) {
+        // Its words are its address: the new one, bare still where it
+        // reads so, else as an autolink, else as words and address.
+        let link = if bare_links(&target) == [(0, target.len())] {
+            target.clone()
+        } else if autolink_end(&format!("<{target}>"), 0).is_some() {
+            format!("<{target}>")
+        } else {
+            format!("[{target}]({target})")
+        };
+        out.replace_range(p.open.0..p.close.1, &link);
+        return Some(out);
+    }
     if is_autolink(text, &p) {
         // Its words are its address: the new one, as an autolink still
         // where it can be one, else as words and address both.
@@ -1747,6 +1903,13 @@ pub fn set_link(text: &str, at: usize, url: &str) -> Option<String> {
 pub fn unlink(text: &str, at: usize) -> Option<String> {
     let (p, _) = link_at(text, at)?;
     let mut out = text.to_string();
+    // A bare address: a backslash before its first mark (`:`, `.`, `@`)
+    // keeps it words, as GitHub reads it too; the same letters drawn.
+    if is_bare(&p) {
+        let k = text[p.open.1..p.close.0].find(|c: char| c.is_ascii_punctuation())? + p.open.1;
+        out.insert(k, '\\');
+        return Some(out);
+    }
     out.replace_range(p.close.0..p.close.1, "");
     out.replace_range(p.open.0..p.open.1, "");
     Some(out)
@@ -2497,5 +2660,53 @@ mod tests {
         assert_eq!(split("a  \nb", 3), ("a  ".to_string(), "\nb".to_string()));
         // Bold across it: one pair round both lines.
         assert_eq!(emphasis("a  \nb", 0, 5, Kind::Bold).map(|r| r.0), Some("**a  \nb**".to_string()));
+    }
+
+    /// GFM's extended autolinks: a bare `https://…`, `www.…` or mail
+    /// address is a link, its words its address, no mark hidden, the file
+    /// as it was. Where one ends follows GitHub's rules.
+    #[test]
+    fn a_bare_address_is_a_link() {
+        let linked = |t: &str| -> Vec<(String, String)> {
+            pairs(t)
+                .into_iter()
+                .filter(|p| p.kind == Kind::Link)
+                .map(|p| (t[p.open.1..p.close.0].to_string(), link_at(t, p.open.1).unwrap().1))
+                .collect()
+        };
+        let one = |t: &str, words: &str, href: &str| assert_eq!(linked(t), [(words.to_string(), href.to_string())], "{t}");
+        one("see https://x.y/a", "https://x.y/a", "https://x.y/a");
+        one("(https://x.y/a)", "https://x.y/a", "https://x.y/a");
+        one("https://x.y/a_(b)", "https://x.y/a_(b)", "https://x.y/a_(b)");
+        one("go to https://x.y.", "https://x.y", "https://x.y");
+        one("https://x.y/?q=1, then", "https://x.y/?q=1", "https://x.y/?q=1");
+        one("is it https://x.y/a?", "https://x.y/a", "https://x.y/a");
+        one("\"https://x.y/a\"", "https://x.y/a", "https://x.y/a");
+        one("'www.x.y'", "www.x.y", "https://www.x.y");
+        one("https://x.y/a&amp;", "https://x.y/a", "https://x.y/a");
+        one("смотри https://пример.рф/путь, потом", "https://пример.рф/путь", "https://пример.рф/путь");
+        one("на www.пример.рф!", "www.пример.рф", "https://www.пример.рф");
+        one("write me@x.example.", "me@x.example", "mailto:me@x.example");
+        one("mailto:me@x.y", "mailto:me@x.y", "mailto:me@x.y");
+        one("*https://x.y*", "https://x.y", "https://x.y");
+        one("https://x.y:8080/a#b", "https://x.y:8080/a#b", "https://x.y:8080/a#b");
+        // Not links: no domain, inside a word, in code, in a link's words,
+        // an autolink already, an underscore near the end of the domain.
+        for none in ["http://localhost/a", "xhttps://x.y", "`https://x.y`", "www. later", "https://a.b_c.d", "me@x", "кme@x.y", "a/me@x.y", "me@-x.y"] {
+            assert_eq!(linked(none), [], "{none}");
+        }
+        assert_eq!(linked("[https://x.y](https://z.w)"), [("https://x.y".to_string(), "https://z.w".to_string())]);
+        assert_eq!(linked("<https://x.y>"), [("https://x.y".to_string(), "https://x.y".to_string())]);
+        // No mark hidden: the words are all of it; nothing in the URL is
+        // emphasis.
+        let t = "at https://x.y/a_b_c.";
+        assert_eq!(Visible::of(t).text(t), t);
+        assert!(styles(t).iter().all(|s| !s.italic));
+        // Unlinked: a backslash keeps it words, the letters drawn the same.
+        let u = unlink(t, 6).unwrap();
+        assert_eq!(linked(&u), []);
+        assert_eq!(Visible::of(&u).text(&u), t);
+        // Given another address: it, bare.
+        assert_eq!(set_link("a https://x.y b", 4, "https://z.w").as_deref(), Some("a https://z.w b"));
     }
 }
