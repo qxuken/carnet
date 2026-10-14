@@ -75,9 +75,37 @@ impl InviteCode {
     }
 }
 
+/// A link to the web app at `origin` that fills in invite `code`: what
+/// the web's join form takes from the address (`#invite=…`).
+pub fn invite_link(origin: &str, code: &str) -> String {
+    format!("{}/#invite={code}", origin.trim_end_matches('/'))
+}
+
+/// What to tell someone given invite `code` to the server at `origin`:
+/// where it goes on the web and in the app, in the words each shows (the
+/// web's form and the desktop's "Cloud sync setup" both say "Enter the
+/// code"). The web app says the same (`web/src/lib/words.ts`, `inviteSteps`).
+pub fn instructions(origin: &str, code: &str) -> String {
+    let origin = origin.trim_end_matches('/');
+    format!(
+        "Give them this code. On the web, they open {} (or {origin}, then Enter the code). In the Carnet app: Settings \u{2192} Sync, Cloud sync setup, the server's address {origin}, then Enter the code.",
+        invite_link(origin, code)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The finding: the web's invite said only the desktop's way in, in
+    /// words the desktop no longer shows. Both ways, in today's words.
+    #[test]
+    fn an_invite_says_where_it_goes_on_the_web_and_in_the_app() {
+        assert_eq!(
+            instructions("https://notes.example.com/", "K7QF-2M9D-XW4H-P3TA"),
+            "Give them this code. On the web, they open https://notes.example.com/#invite=K7QF-2M9D-XW4H-P3TA (or https://notes.example.com, then Enter the code). In the Carnet app: Settings \u{2192} Sync, Cloud sync setup, the server's address https://notes.example.com, then Enter the code."
+        );
+    }
     use crate::crypto::tests::Seeded;
 
     #[test]

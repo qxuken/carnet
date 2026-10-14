@@ -486,6 +486,9 @@ pub struct Sync {
     /// The server this device was set up with, when its keys couldn't be
     /// read: Settings offers it again.
     pub last_origin: Option<String>,
+    /// This device's welcome note went as it joined an account: looked at
+    /// again once the account's notes are all here.
+    pub welcome_dropped: bool,
     /// When the notes' places were last compared with the vault's.
     last_layout: std::time::Instant,
     /// Pictures between devices: made when sync first runs here.
@@ -560,6 +563,7 @@ impl Sync {
             layout_due: false,
             name: None,
             last_origin: None,
+            welcome_dropped: false,
             last_layout: std::time::Instant::now(),
             pictures: None,
             pending: None,
@@ -1111,9 +1115,16 @@ impl Sync {
     /// Whether the account has a recovery code, as far as is known: one
     /// made would replace it. Not known yet: taken to.
     pub fn has_recovery(&self) -> bool {
+        self.recovery_known() != Some(false)
+    }
+
+    /// Whether the account has a recovery code, by the server's answer
+    /// about this device's own account in this run: `None` before one,
+    /// or once the server turned this device away.
+    pub fn recovery_known(&self) -> Option<bool> {
         match &self.phase {
-            Phase::On { session, .. } => session.has_recovery() != Some(false),
-            _ => false,
+            Phase::On { session, .. } => session.has_recovery(),
+            _ => None,
         }
     }
 
@@ -1579,8 +1590,14 @@ impl Sync {
             }
             let _ = std::fs::write(p, config.text());
         }
-        if joining && let Err(e) = store.drop_welcome() {
-            self.error = Some(format!("Couldn't remove this device's welcome note: {e}"));
+        // Joining: this device's untouched welcome note goes before it can
+        // be sent; once the account's notes are all here, it comes back if
+        // the account has none of its own (the app, `welcome_dropped`).
+        if joining {
+            match store.drop_welcome() {
+                Ok(dropped) => self.welcome_dropped = dropped,
+                Err(e) => self.error = Some(format!("Couldn't remove this device's welcome note: {e}")),
+            }
         }
         let name = self.name();
         let mut session = Session::new(identity(&config, keys, name), 0);

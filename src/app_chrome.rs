@@ -736,8 +736,10 @@ impl Carnet {
                                 let said = format!("{} the folders inside \u{201c}{}\u{201d}", if open { "Hide" } else { "Show" }, folder_name(f));
                                 ui.with_keyed(
                                     "fold",
+                                    // The row's height and all the indent
+                                    // there is: an easy target.
                                     NodeSpec::row()
-                                        .size(FOLD_W, 22.0)
+                                        .size(FOLD_W, 30.0)
                                         .radius(radius::CONTROL)
                                         .hover_bg(t.pressed)
                                         .on_click(Msg::FoldFolder { index: i as u64 })
@@ -760,7 +762,7 @@ impl Carnet {
                                 gap(ui, FOLD_W);
                             }
                             icon(ui, Icon::Folder, if selected { t.accent } else { t.muted }, 16.0, false);
-                            label(ui, folder_name(f), counts.get(f.as_str()).copied().unwrap_or(0), selected);
+                            label(ui, folder_name(f), folder_count(&counts, f, !open), selected);
                         },
                     );
                     rows.push((k, FolderRow::Folder(f.clone())));
@@ -1556,7 +1558,17 @@ impl<'a> Tool<'a> {
 pub(super) const EDGE_W: f32 = 6.0;
 
 /// A folder's chevron's width, in its row's indent.
-const FOLD_W: f32 = 16.0;
+const FOLD_W: f32 = 19.0;
+
+/// The count beside folder `f`: its own notes; folded, those in the
+/// folders inside it too, which are out of sight (open, they show theirs).
+pub(super) fn folder_count(counts: &HashMap<&str, usize>, f: &str, folded: bool) -> usize {
+    if !folded {
+        return counts.get(f).copied().unwrap_or(0);
+    }
+    let inside = format!("{f}/");
+    counts.iter().filter(|(k, _)| **k == f || k.starts_with(&inside)).map(|(_, n)| n).sum()
+}
 /// What it does, by the pointer.
 pub(super) const EDGE_HINT: &str = "Drag to make the notes wider or narrower  \u{b7}  double-click for the usual width";
 /// How long the pointer rests on the edge before that shows, seconds.

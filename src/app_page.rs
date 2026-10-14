@@ -35,6 +35,9 @@ pub(super) const ELSEWHERE: &str = "Not on this device";
 /// What stands in for a picture of Carnet's that sync is bringing here
 /// (another device's, not come yet): the web's words.
 pub(super) const DOWNLOADING: &str = "Downloading\u{2026}";
+/// A picture's height for its width while it's on its way, as the web's
+/// `.picture-card.coming`: 4:3.
+pub(super) const COMING_SHAPE: f32 = 0.75;
 /// How long the writing pauses, in seconds, before an empty line says
 /// what can go on it.
 const HINT_AFTER: f64 = 1.2;
@@ -864,11 +867,14 @@ impl Carnet {
                     // stands in the box the picture takes there, as the web
                     // draws it: the width the note gives it, or the text's
                     // (under half of it at an edge), and a picture's height
-                    // at least.
+                    // at least. One on its way is as tall as a picture of
+                    // that width (4:3, a photo's shape: nothing here says
+                    // its own), so the page doesn't move when it comes.
                     let elsewhere = why == ELSEWHERE || why == DOWNLOADING;
                     let box_w = width.map_or(if floated { (self.text_w * 0.45).max(BESIDE_MIN) } else { max_w }, |w| w as f32).clamp(48.0, max_w);
+                    let box_h = if why == DOWNLOADING { (box_w * COMING_SHAPE).max(120.0) } else { 120.0 };
                     let card = if elsewhere {
-                        NodeSpec::row().min_width(box_w).max_width(box_w).min_height(120.0).center()
+                        NodeSpec::row().min_width(box_w).max_width(box_w).min_height(box_h).center()
                     } else {
                         NodeSpec::row().width(Sizing::Fit).max_width(max_w).cross_align(Align::Center)
                     };
@@ -887,10 +893,13 @@ impl Carnet {
                     });
                     return;
                 };
-                let (drawn, fit) = page::picture_width(nw, width, self.text_w, max_w, floated);
+                let (drawn, _) = page::picture_width(nw, width, self.text_w, max_w, floated);
                 let dw = resizing.map_or(drawn, |r| r.w.clamp(page::PICTURE_MIN.min(nw), max_w));
                 let dh = dw * nh / nw;
-                self.pic_w.insert(id, (dw, fit, max_w));
+                // Drawn, its own width, the room, and how wide it is
+                // with no width given: what a resize let go writes by.
+                let none = page::picture_width(nw, None, self.text_w, max_w, floated).0;
+                self.pic_w.insert(id, (dw, nw, max_w, none));
                 if floated && self.float_count > 1 {
                     self.pic_rows.insert(id, (self.float_row, dh, nh / nw));
                 } else {
@@ -1253,7 +1262,7 @@ impl Carnet {
         let p = &ev.payload;
         let x = p.get_float("x").or_else(|| p.get_int("x").map(|v| v as f64)).unwrap_or(0.0) as f32;
         let full = (self.text_w - 10.0).max(48.0);
-        let (now, fit, max_w) = self.pic_w.get(&id).copied().unwrap_or((full, full, full));
+        let (now, natural, max_w, none) = self.pic_w.get(&id).copied().unwrap_or((full, full, full, full));
         match p.get_str("phase") {
             Some("start") => {
                 self.resizing = Some(Resize { id, w0: now, x0: x, w: now, left, snap: None });
@@ -1279,9 +1288,11 @@ impl Carnet {
             }
             _ => {
                 let Some(r) = self.resizing.take() else { return };
-                // Back at the width it has with none given: none given.
-                let width = page::resized_width(r.w, fit);
-                self.edit(Step::Other, |d, _| page::set_image_width(d, id, width));
+                // Pressed and let go: nothing. Back at its own width, as
+                // it is drawn with none: none given.
+                if let Some(width) = page::resized_width(r.w0, r.w, natural, none) {
+                    self.edit(Step::Other, |d, _| page::set_image_width(d, id, width));
+                }
                 self.reveal = false;
             }
         }
@@ -3065,6 +3076,13 @@ impl Carnet {
                 let cmd = m.ctrl || m.super_key;
                 let how = self.settings.link_open;
                 self.link_press = None;
+                // The rest of a triple-click whose second press opened a
+                // link: nothing, the line not chosen.
+                if how.ignores(clicks.max(0) as u32, self.link_opened) {
+                    self.drag = None;
+                    return;
+                }
+                self.link_opened = false;
                 let pos = self.hit(core, x, y).filter(|_| !self.in_margin(x, y));
                 let url = |doc: &Doc| match pos {
                     Some(pos) if cmd => page::link_at(doc, Caret::at(pos)).map(|l| l.2),
@@ -3075,6 +3093,7 @@ impl Carnet {
                     Some(page::OpensOn::Press) => {
                         if let Some(url) = url(self.doc()) {
                             self.drag = None;
+                            self.link_opened = true;
                             self.open_url(&url);
                             return;
                         }

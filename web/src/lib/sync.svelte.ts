@@ -10,7 +10,7 @@ import { AfterQuiet, Coalesced, withCard } from './coalesce';
 import { Shown } from './shown';
 import { type Entry, Uploads } from './uploads';
 import { type Entry as Typed, Pending, replay } from './pending';
-import { linkAction, numbered } from './words';
+import { linkAction, numbered, offlineStatus } from './words';
 import { pastedStem } from './stem';
 
 export type Note = {
@@ -278,6 +278,10 @@ class Sync {
     addEventListener('hashchange', () => this.takeLink());
     // Back online: connected again at once, not when the wait is up.
     addEventListener('online', () => this.reconnect());
+    // Gone offline: said at once, whether or not anything waits to be
+    // sent; the network gone closes no socket, so it's dropped here, and
+    // connected again when the browser is back online.
+    addEventListener('offline', () => this.wentOffline());
     try {
       await this.open();
     } catch (e) {
@@ -304,6 +308,17 @@ class Sync {
 
   /// Connected again now, the wait between tries begun afresh: the
   /// network is back.
+  private wentOffline() {
+    if (!this.vault || this.join) return;
+    this.status = offlineStatus(false);
+    const ws = this.ws;
+    if (!ws) return;
+    this.ws = null;
+    ws.close();
+    this.vault.disconnected();
+    clearTimeout(this.retryTimer);
+  }
+
   private reconnect() {
     this.wait = 1000;
     if (!this.vault || this.join) return;
@@ -431,7 +446,7 @@ class Sync {
         this.dropJoin();
         return;
       }
-      this.status = navigator.onLine ? 'Offline: trying again' : 'Offline';
+      this.status = offlineStatus(navigator.onLine);
       clearTimeout(this.retryTimer);
       this.retryTimer = setTimeout(() => this.connect(), this.wait);
       this.wait = Math.min(this.wait * 2, 60_000);

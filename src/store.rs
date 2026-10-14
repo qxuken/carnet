@@ -2295,6 +2295,22 @@ impl Store {
         Ok(true)
     }
 
+    /// Joined an account and caught up with it, this device's welcome
+    /// note dropped on the way in ([`drop_welcome`](Store::drop_welcome)):
+    /// put back if the account has none of its own (nor one in Deleted,
+    /// which was let go on purpose), to sync as any note does, so the
+    /// account has one. True if it was put back.
+    pub fn welcome_unless_the_account_has_one(&mut self) -> io::Result<bool> {
+        let title = welcome().title;
+        let has = self.notes.iter().any(|n| n.title == title) || self.trashed().iter().any(|t| !t.is_folder && t.title == title);
+        if has {
+            return Ok(false);
+        }
+        self.notes.push(welcome());
+        self.save(self.notes.len() - 1, true)?;
+        Ok(true)
+    }
+
     /// Brings a trashed file back as a note under its old name (or the
     /// first free one), in the folder it was in. Returns its index.
     pub fn restore(&mut self, from: &Path, name: &str, folder: &str) -> io::Result<usize> {
@@ -3312,6 +3328,32 @@ mod tests {
         assert_eq!(fs::read_to_string(replica.join("version")).unwrap(), format!("{}\n", carnet_sync::LAYOUT + 1));
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&replica);
+    }
+
+    /// Its welcome note let go as it joined, a device caught up with the
+    /// account puts it back only if the account has none of its own, nor
+    /// one in Deleted: so the account has one, never two.
+    #[test]
+    fn a_welcome_note_comes_back_only_to_an_account_without_one() {
+        let dir = temp_dir("welcome-back");
+        let mut s = Store::open(dir.clone()).unwrap();
+        assert!(s.drop_welcome().unwrap());
+        // The account's notes came, none a welcome: it's back, to be sent.
+        s.notes.push(Note::new("Plan", Doc::new(vec![Block::text("one")])));
+        s.save(0, true).unwrap();
+        let _ = s.take_changed();
+        assert!(s.welcome_unless_the_account_has_one().unwrap());
+        assert!(dir.join("Welcome to Carnet.md").exists());
+        let key = s.notes.iter().find(|n| n.title == "Welcome to Carnet").and_then(|n| n.key).expect("kept to send");
+        assert!(s.take_changed().contains(&key), "sent");
+        // One there already (the account's): none more.
+        assert!(!s.welcome_unless_the_account_has_one().unwrap());
+        assert_eq!(s.notes.iter().filter(|n| n.title == "Welcome to Carnet").count(), 1);
+        // The account's in Deleted: let go on purpose, not brought back.
+        let i = s.notes.iter().position(|n| n.title == "Welcome to Carnet").unwrap();
+        s.trash(i).unwrap();
+        assert!(!s.welcome_unless_the_account_has_one().unwrap());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A device joining an account lets its own welcome note, untouched,

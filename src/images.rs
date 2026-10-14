@@ -62,6 +62,13 @@ const GRACE: Duration = Duration::from_secs(5);
 /// again takes a moment, their space held meanwhile.
 const IDLE: Duration = Duration::from_secs(30);
 
+/// A picture not found is looked for again this long after, with nothing
+/// else to say it may be there now (a file come by sync or put back by
+/// hand: the store says so at once); then twice as long each time, every
+/// 10 minutes at most, while any is not found.
+pub const MISSING_FIRST: Duration = Duration::from_secs(30);
+pub const MISSING_MOST: Duration = Duration::from_secs(600);
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
     /// Being decoded: its size, from the file's header (or from when it
@@ -126,6 +133,9 @@ pub struct Images {
     waker: Option<Waker>,
     /// The readers' queue, once they are started.
     queue: Option<Queue>,
+    /// When the pictures not found are looked for again, and the wait
+    /// after that ([`MISSING_FIRST`]); none while none is missing.
+    missing: Option<(Instant, Duration)>,
 }
 
 impl Default for Images {
@@ -140,6 +150,7 @@ impl Default for Images {
             inbox: Inbox::default(),
             waker: None,
             queue: None,
+            missing: None,
         }
     }
 }
@@ -310,11 +321,33 @@ impl Images {
         // When the next could go: one on screen now at `IDLE` from now,
         // should this frame be the last to draw it.
         let wait = if total > self.budget { GRACE } else { IDLE };
-        self.entries
+        let go = self
+            .entries
             .values()
             .filter(|h| h.bytes() > 0)
             .map(|h| (h.seen + wait).saturating_duration_since(now).max(Duration::from_millis(100)))
-            .min()
+            .min();
+        let again = self.look_again(now);
+        go.into_iter().chain(again).min()
+    }
+
+    /// Pictures not found, looked for again once their wait is up (they
+    /// are read anew when next drawn); how long until the next time, while
+    /// any is missing.
+    fn look_again(&mut self, now: Instant) -> Option<Duration> {
+        let missing = |h: &Held| matches!(&h.entry, Entry::Failed(e) if e == "not found");
+        if !self.entries.values().any(missing) {
+            self.missing = None;
+            return None;
+        }
+        let (at, wait) = *self.missing.get_or_insert((now + MISSING_FIRST, MISSING_FIRST));
+        if now < at {
+            return Some(at - now);
+        }
+        self.entries.retain(|_, h| !missing(h));
+        let wait = (wait * 2).min(MISSING_MOST);
+        self.missing = Some((now + wait, wait));
+        Some(wait)
     }
 
     /// Forgets a picture's pixels, keeping its size for when it is next
@@ -656,6 +689,57 @@ pub(crate) mod tests {
 
     /// A PNG's signature and header, and no pixels, saying it is `w × h`:
     /// what a file made to exhaust a reader looks like.
+    /// The finding: a picture not found was looked for again only when
+    /// the notes changed. Now it's looked for again a while on, the wait
+    /// doubling to 10 minutes, and shown once its file is there.
+    #[test]
+    fn a_picture_not_found_is_looked_for_again_now_and_then() {
+        let dir = std::env::temp_dir().join(format!("carnet-images-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("late.png");
+        let mut images = Images::default();
+        let mut core = Core::new();
+        let t0 = Instant::now();
+        let look = |images: &mut Images, core: &mut Core, at: Instant| {
+            let wait = images.sweep(core, at);
+            let e = images.get(&path);
+            images.pump(core);
+            (wait, if matches!(e, Entry::Loading { .. }) { images.get(&path) } else { e })
+        };
+        let (_, e) = look(&mut images, &mut core, t0);
+        assert_eq!(e, Entry::Failed("not found".into()));
+        // The next frame asks for one when it's to be looked for.
+        let (wait, _) = look(&mut images, &mut core, t0);
+        assert_eq!(wait, Some(MISSING_FIRST));
+        std::fs::write(&path, encode_png(3, 2, &[90u8; 24]).unwrap()).unwrap();
+        // Not before.
+        let (_, e) = look(&mut images, &mut core, t0 + MISSING_FIRST / 2);
+        assert_eq!(e, Entry::Failed("not found".into()));
+        // Then: read anew, and shown.
+        let (wait, e) = look(&mut images, &mut core, t0 + MISSING_FIRST);
+        assert_eq!(wait, Some(MISSING_FIRST * 2), "twice as long, the next time");
+        assert!(matches!(e, Entry::Ready { w: 3, h: 2, .. }), "{e:?}");
+        // None missing: no more looking.
+        images.sweep(&mut core, t0 + MISSING_FIRST * 3);
+        assert_eq!(images.missing, None);
+        // Gone again: the wait starts over, and never passes the most.
+        std::fs::remove_file(&path).unwrap();
+        let mut images = Images::default();
+        let mut at = t0;
+        let _ = look(&mut images, &mut core, at);
+        let mut waits = Vec::new();
+        for _ in 0..8 {
+            let (wait, _) = look(&mut images, &mut core, at);
+            let w = wait.unwrap();
+            waits.push(w);
+            at += w;
+        }
+        assert_eq!(waits[0], MISSING_FIRST);
+        assert!(waits.iter().all(|w| *w <= MISSING_MOST) && waits.contains(&MISSING_MOST), "{waits:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     pub(crate) fn png_saying(w: u32, h: u32) -> Vec<u8> {
         fn crc(bytes: &[u8]) -> u32 {
             let mut c = !0u32;

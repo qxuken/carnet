@@ -112,6 +112,23 @@ export function withSubfolders(folders: readonly string[]): Set<string> {
 }
 
 /// The folders as the list shows them: those folded away left out.
+/// How many notes each folder holds itself, by its path.
+export function countByFolder(notes: readonly { folder: string; trashed?: boolean }[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const n of notes) if (!n.trashed) out.set(n.folder, (out.get(n.folder) ?? 0) + 1);
+  return out;
+}
+
+/// The count beside a folder: its own notes; folded, those in the folders
+/// inside it too, which are out of sight (open, they show theirs). As the
+/// desktop counts.
+export function folderCount(counts: ReadonlyMap<string, number>, folder: string, folded: boolean): number {
+  if (!folded) return counts.get(folder) ?? 0;
+  let n = 0;
+  for (const [f, c] of counts) if (f === folder || f.startsWith(`${folder}/`)) n += c;
+  return n;
+}
+
 export const inSight = (folders: readonly string[], folded: ReadonlySet<string>) => folders.filter((f) => !hidden(f, folded));
 
 /// `folder` folded (its subfolders hidden) or unfolded (`open`); with

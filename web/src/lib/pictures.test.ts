@@ -102,7 +102,7 @@ describe('a picture not yet on the server', () => {
 /// What the box in a picture's place says now ('' while it's a quiet
 /// box), the picture shown at `p` asked last.
 function says(from: number) {
-  const place = on.made.slice(from).find((e) => e.className === 'picture-card');
+  const place = on.made.slice(from).find((e) => e.className.startsWith('picture-card'));
   return place?.children[1]?.textContent ?? '';
 }
 
@@ -121,6 +121,24 @@ describe('a picture on its way', () => {
     await vi.runAllTimersAsync();
     expect(p.img.src).toBe('blob:c');
     expect(p.img.isConnected).toBe(true);
+    vi.useRealTimers();
+  });
+
+  // The finding: the "Downloading…" card was 120px tall where the picture
+  // came 456px, so the page jumped. Its box is a picture's shape (CSS's
+  // `.coming`) while it may come, a card once it won't.
+  it('keeps a picture’s shape while it comes, a card once it won’t', async () => {
+    vi.useFakeTimers();
+    const p = picture();
+    const from = on.made.length;
+    show(p.el, 'attachments/e.png', p.ask);
+    const place = on.made.slice(from).find((e) => e.className.startsWith('picture-card'))!;
+    expect(place.className).toBe('picture-card coming');
+    vi.advanceTimersByTime(SAY_COMING + 1);
+    expect(place.className).toBe('picture-card coming');
+    p.answers[0].no(new Error('not on the server'));
+    await vi.runAllTimersAsync();
+    expect(place.className).toBe('picture-card');
     vi.useRealTimers();
   });
 

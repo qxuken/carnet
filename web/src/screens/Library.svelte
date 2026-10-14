@@ -19,9 +19,11 @@
   import {
     afterDelete,
     arrow,
+    countByFolder,
     deleteLabel,
     deletedWords,
     fold,
+    folderCount,
     foldsFollow,
     folderTargets,
     followed,
@@ -71,7 +73,8 @@
     if (list) list.scrollTop = top = 0;
   });
 
-  const count = (f: string) => sync.notes.filter((n) => !n.trashed && n.folder === f).length;
+  const counts = $derived(countByFolder(sync.notes));
+  const count = (f: string) => folderCount(counts, f, folded.has(f));
   const deleted = $derived(sync.notes.filter((n) => n.trashed).length);
   // The last deleted note restored or deleted for good: the Deleted list
   // is gone from the side, so back to all the notes.
@@ -493,6 +496,15 @@
   .chevron :global(svg) { transition: transform 0.12s ease; }
   .chevron.open :global(svg) { transform: rotate(90deg); }
   @media (prefers-reduced-motion: reduce) { .chevron :global(svg) { transition: none; } }
+  /* On a touch screen, or a phone's width: a row a finger's height, and
+     the chevron a 44px target, its reach (a box of no paint) past its
+     drawn 22×26 into the indent and the row's height, over no folder's
+     name, so nothing moves. */
+  @media (pointer: coarse), (max-width: 600px) {
+    .frow { min-height: 44px; }
+    .chevron { position: relative; }
+    .chevron::before { content: ''; position: absolute; inset: -9px -11px; }
+  }
   .fold { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 8px 14px; border: 0; background: none; border-radius: var(--radius); cursor: pointer; text-align: left; color: var(--ink); }
   nav .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   nav .count { flex: none; color: var(--faint); font-size: 13px; }

@@ -115,17 +115,17 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                     (f..to).any(|i| !st[i].marker && st[i].ink != 0)
                 });
                 out.push_str(if own && viewer { "<p class=\"initial own\">" } else { "<p class=\"initial\">" });
-                out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
+                out.push_str(&inline::lines(t).into_iter().map(spans).collect::<Vec<_>>().join("<br>"));
                 out.push_str("</p>");
             }
             Kind::Text(t) => {
                 out.push_str("<p>");
-                out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
+                out.push_str(&inline::lines(t).into_iter().map(spans).collect::<Vec<_>>().join("<br>"));
                 out.push_str("</p>");
             }
             Kind::Quote(t) => {
                 out.push_str("<blockquote><p>");
-                out.push_str(&t.split('\n').map(spans).collect::<Vec<_>>().join("<br>"));
+                out.push_str(&inline::lines(t).into_iter().map(spans).collect::<Vec<_>>().join("<br>"));
                 out.push_str("</p></blockquote>");
             }
             Kind::Heading { level, text } => {
@@ -338,6 +338,14 @@ mod tests {
 
     /// Only web, mail and relative links are links: any other scheme, in
     /// any case or broken by a tab, is its words alone.
+    #[test]
+    fn a_bare_address_is_a_link_in_the_reader() {
+        let v = viewer("# T\n\nsee www.x.example/a, or (https://y.example/b) or me@z.example.", |s, _| Picture::Url(s.into()));
+        assert!(v.contains("<a href=\"https://www.x.example/a\">www.x.example/a</a>,"), "{v}");
+        assert!(v.contains("(<a href=\"https://y.example/b\">https://y.example/b</a>)"), "{v}");
+        assert!(v.contains("<a href=\"mailto:me@z.example\">me@z.example</a>."), "{v}");
+    }
+
     #[test]
     fn only_web_mail_and_relative_links_are_links() {
         for bad in ["javascript:alert%281%29", "JaVaScRiPt:alert%281%29", "java\tscript:alert%281%29", " data:text/html,x", "vbscript:x", "file:///etc/passwd", "\u{1}javascript:x", "java\nscript:x"] {

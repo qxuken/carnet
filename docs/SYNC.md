@@ -191,7 +191,7 @@ This needs no server. Only when there's no version to merge from (no replica, or
 
 On macOS the keychain ties an item to the program that made it. A locally rebuilt Carnet, or an update not signed with the same Developer ID, is a different program to the keychain, which asks for the login password before handing over the sync keys. If access is denied, sync stays off and Settings says why; the next start asks again.
 
-**Joining an account that already has notes.** The new device's untouched welcome note, if it's alone in the folder, goes to its trash before anything is sent, so the account doesn't end up with two welcome notes.
+**Joining an account.** The new device's untouched welcome note, if it's alone in the folder, goes before anything is sent (its file removed, not to Deleted), so the account doesn't end up with two welcome notes. Once the account's notes are all here, it comes back, to sync as any note does, if the account has no welcome note of its own (nor one in Deleted, let go on purpose): the account has one, never two, nor none because a device joined. One the person wrote in always stays.
 
 ## 6. The server
 

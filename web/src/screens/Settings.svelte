@@ -8,7 +8,7 @@
   import { ago, dateWords, left } from '../lib/time';
   import Icon from '../lib/Icon.svelte';
   import { pair_link, password_fault, qr_svg } from '../wasm/carnet_web.js';
-  import { joinedSaid, waysBack } from '../lib/words';
+  import { inviteSteps, joinedSaid, recoveryShown, waysBack } from '../lib/words';
   import { LINK_OPENS, linkOpen, linkOpenWords, setLinkOpen, type LinkOpen } from '../lib/editor/links';
 
   let { back }: { back: (() => void) | null } = $props();
@@ -254,32 +254,36 @@
       {/if}
       {@render said('pair')}
 
-      <div class="row rule">
-        <Icon name="key" size={20} />
-        <div class="text">
-          <b>Recovery code</b>
-          {#if sync.recovery}
-            <span>This account has one: twelve words that let a new device in when none of yours is left. A new one replaces it.</span>
-          {:else}
-            <span>Twelve words that let a new device in when none of yours is left.</span>
+      <!-- Only by the server's answer about this browser's own account:
+           not before it, nor once the server turned this browser away. -->
+      {#if recoveryShown(sync.recovery, !!sync.words, !!sync.wordsWaiting)}
+        <div class="row rule">
+          <Icon name="key" size={20} />
+          <div class="text">
+            <b>Recovery code</b>
+            {#if sync.recovery}
+              <span>This account has one: twelve words that let a new device in when none of yours is left. A new one replaces it.</span>
+            {:else}
+              <span>Twelve words that let a new device in when none of yours is left.</span>
+            {/if}
+          </div>
+          {#if sync.words}
+            <button class="pill primary" onclick={() => sync.wordsDone()}>Done</button>
+          {:else if sync.wordsWaiting}
+            <button class="pill" disabled>Making one…</button>
+          {:else if !replacingWords}
+            <button class="pill" disabled={!online} onclick={from('recovery', () => (sync.hasRecovery() ? (replacingWords = true) : sync.makeRecovery()))}>{sync.recovery ? 'Replace' : 'Make one'}</button>
           {/if}
         </div>
-        {#if sync.words}
-          <button class="pill primary" onclick={() => sync.wordsDone()}>Done</button>
-        {:else if sync.wordsWaiting}
-          <button class="pill" disabled>Making one…</button>
-        {:else if !replacingWords}
-          <button class="pill" disabled={!online} onclick={from('recovery', () => (sync.hasRecovery() ? (replacingWords = true) : sync.makeRecovery()))}>{sync.recovery ? 'Replace' : 'Make one'}</button>
-        {/if}
-      </div>
-      {#if replacingWords}
-        <div class="confirm">
-          <p>Replace the recovery code? The words you have now will stop working.</p>
-          <div class="buttons">
-            <button class="pill" onclick={() => (replacingWords = false)}>Cancel</button>
-            <button class="pill danger" disabled={!online} onclick={from('recovery', () => { sync.makeRecovery(); replacingWords = false; })}>Yes, replace</button>
+        {#if replacingWords}
+          <div class="confirm">
+            <p>Replace the recovery code? The words you have now will stop working.</p>
+            <div class="buttons">
+              <button class="pill" onclick={() => (replacingWords = false)}>Cancel</button>
+              <button class="pill danger" disabled={!online} onclick={from('recovery', () => { sync.makeRecovery(); replacingWords = false; })}>Yes, replace</button>
+            </div>
           </div>
-        </div>
+        {/if}
       {/if}
       {#if sync.words}
         <div class="words">
@@ -429,7 +433,7 @@
         {#if sync.invite}
           <div class="invite">
             <p class="digits" aria-label="Invite code">{sync.invite}</p>
-            <p>Give them this code and the server’s address, {location.origin}. In Carnet’s Settings → Sync they type both, and Connect.</p>
+            <p>{inviteSteps(location.origin, sync.invite)}</p>
           </div>
         {/if}
         {#each sync.invites.waiting as w (w.hash)}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { footer, joinedSaid, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
+import { footer, inviteSteps, joinedSaid, offlineStatus, recoveryShown, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
 
 const base = { status: 'Up to date', changes: 0, pictures: 0, waitShown: false, allSent: false, readOnly: false };
 
@@ -9,19 +9,52 @@ describe('footer', () => {
     expect(footer({ ...base, changes: 1, waitShown: true }).text).toBe('Waiting to send 1 change');
     expect(footer({ ...base, status: 'Offline', changes: 2, pictures: 1, waitShown: true }).text).toBe('Offline · Waiting to send 2 changes and 1 picture');
   });
+  // The finding: gone offline, the line said "Up to date" until there
+  // was something to send. Offline is said at once, with its icon,
+  // whatever waits; and up to date again once connected and caught up.
+  it('says offline with its icon whether or not anything waits', () => {
+    expect(footer({ ...base, status: offlineStatus(false) })).toEqual({ ok: false, text: 'Offline', icon: 'cloud-off' });
+    expect(footer({ ...base, status: offlineStatus(true) })).toEqual({ ok: false, text: 'Offline: trying again', icon: 'cloud-off' });
+    expect(footer({ ...base, status: offlineStatus(false), allSent: true }).text).toBe('Offline');
+    expect(footer({ ...base, status: offlineStatus(false), changes: 1, waitShown: true }).icon).toBe('cloud-off');
+    expect(footer({ ...base, status: 'Connecting…' }).icon).toBe('clock');
+    expect(footer(base).icon).toBe('check');
+  });
   it('is up to date, or all sent', () => {
-    expect(footer(base)).toEqual({ ok: true, text: 'Up to date' });
-    expect(footer({ ...base, allSent: true })).toEqual({ ok: true, text: 'All sent' });
+    expect(footer(base)).toEqual({ ok: true, text: 'Up to date', icon: 'check' });
+    expect(footer({ ...base, allSent: true })).toEqual({ ok: true, text: 'All sent', icon: 'check' });
     expect(footer({ ...base, readOnly: true, changes: 1, waitShown: true }).text).toBe('Read only for now: 1 change waiting');
   });
   it('says why pictures wait, when they cannot go from here', () => {
     const held = "The server's picture storage can't be reached from here, so new pictures stay on this device for now.";
-    expect(footer({ ...base, pictures: 1, waitShown: true, held })).toEqual({ ok: false, text: 'Waiting to send 1 picture', why: held });
+    expect(footer({ ...base, pictures: 1, waitShown: true, held })).toEqual({ ok: false, text: 'Waiting to send 1 picture', icon: 'clock', why: held });
     // Said at once: it's no passing wait.
     expect(footer({ ...base, pictures: 1, held }).why).toBe(held);
     // None waiting: nothing to say.
     expect(footer({ ...base, held }).why).toBeUndefined();
     expect(footer({ ...base, pictures: 1, waitShown: true }).why).toBeUndefined();
+  });
+});
+
+describe('inviteSteps', () => {
+  // The finding: the web's invite said only the desktop's way in, in
+  // words the desktop no longer shows. Both ways, as the desktop says them.
+  it('says where the code goes on the web and in the app', () => {
+    expect(inviteSteps('https://notes.example.com/', 'K7QF-2M9D-XW4H-P3TA')).toBe(
+      'Give them this code. On the web, they open https://notes.example.com/#invite=K7QF-2M9D-XW4H-P3TA (or https://notes.example.com, then Enter the code). In the Carnet app: Settings → Sync, Cloud sync setup, the server’s address https://notes.example.com, then Enter the code.',
+    );
+  });
+});
+
+describe('recoveryShown', () => {
+  // The finding: a browser the server turned away said "This account has
+  // one" while the account's own device offered "Make one".
+  it('is shown only by an answer about this account', () => {
+    expect(recoveryShown(null, false, false)).toBe(false);
+    expect(recoveryShown(true, false, false)).toBe(true);
+    expect(recoveryShown(false, false, false)).toBe(true);
+    expect(recoveryShown(null, true, false)).toBe(true);
+    expect(recoveryShown(null, false, true)).toBe(true);
   });
 });
 

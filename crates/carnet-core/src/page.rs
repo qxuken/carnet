@@ -413,9 +413,34 @@ fn join_text(t: &mut String, rest: &str, styled: bool) -> usize {
         t.push_str(rest);
         return before;
     }
+    // Spaces ending its last line, a break's marks once, are no break with
+    // words after them: they go, hidden as they were.
+    if !rest.is_empty()
+        && let Some(&(s, _)) = inline::breaks(t).last().filter(|r| r.1 == t.len())
+    {
+        t.truncate(s);
+    }
     let d = Visible::of(t).drawn_len();
     *t = inline::merge(&inline::join(t, rest));
     Visible::of(t).at(d)
+}
+
+/// A paragraph's lines made one line, a space where each broke: the
+/// break's marks gone with it ([`inline::lines`]).
+fn one_line(t: &str) -> String {
+    inline::lines(t).join(" ")
+}
+
+/// The lines of a paragraph that went on below, now ending it: a
+/// backslash that broke its last line from the next goes, as at a
+/// paragraph's end it would be the backslash it is. Spaces stay, as the
+/// file had them: at the end they are hidden all the same.
+fn ended(t: String) -> String {
+    let broken = format!("{t}\n");
+    match inline::breaks(&broken).last() {
+        Some(&(s, e)) if e == t.len() && &t[s..e] == "\\" => t[..s].to_string(),
+        _ => t,
+    }
 }
 
 /// `t` split at `byte`: each side's marks whole, in styled text.
@@ -851,7 +876,7 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
             let mut rest = tail.unwrap_or_default();
             let first_single = single_line(&doc.blocks()[ba].kind);
             if first_single {
-                rest = rest.replace('\n', " ");
+                rest = one_line(&rest);
             }
             doc.remove(joined);
             if let Some(t) = text_mut(doc, a.slot) {
@@ -923,8 +948,17 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let single = kind_at(doc, p.slot).is_some_and(single_line);
     let s = if single { s.replace('\n', " ") } else { s.to_string() };
     let old = text(doc, p.slot).to_string();
+    let marks = styled(doc, p.slot);
     let Some(t) = text_mut(doc, p.slot) else { return false };
-    let byte = floor_char(t, p.byte);
+    let mut byte = floor_char(t, p.byte);
+    // A line broken at its end, before the marks of the break it had:
+    // they stay that line's, the new break after them.
+    if marks && s.starts_with('\n') {
+        let _r = reading(p.slot);
+        if let Some(r) = inline::breaks(t).into_iter().find(|r| r.0 == byte && r.1 < t.len()) {
+            byte = r.1;
+        }
+    }
     t.insert_str(byte, &s);
     *c = Caret::at(Pos {
         byte: byte + s.len(),
@@ -967,7 +1001,9 @@ fn shortcuts(doc: &mut Doc, c: &mut Caret, old: &str) {
             // The line the caret is on, and where it starts.
             let line_start = new[..p.byte].rfind('\n').map_or(0, |n| n + 1);
             let line_end = new[p.byte..].find('\n').map_or(new.len(), |n| p.byte + n);
-            let line = &new[line_start..line_end];
+            // Its break's marks are no words of the block it makes.
+            let bare_end = inline::breaks(&new).iter().find(|r| r.1 == line_end).map_or(line_end, |r| r.0.max(p.byte));
+            let line = &new[line_start..bare_end];
             let old_line = old.get(line_start..).map(|s| s.split('\n').next().unwrap_or(""));
             let Some(kind) = doc::shortcut(line) else { return };
             if old_line.is_some_and(|l| doc::shortcut(l).is_some()) {
@@ -999,7 +1035,7 @@ fn box_prefix(t: &str) -> Option<(bool, usize)> {
 /// of `kind`, the lines before and after it paragraphs of their own; the
 /// caret into it, at `caret_in` of its text ([`entry`]). Returns it.
 fn make_line(doc: &mut Doc, c: &mut Caret, i: usize, t: &str, (start, end): (usize, usize), kind: Kind, caret_in: usize) -> Block {
-    let before = t[..start].trim_end_matches('\n').to_string();
+    let before = ended(t[..start].trim_end_matches('\n').to_string());
     let after = t.get(end + 1..).unwrap_or("").to_string();
     let mut blocks = Vec::new();
     if !before.is_empty() {
@@ -1184,7 +1220,7 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
                 _ => {
                     let prev_id = doc.blocks()[prev].id;
                     let single = single_line(&doc.blocks()[prev].kind);
-                    let joined = if single { t.replace('\n', " ") } else { t };
+                    let joined = if single { one_line(&t) } else { t };
                     doc.remove(i);
                     let marks = styled(doc, Slot::block(prev_id));
                     let mut at = 0;
@@ -1286,7 +1322,7 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
         _ => {
             let single = single_line(&doc.blocks()[i].kind);
             let rest = next.text_ref().unwrap_or("").to_string();
-            let rest = if single { rest.replace('\n', " ") } else { rest };
+            let rest = if single { one_line(&rest) } else { rest };
             doc.remove(i + 1);
             let marks = styled(doc, p.slot);
             if let Some(t) = text_mut(doc, p.slot) {
@@ -1318,10 +1354,13 @@ pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     let kind = doc.blocks()[i].kind.clone();
     let t = text(doc, p.slot).to_string();
-    let byte = floor_char(&t, p.byte);
+    let mut byte = floor_char(&t, p.byte);
     // Split by the words: a bold run cut by Enter is bold on both lines.
     let marks = styled(doc, p.slot);
+    // At a line's end, the marks of the break that ends it stay with it.
+    let at_break = marks && inline::breaks(&t).into_iter().find(|r| r.0 == byte && r.1 < t.len()).inspect(|r| byte = r.1).is_some();
     let (head, tail) = split_text(&t, byte, marks);
+    let head = if at_break { ended(head) } else { head };
     let v = visible(doc, p.slot);
     let (at_start, at_end) = (v.drawn(byte) == 0, v.drawn(byte) == v.drawn_len());
     let fence = matches!(kind, Kind::Text(_)).then(|| fence_line(&t, byte)).flatten();
@@ -1715,12 +1754,12 @@ pub fn turn(doc: &mut Doc, c: &mut Caret, to: u64) -> bool {
         match (lines, &b.kind) {
             (Some((lo, hi)), Kind::Text(t)) => {
                 let all: Vec<&str> = t.split('\n').collect();
-                // A line's spaces at its end are the export's line break
-                // (`  `), which means nothing at the end of an item or a
-                // heading: they go.
-                let mid: Vec<&str> = all[lo..=hi]
-                    .iter()
-                    .map(|l| if to == TURN_QUOTE { l } else { l.trim_end_matches([' ', '\t']) })
+                // A line's break (`  `, `\`, as the export writes one)
+                // means nothing at the end of an item or a heading: its
+                // marks go, and spaces at the end with them.
+                let bare = inline::lines(t);
+                let mid: Vec<&str> = (lo..=hi)
+                    .map(|k| if to == TURN_QUOTE { all[k] } else { bare[k].trim_end_matches([' ', '\t']) })
                     .collect();
                 let kinds = match mid.as_slice() {
                     [one] => turned(&Kind::Text(one.to_string()), to).map(|k| vec![k]),
@@ -1731,7 +1770,7 @@ pub fn turn(doc: &mut Doc, c: &mut Caret, to: u64) -> bool {
                         // The lines above keep the paragraph: its id, its
                         // dropped letter.
                         let mut before = b.clone();
-                        before.kind = Kind::Text(all[..lo].join("\n"));
+                        before.kind = Kind::Text(ended(all[..lo].join("\n")));
                         pieces.push(before);
                     }
                     n = kinds.len();
@@ -1857,8 +1896,8 @@ pub const TURN_QUOTE: u64 = 7;
 pub fn turned_lines(kind: &Kind, to: u64) -> Option<Vec<Kind>> {
     match kind {
         Kind::Text(t) | Kind::Quote(t) if !matches!(to, TURN_TEXT | TURN_QUOTE) && t.contains('\n') => {
-            let lines: Vec<Kind> = t
-                .split('\n')
+            let lines: Vec<Kind> = inline::lines(t)
+                .into_iter()
                 .filter(|l| !l.trim().is_empty())
                 .filter_map(|l| turned(&Kind::Text(l.to_string()), to))
                 .collect();
@@ -1878,7 +1917,7 @@ pub fn turned(kind: &Kind, to: u64) -> Option<Kind> {
             text, indent, done, ..
         } => (text.clone(), *indent, *done),
     };
-    let line = text.replace('\n', " ");
+    let line = one_line(&text);
     // Only a to-do keeps a tick: Markdown has nowhere to write one on a
     // bullet.
     let item = |style| Kind::Item {
@@ -2029,11 +2068,20 @@ pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
     (from + dx).clamp(PICTURE_MIN, max.max(PICTURE_MIN))
 }
 
-/// The width a resize let go at `w` gives a picture: whole pixels, and
-/// none at all back at (within 2 of) `fit`, the width it has with none.
-pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
+/// The width a resize from `w0` let go at `w` gives a picture `natural`
+/// pixels wide, which is drawn `none` wide with no width given
+/// ([`picture_width`]): `None` when it changes nothing — pressed and let
+/// go, no drag, or back where it began; else whole pixels, and no width
+/// at all only back at (within 2 of) its own width where that is how it
+/// is drawn with none. Never none from a width the room caps it at (a
+/// narrow window's, a row's share), which the note's width outlives.
+pub fn resized_width(w0: f32, w: f32, natural: f32, none: f32) -> Option<Option<u32>> {
+    if (w - w0).abs() < 0.5 {
+        return None;
+    }
     let w = w.round();
-    ((w - fit).abs() >= 2.0).then_some(w as u32)
+    let own = (none - natural).abs() < 0.5 && (w - natural).abs() < 2.0;
+    Some((!own).then_some(w as u32))
 }
 
 /// How near (in px) a picture being resized comes to the height of one
@@ -2432,9 +2480,62 @@ fn clamp(doc: &Doc, p: Pos) -> Pos {
     Pos { byte: p.byte.min(len(doc, p.slot)), ..p }
 }
 
-/// The style the caret is in: the letter before it (the first one
-/// selected, with a selection) — what typing there would carry on.
+/// The style the caret is in: the letter before it — what typing there
+/// would carry on. With a selection, what all its words have: a style on
+/// only where every letter selected has it (a toolbar's button shows on
+/// just when pressing it would take it off), a colour where all have the
+/// same one. A selection of no words: the first letter's.
 pub fn style_at(doc: &Doc, c: Caret) -> inline::Style {
+    if !c.is_empty()
+        && let Some(s) = selection_style(doc, c)
+    {
+        return s;
+    }
+    letter_style(doc, c)
+}
+
+/// What every letter of a selection has (spaces aside, and code blocks,
+/// which have no styles); `None` when it holds no letter.
+fn selection_style(doc: &Doc, c: Caret) -> Option<inline::Style> {
+    let cov = coverage(doc, c);
+    let mut all: Option<inline::Style> = None;
+    for s in slots(doc) {
+        let Some(&(f, t)) = cov.parts.get(&s) else { continue };
+        if !styled(doc, s) || is_atomic(doc, s) {
+            continue;
+        }
+        let _r = reading(s);
+        let text = text(doc, s);
+        let st = inline::styles(text);
+        let bytes = text.as_bytes();
+        for i in f..t.min(text.len()) {
+            if st[i].marker || bytes[i].is_ascii_whitespace() {
+                continue;
+            }
+            let x = st[i];
+            all = Some(match all {
+                None => x,
+                Some(a) => inline::Style {
+                    bold: a.bold && x.bold,
+                    italic: a.italic && x.italic,
+                    strike: a.strike && x.strike,
+                    underline: a.underline && x.underline,
+                    code: a.code && x.code,
+                    link: a.link && x.link,
+                    mark: if a.mark == x.mark { a.mark } else { 0 },
+                    ink: if a.ink == x.ink { a.ink } else { 0 },
+                    marker: false,
+                    picture: a.picture && x.picture,
+                },
+            });
+        }
+    }
+    all
+}
+
+/// The letter before the caret's style (the first one selected, with a
+/// selection).
+fn letter_style(doc: &Doc, c: Caret) -> inline::Style {
     let (a, _) = ordered(doc, c);
     if !styled(doc, a.slot) {
         return inline::Style::default();
@@ -2524,6 +2625,14 @@ impl LinkOpen {
             LinkOpen::DoubleClick if !cmd && clicks == 2 => Some(OpensOn::Press),
             _ => None,
         }
+    }
+
+    /// Whether a press, `clicks` in a row, goes nowhere: links opening on
+    /// a double-click, the third press of a triple-click (and on) after the
+    /// second opened one. It would choose the line the link is on; the link
+    /// opened is what the presses were for.
+    pub fn ignores(self, clicks: u32, opened: bool) -> bool {
+        self == LinkOpen::DoubleClick && opened && clicks >= 3
     }
 
     /// Whether the pointer is a hand over a link with these keys held: a
@@ -2993,6 +3102,7 @@ impl Typing {
         if !on.is_empty() {
             self.pending = Some(Pending { caret: *c, layers: on });
         }
+        spaces_shown(doc, *c);
         changed
     }
 
@@ -3038,6 +3148,28 @@ impl Typing {
         let (pre, post) = marks_of(&on);
         let (out, caret) = inline::insert_styled(&back, k.close.0 + spaces.len(), s, &pre, &post);
         splice(doc, c, k.slot, 0, t.len(), &out, caret)
+    }
+}
+
+/// Spaces typed just before a line's break: shown. Spaces there would be
+/// the break's marks (`  `), hidden, the caret standing still as they
+/// went in; so the break is written with a backslash instead, which keeps
+/// it a break (one Carnet would write as a plain `\n` is made one too:
+/// a line break here all the same).
+fn spaces_shown(doc: &mut Doc, c: Caret) {
+    let p = c.head;
+    if !c.is_empty() || !styled(doc, p.slot) {
+        return;
+    }
+    let _r = reading(p.slot);
+    let Some(t) = text_mut(doc, p.slot) else { return };
+    let e = p.byte;
+    let Some(nl) = t.get(e..).and_then(|r| r.find('\n')).map(|k| e + k) else { return };
+    if !t[..e].ends_with(' ') || !t[e..nl].bytes().all(|b| b == b' ') {
+        return;
+    }
+    if inline::breaks(t).iter().any(|r| r.1 == nl && r.0 < e) {
+        t.replace_range(e..nl, "\\");
     }
 }
 
@@ -3195,7 +3327,7 @@ pub fn paste(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     if !tail.is_empty() {
         if last.text_ref().is_some() && !matches!(last.kind, Kind::Raw(_)) {
             if let Some(t) = doc.block_mut(last_i).text_mut() {
-                t.push_str(&tail.replace('\n', " "));
+                t.push_str(&one_line(&tail));
             }
         } else {
             doc.insert(last_i + 1, Block::text(tail));
@@ -4296,9 +4428,20 @@ mod tests {
         assert_eq!(dragged_width(200.0, -500.0, 600.0), PICTURE_MIN);
         assert_eq!(dragged_width(200.0, 900.0, 600.0), 600.0);
         // Let go: whole pixels; back at its own width, none given.
-        assert_eq!(resized_width(250.4, 300.0), Some(250));
-        assert_eq!(resized_width(298.6, 300.0), None);
-        assert_eq!(resized_width(301.0, 300.0), None);
+        assert_eq!(resized_width(300.0, 250.4, 300.0, 300.0), Some(Some(250)));
+        assert_eq!(resized_width(250.0, 298.6, 300.0, 300.0), Some(None));
+        assert_eq!(resized_width(250.0, 301.0, 300.0, 300.0), Some(None));
+        // The finding: pressed and let go, no drag, at a width a narrow
+        // window caps it at (its own 240 there, 180 drawn): nothing
+        // changes, `|240` kept.
+        let (drawn, _) = picture_width(240.0, Some(240), 180.0, 180.0, false);
+        assert_eq!(resized_width(drawn, drawn, 240.0, picture_width(240.0, None, 180.0, 180.0, false).0), None);
+        // Dragged to the width the room caps it at: that width, written.
+        assert_eq!(resized_width(150.0, 180.0, 240.0, 180.0), Some(Some(180)));
+        // At an edge it's 45% of the text with none: its own width there
+        // is written, not taken for none.
+        let none = picture_width(800.0, None, 600.0, 600.0, true).0;
+        assert_eq!(resized_width(270.0, 800.0, 800.0, none), Some(Some(800)));
         // A shortcut for the side it is at: back on its own line.
         assert_eq!(float_toggled(Float::None, Float::Right), Float::Right);
         assert_eq!(float_toggled(Float::Left, Float::Right), Float::Right);
@@ -5291,4 +5434,145 @@ mod tests {
         assert_eq!(touched(&d, c), 0..=1);
     }
 
+    /// A line broken as Markdown's hard break — two spaces or more, or a
+    /// backslash, before its end — is one line break, as Shift+Enter
+    /// makes, and its marks are no words: the line ends at its last
+    /// letter, typing there goes before them, an edit across the break
+    /// takes them with it, and the file is written back as it was read.
+    #[test]
+    fn a_hard_line_break_is_one_break_and_no_words() {
+        for mark in ["  ", "   ", "\\"] {
+            let md = format!("stay{mark}\napart\n");
+            let (_, d0) = crate::doc::from_markdown(&md);
+            assert_eq!(crate::doc::to_markdown(None, &d0), md, "written back byte for byte");
+            let s = block_slots(&d0.blocks()[0])[0];
+            let v = visible(&d0, s);
+            assert_eq!(v.text(text(&d0, s)), "stay\napart", "{mark:?}");
+            let (end, next) = (4, 4 + mark.len() + 1);
+            // The line's end (End, a click past it): after its last letter.
+            assert_eq!(v.at(4), end);
+            // One step crosses the break, either way.
+            let c = right(&d0, Caret::at(Pos { slot: s, byte: end }), false, false);
+            assert_eq!(c.head.byte, next);
+            assert_eq!(left(&d0, c, false, false).head.byte, end);
+
+            // Typing at the line's end: before the marks, the break kept;
+            // a space typed there shown, the caret past it.
+            let (mut d, mut c, mut t) = (d0.clone(), Caret::at(Pos { slot: s, byte: end }), Typing::default());
+            keys(&mut t, &mut d, &mut c, "s");
+            assert_eq!(text(&d, s), format!("stays{mark}\napart"));
+            keys(&mut t, &mut d, &mut c, " ");
+            let v = visible(&d, s);
+            assert_eq!((v.text(text(&d, s)).as_str(), v.drawn(c.head.byte)), ("stays \napart", 6), "{mark:?}: {:?}", text(&d, s));
+            keys(&mut t, &mut d, &mut c, "on");
+            assert_eq!(visible(&d, s).text(text(&d, s)), "stays on\napart");
+            assert_eq!(text(&d, s), "stays on\\\napart", "a break after a space is the backslash's");
+
+            // Backspace at the next line's start, Delete at this one's end,
+            // a selection across: the break goes, and its marks.
+            let mut d = d0.clone();
+            let mut c = Caret::at(Pos { slot: s, byte: next });
+            assert!(backspace(&mut d, &mut c, false));
+            assert_eq!((text(&d, s), c.head.byte), ("stayapart", 4));
+            let mut d = d0.clone();
+            let mut c = Caret::at(Pos { slot: s, byte: end });
+            assert!(delete(&mut d, &mut c, false));
+            assert_eq!(text(&d, s), "stayapart");
+            let mut d = d0.clone();
+            let mut c = Caret { anchor: Pos { slot: s, byte: 3 }, head: Pos { slot: s, byte: next + 1 } };
+            assert!(delete_selection(&mut d, &mut c));
+            assert_eq!(text(&d, s), "stapart");
+            // Shift+Enter at the end of the line: a break of its own, the
+            // marks of the one read kept on the line after.
+            let mut d = d0.clone();
+            let mut c = Caret::at(Pos { slot: s, byte: end });
+            assert!(enter(&mut d, &mut c, true));
+            assert_eq!(visible(&d, s).text(text(&d, s)), "stay\n\napart");
+            assert_eq!(text(&d, s), format!("stay{mark}\n\napart"));
+            // Enter there: two paragraphs, nothing of the break showing.
+            let mut d = d0.clone();
+            let mut c = Caret::at(Pos { slot: s, byte: end });
+            assert!(enter(&mut d, &mut c, false));
+            let first = if mark == "\\" { "stay" } else { &format!("stay{mark}") };
+            assert_eq!(texts(&d)[..2], [format!("Text:{first}"), "Text:\napart".to_string()]);
+            assert_eq!(visible(&d, s).text(text(&d, s)), "stay");
+        }
+    }
+
+    /// A line turned into an item or a heading loses its break's marks;
+    /// the lines that stay a paragraph keep theirs, as the file had them,
+    /// hidden — the last line of the one above too, but for a backslash,
+    /// which at a paragraph's end would be one.
+    #[test]
+    fn a_turned_line_takes_no_break_and_leaves_none_showing() {
+        for (mark, above) in [("  ", "one  "), ("\\", "one")] {
+            let md = format!("one{mark}\ntwo{mark}\nthree\n");
+            let (_, d0) = crate::doc::from_markdown(&md);
+            let mut d = d0.clone();
+            let s = block_slots(&d.blocks()[0])[0];
+            let mut c = Caret::at(Pos { slot: s, byte: 3 + mark.len() + 2 });
+            assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+            assert_eq!(texts(&d)[..3], [format!("Text:{above}"), "[ ]two".to_string(), "Text:three".to_string()], "{mark:?}");
+            let first = block_slots(&d.blocks()[0])[0];
+            assert_eq!(visible(&d, first).text(text(&d, first)), "one", "nothing of the break shows");
+            assert_eq!(crate::doc::to_markdown(None, &d), format!("{above}\n\n- two\n\nthree\n"));
+            // The whole paragraph made a list: no item ends in marks.
+            let mut d = d0.clone();
+            let mut c = select_blocks(&d, 0, 0);
+            assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
+            assert_eq!(texts(&d)[..3], ["[ ]one", "[ ]two", "[ ]three"]);
+            // Made a heading whole: one line, a space where it broke.
+            let mut d = d0.clone();
+            let mut c = Caret::at(Pos { slot: s, byte: 0 });
+            let k = turned(&d.blocks()[0].kind, TURN_H2).unwrap();
+            assert!(matches!(&k, Kind::Heading { text, .. } if text == "one two three"), "{k:?}");
+            // `- ` typed at the start of the middle line: the same.
+            c.head.byte = 3 + mark.len() + 1;
+            c.anchor = c.head;
+            let mut t = Typing::default();
+            keys(&mut t, &mut d, &mut c, "- ");
+            assert_eq!(texts(&d)[..3], [format!("Text:{above}"), "[ ]two".to_string(), "Text:three".to_string()], "{mark:?}");
+        }
+    }
+
+    /// Links opening on a double-click: the third press of a triple-click
+    /// whose second opened one goes nowhere, so the line isn't chosen;
+    /// a triple-click that opened nothing chooses it as ever.
+    #[test]
+    fn a_triple_click_after_a_link_opened_goes_nowhere() {
+        let dc = LinkOpen::DoubleClick;
+        assert_eq!(dc.opens(2, false, false), Some(OpensOn::Press));
+        assert!(dc.ignores(3, true) && dc.ignores(4, true));
+        assert!(!dc.ignores(3, false), "nothing opened: the line");
+        assert!(!dc.ignores(2, true) && !dc.ignores(1, true));
+        assert!(!LinkOpen::Click.ignores(3, true) && !LinkOpen::ModClick.ignores(3, true));
+    }
+
+    /// The finding: Bold showed on for a selection that only started in
+    /// bold. A style is on for a selection only when all its letters have
+    /// it, across blocks too; a colour, when all have the same.
+    #[test]
+    fn a_selection_has_a_style_only_when_all_its_letters_do() {
+        let d = doc(vec![Block::text("**bold** plain"), Block::text("**more** ==lit== `c`"), Block::text("==all lit==")]);
+        let sel = |i: usize, a: usize, j: usize, b: usize| {
+            let (s, t) = (block_slots(&d.blocks()[i])[0], block_slots(&d.blocks()[j])[0]);
+            Caret { anchor: Pos { slot: s, byte: a }, head: Pos { slot: t, byte: b } }
+        };
+        // "bold plain": started in bold, not all bold.
+        assert!(!style_at(&d, sel(0, 2, 0, 14)).bold);
+        // "bold" alone, and backwards: bold.
+        assert!(style_at(&d, sel(0, 2, 0, 6)).bold);
+        assert!(style_at(&d, sel(0, 6, 0, 2)).bold);
+        // The spaces past it are no letters.
+        assert!(style_at(&d, sel(0, 2, 0, 9)).bold);
+        // Across blocks: "bold" and "more", but not "plain" between.
+        assert!(!style_at(&d, sel(0, 2, 1, 6)).bold);
+        // Highlighted: all of it, or not.
+        assert_eq!(style_at(&d, sel(2, 2, 2, 9)).mark, inline::HIGHLIGHT);
+        assert_eq!(style_at(&d, sel(1, 2, 1, 15)).mark, 0);
+        assert!(!style_at(&d, sel(1, 11, 1, 20)).code);
+        // No selection: the letter before the caret, as ever.
+        assert!(style_at(&d, at(&d, 0, 4)).bold);
+        assert!(!style_at(&d, at(&d, 0, 12)).bold);
+    }
 }

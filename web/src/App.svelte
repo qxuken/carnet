@@ -227,7 +227,7 @@
         <Library open={(key) => go(`note/${key}`)} {current} {create} />
         <footer>
           <span class="status" class:ok={status.ok} role="status">
-            <Icon name={status.ok ? 'check' : 'clock'} size={14} /> {status.text}
+            <Icon name={status.icon} size={14} /> {status.text}
           </span>
           <button class:on={route.kind === 'settings'} onclick={() => go('settings')} aria-label="Settings" title="Settings"><Icon name="settings" size={18} /></button>
         </footer>

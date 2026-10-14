@@ -1820,7 +1820,7 @@ mod tests {
         const EXPORT: &str = include_str!("../../carnet-core/tests/fixtures/apple-notes.md");
         let mut e = Editor::open(EXPORT);
         assert_eq!(e.markdown(), EXPORT);
-        assert_eq!(e.lines()[1].text, "путь: жильё   ");
+        assert_eq!(e.lines()[1].text, "путь: жильё", "the line break's spaces are no words");
         e.select(1, 3, 1, 3);
         e.turn(page::TURN_BULLET);
         assert_eq!(e.markdown(), EXPORT.replacen("**путь:** жильё   \nhostel / ryokan  \n", "- **путь:** жильё\n\nhostel / ryokan  \n", 1));
@@ -1828,7 +1828,7 @@ mod tests {
         assert_eq!(e.caret_lc(), (1, 3, 1, 3));
         assert!(e.undo());
         assert_eq!(e.markdown(), EXPORT);
-        let n = e.lines().iter().position(|l| l.text == "полка для книг в коридоре  ").unwrap();
+        let n = e.lines().iter().position(|l| l.text == "полка для книг в коридоре").unwrap();
         e.select(n, 2, n + 2, 4);
         e.turn(page::TURN_TODO);
         assert_eq!(
@@ -1839,6 +1839,58 @@ mod tests {
                 1
             )
         );
+    }
+
+    /// As on the desktop: a line broken as Markdown's hard break (two
+    /// spaces, a backslash) ends at its last letter; typed at, it keeps
+    /// its break; Backspace at the next line's start takes the break and
+    /// its marks; a line turned below leaves none showing above.
+    #[test]
+    fn a_hard_line_break_shows_nothing_of_its_marks() {
+        for mark in ["  ", "\\"] {
+            let md = format!("# T\n\nstay{mark}\napart\n");
+            let mut e = Editor::open(&md);
+            assert_eq!(e.markdown(), md, "as it was read");
+            assert_eq!((e.lines()[1].text.as_str(), e.lines()[2].text.as_str()), ("stay", "apart"));
+            type_at(&mut e, 1, 4, "s");
+            assert_eq!(e.markdown(), format!("# T\n\nstays{mark}\napart\n"));
+            assert_eq!(e.caret_lc(), (1, 5, 1, 5));
+            e.select(2, 0, 2, 0);
+            assert!(e.backspace(false));
+            assert_eq!(e.markdown(), "# T\n\nstaysapart\n");
+            assert_eq!(e.caret_lc(), (1, 5, 1, 5));
+            assert!(e.undo());
+            e.select(2, 2, 2, 2);
+            e.turn(page::TURN_BULLET);
+            assert_eq!(e.lines()[1].text, "stays");
+            let above = if mark == "  " { "stays  " } else { "stays" };
+            assert_eq!(e.markdown(), format!("# T\n\n{above}\n\n- apart\n"));
+        }
+    }
+
+    /// As on the desktop: a selection that only starts in bold isn't
+    /// bold to the toolbar; one all bold is.
+    #[test]
+    fn a_style_is_on_for_a_selection_only_when_all_of_it_has_it() {
+        let mut e = Editor::open("# T\n\n**bold** plain ==lit==\n");
+        e.select(1, 0, 1, 10);
+        assert!(!e.style_here().bold);
+        e.select(1, 0, 1, 4);
+        assert!(e.style_here().bold);
+        e.select(1, 11, 1, 14);
+        assert_ne!(e.style_here().mark, 0);
+        e.select(1, 6, 1, 14);
+        assert_eq!(e.style_here().mark, 0);
+    }
+
+    /// As on the desktop: pictures one after another on a line are a row
+    /// of pictures, not words with marks showing.
+    #[test]
+    fn pictures_on_one_line_are_pictures() {
+        let e = Editor::open("# T\n\n![a|left|200](x.png)![b|left|200](y.png)\n\nWords\n");
+        let pics: Vec<usize> = (0..e.lines().len()).filter(|&n| e.look(n).kind == "image").collect();
+        assert_eq!(pics.len(), 2, "{:?}", (0..e.lines().len()).map(|n| e.look(n).kind).collect::<Vec<_>>());
+        assert!(!e.text().contains('!'), "{}", e.text());
     }
 
     #[test]
