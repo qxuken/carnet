@@ -2068,11 +2068,20 @@ pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
     (from + dx).clamp(PICTURE_MIN, max.max(PICTURE_MIN))
 }
 
-/// The width a resize let go at `w` gives a picture: whole pixels, and
-/// none at all back at (within 2 of) `fit`, the width it has with none.
-pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
+/// The width a resize from `w0` let go at `w` gives a picture `natural`
+/// pixels wide, which is drawn `none` wide with no width given
+/// ([`picture_width`]): `None` when it changes nothing — pressed and let
+/// go, no drag, or back where it began; else whole pixels, and no width
+/// at all only back at (within 2 of) its own width where that is how it
+/// is drawn with none. Never none from a width the room caps it at (a
+/// narrow window's, a row's share), which the note's width outlives.
+pub fn resized_width(w0: f32, w: f32, natural: f32, none: f32) -> Option<Option<u32>> {
+    if (w - w0).abs() < 0.5 {
+        return None;
+    }
     let w = w.round();
-    ((w - fit).abs() >= 2.0).then_some(w as u32)
+    let own = (none - natural).abs() < 0.5 && (w - natural).abs() < 2.0;
+    Some((!own).then_some(w as u32))
 }
 
 /// How near (in px) a picture being resized comes to the height of one
@@ -4419,9 +4428,20 @@ mod tests {
         assert_eq!(dragged_width(200.0, -500.0, 600.0), PICTURE_MIN);
         assert_eq!(dragged_width(200.0, 900.0, 600.0), 600.0);
         // Let go: whole pixels; back at its own width, none given.
-        assert_eq!(resized_width(250.4, 300.0), Some(250));
-        assert_eq!(resized_width(298.6, 300.0), None);
-        assert_eq!(resized_width(301.0, 300.0), None);
+        assert_eq!(resized_width(300.0, 250.4, 300.0, 300.0), Some(Some(250)));
+        assert_eq!(resized_width(250.0, 298.6, 300.0, 300.0), Some(None));
+        assert_eq!(resized_width(250.0, 301.0, 300.0, 300.0), Some(None));
+        // The finding: pressed and let go, no drag, at a width a narrow
+        // window caps it at (its own 240 there, 180 drawn): nothing
+        // changes, `|240` kept.
+        let (drawn, _) = picture_width(240.0, Some(240), 180.0, 180.0, false);
+        assert_eq!(resized_width(drawn, drawn, 240.0, picture_width(240.0, None, 180.0, 180.0, false).0), None);
+        // Dragged to the width the room caps it at: that width, written.
+        assert_eq!(resized_width(150.0, 180.0, 240.0, 180.0), Some(Some(180)));
+        // At an edge it's 45% of the text with none: its own width there
+        // is written, not taken for none.
+        let none = picture_width(800.0, None, 600.0, 600.0, true).0;
+        assert_eq!(resized_width(270.0, 800.0, 800.0, none), Some(Some(800)));
         // A shortcut for the side it is at: back on its own line.
         assert_eq!(float_toggled(Float::None, Float::Right), Float::Right);
         assert_eq!(float_toggled(Float::Left, Float::Right), Float::Right);

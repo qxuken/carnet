@@ -2342,6 +2342,53 @@ fn a_picture_at_the_right_has_the_words_beside_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding: a picture's resize handle pressed and let go, no drag,
+/// dropped its `|240`: the row's share drew it narrower than its own 240,
+/// and the width it was let go at was taken for "none". A press changes
+/// nothing; a drag writes the width chosen.
+#[test]
+fn a_resize_handle_pressed_and_let_go_changes_nothing() {
+    let body = "![a|left|240](attachments/a.png)\n\n![b|left|240](attachments/b.png)\n\n![c|left|240](attachments/c.png)\n\nWords";
+    let (mut app, mut d, dir) = library("pic-press", &[("Row", body)]);
+    let rgba: Vec<u8> = (0..240 * 180).flat_map(|_| [94u8, 124, 164, 255]).collect();
+    let png = crate::images::encode_png(240, 180, &rgba).unwrap();
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    for n in ["a", "b", "c"] {
+        std::fs::write(dir.join("attachments").join(format!("{n}.png")), &png).unwrap();
+    }
+    app.store.index_files();
+    app.images.retry_failed();
+    app.open(app.store.notes.iter().position(|n| n.title == "Row").unwrap());
+    for _ in 0..4 {
+        d.frame(&mut app);
+    }
+    let id = blocks(&app).iter().find(|b| matches!(b.kind, Kind::Image { .. })).unwrap().id;
+    let i = app.doc().index_of(id).unwrap();
+    app.caret = page::select_blocks(app.doc(), i, i);
+    d_frame_twice(&mut app, &mut d);
+    let drawn = app.pic_w[&id].0;
+    assert!(drawn < 239.0, "the row's share draws it narrower than its own: {drawn}");
+    let width = |app: &Carnet| match &app.doc().get(id).unwrap().kind {
+        Kind::Image { width, .. } => *width,
+        _ => None,
+    };
+    for handle in ["resize", "resize-l", "resize-r"] {
+        let k = d.key_of(handle).unwrap_or_else(|| panic!("{handle}"));
+        let at = d.core.nodes().iter().find(|n| n.key == k).unwrap().rect.center();
+        d.click(&mut app, at.x, at.y);
+        d_frame_twice(&mut app, &mut d);
+        assert_eq!(width(&app), Some(240), "{handle}: pressed, nothing changed");
+    }
+    // Dragged narrower: that width, written.
+    let k = d.key_of("resize").unwrap();
+    let at = d.core.nodes().iter().find(|n| n.key == k).unwrap().rect.center();
+    d.drag(&mut app, at, Vec2::new(at.x - 40.0, at.y));
+    d_frame_twice(&mut app, &mut d);
+    let w = width(&app).expect("a width");
+    assert!((w as f32 - (drawn - 40.0)).abs() <= 2.0, "{drawn} -> {w}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn all_notes_has_its_own_menu() {
     let (mut app, mut d, dir) = fresh("all-menu");

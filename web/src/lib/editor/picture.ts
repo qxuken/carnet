@@ -311,9 +311,12 @@ export function pictureTools(pe: PageEditor, run: Run) {
         d.img.style.width = p?.width ? `${p.width}px` : '';
         d.img.style.maxWidth = '';
         if (keep && p) {
-          const fit = picture_width(d.img.naturalWidth, p.width ?? 0, d.text, d.max, p.float !== 0)[1];
-          const width = resized_width(d.w, fit);
-          run(() => pe.set_picture_width(width))(this.view);
+          // Pressed and let go: nothing. Back at its own width, as it's
+          // drawn with none: none given.
+          const natural = d.img.naturalWidth;
+          const none = picture_width(natural, 0, d.text, d.max, p.float !== 0)[0];
+          const width = resized_width(d.w0, d.w, natural, none);
+          if (width >= 0) run(() => pe.set_picture_width(width === 0 ? undefined : width))(this.view);
         }
         this.place();
       }

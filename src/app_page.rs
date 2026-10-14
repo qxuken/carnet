@@ -893,10 +893,13 @@ impl Carnet {
                     });
                     return;
                 };
-                let (drawn, fit) = page::picture_width(nw, width, self.text_w, max_w, floated);
+                let (drawn, _) = page::picture_width(nw, width, self.text_w, max_w, floated);
                 let dw = resizing.map_or(drawn, |r| r.w.clamp(page::PICTURE_MIN.min(nw), max_w));
                 let dh = dw * nh / nw;
-                self.pic_w.insert(id, (dw, fit, max_w));
+                // Drawn, its own width, the room, and how wide it is
+                // with no width given: what a resize let go writes by.
+                let none = page::picture_width(nw, None, self.text_w, max_w, floated).0;
+                self.pic_w.insert(id, (dw, nw, max_w, none));
                 if floated && self.float_count > 1 {
                     self.pic_rows.insert(id, (self.float_row, dh, nh / nw));
                 } else {
@@ -1259,7 +1262,7 @@ impl Carnet {
         let p = &ev.payload;
         let x = p.get_float("x").or_else(|| p.get_int("x").map(|v| v as f64)).unwrap_or(0.0) as f32;
         let full = (self.text_w - 10.0).max(48.0);
-        let (now, fit, max_w) = self.pic_w.get(&id).copied().unwrap_or((full, full, full));
+        let (now, natural, max_w, none) = self.pic_w.get(&id).copied().unwrap_or((full, full, full, full));
         match p.get_str("phase") {
             Some("start") => {
                 self.resizing = Some(Resize { id, w0: now, x0: x, w: now, left, snap: None });
@@ -1285,9 +1288,11 @@ impl Carnet {
             }
             _ => {
                 let Some(r) = self.resizing.take() else { return };
-                // Back at the width it has with none given: none given.
-                let width = page::resized_width(r.w, fit);
-                self.edit(Step::Other, |d, _| page::set_image_width(d, id, width));
+                // Pressed and let go: nothing. Back at its own width, as
+                // it is drawn with none: none given.
+                if let Some(width) = page::resized_width(r.w0, r.w, natural, none) {
+                    self.edit(Step::Other, |d, _| page::set_image_width(d, id, width));
+                }
                 self.reveal = false;
             }
         }

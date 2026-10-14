@@ -715,7 +715,7 @@ pub struct Carnet {
     resizing: Option<Resize>,
     /// Each picture's width as last drawn, by block id, and the widths it
     /// would have with none given and at the most.
-    pic_w: HashMap<u64, (f32, f32, f32)>,
+    pic_w: HashMap<u64, (f32, f32, f32, f32)>,
     /// Each picture in a row at an edge as last drawn, by block id: the
     /// row's (its first picture's id), its height, and its shape (height
     /// over width). A resize snaps to the heights beside it.

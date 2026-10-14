@@ -1218,11 +1218,16 @@ pub fn dragged_width(from: f32, dx: f32, max: f32) -> f32 {
     page::dragged_width(from, dx, max)
 }
 
-/// The width a resize let go at `w` gives a picture (`undefined`: none,
-/// back at its own `fit`).
+/// The width a resize from `w0` let go at `w` gives a picture
+/// ([`page::resized_width`]): -1 nothing changes (no drag), 0 none (back
+/// at its own width, drawn so with none), else the width.
 #[wasm_bindgen]
-pub fn resized_width(w: f32, fit: f32) -> Option<u32> {
-    page::resized_width(w, fit)
+pub fn resized_width(w0: f32, w: f32, natural: f32, none: f32) -> i32 {
+    match page::resized_width(w0, w, natural, none) {
+        None => -1,
+        Some(None) => 0,
+        Some(Some(w)) => i32::try_from(w).unwrap_or(i32::MAX),
+    }
 }
 
 /// A picture being resized to `w` (`aspect` its height over its width)
