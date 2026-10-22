@@ -129,7 +129,7 @@ impl Carnet {
             Msg::FontMenu { which } => {
                 self.font_pick = if self.font_pick == Some(which) { None } else { Some(which) };
                 self.font_query.clear();
-                self.font_search_reset = true;
+                self.font_search_focus = true;
                 return;
             }
             Msg::SetFont { which, index } => {
@@ -182,7 +182,6 @@ impl Carnet {
             self.sync_how = 0;
             self.signup.reset();
             self.sync.error = None;
-            self.sync_reset_fields = true;
             if self.connect.step() == crate::connect::Step::Form {
                 self.focus_req = Some(Field::SyncCode);
             }
@@ -190,7 +189,6 @@ impl Carnet {
         if self.signup.tick() {
             self.sync_how = 0;
             self.sync_code.clear();
-            self.sync_reset_fields = true;
             self.sync.error = None;
             self.focus_req = Some(Field::SyncCode);
         }
@@ -894,7 +892,6 @@ impl Carnet {
     fn sync_way_in(&mut self, ui: &mut Ui<'_>, l: &Look, starting: bool, field: &MakeField<'_>) {
         use crate::connect::Step;
         let t = l.t;
-        let reset = std::mem::take(&mut self.sync_reset_fields);
         let step = self.connect.step();
         let choice = self.connect.choice();
         // A line said: an icon, then words.
@@ -931,9 +928,6 @@ impl Carnet {
                 ui.with(row, |ui| {
                     let server = self.sync_server.clone();
                     let k = field(self, ui, "sync-server", &server, "https://notes.example.com", Field::SyncServer);
-                    if reset {
-                        ui.set_edit_text(k, &server);
-                    }
                     self.apply_focus(ui, k, Field::SyncServer);
                     if checking {
                         ui.text("Checking\u{2026}", TextStyle::new(Type::UI.size).color(t.muted).nowrap());
@@ -1018,23 +1012,14 @@ impl Carnet {
                         3 => {
                             let email = self.signup.email.clone();
                             let k = field(self, ui, "signup-email", &email, "you@example.com", Field::SignupEmail);
-                            if reset {
-                                ui.set_edit_text(k, &email);
-                            }
                             self.apply_focus(ui, k, Field::SignupEmail);
                         }
                         2 => {
                             let email = self.sync_email.clone();
                             let k = field(self, ui, "sync-email", &email, "you@example.com", Field::SyncEmail);
-                            if reset {
-                                ui.set_edit_text(k, &email);
-                            }
                             self.apply_focus(ui, k, Field::SyncEmail);
                             let password = self.sync_password.clone();
-                            let k = field(self, ui, "sync-password", &password, "Password", Field::SyncPassword);
-                            if reset {
-                                ui.set_edit_text(k, &password);
-                            }
+                            field(self, ui, "sync-password", &password, "Password", Field::SyncPassword);
                         }
                         _ => {
                             // One field for either code: an invite and a
@@ -1042,9 +1027,6 @@ impl Carnet {
                             let hint = if how == 1 { "twelve words, spaces between" } else { "Type or paste the code" };
                             let code = self.sync_code.clone();
                             let k = field(self, ui, "sync-code", &code, hint, Field::SyncCode);
-                            if reset {
-                                ui.set_edit_text(k, &code);
-                            }
                             self.apply_focus(ui, k, Field::SyncCode);
                         }
                     }
@@ -1121,7 +1103,7 @@ impl Carnet {
                     .bg(t.sunken)
                     .cross_align(Align::Center),
                 |ui| {
-                    let k = ui.text_edit(
+                    let k = ui.text_edit_value(
                         key,
                         value,
                         &EditOptions {
@@ -1133,12 +1115,12 @@ impl Carnet {
                             secure: secret && !shown,
                             ..Default::default()
                         },
-                        NodeSpec::row().grow_width().min_width(0.0).label(hint),
+                        f.on(NodeSpec::row().grow_width().min_width(0.0).label(hint)),
                     );
                     me.fields.insert(k, f);
                     made = Some(k);
                     if secret {
-                        me.passwords_now.push(k);
+                        me.passwords_now.push((k, f));
                         let (g, word) = if shown { (Icon::EyeOff, "Hide password") } else { (Icon::Eye, "Show password") };
                         ui.with_keyed(
                             &format!("{key}-eye"),
@@ -1755,16 +1737,15 @@ impl Carnet {
                     |ui| {
                         // The field's own placeholder, as the library's:
                         // where the caret and the typed words start.
-                        let k = ui.text_edit(
+                        let k = ui.text_edit_value(
                             "font-search",
-                            "",
+                            &self.font_query,
                             &EditOptions { style, placeholder: Some("Search fonts".into()), ..Default::default() },
-                            NodeSpec::row().grow_width().label("Search fonts"),
+                            Field::Font.on(NodeSpec::row().grow_width().label("Search fonts")),
                         );
-                        // Opened: emptied, and the keyboard in it, to type
-                        // a font's name at once.
-                        if std::mem::take(&mut self.font_search_reset) {
-                            ui.set_edit_text(k, "");
+                        // Opened (its search emptied): the keyboard in it,
+                        // to type a font's name at once.
+                        if std::mem::take(&mut self.font_search_focus) {
                             ui.focus(k);
                         }
                         self.fields.insert(k, Field::Font);

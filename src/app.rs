@@ -13,9 +13,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use kui_native::widgets;
 use kui_native::{
-    Align, App, Color, Core, EditOptions, Edges, FloatConfig, Key, KeyCode, KeyPhase, Menu,
-    MenuItem, Message, NodeSpec, Rect, Role, Sizing, Stroke, TextStyle, Theme, Ui, UiEvent,
-    Value, Vec2, Waker,
+    Align, App, Boundary, Color, Core, DragPhase, DropPhase, EditKey, EditOptions, Edges,
+    Event, FileDrop, FloatConfig, Key, KeyCode, KeyPhase, Menu, MenuItem, Message, NodeSpec,
+    Rect, Role, Sizing, Stroke, TextEdge, TextStyle, Theme, Ui, UiEvent, Value, Vec2, Waker,
+    WindowEvents, WindowPhase,
 };
 
 use carnet_core::doc::{Block, Doc, Kind, ListStyle, Table};
@@ -332,6 +333,29 @@ pub enum Msg {
     /// Puts a piece of the window's text on the clipboard: the notes
     /// folder's path (0), the open note as Markdown (1).
     CopyText { what: u64 },
+    /// A kui field's words changed (`change: {text}`), it was submitted
+    /// (Enter), let go of (Esc), or an arrow, Backspace or Delete met the
+    /// end of its text (`boundary`).
+    Edited { field: Field },
+    Submitted { field: Field },
+    Cancelled { field: Field },
+    AtEdge { field: Field },
+    /// A right-click on a note's card (by its id), a folder's row (by its
+    /// index, `ALL` for every note) or a row of the Deleted folder
+    /// (`trash[index]`).
+    NoteMenu { note: u64 },
+    FolderMenu { index: u64 },
+    DeletedMenu { index: u64 },
+    /// A row of an open menu, or of the menu bar, chosen: `menu: {item}`,
+    /// whose item is an [`Act`].
+    Chose,
+    /// The window gained the keyboard, or lost it, to another app.
+    WindowFocus,
+    /// Files dragged over the window, or let go on it.
+    FilesOver,
+    /// The folder dialog's answer, and the pictures dialog's.
+    PickedDir,
+    PickedPictures,
 }
 
 /// `Msg::SelectFolder`'s every note, and `Msg::SetFont`'s default face:
@@ -362,9 +386,34 @@ enum MenuFor {
     Deleted(usize),
 }
 
+/// What a menu row asks for: its `id`, read back whole when it is chosen
+/// (`Msg::Chose`).
+#[derive(Message, Clone, Debug, PartialEq)]
+pub enum Act {
+    /// A row of the menu bar the app runs itself (`on_bar`).
+    App { what: String },
+    /// A tool from the More menu: `overflow[at]`.
+    Tool { at: u64 },
+    /// `trash[index]`: put back, deleted forever (asked first), or shown
+    /// in the file manager.
+    Trashed { index: u64, what: String },
+    /// What is chosen in the library: moved into `folder` ("" the top
+    /// level), or to the trash.
+    MovePicked { folder: String },
+    TrashPicked,
+    /// The page's right-click menu (`page_action`).
+    Page { what: String },
+    /// A folder's ("" the notes folder itself: "All notes").
+    Folder { folder: String, what: String },
+    /// A note's, by its id; moved into `folder`.
+    Note { note: u64, what: String },
+    MoveNote { note: u64, folder: String },
+}
+
 /// The kui editors left: the note's title, the library's search, and a
 /// new folder's name while it is typed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[message(string)]
 pub enum Field {
     Search,
     Title,
@@ -387,6 +436,17 @@ pub enum Field {
     /// Settings → Sync: the account's password being set.
     PasswordEmail,
     PasswordNew,
+}
+
+impl Field {
+    /// A kui field's spec, its words, Enter, Esc and edges arriving as
+    /// this field's messages.
+    pub fn on(self, spec: NodeSpec) -> NodeSpec {
+        spec.on_change(Msg::Edited { field: self })
+            .on_submit(Msg::Submitted { field: self })
+            .on_cancel(Msg::Cancelled { field: self })
+            .on_boundary(Msg::AtEdge { field: self })
+    }
 }
 
 pub struct Notice {
@@ -604,8 +664,6 @@ pub struct Carnet {
     /// The title has the caret: the file is not renamed while it does, so
     /// it is not renamed letter by letter.
     title_focused: bool,
-    /// Empty the search box on the next frame.
-    clear_search: bool,
     /// One line under the title for what just happened, with the way back.
     notice: Option<Notice>,
     /// The notice's words and its Undo, as last drawn: pointed at, it
@@ -657,9 +715,9 @@ pub struct Carnet {
     pub settings_open: bool,
     /// Reset in Settings pressed: its line asks to be sure.
     pub reset_armed: bool,
-    /// The font list's search to be emptied on the next frame: it opens
-    /// afresh each time.
-    font_search_reset: bool,
+    /// The font list's search to take the keyboard on the next frame: it
+    /// opens afresh each time.
+    font_search_focus: bool,
     /// Notes whose made time was looked up in their history.
     dated: std::collections::HashSet<u64>,
     /// What the font list is narrowed to.
@@ -853,14 +911,10 @@ pub struct Carnet {
     /// Settings said "A new device is in": once they're left, it's been
     /// seen, and isn't said again (`Sync::joined` let go).
     pub joined_said: bool,
-    /// Settings → Sync's fields are to show `sync_server` and `sync_code`
-    /// when next drawn: a field keeps its own text, so changing ours is not
-    /// enough.
-    sync_reset_fields: bool,
     /// The password fields declared on the last frame, and on this one
     /// so far: one that goes is emptied (`forget_passwords`).
-    passwords_shown: Vec<Key>,
-    passwords_now: Vec<Key>,
+    passwords_shown: Vec<(Key, Field)>,
+    passwords_now: Vec<(Key, Field)>,
     /// The sync inspector is open in Settings → Sync.
     pub sync_inspector: bool,
     /// A rollback (false) or repair (true) of this room, awaiting yes.
@@ -1039,7 +1093,6 @@ impl Carnet {
             styler: Styler::default(),
             last_focus: None,
             title_focused: false,
-            clear_search: false,
             notice: None,
             notice_keys: Vec::new(),
             say: None,
@@ -1061,7 +1114,7 @@ impl Carnet {
             settings,
             settings_open: false,
             reset_armed: false,
-            font_search_reset: false,
+            font_search_focus: false,
             dated: Default::default(),
             font_query: String::new(),
             font_pick: None,
@@ -1140,7 +1193,6 @@ impl Carnet {
             sync_rename: None,
             pair_qr: None,
             joined_said: false,
-            sync_reset_fields: false,
             passwords_shown: Vec::new(),
             passwords_now: Vec::new(),
             sync_inspector: false,
@@ -1751,10 +1803,7 @@ impl Carnet {
         self.caret = Caret::at(page::first(self.doc()));
         self.editing = false;
         self.list_view = false;
-        if !self.query.is_empty() {
-            self.query.clear();
-            self.clear_search = true;
-        }
+        self.query.clear();
         self.reorder();
         self.focus(Field::Title);
     }
@@ -2129,14 +2178,12 @@ impl Carnet {
             && self.sync_server.is_empty()
         {
             self.sync_server = origin;
-            self.sync_reset_fields = true;
         }
         // In: the code, or the twelve words, need not stay on screen; nor
         // the password signed in with be kept.
         if self.sync.is_on() && !(self.sync_code.is_empty() && self.sync_password.is_empty()) {
             self.sync_code.clear();
             self.sync_password.clear();
-            self.sync_reset_fields = true;
         }
         // Joining an account can take a note away, the open one or one
         // before it: this device's untouched welcome note, the account's
@@ -2254,73 +2301,65 @@ impl Carnet {
     /// A Deleted row's menu.
     fn deleted_menu(&self, i: usize) -> Vec<MenuItem> {
         let item = |label: &str, what: &str| {
-            MenuItem::new(label).id(Value::map([("trash", Value::Int(i as i64)), ("do", Value::str(what))]))
+            MenuItem::new(label).id(Act::Trashed { index: i as u64, what: what.into() })
         };
         vec![item("Restore", "restore"), item("Delete Forever\u{2026}", "forever"), item(reveal_label(), "reveal")]
     }
 
-    /// What a library row's context menu asked for.
-    fn on_menu(&mut self, ev: &UiEvent) {
-        let Some(item) = ev.payload.get("item") else { return };
-        // A tool from the More menu.
-        if let Some(i) = item.get_int("tool") {
-            if let Some(msg) = self.overflow.get(i as usize).map(|d| d.msg.clone()) {
-                self.on_plain(msg);
-            }
-            return;
-        }
-        if let Some(i) = item.get_int("trash") {
-            match item.get_str("do") {
-                Some("restore") => self.restore_trashed(i as usize),
-                // Opened, and asked to be sure.
-                Some("forever") => {
-                    self.open_deleted(i as usize);
-                    if let Some(p) = self.peek.as_mut() {
-                        p.armed = true;
-                    }
+    /// What a menu row asked for: a context menu's, or the bar's.
+    fn on_act(&mut self, act: Act) {
+        let (id, what) = match act {
+            Act::App { what } => return self.on_bar(&what),
+            // A tool from the More menu.
+            Act::Tool { at } => {
+                if let Some(msg) = self.overflow.get(at as usize).map(|d| d.msg.clone()) {
+                    self.on_plain(msg);
                 }
-                Some("reveal") => {
-                    if let Some(t) = self.trash.get(i as usize)
-                        && let Err(e) = store::reveal(&t.path)
-                    {
-                        self.error = Some(format!("Couldn't open the folder: {e}"));
-                    }
-                }
-                _ => {}
+                return;
             }
-            return;
-        }
-        match item.get_str("picked") {
-            Some("trash") => return self.trash_picked(),
-            Some("move") => return self.move_picked(item.get_str("folder").unwrap_or_default()),
-            _ => {}
-        }
-        if let Some(action) = item.get_str("page") {
-            let action = action.to_string();
-            self.page_action(&action);
-            return;
-        }
-        if item.get_int("note").is_none()
-            && let Some(folder) = item.get_str("folder")
-        {
-            let (folder, what) = (folder.to_string(), item.get_str("do").unwrap_or_default().to_string());
-            self.folder_action(&folder, &what);
-            return;
-        }
-        let Some(id) = item.get_int("note").map(|v| v as u64) else { return };
+            Act::Trashed { index, what } => {
+                let i = index as usize;
+                match what.as_str() {
+                    "restore" => self.restore_trashed(i),
+                    // Opened, and asked to be sure.
+                    "forever" => {
+                        self.open_deleted(i);
+                        if let Some(p) = self.peek.as_mut() {
+                            p.armed = true;
+                        }
+                    }
+                    "reveal" => {
+                        if let Some(t) = self.trash.get(i)
+                            && let Err(e) = store::reveal(&t.path)
+                        {
+                            self.error = Some(format!("Couldn't open the folder: {e}"));
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+            Act::TrashPicked => return self.trash_picked(),
+            Act::MovePicked { folder } => return self.move_picked(&folder),
+            Act::Page { what } => return self.page_action(&what),
+            Act::Folder { folder, what } => return self.folder_action(&folder, &what),
+            Act::MoveNote { note, folder } => {
+                if let Some(i) = self.store.notes.iter().position(|n| n.id == note) {
+                    self.move_note(i, &folder);
+                }
+                return;
+            }
+            Act::Note { note, what } => (note, what),
+        };
         let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { return };
-        match item.get_str("do") {
-            Some("open") => self.open(i),
-            Some("history") => {
+        match what.as_str() {
+            "open" => self.open(i),
+            "history" => {
                 self.open(i);
                 self.show_history();
             }
-            Some("move") => {
-                let to = item.get_str("folder").unwrap_or_default().to_string();
-                self.move_note(i, &to);
-            }
-            Some("pin") => self.pin(i),
-            Some("reveal") => {
+            "pin" => self.pin(i),
+            "reveal" => {
                 // A note never saved has no file yet: write it first.
                 if self.store.notes[i].path.is_none() {
                     self.store.notes[i].dirty = true;
@@ -2337,18 +2376,18 @@ impl Carnet {
                     self.error = Some(format!("Couldn't open the folder: {e}"));
                 }
             }
-            Some("copy-path") => {
+            "copy-path" => {
                 if let Some(p) = &self.store.notes[i].path {
                     self.clip_out = Some((p.display().to_string(), None));
                 }
             }
-            Some("copy-md") => {
+            "copy-md" => {
                 let md = self.store.notes[i].markdown();
                 let folder = self.store.notes[i].folder.clone();
                 self.copy_markdown(md, &folder);
                 self.say = Some("Copied".into());
             }
-            Some("delete") => self.delete_note_at(i),
+            "delete" => self.delete_note_at(i),
             _ => {}
         }
     }
@@ -2359,15 +2398,13 @@ impl Carnet {
     /// over takes it ("All notes": the top level) — with the rest chosen
     /// with it, when it is one of several. A folder never goes into
     /// itself or a folder inside it: such a row doesn't light up.
-    fn row_drag(&mut self, what: Pick, ev: &UiEvent) {
-        let p = &ev.payload;
-        let num = |k: &str| p.get_float(k).or_else(|| p.get_int(k).map(|v| v as f64)).unwrap_or(0.0) as f32;
-        let at = Vec2::new(num("x"), num("y"));
-        match p.get_str("phase") {
-            Some("start") => {
+    fn row_drag(&mut self, what: Pick, d: kui_native::Drag) {
+        let at = d.pos;
+        match d.phase {
+            DragPhase::Start => {
                 self.row_drag = Some(RowDrag { what, from: at, at, moved: false, target: None, rest: None });
             }
-            Some("move") => {
+            DragPhase::Move => {
                 let target = self
                     .folder_rects
                     .iter()
@@ -2430,20 +2467,19 @@ impl Carnet {
     /// `LIBRARY_WIDTHS` and short of leaving the page less than its least
     /// — so a drag never folds the library away — and is saved when it is
     /// let go. A double-click puts it back to the design's.
-    fn library_drag(&mut self, ev: &UiEvent) {
-        let p = &ev.payload;
-        let x = p.get_float("x").or_else(|| p.get_int("x").map(|v| v as f64)).unwrap_or(0.0) as f32;
+    fn library_drag(&mut self, d: kui_native::Drag) {
+        let x = d.pos.x;
         let (lo, hi) = (*crate::settings::LIBRARY_WIDTHS.start(), self.library_most() as u32);
-        match p.get_str("phase") {
-            Some("start") if p.get_int("clicks").unwrap_or(1) >= 2 => {
+        match d.phase {
+            DragPhase::Start if d.clicks.unwrap_or(1) >= 2 => {
                 self.library_from = None;
                 self.settings.library_w = size::SIDEBAR as u32;
                 self.save_library_w();
             }
             // From the width drawn, which a narrower window may have
             // made less than the one saved.
-            Some("start") => self.library_from = Some((x, self.library_w() as u32)),
-            Some("move") => {
+            DragPhase::Start => self.library_from = Some((x, self.library_w() as u32)),
+            DragPhase::Move => {
                 if let Some((x0, w0)) = self.library_from {
                     self.settings.library_w = (w0 as f32 + x - x0).round().clamp(lo as f32, hi as f32) as u32;
                 }
@@ -2994,10 +3030,7 @@ impl Carnet {
 
     fn folder_menu(&self, folder: &str) -> Vec<MenuItem> {
         let item = |label: &str, what: &str| {
-            MenuItem::new(label).id(Value::map([
-                ("do", Value::str(what)),
-                ("folder", Value::str(folder)),
-            ]))
+            MenuItem::new(label).id(Act::Folder { folder: folder.into(), what: what.into() })
         };
         // "" is the notes folder itself: "All notes" in the list.
         if folder.is_empty() {
@@ -3104,10 +3137,7 @@ impl Carnet {
             return Vec::new();
         };
         let item = |label: &str, what: &str| {
-            MenuItem::new(label).id(Value::map([
-                ("do", Value::str(what)),
-                ("note", Value::Int(id as i64)),
-            ]))
+            MenuItem::new(label).id(Act::Note { note: id, what: what.into() })
         };
         let mut items = vec![
             item("Open", "open"),
@@ -3122,11 +3152,7 @@ impl Carnet {
         // Where it can go: every folder but its own, or back out — in a
         // submenu of its own.
         let move_to = |label: String, to: &str| {
-            MenuItem::new(label).id(Value::map([
-                ("do", Value::str("move")),
-                ("note", Value::Int(id as i64)),
-                ("folder", Value::str(to)),
-            ]))
+            MenuItem::new(label).id(Act::MoveNote { note: id, folder: to.into() })
         };
         let mut targets: Vec<MenuItem> = Vec::new();
         if !note.folder.is_empty() {
@@ -3146,7 +3172,7 @@ impl Carnet {
 
     // ------------------------------------------------------------ events
 
-    fn on_msg(&mut self, msg: Msg, ev: &UiEvent, core: &mut Core) {
+    fn on_msg(&mut self, msg: Msg, event: Event, key: Key, core: &mut Core) {
         // Typing goes on through the page's keys; anything else ends it.
         // The colour picker stays for its own swatches and tabs (and the
         // toolbar buttons that switch them); anything else puts it away.
@@ -3157,23 +3183,45 @@ impl Carnet {
             }
         }
         match msg {
-            Msg::RootKey => self.root_key(ev, core),
+            Msg::RootKey => {
+                if let Event::Key(KeyPhase::Down, k) = event {
+                    self.root_press(k, core);
+                }
+            }
             Msg::Page => {
-                if let Some((KeyPhase::Down, k)) = ev.key_press()
-                    && self.debug_key(&k, core)
+                if let Event::Key(KeyPhase::Down, k) = &event
+                    && self.debug_key(k, core)
                 {
                     return;
                 }
-                self.page_event(ev, core)
+                self.page_event(event, key, core)
             }
-            Msg::PageDrag => self.page_drag(ev, core),
+            Msg::PageDrag => {
+                if let Event::Drag(d) = event {
+                    self.page_drag(d, core);
+                }
+            }
             Msg::SettingsTitle => self.title_click(Instant::now(), core),
-            Msg::ResizePicture { id, side } => self.resize_drag(id, side == 1, ev),
-            Msg::PictureDrag { id } => self.picture_drag(id, ev, core),
-            Msg::CardDrag { note } => self.row_drag(Pick::Note(note), ev),
+            Msg::ResizePicture { id, side } => {
+                if let Event::Drag(d) = event {
+                    self.resize_drag(id, side == 1, d);
+                }
+            }
+            Msg::PictureDrag { id } => {
+                if let Event::Drag(d) = event {
+                    self.picture_drag(id, d, core);
+                }
+            }
+            Msg::CardDrag { note } => {
+                if let Event::Drag(d) = event {
+                    self.row_drag(Pick::Note(note), d);
+                }
+            }
             Msg::FolderDrag { index } => {
-                if let Some(f) = self.store.folders.get(index as usize).cloned() {
-                    self.row_drag(Pick::Folder(f), ev);
+                if let Event::Drag(d) = event
+                    && let Some(f) = self.store.folders.get(index as usize).cloned()
+                {
+                    self.row_drag(Pick::Folder(f), d);
                 }
             }
             // A click on a card or a folder with ⇧ or ⌘ held chooses it.
@@ -3190,7 +3238,11 @@ impl Carnet {
                     self.on_plain(msg);
                 }
             }
-            Msg::LibraryDrag => self.library_drag(ev),
+            Msg::LibraryDrag => {
+                if let Event::Drag(d) = event {
+                    self.library_drag(d);
+                }
+            }
             Msg::FoldFolder { index } => {
                 if let Some(f) = self.store.folders.get(index as usize).cloned() {
                     self.toggle_fold(&f, core.modifiers().alt);
@@ -3327,7 +3379,6 @@ impl Carnet {
             Msg::Undo => self.notice_undo(),
             Msg::ClearSearch => {
                 self.query.clear();
-                self.clear_search = true;
                 self.reorder();
                 self.focus(Field::Search);
             }
@@ -3376,7 +3427,6 @@ impl Carnet {
                 self.connect.change();
                 self.signup.reset();
                 self.sync.error = None;
-                self.sync_reset_fields = true;
                 self.focus_req = Some(Field::SyncServer);
             }
             Msg::SyncBack => {
@@ -3385,7 +3435,6 @@ impl Carnet {
                 self.signup.error = None;
                 if self.connect.step() == crate::connect::Step::Server {
                     self.signup.reset();
-                    self.sync_reset_fields = true;
                     self.focus_req = Some(Field::SyncServer);
                 }
             }
@@ -3394,7 +3443,6 @@ impl Carnet {
                 self.connect.choose();
                 self.sync.error = None;
                 self.signup.error = None;
-                self.sync_reset_fields = true;
                 if self.connect.step() == crate::connect::Step::Form {
                     self.focus_req = Some(match self.sync_how {
                         2 => Field::SyncEmail,
@@ -3654,6 +3702,19 @@ impl Carnet {
                 }
             }
             Msg::ResizePicture { .. } | Msg::CardDrag { .. } | Msg::FolderDrag { .. } | Msg::PictureDrag { .. } | Msg::LibraryDrag => {}
+            // Their events' data is what they are about (`on_event_with`).
+            Msg::Edited { .. }
+            | Msg::Submitted { .. }
+            | Msg::Cancelled { .. }
+            | Msg::AtEdge { .. }
+            | Msg::NoteMenu { .. }
+            | Msg::FolderMenu { .. }
+            | Msg::DeletedMenu { .. }
+            | Msg::Chose
+            | Msg::WindowFocus
+            | Msg::FilesOver
+            | Msg::PickedDir
+            | Msg::PickedPictures => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {
                     self.pending_menu = Some((k, at, MenuFor::Tools));
@@ -3815,13 +3876,6 @@ impl Carnet {
         if !on && !cfg!(debug_assertions) && core.devtools() {
             core.set_devtools(false);
         }
-    }
-
-    fn root_key(&mut self, ev: &UiEvent, core: &mut Core) {
-        let Some((KeyPhase::Down, k)) = ev.key_press() else {
-            return;
-        };
-        self.root_press(k, core);
     }
 
     /// A key no sink took: the window's Tab ring, and the app's chords.
@@ -4147,18 +4201,93 @@ impl Carnet {
         }
     }
 
+    /// Escape let go of a field: a folder's name is dropped; a search
+    /// typed is cleared, the keyboard kept there for the next (a second
+    /// Esc lets go of it).
+    fn on_field_cancel(&mut self, field: Field) {
+        match field {
+            // In a font list's search: the list closes, Settings stays.
+            Field::Font => self.font_pick = None,
+            Field::Search if !self.query.is_empty() => self.on_plain(Msg::ClearSearch),
+            Field::Folder => {
+                // A rename dropped: the keyboard back on its row.
+                if let Some(f) = self.naming.as_ref().and_then(|n| n.rename.clone()) {
+                    self.focus_row = Some(FolderRow::Folder(f));
+                }
+                self.finish_naming(false, false);
+            }
+            _ => {}
+        }
+    }
+
+    /// Files dragged over the window (the root is the one drop zone; where
+    /// they are is the page's question): tracked while they hover, put
+    /// where the drop line is when they land.
+    fn files_over(&mut self, d: FileDrop) {
+        match d.phase {
+            DropPhase::Leave => {
+                self.file_drag = None;
+                self.drop_index = None;
+            }
+            DropPhase::Drop => {
+                let paths: Vec<std::path::PathBuf> = d.paths.iter().map(std::path::PathBuf::from).collect();
+                // On a card: into that note, at its end, whether it opened
+                // while the files rested there or not.
+                let card = self.file_drag.as_ref().and_then(|d| d.card).map(|(n, _)| n);
+                if let Some(n) = card {
+                    self.open(n);
+                    self.drop_index = Some(self.doc().len());
+                } else if let Some(cell) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y)) {
+                    // On a table's cell: into it, at its end.
+                    self.caret = Caret::at(page::end(self.doc(), cell));
+                    self.drop_index = None;
+                }
+                let at = self.drop_index.take();
+                self.file_drag = None;
+                self.insert_files_at(&paths, at);
+            }
+            DropPhase::Enter | DropPhase::Move => {
+                let drag = self.file_drag.get_or_insert(FileDrag { at: None, card: None });
+                if d.pos.is_some() {
+                    drag.at = d.pos;
+                }
+            }
+        }
+    }
+
+    /// Back from another app: catch up with what it did to the folder.
+    /// Off to one: a menu does not outlive the window's attention.
+    fn window_focus(&mut self, focused: bool, core: &mut Core) {
+        if focused {
+            self.typing = false;
+            self.rescan();
+            self.refresh_trash();
+            // A picture that could not be read (locked, half-synced) gets
+            // another try.
+            self.images.retry_failed();
+            // Back from another app: the page takes the keyboard back if it
+            // had it.
+            if std::mem::take(&mut self.refocus) && core.focus() != self.page_key {
+                self.focus_page = true;
+            }
+        } else {
+            core.close_menu();
+            self.refocus = self.editing && core.focus().is_some() && core.focus() == self.page_key;
+        }
+    }
+
     /// A key that met the edge of a field's text. ↓ from the title's last
     /// line: into the note's first line, under the title's caret, as one
     /// text would; → at its end: to the note's start. ↑ and ← from there
     /// come back up.
-    fn on_field_boundary(&mut self, field: Field, key: Key, p: &Value, core: &mut Core) {
-        if field != Field::Title || p.get_str("edge") != Some("end") {
+    fn on_field_boundary(&mut self, field: Field, key: Key, b: Boundary, core: &mut Core) {
+        if field != Field::Title || b.edge != TextEdge::End {
             return;
         }
-        match p.get_str("key") {
+        match b.key {
             // A picture or a divider first: chosen whole, as from a line
             // above it (`page::from_title`).
-            Some("down") => {
+            EditKey::Down => {
                 let x = core.edit_caret_rect(key).map(|r| r.x);
                 let at = x.and_then(|x| self.first_line_at(core, x));
                 let at = at.unwrap_or_else(|| page::first(self.doc()));
@@ -4166,7 +4295,7 @@ impl Carnet {
                 self.caret = page::from_title(self.doc(), at);
                 self.goal_x = x;
             }
-            Some("right") => {
+            EditKey::Right => {
                 let at = page::first(self.doc());
                 self.edit_at(at);
                 self.caret = page::from_title(self.doc(), at);
@@ -4175,16 +4304,21 @@ impl Carnet {
         }
     }
 
-    /// A password field no longer shown is emptied: kui keeps an editor's
-    /// words while its key is off screen, so a password typed to set one
-    /// came back in the field the next Change opened, and stayed in
-    /// memory until then. Carnet keeps no password: the server's OPAQUE
-    /// needs it only while it is being set or signed in with.
+    /// A password field no longer shown is emptied, and so is the password
+    /// it showed: kui keeps an editor's words while its key is off screen,
+    /// and the field shows the model's every frame, so a password typed and
+    /// left (Back, Settings closed) came back the next time the form
+    /// opened, and stayed in memory until then. Carnet keeps no password:
+    /// the server's OPAQUE needs it only while it is being set or signed in
+    /// with. (One being set goes with `pw_edit`.)
     fn forget_passwords(&mut self, core: &mut Core) {
         let shown = std::mem::take(&mut self.passwords_now);
-        for k in std::mem::replace(&mut self.passwords_shown, shown) {
-            if !self.passwords_shown.contains(&k) {
+        for (k, f) in std::mem::replace(&mut self.passwords_shown, shown) {
+            if !self.passwords_shown.iter().any(|&(now, _)| now == k) {
                 core.set_edit_text(k, "");
+                if f == Field::SyncPassword {
+                    self.sync_password.clear();
+                }
             }
         }
     }
@@ -4389,7 +4523,7 @@ impl App for Carnet {
                 kui_native::FileDialog::folder()
                     .title("Choose where your notes live")
                     .directory(start)
-                    .tag("dir"),
+                    .tag(Msg::PickedDir),
             );
         }
         if std::mem::take(&mut self.pick_pictures) {
@@ -4398,7 +4532,7 @@ impl App for Carnet {
                     .multiple()
                     .title("Choose pictures")
                     .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
-                    .tag("pictures"),
+                    .tag(Msg::PickedPictures),
             );
         }
         // Asked on every frame the answer is outstanding: the core queues
@@ -4511,8 +4645,9 @@ impl App for Carnet {
                 // layer between the desktop and its words.
                 .bg(if l.side.a < 1.0 { Color::TRANSPARENT } else { l.side })
                 .on_key(Msg::RootKey)
-                .on_drop(Value::Null),
+                .on_drop(Msg::FilesOver),
         );
+        ui.window_events(WindowEvents::default().on_focus(Msg::WindowFocus));
         self.follow_file_drag(ui);
         if narrow && self.list_view && !self.settings_open {
             self.sidebar(ui, &l, true);
@@ -4566,178 +4701,75 @@ impl App for Carnet {
         }
     }
 
+    /// Every event arrives as a message the view declared, the event's
+    /// data beside it; one that carries none of Carnet's (a `layout`) is
+    /// not the app's to answer. What the core reports rather than a press
+    /// on a control — a field's words, a menu, the window, files — is
+    /// answered here and leaves typing and the colour picker as they are;
+    /// the rest is `on_msg`'s.
     fn on_event_with(&mut self, ev: UiEvent, core: &mut Core) {
-
-        // A modal put away (Esc, or a press outside it): the link editor.
-        if ev.kind() == Some("dismiss") {
-            if self.link_edit.take().is_some() {
-                self.focus_page = true;
-            }
-            return;
-        }
-        if let Some(msg) = ev.message::<Msg>() {
-            self.on_msg(msg, &ev, core);
-            return;
-        }
-        match ev.kind() {
-            Some("changed") => {
-                if let Some(field) = self.fields.get(&ev.key).copied() {
-                    let text = core.edit_text(ev.key).unwrap_or_default();
-                    self.on_field_changed(field, text);
-                }
-            }
-            Some("submit") => {
-                if let Some(field) = self.fields.get(&ev.key).copied() {
-                    self.on_field_submit(field);
-                }
-            }
-            // Escape let go of a field: a folder's name is dropped; a
-            // search typed is cleared, the keyboard kept there for the
-            // next (a second Esc lets go of it).
-            Some("cancel") => {
-                // In a font list's search: the list closes, Settings stays.
-                if self.fields.get(&ev.key) == Some(&Field::Font) {
-                    self.font_pick = None;
-                }
-                if self.fields.get(&ev.key) == Some(&Field::Search) && !self.query.is_empty() {
-                    self.on_plain(Msg::ClearSearch);
-                }
-                if self.fields.get(&ev.key) == Some(&Field::Folder) {
-                    // A rename dropped: the keyboard back on its row.
-                    if let Some(f) = self.naming.as_ref().and_then(|n| n.rename.clone()) {
-                        self.focus_row = Some(FolderRow::Folder(f));
-                    }
-                    self.finish_naming(false, false);
-                }
-            }
+        let (Some(msg), event) = ev.split::<Msg>() else { return };
+        match (msg, event) {
+            (Msg::Edited { field }, Event::EditChange(c)) => self.on_field_changed(field, c.text),
+            (Msg::Submitted { field }, _) => self.on_field_submit(field),
+            (Msg::Cancelled { field }, _) => self.on_field_cancel(field),
             // An arrow, Backspace or Delete that met the end of a field's
             // text.
-            Some("boundary") => {
-                if let Some(field) = self.fields.get(&ev.key).copied() {
-                    self.on_field_boundary(field, ev.key, &ev.payload, core);
+            (Msg::AtEdge { field }, Event::Boundary(b)) => self.on_field_boundary(field, ev.key, b, core),
+            (Msg::NoteMenu { note }, Event::ContextMenu(at)) => {
+                let what = if self.is_picked(&Pick::Note(note)) { MenuFor::Picked } else { MenuFor::Note(note) };
+                self.pending_menu = Some((ev.key, at, what));
+            }
+            (Msg::FolderMenu { index }, Event::ContextMenu(at)) => {
+                let folder = if index == ALL { Some(String::new()) } else { self.store.folders.get(index as usize).cloned() };
+                if let Some(f) = folder {
+                    let what = if index != ALL && self.is_picked(&Pick::Folder(f.clone())) { MenuFor::Picked } else { MenuFor::Folder(f) };
+                    self.pending_menu = Some((ev.key, at, what));
                 }
             }
-            Some("contextmenu") => {
-                let p = &ev.payload;
-                let num = |k: &str| {
-                    p.get_float(k)
-                        .or_else(|| p.get_int(k).map(|v| v as f64))
-                        .unwrap_or(0.0) as f32
-                };
-                let at = Vec2::new(num("x"), num("y"));
-                let folder = p.get_str("tag").and_then(|t| t.strip_prefix("folder:")).and_then(|i| i.parse::<usize>().ok()).and_then(|i| self.store.folders.get(i));
-                if p.get_int("tag").is_some_and(|id| self.is_picked(&Pick::Note(id as u64)))
-                    || folder.is_some_and(|f| self.is_picked(&Pick::Folder(f.clone())))
-                {
-                    self.pending_menu = Some((ev.key, at, MenuFor::Picked));
-                } else if let Some(id) = p.get_int("tag") {
-                    self.pending_menu = Some((ev.key, at, MenuFor::Note(id as u64)));
-                } else if let Some(i) = p.get_str("tag").and_then(|t| t.strip_prefix("deleted:")).and_then(|i| i.parse().ok()) {
-                    self.pending_menu = Some((ev.key, at, MenuFor::Deleted(i)));
-                } else if p.get_str("tag") == Some("folder:all") {
-                    self.pending_menu = Some((ev.key, at, MenuFor::Folder(String::new())));
-                } else if let Some(i) = p.get_str("tag").and_then(|t| t.strip_prefix("folder:"))
-                    && let Some(f) = i.parse::<usize>().ok().and_then(|i| self.store.folders.get(i))
-                {
-                    self.pending_menu = Some((ev.key, at, MenuFor::Folder(f.clone())));
+            (Msg::DeletedMenu { index }, Event::ContextMenu(at)) => {
+                self.pending_menu = Some((ev.key, at, MenuFor::Deleted(index as usize)));
+            }
+            (Msg::Chose, Event::Menu(c)) => {
+                if let Ok(act) = Act::try_from(&c.item) {
+                    self.on_act(act);
                 }
             }
-            Some("menu") => {
-                if let Some(item) = ev.payload.get("item")
-                    && self.on_bar(item)
-                {
-                    return;
-                }
-                self.on_menu(&ev);
-            }
-            // The folder dialog's answer.
-            Some("files") => {
-                let paths: Vec<String> = ev
-                    .payload
-                    .get("paths")
-                    .and_then(Value::as_list)
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect();
-                match ev.payload.get_str("tag") {
-                    Some("pictures") => {
-                        let files: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
-                        self.insert_files(&files);
-                    }
-                    _ => {
-                        if let Some(dir) = paths.first() {
-                            self.dir_change = Some(Some(std::path::PathBuf::from(dir)));
-                        }
-                    }
+            // The folder dialog's answer, and the pictures dialog's.
+            (Msg::PickedDir, Event::Files(paths)) => {
+                if let Some(dir) = paths.first() {
+                    self.dir_change = Some(Some(std::path::PathBuf::from(dir)));
                 }
             }
-            // Files dragged over the window (the root is the one drop
-            // zone; where they are is the page's question): tracked while
-            // they hover, put where the drop line is when they land.
-            Some("drop") => {
-                let p = &ev.payload;
-                let at = match (p.get_float("x"), p.get_float("y")) {
-                    (Some(x), Some(y)) => Some(Vec2::new(x as f32, y as f32)),
-                    _ => None,
-                };
-                match p.get_str("phase") {
-                    Some("leave") => {
-                        self.file_drag = None;
-                        self.drop_index = None;
-                    }
-                    Some("drop") => {
-                        let paths: Vec<std::path::PathBuf> = p
-                            .get("paths")
-                            .and_then(Value::as_list)
-                            .unwrap_or(&[])
-                            .iter()
-                            .filter_map(|v| v.as_str().map(std::path::PathBuf::from))
-                            .collect();
-                        // On a card: into that note, at its end, whether
-                        // it opened while the files rested there or not.
-                        let card = self.file_drag.as_ref().and_then(|d| d.card).map(|(n, _)| n);
-                        if let Some(n) = card {
-                            self.open(n);
-                            self.drop_index = Some(self.doc().len());
-                        } else if let Some(cell) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y)) {
-                            // On a table's cell: into it, at its end.
-                            self.caret = Caret::at(page::end(self.doc(), cell));
-                            self.drop_index = None;
-                        }
-                        let at = self.drop_index.take();
-                        self.file_drag = None;
-                        self.insert_files_at(&paths, at);
-                    }
-                    _ => {
-                        let drag = self.file_drag.get_or_insert(FileDrag { at: None, card: None });
-                        if at.is_some() {
-                            drag.at = at;
-                        }
-                    }
-                }
+            (Msg::PickedPictures, Event::Files(paths)) => {
+                let files: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
+                self.insert_files(&files);
             }
-            // Back from another app: catch up with what it did to the
-            // folder.
-            Some("window") if ev.payload.get_str("phase") == Some("focused") => {
-                self.typing = false;
-                self.rescan();
-                self.refresh_trash();
-                // A picture that could not be read (locked, half-synced)
-                // gets another try.
-                self.images.retry_failed();
-                // Back from another app: the page takes the keyboard back
-                // if it had it.
-                if std::mem::take(&mut self.refocus) && core.focus() != self.page_key {
+            (Msg::FilesOver, Event::Drop(d)) => self.files_over(d),
+            (Msg::WindowFocus, Event::Window(w)) => self.window_focus(w.phase == WindowPhase::Focused, core),
+            // A modal put away (Esc, or a press outside it): the link
+            // editor.
+            (Msg::CloseLink, Event::Dismiss(_)) => {
+                if self.link_edit.take().is_some() {
                     self.focus_page = true;
                 }
             }
-            Some("window") if ev.payload.get_str("phase") == Some("blurred") => {
-                // A menu does not outlive the window's attention.
-                core.close_menu();
-                self.refocus = self.editing && core.focus().is_some() && core.focus() == self.page_key;
-            }
-            _ => {}
+            // Their data unread (a core this one does not follow): nothing
+            // to answer, and nothing for `on_msg` to put away.
+            (
+                Msg::Edited { .. }
+                | Msg::AtEdge { .. }
+                | Msg::NoteMenu { .. }
+                | Msg::FolderMenu { .. }
+                | Msg::DeletedMenu { .. }
+                | Msg::Chose
+                | Msg::WindowFocus
+                | Msg::FilesOver
+                | Msg::PickedDir
+                | Msg::PickedPictures,
+                _,
+            ) => {}
+            (msg, event) => self.on_msg(msg, event, ev.key, core),
         }
     }
 

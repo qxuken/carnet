@@ -267,7 +267,8 @@ impl Carnet {
                         .on_drag(Msg::CardDrag { note: note.id })
                         // Right-click: the row's own menu, opened by the
                         // app on the next frame (`pending_menu`).
-                        .on_context_menu(Value::Int(note.id as i64))
+                        .on_context_menu(Msg::NoteMenu { note: note.id })
+                        .on_menu(Msg::Chose)
                         .label(note.display_title())
                         .selected(selected)
                         .description(format!(
@@ -401,7 +402,8 @@ impl Carnet {
                             .bg(if on { t.accent_soft } else { Color::TRANSPARENT })
                             .hover_bg(if on { t.accent_soft } else { t.hover })
                             .on_click(Msg::OpenDeleted { index: i as u64 })
-                            .on_context_menu(Value::str(format!("deleted:{i}")))
+                            .on_context_menu(Msg::DeletedMenu { index: i as u64 })
+                            .on_menu(Msg::Chose)
                             .label(d.title.clone())
                             .description(format!("Deleted {}, from {from} · {}", ago(now, d.when), d.snippet))
                             .selected(on),
@@ -665,7 +667,8 @@ impl Carnet {
                     "f-all",
                     lit(row(0, all), "")
                         .on_click(Msg::SelectFolder { index: ALL })
-                        .on_context_menu(Value::str("folder:all"))
+                        .on_context_menu(Msg::FolderMenu { index: ALL })
+                        .on_menu(Msg::Chose)
                         .on_layout(Value::Null)
                         .label("All notes"),
                     |ui| {
@@ -674,24 +677,20 @@ impl Carnet {
                     },
                 );
                 rows.push((k, FolderRow::All));
-                // Each naming its own field, so it opens empty; kui keeps a
-                // field's text while it is away, and a name dropped with
-                // Escape would come back in the next one.
-                // A rename's field opens on the folder's name.
+                // The name as typed so far (a rename's starts as the
+                // folder's); each naming its own field, so one starts
+                // with no undo history of the last.
                 let field = |ui: &mut Ui<'_>, depth: usize, n: &Naming| -> Key {
                     let style = TextStyle::new(Type::UI.size).color(t.fg);
                     let mut k = Key::ROOT;
-                    let (initial, said) = match &n.rename {
-                        Some(f) => (folder_name(f), "Folder's new name"),
-                        None => ("", "New folder's name"),
-                    };
+                    let said = if n.rename.is_some() { "Folder's new name" } else { "New folder's name" };
                     ui.with_keyed("f-name", row(depth, false).bg(l.card), |ui| {
                         icon(ui, Icon::Folder, t.accent, 16.0, false);
-                        k = ui.text_edit(
+                        k = ui.text_edit_value(
                             &format!("folder-name-{}", n.nth),
-                            initial,
+                            &n.name,
                             &EditOptions { style, placeholder: Some("Folder name".into()), ..Default::default() },
-                            NodeSpec::row().grow_width().label(said),
+                            Field::Folder.on(NodeSpec::row().grow_width().label(said)),
                         );
                     });
                     k
@@ -723,7 +722,8 @@ impl Carnet {
                         .on_click(Msg::SelectFolder { index: i as u64 })
                         // Dragged to another folder row: moved inside it.
                         .on_drag(Msg::FolderDrag { index: i as u64 })
-                        .on_context_menu(Value::str(format!("folder:{i}")))
+                        .on_context_menu(Msg::FolderMenu { index: i as u64 })
+                        .on_menu(Msg::Chose)
                         .label(folder_name(f));
                     if parent {
                         spec = spec.expanded(open);
@@ -819,7 +819,6 @@ impl Carnet {
     pub(super) fn search(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let t = l.t;
         let empty = self.query.is_empty();
-        let clear = std::mem::take(&mut self.clear_search);
         // Quiet until it is used: in a window in the background, or with
         // nothing searched and the keyboard elsewhere.
         let quiet = !ui.env().focused || (self.query.is_empty() && !self.search_active);
@@ -845,19 +844,16 @@ impl Carnet {
                     .role(Role::Group),
                 |ui| {
                     icon(ui, Icon::Search, t.muted, 15.0, false);
-                    let k = ui.text_edit(
+                    let k = ui.text_edit_value(
                         "search",
-                        "",
+                        &self.query,
                         &EditOptions {
                             style: TextStyle::new(Type::UI.size).color(t.fg),
                             placeholder: Some("Search".into()),
                             ..Default::default()
                         },
-                        NodeSpec::row().grow_width().label("Search notes"),
+                        Field::Search.on(NodeSpec::row().grow_width().label("Search notes")),
                     );
-                    if clear {
-                        ui.set_edit_text(k, "");
-                    }
                     self.fields.insert(k, Field::Search);
                     self.apply_focus(ui, k, Field::Search);
                     if !empty {
@@ -1393,7 +1389,7 @@ impl Carnet {
                 items.push(MenuItem::separator());
             }
             let mut item = MenuItem::new(d.name)
-                .id(Value::map([("tool", Value::Int(i as i64))]))
+                .id(Act::Tool { at: i as u64 })
                 .enabled(d.enabled);
             if let Some(spec) = d.spec {
                 item = item.accel(spec);
@@ -1537,8 +1533,10 @@ impl<'a> Tool<'a> {
             })
             .transition(if self.calm { 900.0 } else { 140.0 })
             .label(self.name)
-            // Where it is: what a menu it opens hangs from.
-            .on_layout(Value::Null);
+            // Where it is: what a menu it opens hangs from, and where the
+            // row chosen in it comes back.
+            .on_layout(Value::Null)
+            .on_menu(Msg::Chose);
         if let Some(state) = self.toggle {
             spec = spec.role(Role::Checkbox).checked(state);
         }

@@ -6805,7 +6805,6 @@ fn removed_then_back_by_an_invite_draws_each_node_once() {
     until("the invite", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| x[0].0.sync.invite.is_some());
     a.sync_server = origin.clone();
     a.sync_code = w.sync.invite.clone().unwrap();
-    a.sync_reset_fields = true;
     a.on_plain(Msg::SyncStart);
     until("the desktop online on an account of its own, its devices and invites listed", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| {
         let a = &x[1].0;
@@ -10056,5 +10055,169 @@ fn backspace_or_delete_after_a_click_on_a_folder_removes_it() {
     d.frame(&mut app);
     key(&mut app, &mut d, "backspace");
     assert_eq!(app.store.notes.len(), notes);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A right-click on the library's row whose words are `row`, then a click
+/// on the row `choice` of the menu it opened.
+fn row_menu(app: &mut Carnet, d: &mut Drive, row: &str, choice: &str) {
+    d.core.set_inspect(true);
+    d.frame(app);
+    let edge = app.library_w();
+    let at = d
+        .core
+        .nodes()
+        .iter()
+        .find(|n| n.text.as_deref() == Some(row) && n.rect.x < edge)
+        .map(|n| n.rect.center())
+        .unwrap_or_else(|| panic!("{row} is drawn in the library"));
+    d.input(app, InputEvent::CursorMoved(at));
+    d.input(app, InputEvent::MouseDown { button: kui_native::MouseButton::Secondary, clicks: 1 });
+    d.input(app, InputEvent::MouseUp { button: kui_native::MouseButton::Secondary });
+    d_frame_twice(app, d);
+    let at = d
+        .core
+        .nodes()
+        .iter()
+        .find(|n| n.text.as_deref() == Some(choice))
+        .map(|n| n.rect.center())
+        .unwrap_or_else(|| panic!("{choice} is in the menu"));
+    d.click(app, at.x, at.y);
+    d.frame(app);
+}
+
+/// A folder's menu reaches the app (kui posts a choice only to a node that
+/// declares where it goes), and so do its name field's words, Enter and
+/// Esc.
+#[test]
+fn a_folders_menu_renames_it_and_esc_lets_the_name_go() {
+    let (mut app, mut d, dir) = fresh("folder-menu");
+    app.store.create_folder("", "Work").unwrap();
+    d.frame(&mut app);
+    row_menu(&mut app, &mut d, "Work", "Rename\u{2026}");
+    assert_eq!(app.naming.as_ref().and_then(|n| n.rename.as_deref()), Some("Work"));
+    d.frame(&mut app);
+    let field = d.core.focus().and_then(|k| app.fields.get(&k)).copied();
+    assert_eq!(field, Some(Field::Folder), "the name's field has the keyboard");
+    type_in(&mut app, &mut d, "s");
+    key(&mut app, &mut d, "enter");
+    assert!(app.store.folders.iter().any(|f| f == "Works"), "{:?}", app.store.folders);
+    assert!(app.naming.is_none());
+    // Again, and let go of.
+    row_menu(&mut app, &mut d, "Works", "Rename\u{2026}");
+    d.frame(&mut app);
+    type_in(&mut app, &mut d, "hop");
+    key(&mut app, &mut d, "escape");
+    assert!(app.naming.is_none(), "Esc drops the name");
+    assert_eq!(app.store.folders, ["Works"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A row of the Deleted folder's menu reaches the app.
+#[test]
+fn a_deleted_rows_menu_puts_it_back() {
+    let (mut app, mut d, dir) = fresh("deleted-menu");
+    d.text(&mut app, "Old plans");
+    d.frame(&mut app);
+    app.delete_note_at(app.current);
+    app.notice = None;
+    app.on_plain(Msg::ShowDeleted);
+    d.frame(&mut app);
+    row_menu(&mut app, &mut d, "Old plans", "Restore");
+    assert!(app.trash.iter().all(|t| t.title != "Old plans"), "out of the trash");
+    assert!(app.store.notes.iter().any(|n| n.display_title() == "Old plans"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A row of the menu bar the app runs itself, not a key kui plays back.
+#[test]
+fn a_bar_row_the_app_runs_reaches_it() {
+    let (mut app, mut d, dir) = fresh_mac("menubar-own-row");
+    let was = app.settings.focus;
+    choose(&mut app, &mut d, "View", "Focus");
+    assert_eq!(app.settings.focus, !was);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A kui field shows the model's words on every frame (its `value`): a
+/// title another device changed, with the keyboard in it or not, and a
+/// search the app emptied. What is typed goes on from there.
+#[test]
+fn a_field_shows_what_the_model_holds() {
+    let (mut app, mut d, dir) = fresh("field-value");
+    type_in(&mut app, &mut d, "Mine");
+    let title = app_field(&app, Field::Title).expect("the title's field");
+    assert_eq!(d.core.focus(), Some(title));
+    app.store.notes[app.current].title = "Theirs".into();
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(title).as_deref(), Some("Theirs"), "while it has the keyboard");
+    type_in(&mut app, &mut d, "!");
+    assert_eq!(app.store.notes[app.current].title, "Theirs!", "typing goes on at its end");
+    key(&mut app, &mut d, "enter");
+    assert!(page_focused(&app, &d));
+    app.store.notes[app.current].title = "Elsewhere".into();
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(title).as_deref(), Some("Elsewhere"), "and without it");
+    // The search, emptied by the app: so is its field.
+    key_with(&mut app, &mut d, "f", CTRL);
+    type_in(&mut app, &mut d, "zzz");
+    let search = app_field(&app, Field::Search).expect("the search");
+    assert_eq!(d.core.edit_text(search).as_deref(), Some("zzz"));
+    app.on_plain(Msg::ClearSearch);
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(search).as_deref(), Some(""));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Settings → Sync's address put in by the app (the last server signed
+/// in to, say) shows in its field, with nothing to tell the field.
+#[test]
+fn the_sync_address_the_app_fills_shows_in_its_field() {
+    let (mut app, mut d, dir) = tall("sync-address-value");
+    let field = app_field(&app, Field::SyncServer).expect("the server's field");
+    assert_eq!(d.core.edit_text(field).as_deref(), Some(""));
+    app.sync_server = "https://notes.example.com".into();
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(field).as_deref(), Some("https://notes.example.com"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The password typed to sign in goes with its field: Back to the ways in,
+/// or Settings closed, and the form opens again with none — in the field
+/// or kept by the app.
+#[test]
+fn a_sign_in_password_left_behind_is_forgotten() {
+    let (store, dir) = temp_store("pw-forgotten");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings_open = true;
+    app.connect.assume("https://notes.example.com", server_info(&["passwords"]));
+    let typed = |app: &mut Carnet, d: &mut Drive| {
+        app.on_plain(Msg::SyncHow { to: 2 });
+        d_frame_twice(app, d);
+        let k = app_field(app, Field::SyncPassword).expect("the password's field");
+        d.focus(app, k);
+        d.text(app, "hunter22");
+        d_frame_twice(app, d);
+        assert_eq!(app.sync_password, "hunter22");
+        k
+    };
+    let reopened = |app: &mut Carnet, d: &mut Drive| {
+        app.on_plain(Msg::SyncHow { to: 2 });
+        d_frame_twice(app, d);
+        let k = app_field(app, Field::SyncPassword).expect("the password's field");
+        (app.sync_password.clone(), d.core.edit_text(k).unwrap_or_default())
+    };
+    typed(&mut app, &mut d);
+    app.on_plain(Msg::SyncBack);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.sync_password.is_empty(), "Back: forgotten");
+    assert_eq!(reopened(&mut app, &mut d), (String::new(), String::new()));
+    typed(&mut app, &mut d);
+    app.settings_open = false;
+    d_frame_twice(&mut app, &mut d);
+    app.settings_open = true;
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(reopened(&mut app, &mut d), (String::new(), String::new()), "Settings closed: forgotten");
     let _ = std::fs::remove_dir_all(dir);
 }
