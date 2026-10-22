@@ -144,6 +144,7 @@ impl Carnet {
                 // title, as it reads.
                 .on_drag(Msg::PageDrag)
                 .on_context_menu(Msg::Page)
+                .on_menu(Msg::Chose)
                 // Where it is: a dragged file's drop line, and the edges
                 // that scroll it.
                 .on_layout(Value::Null),
@@ -235,6 +236,7 @@ impl Carnet {
                             // one beside it.
                             .on_drag(Msg::PageDrag)
                             .on_context_menu(Msg::Page)
+                            .on_menu(Msg::Chose)
                             .role(Role::MultilineTextInput)
                             .label("Note");
                         // Over a link a press would open, a hand.
@@ -419,7 +421,7 @@ impl Carnet {
                     placeholder: Some("Untitled".into()),
                     ..Default::default()
                 },
-                NodeSpec::row().grow_width().label("Title"),
+                Field::Title.on(NodeSpec::row().grow_width().label("Title")),
             );
             self.fields.insert(k, Field::Title);
             // kui's field keeps its own words: a title changed elsewhere —
@@ -1148,24 +1150,22 @@ impl Carnet {
     /// A picture pressed: selected; dragged, carried — the drop line shows
     /// where it goes between blocks, a bar beside a picture where the two
     /// will sit side by side, a ring round a table's cell it goes into.
-    pub(super) fn picture_drag(&mut self, id: u64, ev: &UiEvent, core: &Core) {
-        let p = &ev.payload;
-        let num = |k: &str| p.get_float(k).or_else(|| p.get_int(k).map(|v| v as f64)).unwrap_or(0.0) as f32;
-        let at = Vec2::new(num("x"), num("y"));
-        if p.get_str("phase") == Some("start") {
+    pub(super) fn picture_drag(&mut self, id: u64, d: kui_native::Drag, core: &Core) {
+        let at = d.pos;
+        if d.phase == DragPhase::Start {
             self.pic_drag = Some(PicDrag { what: Carried::Block(id), from: at, at, moved: false, target: None });
             self.on_plain(Msg::Select { id });
             return;
         }
-        self.carry(core, p.get_str("phase"), at);
+        self.carry(core, d.phase, at);
     }
 
     /// A carried picture's pointer moved (`move`) or let go (anything
     /// else): where it would land followed, or it put there, as one step
     /// of the history. A press that never travelled moves nothing.
-    fn carry(&mut self, core: &Core, phase: Option<&str>, at: Vec2) {
+    fn carry(&mut self, core: &Core, phase: DragPhase, at: Vec2) {
         let Some(what) = self.pic_drag.as_ref().map(|d| d.what) else { return };
-        if phase == Some("move") {
+        if phase == DragPhase::Move {
             let target = self.picture_target(core, what, at);
             let Some(d) = self.pic_drag.as_mut() else { return };
             d.at = at;
@@ -1258,13 +1258,12 @@ impl Carnet {
     /// A drag on a picture's handle: the width follows the pointer, and
     /// lands as one step of the history when it is let go. Back at its own
     /// width (or the page's, for one wider), the width is forgotten.
-    pub(super) fn resize_drag(&mut self, id: u64, left: bool, ev: &UiEvent) {
-        let p = &ev.payload;
-        let x = p.get_float("x").or_else(|| p.get_int("x").map(|v| v as f64)).unwrap_or(0.0) as f32;
+    pub(super) fn resize_drag(&mut self, id: u64, left: bool, d: kui_native::Drag) {
+        let x = d.pos.x;
         let full = (self.text_w - 10.0).max(48.0);
         let (now, natural, max_w, none) = self.pic_w.get(&id).copied().unwrap_or((full, full, full, full));
-        match p.get_str("phase") {
-            Some("start") => {
+        match d.phase {
+            DragPhase::Start => {
                 self.resizing = Some(Resize { id, w0: now, x0: x, w: now, left, snap: None });
                 if let Some(i) = self.doc().index_of(id) {
                     let c = page::select_blocks(self.doc(), i, i);
@@ -1273,7 +1272,7 @@ impl Carnet {
                 self.focus_page = true;
                 self.editing = true;
             }
-            Some("move") => {
+            DragPhase::Move => {
                 // Near the height of a picture beside it in its row, it
                 // takes that height: the row lines up.
                 let row = self.pic_rows.get(&id).copied();
@@ -1933,10 +1932,10 @@ impl Carnet {
 
     /// The page sink's events: a key, typed or pasted text, an IME
     /// composition.
-    pub(super) fn page_event(&mut self, ev: &UiEvent, core: &mut Core) {
-        match ev.kind() {
-            Some("key") => {
-                if let Some((KeyPhase::Down, k)) = ev.key_press() {
+    pub(super) fn page_event(&mut self, event: Event, key: Key, core: &mut Core) {
+        match event {
+            Event::Key(phase, k) => {
+                if phase == KeyPhase::Down {
                     // A letter's press is writing (it types its text:
                     // `page_key_press`); Enter, Tab and the deletes are
                     // too, with a modifier or without (⌘⌫ takes the line
@@ -1956,9 +1955,9 @@ impl Carnet {
                     self.page_key_press(k, core);
                 }
             }
-            Some("text") => {
-                let s = ev.payload.get_str("text").unwrap_or("").to_string();
-                let pasted = std::mem::take(&mut self.paste_pending) || ev.payload.get("pasted").is_some();
+            Event::Text(t) => {
+                let s = t.text;
+                let pasted = std::mem::take(&mut self.paste_pending) || t.pasted;
                 self.preedit = None;
                 if pasted {
                     self.edit(Step::Other, |d, c| page::paste(d, c, &s));
@@ -1970,24 +1969,17 @@ impl Carnet {
                     self.type_text(&s);
                 }
             }
-            Some("preedit") => {
+            Event::Preedit(p) => {
                 // A letter being composed (an accent held, an input
                 // method) is typing too.
                 self.typing = true;
                 self.typed_at = core.now();
-                let s = ev.payload.get_str("text").unwrap_or("");
-                self.preedit = (!s.is_empty()).then(|| s.to_string());
+                self.preedit = (!p.text.is_empty()).then_some(p.text);
             }
             // A right-click: the caret goes where it was unless that is
             // inside the selection, which the menu then acts on.
-            Some("contextmenu") => {
-                let p = &ev.payload;
-                let num = |k: &str| {
-                    p.get_float(k)
-                        .or_else(|| p.get_int(k).map(|v| v as f64))
-                        .unwrap_or(0.0) as f32
-                };
-                let (x, y) = (num("x"), num("y"));
+            Event::ContextMenu(at) => {
+                let (x, y) = (at.x, at.y);
                 if let Some(pos) = self.hit(core, x, y)
                     && !page::contains(self.doc(), self.caret, pos)
                 {
@@ -1997,8 +1989,8 @@ impl Carnet {
                 self.focus_page = true;
                 self.writing.moved();
                 self.history().seal();
-                self.pending_menu = Some((ev.key, Vec2::new(x, y), MenuFor::Page));
-                self.menu_at = Vec2::new(x, y);
+                self.pending_menu = Some((key, at, MenuFor::Page));
+                self.menu_at = at;
             }
             _ => {}
         }
@@ -2011,7 +2003,7 @@ impl Carnet {
         let selected = !self.caret.is_empty();
         let in_table = self.caret.head.slot.cell.is_some();
         let item = |label: &str, action: &str| {
-            MenuItem::new(label).id(Value::map([("page", Value::str(action))]))
+            MenuItem::new(label).id(Act::Page { what: action.into() })
         };
         let picture = self.picture_at_caret().is_some();
         let mut items = Vec::new();
@@ -2701,7 +2693,7 @@ impl Carnet {
                         "link-url",
                         &le.url,
                         &EditOptions { style: TextStyle::new(Type::UI.size).color(t.fg), ..Default::default() },
-                        NodeSpec::row().grow_width().label("Link address"),
+                        Field::Link.on(NodeSpec::row().grow_width().label("Link address")),
                     ));
                 });
                 ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
@@ -3045,23 +3037,17 @@ impl Carnet {
     /// it. Where a press lands is the page's own question (`hit`): kui's
     /// `line` is the row a press is level with, the same for every cell of
     /// a table row and for the margin beside it.
-    pub(super) fn page_drag(&mut self, ev: &UiEvent, core: &Core) {
-        let p = &ev.payload;
-        let num = |k: &str| {
-            p.get_float(k)
-                .or_else(|| p.get_int(k).map(|v| v as f64))
-                .unwrap_or(0.0) as f32
-        };
-        let (x, y) = (num("x"), num("y"));
-        let clicks = p.get_int("clicks").unwrap_or(1);
+    pub(super) fn page_drag(&mut self, d: kui_native::Drag, core: &Core) {
+        let (x, y) = (d.pos.x, d.pos.y);
+        let clicks = d.clicks.map_or(1, i64::from);
         // A cell's picture pressed: carried, not a selection.
-        if p.get_str("phase") != Some("start") && self.pic_drag.as_ref().is_some_and(|d| matches!(d.what, Carried::Cell(..))) {
-            self.carry(core, p.get_str("phase"), Vec2::new(x, y));
+        if d.phase != DragPhase::Start && self.pic_drag.as_ref().is_some_and(|d| matches!(d.what, Carried::Cell(..))) {
+            self.carry(core, d.phase, Vec2::new(x, y));
             self.reveal = false;
             return;
         }
-        match p.get_str("phase") {
-            Some("start") => {
+        match d.phase {
+            DragPhase::Start => {
                 self.focus_page = true;
                 self.editing = true;
                 self.goal_x = None;
@@ -3135,7 +3121,7 @@ impl Carnet {
                 }
                 self.drag_at = Some((Vec2::new(x, y), Vec2::new(x, y), core.now()));
             }
-            Some("move") => {
+            DragPhase::Move => {
                 if let Some((at, _, _)) = self.drag_at.as_mut() {
                     *at = Vec2::new(x, y);
                 }

@@ -1133,7 +1133,7 @@ impl Carnet {
                             secure: secret && !shown,
                             ..Default::default()
                         },
-                        NodeSpec::row().grow_width().min_width(0.0).label(hint),
+                        f.on(NodeSpec::row().grow_width().min_width(0.0).label(hint)),
                     );
                     me.fields.insert(k, f);
                     made = Some(k);
@@ -1759,7 +1759,7 @@ impl Carnet {
                             "font-search",
                             "",
                             &EditOptions { style, placeholder: Some("Search fonts".into()), ..Default::default() },
-                            NodeSpec::row().grow_width().label("Search fonts"),
+                            Field::Font.on(NodeSpec::row().grow_width().label("Search fonts")),
                         );
                         // Opened: emptied, and the keyboard in it, to type
                         // a font's name at once.

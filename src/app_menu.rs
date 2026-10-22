@@ -46,7 +46,7 @@ impl Carnet {
         // A row whose shortcut is played back as that key.
         let key = |label: &str, spec: &str| MenuItem::new(label).accel(spec).replay();
         // A row the app runs itself.
-        let act = |label: &str, what: &str| MenuItem::new(label).id(Value::map([("app", Value::str(what))]));
+        let act = |label: &str, what: &str| MenuItem::new(label).id(Act::App { what: what.into() });
         // The application's own row, worded with the name: AppKit would
         // take the process's, which is the binary's lower-case one.
         let role = |r: MenuRole, label: &str| MenuItem { label: label.into(), ..MenuItem::role(r) };
@@ -153,13 +153,12 @@ impl Carnet {
             "Window",
             vec![act("Minimize", "minimize").accel("mod+m"), act("Zoom", "zoom")],
         );
-        MenuBar::new(vec![app, file, edit, format, view, window])
+        MenuBar::new(vec![app, file, edit, format, view, window]).on_menu(Msg::Chose)
     }
 
     /// A row of the bar the app runs itself chosen. (A row that is its key
     /// posts nothing: kui plays the key.)
-    pub(super) fn on_bar(&mut self, item: &Value) -> bool {
-        let Some(what) = item.get_str("app") else { return false };
+    pub(super) fn on_bar(&mut self, what: &str) {
         match what {
             "close" => self.window_cmd = Some(WindowCommand::Close(WindowId::MAIN)),
             "minimize" => self.window_cmd = Some(WindowCommand::Minimize(WindowId::MAIN)),
@@ -179,6 +178,5 @@ impl Carnet {
             "fade-tools" => self.on_settings(Msg::SetToolbar { to: u64::from(!self.settings.fade_tools) }),
             _ => {}
         }
-        true
     }
 }

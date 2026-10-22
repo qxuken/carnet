@@ -162,11 +162,10 @@ impl Carnet {
         let (folders, notes) = self.picked_now();
         let what = Self::picked_words(folders.len(), notes.len());
         let item = |label: String, to: Option<&str>| {
-            let mut m = vec![("picked", Value::str(if to.is_some() { "move" } else { "trash" }))];
-            if let Some(f) = to {
-                m.push(("folder", Value::str(f)));
-            }
-            MenuItem::new(label).id(Value::map(m))
+            MenuItem::new(label).id(match to {
+                Some(f) => Act::MovePicked { folder: f.into() },
+                None => Act::TrashPicked,
+            })
         };
         let mut items = Vec::new();
         if !folders.is_empty() || !notes.is_empty() {

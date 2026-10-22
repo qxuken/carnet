@@ -10058,3 +10058,84 @@ fn backspace_or_delete_after_a_click_on_a_folder_removes_it() {
     assert_eq!(app.store.notes.len(), notes);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A right-click on the library's row whose words are `row`, then a click
+/// on the row `choice` of the menu it opened.
+fn row_menu(app: &mut Carnet, d: &mut Drive, row: &str, choice: &str) {
+    d.core.set_inspect(true);
+    d.frame(app);
+    let edge = app.library_w();
+    let at = d
+        .core
+        .nodes()
+        .iter()
+        .find(|n| n.text.as_deref() == Some(row) && n.rect.x < edge)
+        .map(|n| n.rect.center())
+        .unwrap_or_else(|| panic!("{row} is drawn in the library"));
+    d.input(app, InputEvent::CursorMoved(at));
+    d.input(app, InputEvent::MouseDown { button: kui_native::MouseButton::Secondary, clicks: 1 });
+    d.input(app, InputEvent::MouseUp { button: kui_native::MouseButton::Secondary });
+    d_frame_twice(app, d);
+    let at = d
+        .core
+        .nodes()
+        .iter()
+        .find(|n| n.text.as_deref() == Some(choice))
+        .map(|n| n.rect.center())
+        .unwrap_or_else(|| panic!("{choice} is in the menu"));
+    d.click(app, at.x, at.y);
+    d.frame(app);
+}
+
+/// A folder's menu reaches the app (kui posts a choice only to a node that
+/// declares where it goes), and so do its name field's words, Enter and
+/// Esc.
+#[test]
+fn a_folders_menu_renames_it_and_esc_lets_the_name_go() {
+    let (mut app, mut d, dir) = fresh("folder-menu");
+    app.store.create_folder("", "Work").unwrap();
+    d.frame(&mut app);
+    row_menu(&mut app, &mut d, "Work", "Rename\u{2026}");
+    assert_eq!(app.naming.as_ref().and_then(|n| n.rename.as_deref()), Some("Work"));
+    d.frame(&mut app);
+    let field = d.core.focus().and_then(|k| app.fields.get(&k)).copied();
+    assert_eq!(field, Some(Field::Folder), "the name's field has the keyboard");
+    type_in(&mut app, &mut d, "s");
+    key(&mut app, &mut d, "enter");
+    assert!(app.store.folders.iter().any(|f| f == "Works"), "{:?}", app.store.folders);
+    assert!(app.naming.is_none());
+    // Again, and let go of.
+    row_menu(&mut app, &mut d, "Works", "Rename\u{2026}");
+    d.frame(&mut app);
+    type_in(&mut app, &mut d, "hop");
+    key(&mut app, &mut d, "escape");
+    assert!(app.naming.is_none(), "Esc drops the name");
+    assert_eq!(app.store.folders, ["Works"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A row of the Deleted folder's menu reaches the app.
+#[test]
+fn a_deleted_rows_menu_puts_it_back() {
+    let (mut app, mut d, dir) = fresh("deleted-menu");
+    d.text(&mut app, "Old plans");
+    d.frame(&mut app);
+    app.delete_note_at(app.current);
+    app.notice = None;
+    app.on_plain(Msg::ShowDeleted);
+    d.frame(&mut app);
+    row_menu(&mut app, &mut d, "Old plans", "Restore");
+    assert!(app.trash.iter().all(|t| t.title != "Old plans"), "out of the trash");
+    assert!(app.store.notes.iter().any(|n| n.display_title() == "Old plans"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A row of the menu bar the app runs itself, not a key kui plays back.
+#[test]
+fn a_bar_row_the_app_runs_reaches_it() {
+    let (mut app, mut d, dir) = fresh_mac("menubar-own-row");
+    let was = app.settings.focus;
+    choose(&mut app, &mut d, "View", "Focus");
+    assert_eq!(app.settings.focus, !was);
+    let _ = std::fs::remove_dir_all(dir);
+}

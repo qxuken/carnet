@@ -267,7 +267,8 @@ impl Carnet {
                         .on_drag(Msg::CardDrag { note: note.id })
                         // Right-click: the row's own menu, opened by the
                         // app on the next frame (`pending_menu`).
-                        .on_context_menu(Value::Int(note.id as i64))
+                        .on_context_menu(Msg::NoteMenu { note: note.id })
+                        .on_menu(Msg::Chose)
                         .label(note.display_title())
                         .selected(selected)
                         .description(format!(
@@ -401,7 +402,8 @@ impl Carnet {
                             .bg(if on { t.accent_soft } else { Color::TRANSPARENT })
                             .hover_bg(if on { t.accent_soft } else { t.hover })
                             .on_click(Msg::OpenDeleted { index: i as u64 })
-                            .on_context_menu(Value::str(format!("deleted:{i}")))
+                            .on_context_menu(Msg::DeletedMenu { index: i as u64 })
+                            .on_menu(Msg::Chose)
                             .label(d.title.clone())
                             .description(format!("Deleted {}, from {from} · {}", ago(now, d.when), d.snippet))
                             .selected(on),
@@ -665,7 +667,8 @@ impl Carnet {
                     "f-all",
                     lit(row(0, all), "")
                         .on_click(Msg::SelectFolder { index: ALL })
-                        .on_context_menu(Value::str("folder:all"))
+                        .on_context_menu(Msg::FolderMenu { index: ALL })
+                        .on_menu(Msg::Chose)
                         .on_layout(Value::Null)
                         .label("All notes"),
                     |ui| {
@@ -691,7 +694,7 @@ impl Carnet {
                             &format!("folder-name-{}", n.nth),
                             initial,
                             &EditOptions { style, placeholder: Some("Folder name".into()), ..Default::default() },
-                            NodeSpec::row().grow_width().label(said),
+                            Field::Folder.on(NodeSpec::row().grow_width().label(said)),
                         );
                     });
                     k
@@ -723,7 +726,8 @@ impl Carnet {
                         .on_click(Msg::SelectFolder { index: i as u64 })
                         // Dragged to another folder row: moved inside it.
                         .on_drag(Msg::FolderDrag { index: i as u64 })
-                        .on_context_menu(Value::str(format!("folder:{i}")))
+                        .on_context_menu(Msg::FolderMenu { index: i as u64 })
+                        .on_menu(Msg::Chose)
                         .label(folder_name(f));
                     if parent {
                         spec = spec.expanded(open);
@@ -853,7 +857,7 @@ impl Carnet {
                             placeholder: Some("Search".into()),
                             ..Default::default()
                         },
-                        NodeSpec::row().grow_width().label("Search notes"),
+                        Field::Search.on(NodeSpec::row().grow_width().label("Search notes")),
                     );
                     if clear {
                         ui.set_edit_text(k, "");
@@ -1393,7 +1397,7 @@ impl Carnet {
                 items.push(MenuItem::separator());
             }
             let mut item = MenuItem::new(d.name)
-                .id(Value::map([("tool", Value::Int(i as i64))]))
+                .id(Act::Tool { at: i as u64 })
                 .enabled(d.enabled);
             if let Some(spec) = d.spec {
                 item = item.accel(spec);
@@ -1537,8 +1541,10 @@ impl<'a> Tool<'a> {
             })
             .transition(if self.calm { 900.0 } else { 140.0 })
             .label(self.name)
-            // Where it is: what a menu it opens hangs from.
-            .on_layout(Value::Null);
+            // Where it is: what a menu it opens hangs from, and where the
+            // row chosen in it comes back.
+            .on_layout(Value::Null)
+            .on_menu(Msg::Chose);
         if let Some(state) = self.toggle {
             spec = spec.role(Role::Checkbox).checked(state);
         }
