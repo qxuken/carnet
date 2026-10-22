@@ -664,8 +664,6 @@ pub struct Carnet {
     /// The title has the caret: the file is not renamed while it does, so
     /// it is not renamed letter by letter.
     title_focused: bool,
-    /// Empty the search box on the next frame.
-    clear_search: bool,
     /// One line under the title for what just happened, with the way back.
     notice: Option<Notice>,
     /// The notice's words and its Undo, as last drawn: pointed at, it
@@ -717,9 +715,9 @@ pub struct Carnet {
     pub settings_open: bool,
     /// Reset in Settings pressed: its line asks to be sure.
     pub reset_armed: bool,
-    /// The font list's search to be emptied on the next frame: it opens
-    /// afresh each time.
-    font_search_reset: bool,
+    /// The font list's search to take the keyboard on the next frame: it
+    /// opens afresh each time.
+    font_search_focus: bool,
     /// Notes whose made time was looked up in their history.
     dated: std::collections::HashSet<u64>,
     /// What the font list is narrowed to.
@@ -913,14 +911,10 @@ pub struct Carnet {
     /// Settings said "A new device is in": once they're left, it's been
     /// seen, and isn't said again (`Sync::joined` let go).
     pub joined_said: bool,
-    /// Settings → Sync's fields are to show `sync_server` and `sync_code`
-    /// when next drawn: a field keeps its own text, so changing ours is not
-    /// enough.
-    sync_reset_fields: bool,
     /// The password fields declared on the last frame, and on this one
     /// so far: one that goes is emptied (`forget_passwords`).
-    passwords_shown: Vec<Key>,
-    passwords_now: Vec<Key>,
+    passwords_shown: Vec<(Key, Field)>,
+    passwords_now: Vec<(Key, Field)>,
     /// The sync inspector is open in Settings → Sync.
     pub sync_inspector: bool,
     /// A rollback (false) or repair (true) of this room, awaiting yes.
@@ -1099,7 +1093,6 @@ impl Carnet {
             styler: Styler::default(),
             last_focus: None,
             title_focused: false,
-            clear_search: false,
             notice: None,
             notice_keys: Vec::new(),
             say: None,
@@ -1121,7 +1114,7 @@ impl Carnet {
             settings,
             settings_open: false,
             reset_armed: false,
-            font_search_reset: false,
+            font_search_focus: false,
             dated: Default::default(),
             font_query: String::new(),
             font_pick: None,
@@ -1200,7 +1193,6 @@ impl Carnet {
             sync_rename: None,
             pair_qr: None,
             joined_said: false,
-            sync_reset_fields: false,
             passwords_shown: Vec::new(),
             passwords_now: Vec::new(),
             sync_inspector: false,
@@ -1811,10 +1803,7 @@ impl Carnet {
         self.caret = Caret::at(page::first(self.doc()));
         self.editing = false;
         self.list_view = false;
-        if !self.query.is_empty() {
-            self.query.clear();
-            self.clear_search = true;
-        }
+        self.query.clear();
         self.reorder();
         self.focus(Field::Title);
     }
@@ -2189,14 +2178,12 @@ impl Carnet {
             && self.sync_server.is_empty()
         {
             self.sync_server = origin;
-            self.sync_reset_fields = true;
         }
         // In: the code, or the twelve words, need not stay on screen; nor
         // the password signed in with be kept.
         if self.sync.is_on() && !(self.sync_code.is_empty() && self.sync_password.is_empty()) {
             self.sync_code.clear();
             self.sync_password.clear();
-            self.sync_reset_fields = true;
         }
         // Joining an account can take a note away, the open one or one
         // before it: this device's untouched welcome note, the account's
@@ -3392,7 +3379,6 @@ impl Carnet {
             Msg::Undo => self.notice_undo(),
             Msg::ClearSearch => {
                 self.query.clear();
-                self.clear_search = true;
                 self.reorder();
                 self.focus(Field::Search);
             }
@@ -3441,7 +3427,6 @@ impl Carnet {
                 self.connect.change();
                 self.signup.reset();
                 self.sync.error = None;
-                self.sync_reset_fields = true;
                 self.focus_req = Some(Field::SyncServer);
             }
             Msg::SyncBack => {
@@ -3450,7 +3435,6 @@ impl Carnet {
                 self.signup.error = None;
                 if self.connect.step() == crate::connect::Step::Server {
                     self.signup.reset();
-                    self.sync_reset_fields = true;
                     self.focus_req = Some(Field::SyncServer);
                 }
             }
@@ -3459,7 +3443,6 @@ impl Carnet {
                 self.connect.choose();
                 self.sync.error = None;
                 self.signup.error = None;
-                self.sync_reset_fields = true;
                 if self.connect.step() == crate::connect::Step::Form {
                     self.focus_req = Some(match self.sync_how {
                         2 => Field::SyncEmail,
@@ -4321,16 +4304,21 @@ impl Carnet {
         }
     }
 
-    /// A password field no longer shown is emptied: kui keeps an editor's
-    /// words while its key is off screen, so a password typed to set one
-    /// came back in the field the next Change opened, and stayed in
-    /// memory until then. Carnet keeps no password: the server's OPAQUE
-    /// needs it only while it is being set or signed in with.
+    /// A password field no longer shown is emptied, and so is the password
+    /// it showed: kui keeps an editor's words while its key is off screen,
+    /// and the field shows the model's every frame, so a password typed and
+    /// left (Back, Settings closed) came back the next time the form
+    /// opened, and stayed in memory until then. Carnet keeps no password:
+    /// the server's OPAQUE needs it only while it is being set or signed in
+    /// with. (One being set goes with `pw_edit`.)
     fn forget_passwords(&mut self, core: &mut Core) {
         let shown = std::mem::take(&mut self.passwords_now);
-        for k in std::mem::replace(&mut self.passwords_shown, shown) {
-            if !self.passwords_shown.contains(&k) {
+        for (k, f) in std::mem::replace(&mut self.passwords_shown, shown) {
+            if !self.passwords_shown.iter().any(|&(now, _)| now == k) {
                 core.set_edit_text(k, "");
+                if f == Field::SyncPassword {
+                    self.sync_password.clear();
+                }
             }
         }
     }
@@ -4766,6 +4754,21 @@ impl App for Carnet {
                     self.focus_page = true;
                 }
             }
+            // Their data unread (a core this one does not follow): nothing
+            // to answer, and nothing for `on_msg` to put away.
+            (
+                Msg::Edited { .. }
+                | Msg::AtEdge { .. }
+                | Msg::NoteMenu { .. }
+                | Msg::FolderMenu { .. }
+                | Msg::DeletedMenu { .. }
+                | Msg::Chose
+                | Msg::WindowFocus
+                | Msg::FilesOver
+                | Msg::PickedDir
+                | Msg::PickedPictures,
+                _,
+            ) => {}
             (msg, event) => self.on_msg(msg, event, ev.key, core),
         }
     }

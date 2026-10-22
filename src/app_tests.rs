@@ -6805,7 +6805,6 @@ fn removed_then_back_by_an_invite_draws_each_node_once() {
     until("the invite", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| x[0].0.sync.invite.is_some());
     a.sync_server = origin.clone();
     a.sync_code = w.sync.invite.clone().unwrap();
-    a.sync_reset_fields = true;
     a.on_plain(Msg::SyncStart);
     until("the desktop online on an account of its own, its devices and invites listed", &mut [(&mut w, &mut dw), (&mut a, &mut da)], &|x| {
         let a = &x[1].0;
@@ -10137,5 +10136,88 @@ fn a_bar_row_the_app_runs_reaches_it() {
     let was = app.settings.focus;
     choose(&mut app, &mut d, "View", "Focus");
     assert_eq!(app.settings.focus, !was);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A kui field shows the model's words on every frame (its `value`): a
+/// title another device changed, with the keyboard in it or not, and a
+/// search the app emptied. What is typed goes on from there.
+#[test]
+fn a_field_shows_what_the_model_holds() {
+    let (mut app, mut d, dir) = fresh("field-value");
+    type_in(&mut app, &mut d, "Mine");
+    let title = app_field(&app, Field::Title).expect("the title's field");
+    assert_eq!(d.core.focus(), Some(title));
+    app.store.notes[app.current].title = "Theirs".into();
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(title).as_deref(), Some("Theirs"), "while it has the keyboard");
+    type_in(&mut app, &mut d, "!");
+    assert_eq!(app.store.notes[app.current].title, "Theirs!", "typing goes on at its end");
+    key(&mut app, &mut d, "enter");
+    assert!(page_focused(&app, &d));
+    app.store.notes[app.current].title = "Elsewhere".into();
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(title).as_deref(), Some("Elsewhere"), "and without it");
+    // The search, emptied by the app: so is its field.
+    key_with(&mut app, &mut d, "f", CTRL);
+    type_in(&mut app, &mut d, "zzz");
+    let search = app_field(&app, Field::Search).expect("the search");
+    assert_eq!(d.core.edit_text(search).as_deref(), Some("zzz"));
+    app.on_plain(Msg::ClearSearch);
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(search).as_deref(), Some(""));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Settings → Sync's address put in by the app (the last server signed
+/// in to, say) shows in its field, with nothing to tell the field.
+#[test]
+fn the_sync_address_the_app_fills_shows_in_its_field() {
+    let (mut app, mut d, dir) = tall("sync-address-value");
+    let field = app_field(&app, Field::SyncServer).expect("the server's field");
+    assert_eq!(d.core.edit_text(field).as_deref(), Some(""));
+    app.sync_server = "https://notes.example.com".into();
+    d.frame(&mut app);
+    assert_eq!(d.core.edit_text(field).as_deref(), Some("https://notes.example.com"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The password typed to sign in goes with its field: Back to the ways in,
+/// or Settings closed, and the form opens again with none — in the field
+/// or kept by the app.
+#[test]
+fn a_sign_in_password_left_behind_is_forgotten() {
+    let (store, dir) = temp_store("pw-forgotten");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 1600.0).framing();
+    app.settings_open = true;
+    app.connect.assume("https://notes.example.com", server_info(&["passwords"]));
+    let typed = |app: &mut Carnet, d: &mut Drive| {
+        app.on_plain(Msg::SyncHow { to: 2 });
+        d_frame_twice(app, d);
+        let k = app_field(app, Field::SyncPassword).expect("the password's field");
+        d.focus(app, k);
+        d.text(app, "hunter22");
+        d_frame_twice(app, d);
+        assert_eq!(app.sync_password, "hunter22");
+        k
+    };
+    let reopened = |app: &mut Carnet, d: &mut Drive| {
+        app.on_plain(Msg::SyncHow { to: 2 });
+        d_frame_twice(app, d);
+        let k = app_field(app, Field::SyncPassword).expect("the password's field");
+        (app.sync_password.clone(), d.core.edit_text(k).unwrap_or_default())
+    };
+    typed(&mut app, &mut d);
+    app.on_plain(Msg::SyncBack);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.sync_password.is_empty(), "Back: forgotten");
+    assert_eq!(reopened(&mut app, &mut d), (String::new(), String::new()));
+    typed(&mut app, &mut d);
+    app.settings_open = false;
+    d_frame_twice(&mut app, &mut d);
+    app.settings_open = true;
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(reopened(&mut app, &mut d), (String::new(), String::new()), "Settings closed: forgotten");
     let _ = std::fs::remove_dir_all(dir);
 }

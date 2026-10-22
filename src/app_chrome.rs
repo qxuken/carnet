@@ -677,22 +677,18 @@ impl Carnet {
                     },
                 );
                 rows.push((k, FolderRow::All));
-                // Each naming its own field, so it opens empty; kui keeps a
-                // field's text while it is away, and a name dropped with
-                // Escape would come back in the next one.
-                // A rename's field opens on the folder's name.
+                // The name as typed so far (a rename's starts as the
+                // folder's); each naming its own field, so one starts
+                // with no undo history of the last.
                 let field = |ui: &mut Ui<'_>, depth: usize, n: &Naming| -> Key {
                     let style = TextStyle::new(Type::UI.size).color(t.fg);
                     let mut k = Key::ROOT;
-                    let (initial, said) = match &n.rename {
-                        Some(f) => (folder_name(f), "Folder's new name"),
-                        None => ("", "New folder's name"),
-                    };
+                    let said = if n.rename.is_some() { "Folder's new name" } else { "New folder's name" };
                     ui.with_keyed("f-name", row(depth, false).bg(l.card), |ui| {
                         icon(ui, Icon::Folder, t.accent, 16.0, false);
-                        k = ui.text_edit(
+                        k = ui.text_edit_value(
                             &format!("folder-name-{}", n.nth),
-                            initial,
+                            &n.name,
                             &EditOptions { style, placeholder: Some("Folder name".into()), ..Default::default() },
                             Field::Folder.on(NodeSpec::row().grow_width().label(said)),
                         );
@@ -823,7 +819,6 @@ impl Carnet {
     pub(super) fn search(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let t = l.t;
         let empty = self.query.is_empty();
-        let clear = std::mem::take(&mut self.clear_search);
         // Quiet until it is used: in a window in the background, or with
         // nothing searched and the keyboard elsewhere.
         let quiet = !ui.env().focused || (self.query.is_empty() && !self.search_active);
@@ -849,9 +844,9 @@ impl Carnet {
                     .role(Role::Group),
                 |ui| {
                     icon(ui, Icon::Search, t.muted, 15.0, false);
-                    let k = ui.text_edit(
+                    let k = ui.text_edit_value(
                         "search",
-                        "",
+                        &self.query,
                         &EditOptions {
                             style: TextStyle::new(Type::UI.size).color(t.fg),
                             placeholder: Some("Search".into()),
@@ -859,9 +854,6 @@ impl Carnet {
                         },
                         Field::Search.on(NodeSpec::row().grow_width().label("Search notes")),
                     );
-                    if clear {
-                        ui.set_edit_text(k, "");
-                    }
                     self.fields.insert(k, Field::Search);
                     self.apply_focus(ui, k, Field::Search);
                     if !empty {

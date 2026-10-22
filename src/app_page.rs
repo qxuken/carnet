@@ -412,7 +412,7 @@ impl Carnet {
             return;
         }
         ui.with(row, |ui| {
-            let k = ui.text_edit(
+            let k = ui.text_edit_value(
                 "title",
                 &title,
                 &EditOptions {
@@ -424,12 +424,6 @@ impl Carnet {
                 Field::Title.on(NodeSpec::row().grow_width().label("Title")),
             );
             self.fields.insert(k, Field::Title);
-            // kui's field keeps its own words: a title changed elsewhere —
-            // by another device, or in the file by another app — is put in
-            // it, unless it's being written here.
-            if ui.focused() != Some(k) && ui.core().edit_text(k).is_some_and(|now| now != title) {
-                ui.set_edit_text(k, &title);
-            }
             self.apply_focus(ui, k, Field::Title);
             // Come up to from the note: the caret at the end, then, for ↑,
             // along the last line to the column it left.
@@ -2652,11 +2646,7 @@ impl Carnet {
     pub(super) fn link_editor(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let Some(le) = self.link_edit.clone() else { return };
         let t = l.t;
-        // Its first frame: placed now, and its field given this link's
-        // address. kui keeps a field's text while it is away, so it would
-        // show the last link's (a `javascript:` one beside this one's
-        // Open, say).
-        let fresh = le.at.is_none();
+        // Its first frame: placed now.
         let at = match le.at {
             Some(at) => at,
             None => {
@@ -2689,7 +2679,7 @@ impl Carnet {
             |ui| {
                 ui.text(if le.existing { "Link" } else { "Make a link" }, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
                 ui.with(NodeSpec::row().grow_width().pad_xy(10.0, 7.0).radius(radius::CONTROL).bg(t.sunken), |ui| {
-                    field = Some(ui.text_edit(
+                    field = Some(ui.text_edit_value(
                         "link-url",
                         &le.url,
                         &EditOptions { style: TextStyle::new(Type::UI.size).color(t.fg), ..Default::default() },
@@ -2725,9 +2715,6 @@ impl Carnet {
             },
         );
         if let Some(k) = field {
-            if fresh {
-                ui.set_edit_text(k, &le.url);
-            }
             self.fields.insert(k, Field::Link);
             self.apply_focus(ui, k, Field::Link);
         }
