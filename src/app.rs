@@ -911,10 +911,10 @@ pub struct Carnet {
     /// Settings said "A new device is in": once they're left, it's been
     /// seen, and isn't said again (`Sync::joined` let go).
     pub joined_said: bool,
-    /// The password fields declared on the last frame, and on this one
-    /// so far: one that goes is emptied (`forget_passwords`).
-    passwords_shown: Vec<(Key, Field)>,
-    passwords_now: Vec<(Key, Field)>,
+    /// The sign-in password's field drawn on the last frame, and on this
+    /// one so far: when it goes, so does the password (`forget_passwords`).
+    sync_password_drawn: bool,
+    sync_password_now: bool,
     /// The sync inspector is open in Settings → Sync.
     pub sync_inspector: bool,
     /// A rollback (false) or repair (true) of this room, awaiting yes.
@@ -1193,8 +1193,8 @@ impl Carnet {
             sync_rename: None,
             pair_qr: None,
             joined_said: false,
-            passwords_shown: Vec::new(),
-            passwords_now: Vec::new(),
+            sync_password_drawn: false,
+            sync_password_now: false,
             sync_inspector: false,
             sync_inspect_armed: None,
             sync_inspect_open: None,
@@ -4304,22 +4304,16 @@ impl Carnet {
         }
     }
 
-    /// A password field no longer shown is emptied, and so is the password
-    /// it showed: kui keeps an editor's words while its key is off screen,
-    /// and the field shows the model's every frame, so a password typed and
-    /// left (Back, Settings closed) came back the next time the form
-    /// opened, and stayed in memory until then. Carnet keeps no password:
-    /// the server's OPAQUE needs it only while it is being set or signed in
-    /// with. (One being set goes with `pw_edit`.)
-    fn forget_passwords(&mut self, core: &mut Core) {
-        let shown = std::mem::take(&mut self.passwords_now);
-        for (k, f) in std::mem::replace(&mut self.passwords_shown, shown) {
-            if !self.passwords_shown.iter().any(|&(now, _)| now == k) {
-                core.set_edit_text(k, "");
-                if f == Field::SyncPassword {
-                    self.sync_password.clear();
-                }
-            }
+    /// The password typed to sign in goes with its field. kui forgets a
+    /// password field's words the frame it isn't drawn; the app's copy,
+    /// which the field shows every frame, would bring one typed and left
+    /// (Back, Settings closed) back the next time the form opened. Carnet
+    /// keeps no password: the server's OPAQUE needs it only while it is
+    /// being set or signed in with. (One being set goes with `pw_edit`.)
+    fn forget_passwords(&mut self) {
+        let drawn = std::mem::take(&mut self.sync_password_now);
+        if std::mem::replace(&mut self.sync_password_drawn, drawn) && !drawn {
+            self.sync_password.clear();
         }
     }
 
@@ -4607,7 +4601,7 @@ impl App for Carnet {
             ui.core().declare_menu_bar(bar);
         }
         self.fields.clear();
-        self.forget_passwords(ui.core());
+        self.forget_passwords();
         self.caret = page::fix(self.doc(), self.caret);
         self.follow_pointer(ui);
         let mut l = self.styler.look(ui, &self.settings);

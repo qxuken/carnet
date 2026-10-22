@@ -4858,7 +4858,8 @@ fn a_new_device_comes_in_by_email_and_password() {
     // Set, the field put away keeps nothing of it; Change opens it empty.
     da.frame(&mut a);
     assert!(a.pw_edit.is_none());
-    assert_eq!(da.core.edit_text(pw_field).as_deref(), Some(""), "nothing kept in the field put away");
+    // (kui forgets a password field the frame it isn't drawn.)
+    assert!(da.core.edit_text(pw_field).is_none_or(|t| t.is_empty()), "nothing kept in the field put away");
     assert!(drawn(&mut da, &mut a, "Change"));
     a.on_plain(Msg::SyncPassword);
     d_frame_twice(&mut a, &mut da);
@@ -10227,5 +10228,28 @@ fn a_sign_in_password_left_behind_is_forgotten() {
     app.settings_open = true;
     d_frame_twice(&mut app, &mut d);
     assert_eq!(reopened(&mut app, &mut d), (String::new(), String::new()), "Settings closed: forgotten");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A tool's hint goes with the tool when the toolbar fades for the
+/// writing, though the pointer rests on it: kui draws a hint at the
+/// strip's opacity, not the button's, so it would stay over a toolbar that
+/// is gone. The tool still says it.
+#[test]
+fn a_tools_hint_fades_with_the_toolbar() {
+    let (mut app, mut d, dir) = body("hint-fades");
+    d.core.set_inspect(true);
+    settle(&mut app, &mut d);
+    let bold = d.core.nodes().iter().find(|n| n.label.as_deref() == Some("t-bold")).map(|n| (n.key, n.rect)).unwrap();
+    d.input(&mut app, InputEvent::CursorMoved(bold.1.center()));
+    settle(&mut app, &mut d);
+    let hint = |d: &Drive| d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with("Bold  \u{b7}")));
+    assert!(hint(&d), "the hint, the pointer resting on Bold");
+    type_in(&mut app, &mut d, "Words going down");
+    settle(&mut app, &mut d);
+    assert_eq!(tool_opacity(&d, "t-bold"), 0.0);
+    assert!(!hint(&d), "gone with the toolbar");
+    let said = d.core.access_tree().nodes.iter().find(|n| n.key == bold.0).and_then(|n| n.description.clone());
+    assert!(said.as_deref().is_some_and(|s| s.starts_with("Bold")), "{said:?}");
     let _ = std::fs::remove_dir_all(dir);
 }

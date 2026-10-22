@@ -1119,8 +1119,10 @@ impl Carnet {
                     );
                     me.fields.insert(k, f);
                     made = Some(k);
+                    if f == Field::SyncPassword {
+                        me.sync_password_now = true;
+                    }
                     if secret {
-                        me.passwords_now.push((k, f));
                         let (g, word) = if shown { (Icon::EyeOff, "Hide password") } else { (Icon::Eye, "Show password") };
                         ui.with_keyed(
                             &format!("{key}-eye"),

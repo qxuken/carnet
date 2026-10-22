@@ -1541,9 +1541,16 @@ impl<'a> Tool<'a> {
             spec = spec.role(Role::Checkbox).checked(state);
         }
         // Not while a menu is open: the pointer, still over the button
-        // that opened it to the window, would call one up behind it.
-        if ui.core().menu().is_none() {
+        // that opened it to the window, would call one up behind it. Nor
+        // while it has faded away for the writing: kui alpha.62 draws a
+        // hint at the strip's opacity, not the button's, so one would stay
+        // over a toolbar that is gone. The words are still its
+        // description. (alpha.63 floats no hint over a box at opacity 0:
+        // with it, `!self.calm` and the description can go.)
+        if ui.core().menu().is_none() && !self.calm {
             spec = spec.tooltip(&self.hint);
+        } else {
+            spec = spec.description(self.hint.as_str());
         }
         let (icon, filled) = (self.icon, self.filled);
         let ink = if filled { t.accent } else { ink };
