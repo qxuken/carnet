@@ -2869,7 +2869,10 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// A path as [`same_path`] compares it: what a set of paths is keyed by.
 fn path_key(p: &Path) -> String {
-    p.to_string_lossy().to_lowercase()
+    let key = p.to_string_lossy().to_lowercase();
+    // Windows takes `/` as `\`, and says `\`: a picture sync wrote at
+    // `attachments/x.png` is the one the system names `attachments\x.png`.
+    if cfg!(windows) { key.replace('/', "\\") } else { key }
 }
 
 /// How `.pinned` names a note: its path under the notes folder.
