@@ -911,10 +911,12 @@ pub struct Carnet {
     /// Settings said "A new device is in": once they're left, it's been
     /// seen, and isn't said again (`Sync::joined` let go).
     pub joined_said: bool,
-    /// The sign-in password's field drawn on the last frame, and on this
-    /// one so far: when it goes, so does the password (`forget_passwords`).
-    sync_password_drawn: bool,
-    sync_password_now: bool,
+    /// The password fields drawn on the last frame, and on this one so
+    /// far, sign-in's and a new one's ([`Field::SyncPassword`],
+    /// [`Field::PasswordNew`]): when one goes, so does its password
+    /// (`forget_passwords`).
+    passwords_drawn: [bool; 2],
+    passwords_now: [bool; 2],
     /// The sync inspector is open in Settings → Sync.
     pub sync_inspector: bool,
     /// A rollback (false) or repair (true) of this room, awaiting yes.
@@ -1193,8 +1195,8 @@ impl Carnet {
             sync_rename: None,
             pair_qr: None,
             joined_said: false,
-            sync_password_drawn: false,
-            sync_password_now: false,
+            passwords_drawn: [false; 2],
+            passwords_now: [false; 2],
             sync_inspector: false,
             sync_inspect_armed: None,
             sync_inspect_open: None,
@@ -4304,16 +4306,23 @@ impl Carnet {
         }
     }
 
-    /// The password typed to sign in goes with its field. kui forgets a
-    /// password field's words the frame it isn't drawn; the app's copy,
-    /// which the field shows every frame, would bring one typed and left
-    /// (Back, Settings closed) back the next time the form opened. Carnet
-    /// keeps no password: the server's OPAQUE needs it only while it is
-    /// being set or signed in with. (One being set goes with `pw_edit`.)
+    /// A password typed to sign in, or to set one, goes with its field.
+    /// kui forgets a password field's words the frame it isn't drawn; the
+    /// app's copy, which the field shows every frame, would bring one
+    /// typed and left (Back, Settings closed) back the next time the form
+    /// opened. Carnet keeps no password: the server's OPAQUE needs it only
+    /// while it is being set or signed in with, and has its own copy once
+    /// asked.
     fn forget_passwords(&mut self) {
-        let drawn = std::mem::take(&mut self.sync_password_now);
-        if std::mem::replace(&mut self.sync_password_drawn, drawn) && !drawn {
+        let now = std::mem::take(&mut self.passwords_now);
+        let was = std::mem::replace(&mut self.passwords_drawn, now);
+        if was[0] && !now[0] {
             self.sync_password.clear();
+        }
+        if was[1] && !now[1]
+            && let Some((_, password)) = self.pw_edit.as_mut()
+        {
+            password.clear();
         }
     }
 

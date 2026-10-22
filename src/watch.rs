@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use notify::event::ModifyKind;
 use notify::{EventKind, RecursiveMode, Watcher as _};
 
 use crate::store;
@@ -70,6 +71,16 @@ impl Watch {
                         Ok(e) if e.need_rescan() => Said::Anything,
                         // Reads and opens are no change.
                         Ok(e) if matches!(e.kind, EventKind::Access(_)) => return,
+                        // A folder's own times changing is no change
+                        // either: Windows says so of a folder whenever
+                        // something in it comes or goes (a save's
+                        // temporary file), and what came or went is said
+                        // of itself. A folder renamed still is.
+                        Ok(e) if matches!(e.kind, EventKind::Modify(k) if !matches!(k, ModifyKind::Name(_)))
+                            && e.paths.iter().all(|p| p.is_dir()) =>
+                        {
+                            return;
+                        }
                         Ok(e) => Said::Paths(e.paths),
                         Err(_) => Said::Anything,
                     };
@@ -232,12 +243,13 @@ mod tests {
         watch.take();
         let long = Duration::from_secs(5);
         let quiet = Duration::from_secs(1);
-        let changes: [(&str, &dyn Fn()); 5] = [
+        let changes: [(&str, &dyn Fn()); 6] = [
             ("written", &|| fs::write(dir.join("New.md"), "# New\n").unwrap()),
             ("changed", &|| fs::write(dir.join("New.md"), "# New\n\nmore\n").unwrap()),
             ("renamed", &|| fs::rename(dir.join("New.md"), dir.join("Work/Newer.md")).unwrap()),
             ("deleted", &|| fs::remove_file(dir.join("Work/Newer.md")).unwrap()),
             ("a folder", &|| fs::create_dir(dir.join("Home")).unwrap()),
+            ("a folder renamed", &|| fs::rename(dir.join("Home"), dir.join("House")).unwrap()),
         ];
         for (what, change) in changes {
             let before = woke.load(Ordering::Relaxed);

@@ -2869,7 +2869,10 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// A path as [`same_path`] compares it: what a set of paths is keyed by.
 fn path_key(p: &Path) -> String {
-    p.to_string_lossy().to_lowercase()
+    let key = p.to_string_lossy().to_lowercase();
+    // Windows takes `/` as `\`, and says `\`: a picture sync wrote at
+    // `attachments/x.png` is the one the system names `attachments\x.png`.
+    if cfg!(windows) { key.replace('/', "\\") } else { key }
 }
 
 /// How `.pinned` names a note: its path under the notes folder.
@@ -4123,6 +4126,9 @@ mod tests {
             "/net/host/share/x.png",
             "/Network/Servers/host/x.png",
             "file:///net/host/x.png",
+            // Climbed to from the notes folder: `/net` on a Mac or Linux,
+            // and on Windows `C:\net`, a folder like any other.
+            #[cfg(unix)]
             "../../../../../../../../../../net/host/x.png",
         ] {
             assert_eq!(s.resolve("", src), None, "{src}");

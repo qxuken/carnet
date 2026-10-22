@@ -3,9 +3,9 @@
 //! as the kui theme so the stock pieces — the caret, selections,
 //! scrollbars, tooltips — wear them too, and the faces the page is set in.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use kui_native::{Appearance, Color, Core, FontFamily, TextStyle, Theme, Ui};
+use kui_native::{Appearance, Color, Core, FontFamily, TextStyle, Theme, Tokens, Ui};
 
 use crate::design::{self, Colors};
 use crate::settings::{Settings, ThemePref};
@@ -66,13 +66,15 @@ impl Look {
 
 }
 
-/// Resolves each face once, by name; the palette follows the settings, or
-/// the OS, each frame.
+/// The faces by kui's family tokens, declared again only when the chosen
+/// ones change; the palette follows the settings, or the OS, each frame.
 #[derive(Default)]
 pub struct Styler {
     /// The colours pinned as kui's theme: re-pinned only when they change.
     pinned: Option<Colors>,
-    faces: HashMap<String, FontFamily>,
+    /// The faces chosen when the tokens were last declared: the text's,
+    /// the headings', a dropped letter's and code's.
+    declared: Option<[String; 4]>,
     /// The shipped faces are registered with kui.
     shipped: bool,
 }
@@ -124,18 +126,27 @@ pub fn code_families(core: &mut Core) -> HashSet<String> {
         .collect()
 }
 
-impl Styler {
-    /// A face by family name; `fallback` when it is not installed.
-    fn face(&mut self, ui: &mut Ui<'_>, name: &str, fallback: FontFamily) -> FontFamily {
-        if name.is_empty() {
-            return fallback;
-        }
-        *self
-            .faces
-            .entry(name.to_string())
-            .or_insert_with(|| ui.system_font(name).map_or(fallback, FontFamily::Custom))
-    }
+/// The page's faces as kui's family tokens (ADR 0049): each the face
+/// chosen in Settings, then Carnet's own, then a stock family. kui takes
+/// the first that is installed or loaded, and takes again when the fonts
+/// change, so a face installed while Carnet runs is used as it comes. A
+/// dropped letter's falls back to the headings', whichever won there.
+fn faces(s: &Settings) -> Tokens {
+    let chosen = |name: &str| (!name.is_empty()).then(|| name.to_string());
+    let heading: Vec<String> = chosen(&s.heading_font)
+        .into_iter()
+        .chain(std::iter::once(HEADING_FACE).chain(SERIFS).map(String::from))
+        .chain(["serif".to_string()])
+        .collect();
+    let initial: Vec<String> = chosen(&s.initial_font).into_iter().chain(heading.iter().cloned()).collect();
+    Tokens::new()
+        .family("body", chosen(&s.font).into_iter().chain([BODY_FACE.to_string(), "sans".to_string()]))
+        .family("heading", heading)
+        .family("initial", initial)
+        .family("code", chosen(&s.code_font).into_iter().chain(["mono".to_string()]))
+}
 
+impl Styler {
     pub fn look(&mut self, ui: &mut Ui<'_>, s: &Settings) -> Look {
         // `CARNET_THEME=light|dark` pins one; then the settings; then the
         // OS decides.
@@ -160,29 +171,16 @@ impl Styler {
                 let _ = ui.core().add_font_data(data.to_vec());
             }
         }
-        let default_serif = match self.faces.get("") {
-            Some(f) => *f,
-            None => {
-                let f = std::iter::once(&HEADING_FACE)
-                    .chain(SERIFS.iter())
-                    .find_map(|name| ui.system_font(name))
-                    .map_or(FontFamily::Serif, FontFamily::Custom);
-                self.faces.insert(String::new(), f);
-                f
-            }
-        };
-        let default_body = match self.faces.get(" body") {
-            Some(f) => *f,
-            None => {
-                let f = ui.system_font(BODY_FACE).map_or(FontFamily::Sans, FontFamily::Custom);
-                self.faces.insert(" body".to_string(), f);
-                f
-            }
-        };
-        let serif = self.face(ui, &s.heading_font, default_serif);
-        let body = self.face(ui, &s.font, default_body);
-        let initial = self.face(ui, &s.initial_font, serif);
-        let code = self.face(ui, &s.code_font, FontFamily::Mono);
+        let chosen = [s.font.clone(), s.heading_font.clone(), s.initial_font.clone(), s.code_font.clone()];
+        if self.declared.as_ref() != Some(&chosen) {
+            ui.set_tokens(faces(s));
+            self.declared = Some(chosen);
+        }
+        let mut face = |name: &str, stock: FontFamily| ui.token_family(name).unwrap_or(stock);
+        let serif = face("heading", FontFamily::Serif);
+        let body = face("body", FontFamily::Sans);
+        let initial = face("initial", serif);
+        let code = face("code", FontFamily::Mono);
         let t = ui.theme();
         Look {
             t,
@@ -227,3 +225,101 @@ pub const SUGGESTED_FONTS: [&str; 18] = [
     "JetBrains Mono",
     "Consolas",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kui_native::Size;
+
+    /// The faces are kui's family tokens: Carnet's own unless one is
+    /// chosen, a chosen one this machine hasn't got falling back to
+    /// Carnet's, a dropped letter in the headings' face unless it has its
+    /// own, code in the system's monospace; declared again as the choices
+    /// change, and as they were when they change back.
+    #[test]
+    fn the_faces_are_kuis_family_tokens() {
+        let mut core = Core::new();
+        let mut styler = Styler::default();
+        let mut faces = |core: &mut Core, s: &Settings| {
+            let mut ui = core.frame(Size::new(400.0, 300.0), 1.0);
+            let l = styler.look(&mut ui, s);
+            ui.finish();
+            (l.body, l.serif, l.initial, l.code)
+        };
+        let mut s = Settings::default();
+        let first = faces(&mut core, &s);
+        let inter = FontFamily::Custom(core.add_system_font(BODY_FACE).expect("Inter, shipped"));
+        let source = FontFamily::Custom(core.add_system_font(HEADING_FACE).expect("Source Serif 4, shipped"));
+        assert_eq!(first, (inter, source, source, FontFamily::Mono));
+        let tokens: Vec<_> = core.tokens().expect("declared").families().iter().map(|(n, t)| (n.as_str(), t.picked())).collect();
+        assert_eq!(tokens, [("body", Some(BODY_FACE)), ("heading", Some(HEADING_FACE)), ("initial", Some(HEADING_FACE)), ("code", Some("mono"))]);
+
+        // The headings in the text's face: a dropped letter follows them.
+        s.heading_font = BODY_FACE.into();
+        s.code_font = HEADING_FACE.into();
+        assert_eq!(faces(&mut core, &s), (inter, inter, inter, source));
+        // A dropped letter's own; a face not on this machine is Carnet's.
+        s.initial_font = HEADING_FACE.into();
+        s.font = "No Such Face 2026".into();
+        assert_eq!(faces(&mut core, &s), (inter, inter, source, source));
+        assert_eq!(faces(&mut core, &Settings::default()), first);
+    }
+
+    /// `font` with every `from` in its names table written `to`, as long:
+    /// a family of its own, for one that wasn't there to be picked.
+    fn renamed(font: &[u8], from: &str, to: &str) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let be32 = |b: &[u8]| u32::from_be_bytes(b.try_into().unwrap()) as usize;
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        let (at, len) = (0..tables)
+            .map(|i| &font[12 + 16 * i..28 + 16 * i])
+            .find(|record| &record[..4] == b"name")
+            .map(|record| (be32(&record[8..12]), be32(&record[12..16])))
+            .expect("a names table");
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+        let mut out = font.to_vec();
+        let names = &mut out[at..at + len];
+        for (a, b) in [(from.as_bytes().to_vec(), to.as_bytes().to_vec()), (utf16(from), utf16(to))] {
+            let mut i = 0;
+            while i + a.len() <= names.len() {
+                if names[i..i + a.len()] == a[..] {
+                    names[i..i + a.len()].copy_from_slice(&b);
+                    i += a.len();
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// A face chosen in Settings that isn't there yet is Carnet's own until
+    /// it comes, and from the next frame on is the one chosen, with no
+    /// restart: kui picks the tokens again when the fonts change (an
+    /// install says so on Windows and macOS, and loaded here).
+    #[test]
+    fn a_face_chosen_before_it_is_there_is_taken_when_it_comes() {
+        let mut core = Core::new();
+        let mut styler = Styler::default();
+        let s = Settings { font: "Quill".into(), ..Settings::default() };
+        let mut body = |core: &mut Core| {
+            let mut ui = core.frame(Size::new(400.0, 300.0), 1.0);
+            let l = styler.look(&mut ui, &s);
+            ui.finish();
+            l.body
+        };
+        let picked = |core: &Core| {
+            let tokens = core.tokens().expect("declared");
+            tokens.families().iter().find(|(n, _)| n == "body").and_then(|(_, t)| t.picked().map(String::from))
+        };
+        let before = body(&mut core);
+        assert_eq!(before, FontFamily::Custom(core.add_system_font(BODY_FACE).expect("Inter, shipped")), "not there: Carnet's own");
+        assert_eq!(picked(&core).as_deref(), Some(BODY_FACE));
+
+        core.add_font_data(renamed(SHIPPED[0], "Inter", "Quill")).expect("Inter as Quill");
+        let quill = FontFamily::Custom(core.add_system_font("Quill").expect("loaded"));
+        assert_ne!(quill, before);
+        assert_eq!(body(&mut core), quill, "taken the next frame");
+        assert_eq!(picked(&core).as_deref(), Some("Quill"));
+    }
+}

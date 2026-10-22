@@ -2039,6 +2039,12 @@ fn the_link_editor_shows_the_link_it_was_opened_on() {
     d.frame(&mut app);
     d.frame(&mut app);
     assert_eq!(field(&mut d), "https://x.test/two");
+    // Its undo starts with it: Ctrl+Z (the field's Undo, as the window
+    // hands it on) goes back into no other address.
+    d.input(&mut app, InputEvent::Key(EditKey::Undo, kui_native::Mods::default()));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(field(&mut d), "https://x.test/two");
+    assert_eq!(app.link_edit.as_ref().map(|l| l.url.as_str()), Some("https://x.test/two"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -4866,6 +4872,16 @@ fn a_new_device_comes_in_by_email_and_password() {
     let k = app_field(&a, Field::PasswordNew).unwrap();
     assert_eq!(da.core.edit_text(k).as_deref(), Some(""), "Change opens empty");
     assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some(""));
+    // Typed and left, Settings closed: forgotten, by the app and the field.
+    da.focus(&mut a, k);
+    da.text(&mut a, "left behind here");
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some("left behind here"));
+    a.settings_open = false;
+    d_frame_twice(&mut a, &mut da);
+    a.settings_open = true;
+    d_frame_twice(&mut a, &mut da);
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some(""), "Settings closed: forgotten");
+    assert_eq!(da.core.edit_text(app_field(&a, Field::PasswordNew).unwrap()).as_deref(), Some(""));
     a.on_plain(Msg::SyncPasswordCancel);
 
     // A wrong one: nothing let in, and said.

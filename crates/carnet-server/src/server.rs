@@ -1609,7 +1609,22 @@ async fn socket_task(app: App, socket: WebSocket, client: String, said: compat::
     drop(line);
     // What waits is written, a moment allowed; a device that doesn't
     // take it is let go.
-    if tokio::time::timeout(Duration::from_secs(5), &mut writer).await.is_err() {
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    if tokio::time::timeout_at(until, &mut writer).await.is_err() {
         writer.abort();
+    }
+    // Told why, the device has the last word, in the same moment: what it
+    // sends meanwhile is read and let be until its own Close. Closed under
+    // it instead, its next frame is answered by a reset, and a device on
+    // Windows loses with it the Close it hadn't read yet, and why.
+    if matches!(end, End::Late(_)) {
+        let _ = tokio::time::timeout_at(until, async {
+            while let Some(Ok(m)) = stream.next().await {
+                if matches!(m, Message::Close(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
     }
 }

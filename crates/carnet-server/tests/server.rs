@@ -504,18 +504,27 @@ async fn behind_cloudflare_sockets_are_limited_by_its_header() {
 /// cased) and the body.
 async fn request(addr: std::net::SocketAddr, method: &str, path: &str, extra: &str, body: &[u8]) -> (u16, String, Vec<u8>) {
     let mut s = TcpStream::connect(addr).await.unwrap();
-    let req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}Connection: close\r\n\r\n");
+    // A request refused before its body is read is closed with the body
+    // unread, and a body sent anyway is answered by a reset, which on
+    // Windows takes the answer with it. So the body waits for the server
+    // to ask for it (100 Continue), as a refusal never does.
+    let expect = if body.is_empty() { "" } else { "Expect: 100-continue\r\n" };
+    let req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}{expect}Connection: close\r\n\r\n");
     s.write_all(req.as_bytes()).await.unwrap();
-    // A request refused before its body is read: the server may close
-    // with the body unread, and the socket be reset. What came before is
-    // the answer.
-    let _ = s.write_all(body).await;
     let mut out = Vec::new();
     let mut buf = [0u8; 65536];
+    let mut asked = body.is_empty();
     loop {
         match s.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
+        }
+        if !asked && let Some(end) = out.windows(4).position(|w| w == b"\r\n\r\n") {
+            asked = true;
+            if out.starts_with(b"HTTP/1.1 100") {
+                out.drain(..end + 4);
+                s.write_all(body).await.unwrap();
+            }
         }
     }
     let split = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
@@ -1015,6 +1024,10 @@ fn the_binary_starts_beside_untracked_pictures_when_told() {
     let server = |args: &[&str], vars: &[(&str, &str)]| {
         let mut c = Command::new(env!("CARGO_BIN_EXE_carnet-server"));
         c.env_clear().arg("--data").arg(&data).args(["--listen", "127.0.0.1:0"]).args(args).envs(vars.iter().copied());
+        // Windows' sockets won't start without it (os error 10106).
+        if let Some(root) = std::env::var_os("SYSTEMROOT") {
+            c.env("SYSTEMROOT", root);
+        }
         c
     };
     let said = |mut c: Command| {
