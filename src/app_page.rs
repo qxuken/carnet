@@ -2647,6 +2647,7 @@ impl Carnet {
         let Some(le) = self.link_edit.clone() else { return };
         let t = l.t;
         // Its first frame: placed now.
+        let fresh = le.at.is_none();
         let at = match le.at {
             Some(at) => at,
             None => {
@@ -2679,12 +2680,19 @@ impl Carnet {
             |ui| {
                 ui.text(if le.existing { "Link" } else { "Make a link" }, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
                 ui.with(NodeSpec::row().grow_width().pad_xy(10.0, 7.0).radius(radius::CONTROL).bg(t.sunken), |ui| {
-                    field = Some(ui.text_edit_value(
+                    let k = ui.text_edit_value(
                         "link-url",
                         &le.url,
                         &EditOptions { style: TextStyle::new(Type::UI.size).color(t.fg), ..Default::default() },
                         Field::Link.on(NodeSpec::row().grow_width().label("Link address")),
-                    ));
+                    );
+                    // A link of its own: kui keeps the field between
+                    // links, and Ctrl+Z would go back into the last one's
+                    // address. Set whole, its undo starts here.
+                    if fresh {
+                        ui.set_edit_text(k, &le.url);
+                    }
+                    field = Some(k);
                 });
                 ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
                     let button = |ui: &mut Ui<'_>, key: &str, name: &str, what: u64, primary: bool| {

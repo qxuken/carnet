@@ -2039,6 +2039,12 @@ fn the_link_editor_shows_the_link_it_was_opened_on() {
     d.frame(&mut app);
     d.frame(&mut app);
     assert_eq!(field(&mut d), "https://x.test/two");
+    // Its undo starts with it: Ctrl+Z (the field's Undo, as the window
+    // hands it on) goes back into no other address.
+    d.input(&mut app, InputEvent::Key(EditKey::Undo, kui_native::Mods::default()));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(field(&mut d), "https://x.test/two");
+    assert_eq!(app.link_edit.as_ref().map(|l| l.url.as_str()), Some("https://x.test/two"));
     let _ = std::fs::remove_dir_all(dir);
 }
 
