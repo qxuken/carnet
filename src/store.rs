@@ -4126,6 +4126,9 @@ mod tests {
             "/net/host/share/x.png",
             "/Network/Servers/host/x.png",
             "file:///net/host/x.png",
+            // Climbed to from the notes folder: `/net` on a Mac or Linux,
+            // and on Windows `C:\net`, a folder like any other.
+            #[cfg(unix)]
             "../../../../../../../../../../net/host/x.png",
         ] {
             assert_eq!(s.resolve("", src), None, "{src}");

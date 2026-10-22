@@ -1,0 +1,6 @@
+# What tests read byte for byte is checked out byte for byte: git on
+# Windows would otherwise end its lines in CRLF, and a test comparing a
+# note written back with the file it came from would fail there alone.
+crates/carnet-core/tests/fixtures/** -text
+crates/carnet-sync/protocol/** -text
+fuzz/seeds/** -text
