@@ -264,4 +264,62 @@ mod tests {
         assert_eq!(faces(&mut core, &s), (inter, inter, source, source));
         assert_eq!(faces(&mut core, &Settings::default()), first);
     }
+
+    /// `font` with every `from` in its names table written `to`, as long:
+    /// a family of its own, for one that wasn't there to be picked.
+    fn renamed(font: &[u8], from: &str, to: &str) -> Vec<u8> {
+        assert_eq!(from.len(), to.len());
+        let be32 = |b: &[u8]| u32::from_be_bytes(b.try_into().unwrap()) as usize;
+        let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+        let (at, len) = (0..tables)
+            .map(|i| &font[12 + 16 * i..28 + 16 * i])
+            .find(|record| &record[..4] == b"name")
+            .map(|record| (be32(&record[8..12]), be32(&record[12..16])))
+            .expect("a names table");
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_be_bytes).collect::<Vec<u8>>();
+        let mut out = font.to_vec();
+        let names = &mut out[at..at + len];
+        for (a, b) in [(from.as_bytes().to_vec(), to.as_bytes().to_vec()), (utf16(from), utf16(to))] {
+            let mut i = 0;
+            while i + a.len() <= names.len() {
+                if names[i..i + a.len()] == a[..] {
+                    names[i..i + a.len()].copy_from_slice(&b);
+                    i += a.len();
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// A face chosen in Settings that isn't there yet is Carnet's own until
+    /// it comes, and from the next frame on is the one chosen, with no
+    /// restart: kui picks the tokens again when the fonts change (an
+    /// install says so on Windows and macOS, and loaded here).
+    #[test]
+    fn a_face_chosen_before_it_is_there_is_taken_when_it_comes() {
+        let mut core = Core::new();
+        let mut styler = Styler::default();
+        let s = Settings { font: "Quill".into(), ..Settings::default() };
+        let mut body = |core: &mut Core| {
+            let mut ui = core.frame(Size::new(400.0, 300.0), 1.0);
+            let l = styler.look(&mut ui, &s);
+            ui.finish();
+            l.body
+        };
+        let picked = |core: &Core| {
+            let tokens = core.tokens().expect("declared");
+            tokens.families().iter().find(|(n, _)| n == "body").and_then(|(_, t)| t.picked().map(String::from))
+        };
+        let before = body(&mut core);
+        assert_eq!(before, FontFamily::Custom(core.add_system_font(BODY_FACE).expect("Inter, shipped")), "not there: Carnet's own");
+        assert_eq!(picked(&core).as_deref(), Some(BODY_FACE));
+
+        core.add_font_data(renamed(SHIPPED[0], "Inter", "Quill")).expect("Inter as Quill");
+        let quill = FontFamily::Custom(core.add_system_font("Quill").expect("loaded"));
+        assert_ne!(quill, before);
+        assert_eq!(body(&mut core), quill, "taken the next frame");
+        assert_eq!(picked(&core).as_deref(), Some("Quill"));
+    }
 }
