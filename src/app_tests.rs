@@ -4866,6 +4866,16 @@ fn a_new_device_comes_in_by_email_and_password() {
     let k = app_field(&a, Field::PasswordNew).unwrap();
     assert_eq!(da.core.edit_text(k).as_deref(), Some(""), "Change opens empty");
     assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some(""));
+    // Typed and left, Settings closed: forgotten, by the app and the field.
+    da.focus(&mut a, k);
+    da.text(&mut a, "left behind here");
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some("left behind here"));
+    a.settings_open = false;
+    d_frame_twice(&mut a, &mut da);
+    a.settings_open = true;
+    d_frame_twice(&mut a, &mut da);
+    assert_eq!(a.pw_edit.as_ref().map(|p| p.1.as_str()), Some(""), "Settings closed: forgotten");
+    assert_eq!(da.core.edit_text(app_field(&a, Field::PasswordNew).unwrap()).as_deref(), Some(""));
     a.on_plain(Msg::SyncPasswordCancel);
 
     // A wrong one: nothing let in, and said.
