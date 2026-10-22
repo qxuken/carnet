@@ -5981,8 +5981,16 @@ fn the_app_learns_at_once_its_account_can_write_again() {
     assert_eq!(said, 1, "read only, said once");
     assert_eq!(a.sync.error, None);
     let before = held();
+    // Written on the page, Settings away a moment: typed with Settings
+    // over the page, it went nowhere, and what the wait below saw sent was
+    // whatever else the app had to send, in its own time.
+    a.settings_open = false;
+    a.on_plain(Msg::FocusTitle);
+    d_frame_twice(&mut a, &mut da);
     type_in(&mut a, &mut da, "Typed while suspended");
+    assert_eq!(a.store.notes[a.current].title, "Typed while suspended");
     a.save_current();
+    a.settings_open = true;
     for _ in 0..50 {
         da.frame(&mut a);
         std::thread::sleep(Duration::from_millis(5));
