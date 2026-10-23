@@ -323,6 +323,47 @@ fn the_caret_is_drawn_where_the_text_ends() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The caret of a line scrolled up past the page's top is cut there, as
+/// its words are: never drawn over the toolbar.
+#[test]
+fn a_caret_scrolled_past_the_page_is_cut_with_its_line() {
+    let (mut app, mut d, dir) = body("caret-cut");
+    type_in(&mut app, &mut d, "The first line");
+    for i in 0..40 {
+        key(&mut app, &mut d, "enter");
+        type_in(&mut app, &mut d, &format!("Line {i}"));
+    }
+    key_with(&mut app, &mut d, "up", CTRL);
+    key(&mut app, &mut d, "end");
+    assert_eq!(app.doc().get(app.caret.head.slot.block).and_then(|b| b.text_ref()), Some("The first line"));
+    d.core.set_inspect(true);
+    // The wheel, a little at a time, until the caret's line is half
+    // under the page's top.
+    let page = app.page_rect.expect("the page");
+    let mut bar = None;
+    for _ in 0..200 {
+        d.wheel(&mut app, page.x + page.w / 2.0, page.y + page.h / 2.0, 0.0, -4.0);
+        d.frame(&mut app);
+        let r = d.key_of("caret").and_then(|k| d.rect_of(k));
+        if r.is_some_and(|r| r.y < page.y && r.y + r.h > page.y) {
+            bar = r;
+            break;
+        }
+    }
+    let bar = bar.expect("the caret half under the page's top");
+    // Its quad, in physical pixels, and what clips it.
+    let s = d.core.scale();
+    let (list, _) = d.core.output();
+    let quad = list
+        .quads
+        .iter()
+        .find(|q| (q.rect.x - bar.x * s).abs() < 1.0 && (q.rect.y - bar.y * s).abs() < 1.0 && (q.rect.w - bar.w * s).abs() < 1.0)
+        .expect("the caret's quad");
+    let clip = list.clips[quad.clip as usize].rect;
+    assert!(clip.y >= page.y * s - 1.0, "cut at the page's top {}: {clip:?}", page.y * s);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn search_with_no_match_makes_the_note_and_then_clears() {
     let (store, dir) = temp_store("search");

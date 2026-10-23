@@ -1477,7 +1477,7 @@ impl Carnet {
                 .radius(1.0)
                 .bg(t.accent)
                 .opacity(if blink { 1.0 } else { 0.0 })
-                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0))
+                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0).clipped())
                 .role(Role::None)
         };
         let Some((nw, nh)) = natural else {
@@ -1804,7 +1804,7 @@ impl Carnet {
                 ui.text_in_keyed(
                     "hint",
                     NodeSpec::row()
-                        .float(FloatConfig::parent())
+                        .float(FloatConfig::parent().clipped())
                         .enter(kui_native::Enter::default().opacity(0.0))
                         .transition(320.0)
                         .role(Role::None),
@@ -1817,14 +1817,16 @@ impl Carnet {
             }
             // The bar is declared on every frame and blinks by its opacity:
             // a float that came and went with the blink would come back
-            // each time over whatever opened since (the `/` menu).
+            // each time over whatever opened since (the `/` menu). It takes
+            // the page's clip: a float escapes it, and the caret of a line
+            // scrolled up under the toolbar was drawn over the toolbar.
             let bar = |h: f32, (dx, dy): (f32, f32), on: bool| {
                 NodeSpec::row()
                     .size(2.0, h.max(8.0))
                     .radius(1.0)
                     .bg(t.accent)
                     .opacity(if on { 1.0 } else { 0.0 })
-                    .float(FloatConfig::parent().offset(dx, dy))
+                    .float(FloatConfig::parent().offset(dx, dy).clipped())
                     .role(Role::None)
             };
             // On an empty line the caret is the line's start: nothing to
