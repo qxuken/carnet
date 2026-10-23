@@ -274,7 +274,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carnet-core"
-version = "0.1.2"
+version = "0.1.3"
 
 [[package]]
 name = "carnet-fuzz"
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "carnet-server"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "axum",
  "carnet-sync",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "carnet-sync"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "argon2",
