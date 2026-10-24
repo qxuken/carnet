@@ -452,6 +452,29 @@ fn split_text(t: &str, byte: usize, styled: bool) -> (String, String) {
     }
 }
 
+/// Where a line broken at `byte` of styled text breaks: past the marks
+/// that close the words before it, and past those of the break ending
+/// its line, which stay that line's. The caret after a run's last
+/// letter is inside its marks, so typing carries the style on; a `\n`
+/// there would leave the closing mark at the next line's start, where it
+/// closes nothing (`**bold\n**`, two stars to any other reader), and the
+/// new line would begin inside the run, or behind the old one's spaces —
+/// no fresh line to start a `/` on.
+fn break_at(t: &str, byte: usize) -> usize {
+    let pairs = inline::pairs(t);
+    let breaks = inline::breaks(t);
+    let mut at = byte;
+    loop {
+        if let Some(p) = pairs.iter().find(|p| p.kind != inline::Kind::Break && p.close.0 == at && p.close.1 > at) {
+            at = p.close.1;
+        } else if let Some(r) = breaks.iter().find(|r| r.0 == at && r.1 > at) {
+            at = r.1;
+        } else {
+            return at;
+        }
+    }
+}
+
 // ------------------------------------------------------------ motions
 
 /// The picture among a cell's words that the caret selects end to end,
@@ -951,13 +974,12 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let marks = styled(doc, p.slot);
     let Some(t) = text_mut(doc, p.slot) else { return false };
     let mut byte = floor_char(t, p.byte);
-    // A line broken at its end, before the marks of the break it had:
-    // they stay that line's, the new break after them.
+    // A line broken after its last letter: the marks closing the words
+    // and those of the break it had stay that line's, the new break after
+    // them ([`break_at`]).
     if marks && s.starts_with('\n') {
         let _r = reading(p.slot);
-        if let Some(r) = inline::breaks(t).into_iter().find(|r| r.0 == byte && r.1 < t.len()) {
-            byte = r.1;
-        }
+        byte = break_at(t, byte);
     }
     t.insert_str(byte, &s);
     *c = Caret::at(Pos {
@@ -1357,8 +1379,13 @@ pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
     let mut byte = floor_char(&t, p.byte);
     // Split by the words: a bold run cut by Enter is bold on both lines.
     let marks = styled(doc, p.slot);
-    // At a line's end, the marks of the break that ends it stay with it.
-    let at_break = marks && inline::breaks(&t).into_iter().find(|r| r.0 == byte && r.1 < t.len()).inspect(|r| byte = r.1).is_some();
+    // At a line's end, the marks closing its words and those of the
+    // break that ends it stay with it ([`break_at`]): the line below
+    // starts clean, its spaces never come down to it.
+    if marks {
+        byte = break_at(&t, byte);
+    }
+    let at_break = marks && inline::breaks(&t).into_iter().any(|r| r.1 == byte && r.1 < t.len());
     let (head, tail) = split_text(&t, byte, marks);
     let head = if at_break { ended(head) } else { head };
     let v = visible(doc, p.slot);
@@ -5590,6 +5617,53 @@ mod tests {
             let first = if mark == "\\" { "stay" } else { &format!("stay{mark}") };
             assert_eq!(texts(&d)[..2], [format!("Text:{first}"), "Text:\napart".to_string()]);
             assert_eq!(visible(&d, s).text(text(&d, s)), "stay");
+        }
+    }
+
+    /// The finding: a line that ends highlighted, in a hard break's
+    /// spaces (`Open <mark …>terminal</mark>  `), and a new line under it
+    /// never offered the `/` menu. Enter took the spaces down into the new
+    /// paragraph, the caret before them; Shift+Enter put its break inside
+    /// the highlight, the new line opening in the `<mark>`. A line broken
+    /// after its last letter keeps the marks closing its words and those
+    /// of its break, and the line below starts clean; written, a break
+    /// with nothing after it yet reads back as it was.
+    #[test]
+    fn a_line_broken_after_its_last_letter_starts_clean() {
+        let line = "Open <mark style=\"background: #E2D5F0CC\">terminal</mark>  ";
+        let (_, d0) = crate::doc::from_markdown(&format!("{line}\n\n- next\n"));
+        let s = block_slots(&d0.blocks()[0])[0];
+        let v = visible(&d0, s);
+        let end = v.at(v.drawn_len());
+        assert_eq!(end, line.find("</mark>").unwrap(), "the line's end: inside the highlight");
+        // Enter: the spaces stay above, hidden as the file had them.
+        let (mut d, mut c) = (d0.clone(), Caret::at(Pos { slot: s, byte: end }));
+        assert!(enter(&mut d, &mut c, false));
+        assert_eq!(texts(&d)[..3], [format!("Text:{line}"), "Text:".to_string(), "[ ]next".to_string()]);
+        // Shift+Enter: the break after them, the spaces its marks now.
+        let (mut d, mut c, mut t) = (d0.clone(), Caret::at(Pos { slot: s, byte: end }), Typing::default());
+        assert!(enter(&mut d, &mut c, true));
+        assert_eq!((text(&d, s), c.head.byte), (format!("{line}\n").as_str(), line.len() + 1));
+        assert_eq!(visible(&d, s).text(text(&d, s)), "Open terminal\n");
+        keys(&mut t, &mut d, &mut c, "/");
+        assert_eq!(text(&d, s), format!("{line}\n/"), "typed on a line of its own, unhighlighted");
+
+        // After a bold word, mid-line or at the end: past its closing
+        // stars, which a `\n` before would leave closing nothing.
+        for (md, byte, broken) in [("**bold** more", 6, "**bold**\n more"), ("say **bold**", 10, "say **bold**\n")] {
+            let mut d = doc(vec![Block::text(md)]);
+            let mut c = at(&d, 0, byte);
+            assert!(enter(&mut d, &mut c, true));
+            assert_eq!((text(&d, c.head.slot), c.head.byte), (broken, broken.find('\n').unwrap() + 1));
+        }
+
+        // Written and read back: the break that ends a paragraph, with
+        // nothing after it yet, is still there.
+        for t in ["hello\n", &format!("{line}\n"), "**bold**\n", "one\n\n"] {
+            let d = doc(vec![Block::text(t)]);
+            let md = crate::doc::to_markdown(None, &d);
+            let (_, back) = crate::doc::from_markdown(&md);
+            assert_eq!(back.blocks()[0].text_ref(), Some(t), "{md:?}");
         }
     }
 

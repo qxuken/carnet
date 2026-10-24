@@ -9154,6 +9154,78 @@ fn shift_enter_opens_its_line_at_once() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The finding, in a note of the user's: a line ending highlighted and in
+/// a hard break's two spaces, `Open <mark …>terminal</mark>  `, and `/` on
+/// a new line under it offered nothing. Enter took the spaces down to the
+/// new paragraph, the caret before them; Shift+Enter broke the line
+/// inside the highlight. Either way the new line now starts clean, the
+/// menu shows on it, and the file keeps the line above as it was.
+#[test]
+fn a_slash_on_the_line_after_a_highlight_offers_the_blocks() {
+    let line = "Open <mark style=\"background: #E2D5F0CC\">terminal</mark>  ";
+    let rest = "- Navigate to vpn folder   \n\n```\n$ z vpn\n```\n\n- To start connection  \n";
+    let md = format!("# vpn\n\n{line}\n\n{rest}");
+    for (n, mods) in [KeyMods::NONE, SHIFT].into_iter().enumerate() {
+        let (store, dir) = temp_store(&format!("slash-after-mark-{n}"));
+        drop(store);
+        std::fs::write(dir.join("vpn.md"), &md).unwrap();
+        let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+        let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+        d.core.set_inspect(true);
+        d.frame(&mut app);
+        let i = app.store.notes.iter().position(|n| n.title == "vpn").unwrap();
+        app.open(i);
+        for _ in 0..4 {
+            d.frame(&mut app);
+        }
+        let written = |app: &mut Carnet| {
+            app.save_current();
+            std::fs::read_to_string(dir.join("vpn.md")).unwrap()
+        };
+        // On the page, not the note's line in the list.
+        let keys: Vec<Key> = app.slot_keys.values().copied().collect();
+        let para = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Open terminal") && keys.contains(&n.key)).expect("the line, its marks hidden").rect;
+        d.click(&mut app, para.x + 10.0, para.y + 6.0);
+        d_frame_twice(&mut app, &mut d);
+        key(&mut app, &mut d, "end");
+        let above = app.caret.head.slot;
+        let end = app.rect_at(&d.core, above, app.caret.head.byte).unwrap();
+        key_with(&mut app, &mut d, "enter", mods);
+        d_frame_twice(&mut app, &mut d);
+        if mods.shift {
+            assert_eq!(page::text(app.doc(), above), format!("{line}\n"), "the break after the spaces");
+        } else {
+            assert_eq!(texts(&app)[..3], [line, "", "[ ]Navigate to vpn folder   "], "the spaces stay above");
+        }
+        // An empty paragraph's caret is its line's start, unmeasured.
+        let k = app.slot_keys.get(&app.caret.head.slot).copied().unwrap();
+        let line_of = d.core.nodes().iter().find(|n| n.key == k).map(|n| n.rect);
+        let r = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).or(line_of).unwrap();
+        assert!(r.y >= end.y + end.h - 0.5, "the caret on the new line: {r:?} under {end:?}");
+        let file = written(&mut app);
+        if mods.shift {
+            // The break with nothing after it yet: a line of a backslash,
+            // read back as the empty line it is.
+            assert_eq!(file, format!("# vpn\n\n{line}\n\\\n\n{rest}"));
+            let (_, back) = carnet_core::doc::from_markdown(&file);
+            assert_eq!(back.blocks()[0].text_ref(), Some(format!("{line}\n").as_str()));
+        } else {
+            assert!(file.starts_with(&format!("# vpn\n\n{line}\n\n")), "{file:?}");
+        }
+        type_in(&mut app, &mut d, "/");
+        d.frame(&mut app);
+        assert!(app.slash_now().is_some(), "{mods:?}: {:?}", texts(&app));
+        assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("Table")), "the menu shows");
+        type_in(&mut app, &mut d, "code");
+        key(&mut app, &mut d, "enter");
+        assert_eq!(texts(&app)[0], line, "{mods:?}: the line above as it was");
+        assert!(matches!(&blocks(&app)[1].kind, Kind::Raw(r) if r.starts_with("```")), "{:?}", texts(&app));
+        let w = d.warnings();
+        assert!(w.is_empty(), "{w:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A picture that's the user's own file, beside the note: drawn faint with
 /// a mark, and selected, a bar that says so. Moved into Carnet, it's in
 /// the attachments folder and the note shows it there; the notice's Undo
