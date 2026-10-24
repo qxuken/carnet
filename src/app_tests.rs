@@ -8732,6 +8732,49 @@ fn a_dividers_picture_is_kept_small_and_clear() {
     let _ = std::fs::remove_dir_all(config);
 }
 
+/// An SVG picked for dividers is drawn once into the PNG a divider shows,
+/// as large as one is kept, its shape and its see-through parts kept, and
+/// is drawn on the page like any picture.
+#[test]
+fn an_svg_divider_is_drawn_into_a_png_when_picked() {
+    use crate::settings::Divider;
+    let (mut app, mut d, dir, config) = divided("divider-svg");
+    // 400 × 100: see-through but for a solid bar and a half-clear dot.
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100" viewBox="0 0 400 100">
+        <rect x="0" y="40" width="160" height="20" fill="#c0553f"/>
+        <circle cx="300" cy="50" r="40" fill="#336699" fill-opacity="0.5"/>
+    </svg>"##;
+    let picked = dir.with_extension("ornament.svg");
+    std::fs::write(&picked, svg).unwrap();
+    app.set_divider_picture(&picked);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert_eq!(app.settings.divider, Divider::Picture);
+    let kept = app.settings.divider_picture_file().expect("kept");
+    assert_eq!(kept.extension().and_then(|e| e.to_str()), Some("png"));
+    let png = image::open(&kept).unwrap().to_rgba8();
+    // 4:1 within 1800 × 168: drawn 672 × 168, not 400 × 100 blown up.
+    assert_eq!((png.width(), png.height()), (672, 168));
+    let k = 168.0 / 100.0;
+    let at = |x: f32, y: f32| png.get_pixel((x * k) as u32, (y * k) as u32).0;
+    assert_eq!(at(80.0, 50.0), [0xc0, 0x55, 0x3f, 255], "the bar, solid and its own colour");
+    assert_eq!(at(80.0, 10.0)[3], 0, "clear around it");
+    let dot = at(300.0, 50.0);
+    assert!((120..=135).contains(&dot[3]) && (0x30..=0x36).contains(&dot[0]) && (0x96..=0x9c).contains(&dot[2]), "half clear, its colour not darkened: {dot:?}");
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    assert!(matches!(app.divider_look(1.0, 600.0), DividerLook::Picture(Some(_), w, h) if (w, h) == (112.0, 28.0)), "{:?}", app.divider_look(1.0, 600.0));
+    // Not an SVG at all: said, and the divider as it was.
+    let bad = dir.with_extension("bad.svg");
+    std::fs::write(&bad, "not a drawing").unwrap();
+    app.set_divider_picture(&bad);
+    assert!(app.error.as_deref().is_some_and(|e| e.ends_with(".bad.svg for dividers: it isn't a drawing Carnet can read")), "{:?}", app.error);
+    assert_eq!(app.settings.divider_picture_file().as_deref(), Some(kept.as_path()));
+    let _ = std::fs::remove_file(picked);
+    let _ = std::fs::remove_file(bad);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
+}
+
 #[test]
 fn a_window_360_wide_holds_the_note_the_list_and_the_settings() {
     let (store, dir) = temp_store("w360");

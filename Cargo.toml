@@ -33,6 +33,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # events (FSEvents, inotify, ReadDirectoryChangesW), so an idle folder
 # costs nothing (src/watch.rs).
 notify = "8.2"
+# A divider's picture may be an SVG: drawn once, as it's picked, into the
+# PNG a divider shows. Text in it in the system's fonts (fontdb is in
+# kui's tree already); no pictures inside it, which would bring a JPEG
+# decoder of its own.
+resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "svgz"] }
 # Local time: a pasted picture's file is named for when it was pasted, as
 # the clock on the wall says it.
 jiff = "0.2"

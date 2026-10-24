@@ -5088,7 +5088,7 @@ impl Carnet {
             ui.request_files(
                 kui_native::FileDialog::open()
                     .title("Choose a picture for dividers")
-                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "svgz"])
                     .tag(Msg::PickedDividerPicture),
             );
         }

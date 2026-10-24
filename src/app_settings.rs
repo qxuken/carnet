@@ -261,7 +261,7 @@ impl Carnet {
     /// With no folder (in tests), kept where it is.
     pub(super) fn set_divider_picture(&mut self, from: &Path) {
         let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if !images::is_image(from) {
+        if !images::is_image(from) && !images::is_svg(from) {
             self.error = Some(format!("{name} isn't a picture Carnet shows"));
             return;
         }

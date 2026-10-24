@@ -522,7 +522,7 @@ fn fit(d: Decoded) -> Decoded {
 /// picture is drawn a few lines tall, and a camera's photo kept whole for
 /// it took a second to decode and a frame to upload. Its size, as written.
 pub fn shrink_to_png(from: &Path, to: &Path, most_w: u32, most_h: u32) -> Result<(u32, u32), String> {
-    let d = decode(from)?;
+    let d = if is_svg(from) { draw_svg(from, most_w, most_h)? } else { decode(from)? };
     let img = image::RgbaImage::from_raw(d.w, d.h, d.rgba).ok_or_else(|| "no pixels".to_string())?;
     let img = image::DynamicImage::ImageRgba8(img);
     let img = if img.width() > most_w || img.height() > most_h { img.thumbnail(most_w, most_h) } else { img };
@@ -530,6 +530,43 @@ pub fn shrink_to_png(from: &Path, to: &Path, most_w: u32, most_h: u32) -> Result
     let png = encode_png(rgba.width(), rgba.height(), rgba.as_raw())?;
     std::fs::write(to, png).map_err(|e| e.to_string())?;
     Ok((rgba.width(), rgba.height()))
+}
+
+/// Whether a file is an SVG drawing (or a gzipped one), by its extension:
+/// a divider's picture may be, drawn once into pixels; a note's isn't.
+pub fn is_svg(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "svg" | "svgz"))
+}
+
+/// An SVG drawn as RGBA as large as fits `most_w` × `most_h`, its shape
+/// kept: a drawing has no size of its own to be shrunk from, so it's drawn
+/// at the size it will be kept at, never blurred up from a small one. Its
+/// text in the system's fonts.
+fn draw_svg(path: &Path, most_w: u32, most_h: u32) -> Result<Decoded, String> {
+    use resvg::{tiny_skia, usvg};
+    let data = std::fs::read(path).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "not found".to_string() } else { e.to_string() })?;
+    let mut opt = usvg::Options::default();
+    opt.fontdb_mut().load_system_fonts();
+    let tree = usvg::Tree::from_data(&data, &opt).map_err(|_| "it isn't a drawing Carnet can read".to_string())?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return Err("it draws nothing".to_string());
+    }
+    let k = (most_w as f32 / size.width()).min(most_h as f32 / size.height());
+    let (w, h) = (((size.width() * k).round() as u32).max(1), ((size.height() * k).round() as u32).max(1));
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or_else(|| "too big to draw".to_string())?;
+    resvg::render(&tree, tiny_skia::Transform::from_scale(k, k), &mut pixmap.as_mut());
+    // tiny-skia's pixels are premultiplied; a PNG's aren't.
+    let mut rgba = pixmap.take();
+    for p in rgba.as_chunks_mut::<4>().0 {
+        let a = p[3] as u32;
+        if a > 0 && a < 255 {
+            for c in &mut p[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    Ok(Decoded { w, h, rgba })
 }
 
 /// RGBA as a PNG file's bytes.
