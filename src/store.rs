@@ -2415,9 +2415,10 @@ impl Store {
     }
 
     /// `text`, a note's from the folder `from`, with the files its links
-    /// and Obsidian embeds name by a path from there — pictures and
-    /// documents, nothing that could run, and no other note — copied into
-    /// the attachments folder, and the links rewritten to find them from
+    /// and Obsidian embeds name by a path from there — files of any kind,
+    /// but no other note — copied into the attachments folder (a link to
+    /// one that could run asks before it opens, as any does), and the
+    /// links rewritten to find them from
     /// `to` (an embed by its path from the notes folder). The same file
     /// named twice is copied once.
     fn bring_linked(&mut self, text: &str, from: &Path, to: &Path) -> String {
@@ -2427,8 +2428,7 @@ impl Store {
         // another note stays one: that note comes in on its own, or not.
         let mut bring = |t: &str| -> Option<PathBuf> {
             let p = from.join(decode_src(t));
-            let name = file_name(&p);
-            if !is_relative(t) || on_network(&p) || !p.is_file() || is_markdown(&p) || !(doc::is_picture_name(&name) || doc::is_document_name(&name)) {
+            if !is_relative(t) || on_network(&p) || !p.is_file() || is_markdown(&p) {
                 return None;
             }
             if within(&self.dir, &p) {
@@ -3213,20 +3213,46 @@ pub fn epoch_time(secs: u64) -> Option<SystemTime> {
     (secs <= LAST).then(|| UNIX_EPOCH + Duration::from_secs(secs))
 }
 
-/// Whether a file a note links to is one to open in its own app: a
-/// document, a picture, a recording, a film. Anything else (a program, a
-/// script) is shown in its folder, never run from a link.
-pub fn opens_safely(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "pdf" | "txt" | "md" | "rtf" | "csv" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx"
-                | "pages" | "numbers" | "key" | "odt" | "ods" | "odp" | "ics" | "vcf"
-                | "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "heif" | "tif" | "tiff"
-                | "m4a" | "mp3" | "wav" | "aac" | "aiff" | "caf" | "flac" | "ogg"
-                | "mov" | "mp4" | "m4v" | "webm"
-        )
-    })
+/// Whether a file a note links to could run a program as it opens: one
+/// of the kinds that run, install or lead elsewhere
+/// ([`doc::could_run`]), or, on a Mac or Linux, one the system would run
+/// for its mode (a script with no kind, marked as a program). Its link
+/// asks before it opens; any other opens in its own app.
+pub fn could_run(path: &Path) -> bool {
+    doc::could_run(&file_name(path)) || runs_by_mode(path)
+}
+
+#[cfg(unix)]
+fn runs_by_mode(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn runs_by_mode(_: &Path) -> bool {
+    false
+}
+
+/// Opens a file in the notes folder in the system's own app for it. One
+/// with no kind (a `README`) has none: on a Mac it opens in the text
+/// editor (`open -t`), where `open` alone would find no app, or run it
+/// in Terminal were it a program; Windows asks which app (it runs nothing
+/// by a name without a kind); Linux's opener reads what's in it, and
+/// opens text as text.
+#[cfg(test)]
+pub fn open_file(path: &Path) -> io::Result<()> {
+    open_url(&path.to_string_lossy())
+}
+
+/// Opens a file in the notes folder in the system's own app for it.
+#[cfg(not(test))]
+pub fn open_file(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if path.extension().is_none() {
+        std::process::Command::new("open").arg("-t").arg(path).spawn()?;
+        return Ok(());
+    }
+    open_url(&path.to_string_lossy())
 }
 
 /// A file system's error in plain words: what went wrong, without the
@@ -4267,10 +4293,10 @@ mod tests {
 
     /// A Markdown file from elsewhere (dropped on the window) comes in as a
     /// note: copied, under its own name or the next one free, the pictures
-    /// and documents beside it that it links to brought into the
-    /// attachments folder (once, however often named) and its links and
-    /// embeds following them; a web picture, a missing one and a script
-    /// stay as written. What isn't UTF-8, or is too big to be a note,
+    /// and files beside it that it links to, a script among them,
+    /// brought into the attachments folder (once, however often named)
+    /// and its links and embeds following them; a web picture and a
+    /// missing one stay as written. What isn't UTF-8, or is too big to be a note,
     /// stays out, and nothing of it is left behind.
     #[test]
     fn a_markdown_file_from_elsewhere_comes_in_as_a_note() {
@@ -4294,12 +4320,12 @@ mod tests {
         assert_eq!(fs::read_to_string(dir.join("Work").join("Trip.md")).unwrap(), "# Mine\n");
         assert_eq!(
             fs::read_to_string(dir.join("Work").join("Trip 2.md")).unwrap(),
-            "# Trip\n\n![The sea](../attachments/Sea-view.png)\n\nAgain <img src=\"../attachments/Sea-view.png\" width=\"200\">\n\n[Plan](<../attachments/Plan.pdf>), [run](run.sh), ![](https://example.com/x.png), ![](gone.png)\n\n![[attachments/leaf.png|300]]\n"
+            "# Trip\n\n![The sea](../attachments/Sea-view.png)\n\nAgain <img src=\"../attachments/Sea-view.png\" width=\"200\">\n\n[Plan](<../attachments/Plan.pdf>), [run](../attachments/run.sh), ![](https://example.com/x.png), ![](gone.png)\n\n![[attachments/leaf.png|300]]\n"
         );
         let pics = dir.join(ATTACHMENTS);
         assert_eq!(fs::read_to_string(pics.join("Sea-view.png")).unwrap(), "a sea");
-        assert!(pics.join("leaf.png").is_file() && pics.join("Plan.pdf").is_file());
-        assert!(!pics.join("Sea-view-2.png").exists() && !pics.join("run.sh").exists() && !pics.join("run.png").exists());
+        assert!(pics.join("leaf.png").is_file() && pics.join("Plan.pdf").is_file() && pics.join("run.sh").is_file());
+        assert!(!pics.join("Sea-view-2.png").exists() && !pics.join("run.png").exists());
         assert_eq!(fs::read_to_string(out.join("Trip.md")).unwrap(), text, "copied, not moved or changed");
         assert!(out.join("img").join("Sea view.png").exists());
         assert!(s.resolve("Work", "../attachments/Sea-view.png").unwrap().is_file());
@@ -4453,7 +4479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_to_a_file_beside_the_notes_opens_it_and_a_program_is_only_shown() {
+    fn a_link_to_a_file_beside_the_notes_opens_it_and_a_program_asks_first() {
         let dir = temp_dir("file-links");
         let s = Store::open(dir.clone()).unwrap();
         fs::create_dir_all(dir.join("attachments")).unwrap();
@@ -4461,15 +4487,25 @@ mod tests {
         fs::write(dir.join("attachments").join("Boarding pass.pdf"), "pdf").unwrap();
         fs::write(dir.join("attachments").join("run.command"), "#!/bin/sh").unwrap();
         let pdf = s.linked_file("Archive", "../attachments/Boarding%20pass.pdf").expect("found from a folder");
-        assert!(opens_safely(&pdf));
-        assert!(!opens_safely(&s.linked_file("", "attachments/run.command").unwrap()), "shown, not run");
-        // Nothing that runs, or opens as a page that could: whatever its
-        // case, and none without a kind.
-        for name in ["x.COMMAND", "x.sh", "x.app", "x.terminal", "x.tool", "x.jar", "x.exe", "x.bat", "x.ps1", "x.html", "x.svg", "x.webloc", "x.fileloc", "x.scpt", "x.pkg", "x.dmg", "x.docm", "x"] {
-            assert!(!opens_safely(Path::new(name)), "{name}");
+        assert!(!could_run(&pdf));
+        assert!(could_run(&s.linked_file("", "attachments/run.command").unwrap()), "asked about first");
+        // Whatever its case; and one with no kind, source code, a page,
+        // a note, opens without a word.
+        for name in ["x.COMMAND", "x.sh", "x.app", "x.terminal", "x.tool", "x.jar", "x.exe", "x.bat", "x.ps1", "x.webloc", "x.fileloc", "x.scpt", "x.pkg", "x.dmg", "x.py"] {
+            assert!(could_run(Path::new(name)), "{name}");
         }
-        for name in ["x.PDF", "x.png", "x.m4a", "x.mov", "x.md"] {
-            assert!(opens_safely(Path::new(name)), "{name}");
+        for name in ["x.PDF", "x.png", "x.m4a", "x.mov", "x.md", "README", "main.rs", "x.html", "x.svg", "x.docm", "x.txt"] {
+            assert!(!could_run(Path::new(name)), "{name}");
+        }
+        // On a Mac or Linux, a script with no kind marked as a program.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = dir.join("attachments").join("tool");
+            fs::write(&tool, "#!/bin/sh").unwrap();
+            assert!(!could_run(&tool));
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(could_run(&tool));
         }
         assert_eq!(s.linked_file("", "example.com"), None, "a web address");
         assert_eq!(s.linked_file("", "attachments/gone.pdf"), None);

@@ -1366,15 +1366,16 @@ fn a_vault_naming_places_outside_the_notes_folder_writes_nothing_there() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A file another device names in `attachments/` that isn't a picture or
-/// a document by its name (a program, a script, an app, a shortcut) is
-/// never written here, whatever its bytes, and isn't sent from here
-/// either — in either of the vault's maps. A document with no kind, or a
-/// page, comes as a PDF does. A picture or a document that comes is
-/// marked as from elsewhere, as a download is (macOS's quarantine,
-/// Windows' Mark of the Web); one made here isn't.
+/// Every file of `attachments/` comes by sync, of any kind: a document,
+/// one with no kind, a script, a program (which asks before it opens
+/// here, as anywhere). Only where it's kept by its name counts: one the
+/// vault names in the other map than its name's (a program in the
+/// pictures', where a Carnet from before files would read it) is never
+/// written here, nor one outside `attachments/`, nor one being written.
+/// What comes is marked as from elsewhere, as a download is (macOS's
+/// quarantine, Windows' Mark of the Web); one made here isn't.
 #[test]
-fn only_pictures_and_documents_come_by_sync() {
+fn every_file_comes_by_sync_as_its_name_keeps_it() {
     let mut two = Two::new("only-pictures");
     let photo: Vec<u8> = (0..20_000u32).map(|i| (i % 239) as u8).collect();
     let a = &mut two.sides[0].store;
@@ -1384,34 +1385,35 @@ fn only_pictures_and_documents_come_by_sync() {
     a.notes.push(n);
     let i = a.notes.len() - 1;
     a.save(i, true).unwrap();
-    // A document: sent. A script: not.
+    // A document, a script and a program: all sent.
     std::fs::write(a.dir.join("attachments/notes.txt"), b"plain words").unwrap();
     std::fs::write(a.dir.join("attachments/fix.sh"), b"echo hi").unwrap();
+    std::fs::write(a.dir.join("attachments/setup.exe"), b"MZ a program").unwrap();
     for _ in 0..4 {
         two.pump();
     }
     assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok(), Some(photo.clone()));
     let txt = two.sides[1].dir.join("attachments/notes.txt");
     assert_eq!(std::fs::read(&txt).ok().as_deref(), Some(&b"plain words"[..]), "the document comes");
-    assert!(!two.sides[1].dir.join("attachments/fix.sh").exists());
+    assert_eq!(std::fs::read(two.sides[1].dir.join("attachments/fix.sh")).ok().as_deref(), Some(&b"echo hi"[..]), "the script comes");
+    let exe = two.sides[1].dir.join("attachments/setup.exe");
+    assert_eq!(std::fs::read(&exe).ok().as_deref(), Some(&b"MZ a program"[..]), "the program comes");
+    assert!(crate::store::could_run(&exe), "and asks before it opens");
     let id = crate::files::hex(&two.sides[0].session.blob_id(&photo));
 
-    // The picture's id under names that would run (one as Windows reads
-    // it, its dot at the end no part of it), written as no Carnet writes
-    // them, in the pictures' map and the documents'; and under two that
-    // are documents, a name with no kind and a page.
+    // The picture's id under names written as no Carnet writes them: a
+    // program in the pictures' map, one being written, and, in the
+    // files' map, one with no kind and a page, which come.
     let raw = loro::LoroDoc::new();
     raw.set_peer_id(0xbad).unwrap();
-    let bad = [
-        "attachments/run.command", "attachments/Tool.app", "attachments/fix.sh", "attachments/setup.exe", "attachments/run.exe.",
-        "attachments/run.exe", "attachments/Home.lnk",
-    ];
+    let bad = ["attachments/run.command", "attachments/Tool.app", "attachments/x.tmp-carnet"];
     let good = ["attachments/readme", "attachments/page.html"];
-    for map in ["pictures", "files"] {
-        let m = raw.get_map(map);
-        for p in bad.iter().chain(&good).filter(|p| **p != "attachments/run.exe") {
-            m.insert(p, id.as_str()).unwrap();
-        }
+    for p in bad {
+        raw.get_map("pictures").insert(p, id.as_str()).unwrap();
+    }
+    raw.get_map("files").insert("attachments/x.tmp-carnet", id.as_str()).unwrap();
+    for p in good {
+        raw.get_map("files").insert(p, id.as_str()).unwrap();
     }
     raw.commit();
     let bytes = raw.export(loro::ExportMode::all_updates()).unwrap();
@@ -1442,7 +1444,7 @@ fn only_pictures_and_documents_come_by_sync() {
         };
         let m = mark(&got).expect("marked as from elsewhere");
         assert!(m.starts_with("0081;") && m.ends_with(";Carnet;"), "{m}");
-        assert!(mark(&txt).is_some(), "the document too");
+        assert!(mark(&txt).is_some() && mark(&exe).is_some(), "the document and the program too");
         assert_eq!(mark(&two.sides[0].dir.join(&src)), None, "made here: not marked");
     }
     #[cfg(windows)]
@@ -1453,7 +1455,7 @@ fn only_pictures_and_documents_come_by_sync() {
             std::fs::read_to_string(std::path::PathBuf::from(s)).ok()
         };
         assert_eq!(mark(&got).as_deref(), Some("[ZoneTransfer]\r\nZoneId=3\r\n"), "marked as from the Internet");
-        assert!(mark(&txt).is_some(), "the document too");
+        assert!(mark(&txt).is_some() && mark(&exe).is_some(), "the document and the program too");
         assert_eq!(mark(&two.sides[0].dir.join(&src)), None, "made here: not marked");
     }
 }

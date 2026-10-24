@@ -2750,19 +2750,12 @@ impl Carnet {
     /// anything else stays shut, as does a mail link that would attach a
     /// file of this computer's (export.rs `safe_href`), whatever opens it.
     pub(super) fn open_url(&mut self, url: &str) {
-        // A file in the notes folder (a PDF or a recording an export
-        // brought): opened in its own app, or, one that could run, shown
-        // in its folder instead.
+        // A file in the notes folder (one the paperclip put there, a PDF
+        // an export brought): opened in its own app, one that could run
+        // once asked (app_open.rs).
         let folder = self.store.notes[self.current].folder.clone();
         if let Some(path) = self.store.linked_file(&folder, url) {
-            let opened = if store::opens_safely(&path) {
-                store::open_url(&path.to_string_lossy())
-            } else {
-                store::reveal(&path)
-            };
-            if let Err(e) = opened {
-                self.error = Some(format!("Couldn't open the file: {}", store::plain_error(&e)));
-            }
+            self.open_linked(path);
             return;
         }
         // Read as a browser reads it, given its scheme, then read again:
@@ -2984,11 +2977,10 @@ impl Carnet {
     }
 
     /// Files dropped, pasted or picked: copied in beside the notes, the
-    /// pictures put in as pictures and the documents
-    /// ([`carnet_core::doc::is_document_name`]: any file but one that
-    /// could run) as links to them, before block `at` (the drop line) or
-    /// at the caret. A program, a script, a shortcut — and a folder — is
-    /// left out, and said so.
+    /// pictures put in as pictures and every other file, of any kind, as
+    /// a link to it (one that could run asks before it opens:
+    /// app_open.rs), before block `at` (the drop line) or at the caret. A
+    /// folder is left out, and said so.
     pub(super) fn insert_files_at(&mut self, paths: &[std::path::PathBuf], at: Option<usize>) {
         if self.reading() {
             return;
@@ -2996,22 +2988,18 @@ impl Carnet {
         let folder = self.store.notes[self.current].folder.clone();
         let mut srcs = Vec::new();
         let mut links: Vec<(String, String)> = Vec::new();
-        let (mut skipped, mut folders) = (0, 0);
+        let mut folders = 0;
         for p in paths {
             if p.is_dir() {
                 folders += 1;
                 continue;
             }
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            if !images::is_image(p) && carnet_core::doc::is_document_name(name) {
+            if !images::is_image(p) {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 match self.store.import_attachment(&folder, p) {
-                    Ok(src) => links.push((name.to_string(), src)),
+                    Ok(src) => links.push((name, src)),
                     Err(e) => self.error = Some(format!("Couldn't copy {}: {e}", p.display())),
                 }
-                continue;
-            }
-            if !images::is_image(p) {
-                skipped += 1;
                 continue;
             }
             // An iPhone's photo goes in as a JPEG, which shows everywhere.
@@ -3030,18 +3018,11 @@ impl Carnet {
                 Err(e) => self.error = Some(format!("Couldn't copy {}: {e}", p.display())),
             }
         }
-        let mut left = Vec::new();
-        if skipped > 0 {
-            left.push(
-                if skipped == 1 { "a file that could run (a program, a script or a shortcut)".to_string() }
-                else { format!("{skipped} files that could run (programs, scripts or shortcuts)") },
-            );
-        }
         if folders > 0 {
-            left.push(if folders == 1 { "a folder".to_string() } else { format!("{folders} folders") });
-        }
-        if !left.is_empty() {
-            self.notify(format!("Left out {}", left.join(" and ")), None);
+            self.notify(
+                if folders == 1 { "Left out a folder: only files go in".to_string() } else { format!("Left out {folders} folders: only files go in") },
+                None,
+            );
         }
         // Dropped between blocks with no picture: the links a line of their
         // own at the drop line. Else at the caret: among its words, or

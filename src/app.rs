@@ -45,6 +45,8 @@ mod devtools_view;
 mod menu_view;
 #[path = "app_pick.rs"]
 mod pick_view;
+#[path = "app_open.rs"]
+mod open_view;
 use pick_view::Pick;
 use chrome::ago;
 
@@ -290,6 +292,10 @@ pub enum Msg {
     /// The link editor's buttons: 0 done, 1 open, 2 remove the link.
     LinkAct { what: u64 },
     CloseLink,
+    /// A link to a file that could run, asked about: opened anyway, or
+    /// not (Cancel, Esc, a press outside the question).
+    OpenAnyway,
+    OpenCancel,
     /// The selected picture beside the words (1 left, 2 right) or on its
     /// own line (0).
     Float { to: u64 },
@@ -640,6 +646,9 @@ pub struct Carnet {
     pub writing: Typing,
     /// The link editor: what it edits and where it hangs.
     pub link_edit: Option<LinkEdit>,
+    /// A file a link leads to that could run a program: asked about
+    /// before it opens (`store::could_run`).
+    pub open_ask: Option<std::path::PathBuf>,
     /// Where the page's menu last opened.
     menu_at: Vec2,
     /// Each table cell's box as the last frame laid it out: what a click is
@@ -1100,6 +1109,7 @@ impl Carnet {
             tint_from: None,
             writing: Typing::default(),
             link_edit: None,
+            open_ask: None,
             menu_at: Vec2::new(0.0, 0.0),
             cell_rects: HashMap::new(),
             cell_pieces: HashMap::new(),
@@ -3758,6 +3768,12 @@ impl Carnet {
                 self.link_edit = None;
                 self.focus_page = true;
             }
+            Msg::OpenAnyway => {
+                if let Some(path) = self.open_ask.take() {
+                    self.open_file(&path);
+                }
+            }
+            Msg::OpenCancel => self.open_ask = None,
             Msg::IntoCarnet { copy } => self.take_in_picture(copy == 1),
             Msg::Float { to } => {
                 if let Some((id, _, _)) = self.picture_here() {
@@ -4915,6 +4931,7 @@ impl App for Carnet {
         if !self.settings_open {
             self.tint_picker(ui, &l);
             self.link_editor(ui, &l);
+            self.open_question(ui, &l);
         }
         self.note_ghost(ui, &l);
         if self.hud {
@@ -4983,6 +5000,9 @@ impl App for Carnet {
                     self.focus_page = true;
                 }
             }
+            // And the question before a file that could run opens: as
+            // Cancel.
+            (Msg::OpenCancel, Event::Dismiss(_)) => self.open_ask = None,
             // Their data unread (a core this one does not follow): nothing
             // to answer, and nothing for `on_msg` to put away.
             (

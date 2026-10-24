@@ -1081,12 +1081,11 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     assert_eq!(srcs, ["attachments/Holiday-photo.png"]);
     assert!(dir.join("attachments").join("Holiday-photo.png").is_file());
     assert!(a.exists(), "copied, not moved");
-    // A document goes in as a link to its copy, under the picture; a
-    // script is left out, and said so.
-    assert!(texts(&app).iter().any(|t| t == "[notes.txt](attachments/notes.txt)"), "{:?}", texts(&app));
-    assert!(dir.join("attachments").join("notes.txt").is_file());
-    assert!(!dir.join("attachments").join("run.sh").exists() && !dir.join("attachments").join("run.png").exists());
-    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Left out a file that could run (a program, a script or a shortcut)"));
+    // Any other file goes in as a link to its copy, under the picture: a
+    // document, and a script too (which asks before it opens).
+    assert!(texts(&app).iter().any(|t| t == "[notes.txt](attachments/notes.txt) [run.sh](attachments/run.sh)"), "{:?}", texts(&app));
+    assert!(dir.join("attachments").join("notes.txt").is_file() && dir.join("attachments").join("run.sh").is_file());
+    assert!(app.notice.is_none(), "nothing left out");
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }
@@ -1198,34 +1197,101 @@ fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
 }
 
 /// The finding: a `README` and a `.rs` file were refused, as nothing but
-/// a PDF, a sheet or a recording was taken. Any file goes in as a link
-/// now, one with no kind keeping none, a Markdown file picked among them
-/// (dropped, it comes in as a note); only what could run, and a folder,
-/// is left out.
+/// a PDF, a sheet or a recording was taken; then so was a program. Any
+/// file goes in as a link now, one with no kind keeping none, a Markdown
+/// file picked among them (dropped, it comes in as a note), a program, a
+/// script and a shortcut as well; only a folder is left out.
 #[test]
-fn any_file_but_what_runs_is_linked() {
+fn any_file_is_linked() {
     let (mut app, mut d, dir) = body("any-file");
     let outside = std::env::temp_dir().join(format!("carnet-any-file-src-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&outside);
     std::fs::create_dir_all(outside.join("src")).unwrap();
-    let files: Vec<std::path::PathBuf> = ["README", "main.rs", "Plan.md", "setup.exe", "Home.lnk"].iter().map(|n| outside.join(n)).collect();
-    for f in &files {
+    let names = ["README", "main.rs", "Plan.md", "setup.exe", "fix.py", "Home.lnk"];
+    let mut picked: Vec<std::path::PathBuf> = names.iter().map(|n| outside.join(n)).collect();
+    for f in &picked {
         std::fs::write(f, b"x").unwrap();
     }
-    let mut picked = files.clone();
     picked.push(outside.join("src"));
     app.insert_files(&picked);
     d.frame(&mut app);
-    assert_eq!(texts(&app)[0], "[README](attachments/README) [main.rs](attachments/main.rs) [Plan.md](attachments/Plan.md)");
-    for kept in ["README", "main.rs", "Plan.md"] {
+    let links: Vec<String> = names.iter().map(|n| format!("[{n}](attachments/{n})")).collect();
+    assert_eq!(texts(&app)[0], links.join(" "));
+    for kept in names {
         assert!(dir.join("attachments").join(kept).is_file(), "{kept}");
     }
-    assert_eq!(std::fs::read_dir(dir.join("attachments")).unwrap().count(), 3, "nothing else");
     assert!(app.store.notes.iter().all(|n| n.title != "Plan"), "a file, not a note");
-    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Left out 2 files that could run (programs, scripts or shortcuts) and a folder"));
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Left out a folder: only files go in"));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }
+
+/// A link to a file opens it in its own app: a `README`, source code, a
+/// PDF at once. One that could run (a program, a script, a shortcut) asks
+/// first, naming it: Cancel (or Enter, which is on it, or Esc) opens
+/// nothing, Open anyway opens it.
+#[test]
+fn a_link_to_a_file_that_could_run_asks_before_it_opens() {
+    let (mut app, mut d, dir) = body("open-ask");
+    d.core.set_inspect(true);
+    let outside = std::env::temp_dir().join(format!("carnet-open-ask-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let names = ["README", "main.rs", "setup.exe", "fix.py"];
+    let picked: Vec<std::path::PathBuf> = names.iter().map(|n| outside.join(n)).collect();
+    for f in &picked {
+        std::fs::write(f, b"x").unwrap();
+    }
+    app.insert_files(&picked);
+    d.frame(&mut app);
+    let slot = app.caret.head.slot;
+    let words = drawn_text(&app, &d, slot);
+    assert_eq!(words, "README main.rs setup.exe fix.py");
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    let ctrl_click = |app: &mut Carnet, d: &mut Drive, name: &str| {
+        let at = words.find(name).unwrap() + 1;
+        d.input(app, InputEvent::Modifiers(CTRL));
+        click_drawn(app, d, slot, at);
+        d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+        d.frame(app);
+    };
+    let file = |n: &str| dir.join("attachments").join(n);
+    opened();
+    for n in ["README", "main.rs"] {
+        ctrl_click(&mut app, &mut d, n);
+        assert_eq!(opened(), [file(n)], "{n} opens at once");
+        assert!(app.open_ask.is_none());
+    }
+    // A program: asked about, by name, and nothing opens yet.
+    ctrl_click(&mut app, &mut d, "setup.exe");
+    assert_eq!(opened(), Vec::<std::path::PathBuf>::new());
+    assert!(app.open_ask.is_some());
+    assert!(drawn(&mut d, &mut app, "Open \u{201c}setup.exe\u{201d}?") && drawn(&mut d, &mut app, super::open_view::OPEN_ASK_WHY));
+    let cancel = d.key_named("Cancel").expect("Cancel");
+    d.click_key(&mut app, cancel);
+    d.frame(&mut app);
+    assert!(app.open_ask.is_none() && opened().is_empty(), "Cancel opens nothing");
+    // Enter is on Cancel; Esc is Cancel too.
+    ctrl_click(&mut app, &mut d, "setup.exe");
+    let before = texts(&app);
+    key(&mut app, &mut d, "enter");
+    assert!(app.open_ask.is_none() && opened().is_empty(), "Enter cancels");
+    assert_eq!(texts(&app), before, "and types nothing");
+    ctrl_click(&mut app, &mut d, "fix.py");
+    assert!(app.open_ask.is_some(), "a script asks too");
+    key(&mut app, &mut d, "escape");
+    assert!(app.open_ask.is_none() && opened().is_empty(), "Esc cancels");
+    // Open anyway: it opens.
+    ctrl_click(&mut app, &mut d, "setup.exe");
+    let anyway = d.key_named("Open anyway").expect("Open anyway");
+    d.click_key(&mut app, anyway);
+    d.frame(&mut app);
+    assert_eq!(opened(), [file("setup.exe")]);
+    assert!(app.open_ask.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
 
 /// `/file` asks for files as the paperclip does, of any kind, and what
 /// comes goes in on the line it was typed on, which it leaves empty.
