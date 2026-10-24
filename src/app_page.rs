@@ -1716,11 +1716,14 @@ impl Carnet {
         } else {
             runs.iter().filter(|r| r.2.marker).map(|r| (r.0, r.1)).collect()
         };
+        // A `--` is drawn as an em dash, one letter for its two bytes; the
+        // file keeps them (`inline::dashes`). Never in code.
+        let dashes = if code_block { Vec::new() } else { inline::dashes(text) };
         if code_block {
             self.shown.insert(slot, page::drawn(self.doc(), slot));
-        } else if !hidden.is_empty() && !text.is_empty() {
+        } else if (!hidden.is_empty() || !dashes.is_empty()) && !text.is_empty() {
             // What is drawn: what a press's byte is read back through.
-            self.shown.insert(slot, inline::Visible::of(text));
+            self.shown.insert(slot, inline::Visible::page(text));
         }
         // Bytes of the drawn text from where this part starts.
         let d0 = self.drawn_byte(slot, lo);
@@ -1787,6 +1790,7 @@ impl Carnet {
                 let mut cuts = vec![lo, hi];
                 cuts.extend(runs.iter().map(|r| r.0));
                 cuts.extend(hidden.iter().flat_map(|&(f, to)| [f, to]));
+                cuts.extend(dashes.iter().flat_map(|&(f, to)| [f, to]));
                 if let Some((f, to)) = part {
                     cuts.extend([f.min(text.len()), to.min(text.len())]);
                 }
@@ -1796,7 +1800,8 @@ impl Carnet {
                 if let Some((f, to)) = cap {
                     cuts.extend([f, to]);
                 }
-                cuts.retain(|&c| lo <= c && c <= hi);
+                // A dash is one letter: never cut between its dashes.
+                cuts.retain(|&c| lo <= c && c <= hi && !dashes.iter().any(|&(f, to)| f < c && c < to));
                 cuts.sort_unstable();
                 cuts.dedup();
                 // Whether the words drawn end in a line break.
@@ -1814,7 +1819,8 @@ impl Carnet {
                     if hidden.iter().any(|&(f, to)| f <= a && b <= to) {
                         continue;
                     }
-                    let mut sp = Span::new(&text[a..b]);
+                    let dash = dashes.iter().any(|&(f, to)| f <= a && b <= to);
+                    let mut sp = Span::new(if dash { inline::EM_DASH } else { &text[a..b] });
                     let mut wash = None;
                     if s.marker {
                         // The marks show on the line being written; on the

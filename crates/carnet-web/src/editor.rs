@@ -299,6 +299,8 @@ impl Editor {
         let block = self.caret.head.slot.block;
         let mut caret = self.caret;
         let changed = f(&mut self.doc, &mut caret);
+        // Never between the two dashes of an em dash, whatever the edit.
+        let caret = page::settle(&self.doc, caret);
         // Some only move the caret (Enter down a table's column): that is
         // something done too, for the view to follow.
         let moved = caret != self.caret;
@@ -1150,8 +1152,12 @@ impl Editor {
         let end = l.start + l.text.len();
         let mut out: Vec<(usize, usize, Style)> = Vec::new();
         let mut d = 0;
-        for &(f, to) in &v.runs {
-            for (k, s) in styles[f..to].iter().enumerate() {
+        for (f, to, dash) in v.stretches() {
+            // A `--` drawn as an em dash: its letter's three bytes, in the
+            // style of its dashes.
+            let drawn = if dash { inline::EM_DASH.len() } else { to - f };
+            for k in 0..drawn {
+                let s = &styles[if dash { f } else { f + k }];
                 let at = d + k;
                 if at < l.start || at >= end || l.text.as_bytes().get(at - l.start).is_none() {
                     continue;
@@ -1166,7 +1172,7 @@ impl Editor {
                     _ => out.push((a, b, s)),
                 }
             }
-            d += to - f;
+            d += drawn;
         }
         // Bytes to UTF-16 columns, each run on whole letters.
         out.into_iter()
@@ -1307,6 +1313,51 @@ mod tests {
         assert!(e.look(1).runs.iter().any(|r| r.2.mark != 0 && (r.0, r.1) == (9, 13)));
         assert!(e.look(3).runs.iter().any(|r| r.2.ink != 0 && (r.0, r.1) == (2, 5)));
         assert_eq!(e.look(4).kind, "divider");
+    }
+
+    /// `--` is shown as an em dash, one letter of CodeMirror's text, as the
+    /// desktop draws it (`page::visible`); the Markdown keeps the dashes.
+    /// Typed, it becomes one; stepped onto it's whole; Backspace after it
+    /// takes both; a copy keeps them. Never in code; a run of three as it
+    /// is.
+    #[test]
+    fn two_dashes_are_shown_as_an_em_dash() {
+        let e = Editor::open("# T\n\nA **bold -- dash** and `c--d`.\n\n```\nx -- y\n```\n");
+        let lines: Vec<&str> = e.lines().iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(lines[..4], ["T", "A bold \u{2014} dash and c--d.", "x -- y", ""]);
+        // The dash is bold as its words are: columns 2 to 11, the dash one.
+        let bold: Vec<(usize, usize)> = e.look(1).runs.iter().filter(|r| r.2.bold).map(|r| (r.0, r.1)).collect();
+        assert_eq!(bold, [(2, 13)]);
+        // Typed: the second dash makes it one letter, the caret after it.
+        let mut e = Editor::open("# T\n\nx\n");
+        e.select(1, 1, 1, 1);
+        for ch in [" ", "-", "-", " ", "y"] {
+            e.input(ch);
+        }
+        assert_eq!(e.markdown(), "# T\n\nx -- y\n");
+        assert_eq!(e.lines()[1].text, "x \u{2014} y");
+        assert_eq!(e.caret_lc(), (1, 5, 1, 5));
+        // A place by its column: before the dash, after it.
+        e.select(1, 2, 1, 2);
+        e.input("[");
+        e.select(1, 4, 1, 4);
+        e.input("]");
+        assert_eq!(e.markdown(), "# T\n\nx [--] y\n");
+        e.undo();
+        e.undo();
+        // Selected, its copy keeps the dashes.
+        e.select(1, 2, 1, 3);
+        assert_eq!(e.copy().as_deref(), Some("--"));
+        // Backspace after it takes both dashes.
+        e.select(1, 3, 1, 3);
+        assert!(e.backspace(false));
+        assert_eq!(e.markdown(), "# T\n\nx  y\n");
+        assert_eq!(e.caret_lc(), (1, 2, 1, 2));
+        // A third dash after it is three dashes, shown as written.
+        let mut e = Editor::open("# T\n\nx --\n");
+        e.select(1, 3, 1, 3);
+        e.input("-");
+        assert_eq!((e.markdown().as_str(), e.lines()[1].text.as_str()), ("# T\n\nx ---\n", "x ---"));
     }
 
     /// A paragraph's dropped first letter is its first line's, as the

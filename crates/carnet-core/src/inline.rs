@@ -175,6 +175,8 @@ struct Read {
     pictures: Vec<CellPicture>,
     /// The marks of every line break ([`breaks`]).
     breaks: Vec<(usize, usize)>,
+    /// Each `--` drawn as an em dash ([`dashes`]).
+    dashes: Vec<(usize, usize)>,
 }
 
 /// The line as runs of one style each: `(start, end, style)`, in order,
@@ -656,7 +658,111 @@ fn read_counting(text: &str, count: Count) -> Read {
             };
         }
     }
-    Read { styles: st, tints: found, pairs, pictures, breaks }
+    let dashes = dashes_of(text, &st, &quiet);
+    Read { styles: st, tints: found, pairs, pictures, breaks, dashes }
+}
+
+/// What a `--` is drawn as.
+pub const EM_DASH: &str = "\u{2014}";
+
+/// Each `--` of `text` drawn as an em dash (`—`), `(start, end)` in the
+/// source, in order. Only drawn: the file keeps the two dashes, as a
+/// divider is drawn as an ornament and kept as `---`. A run of exactly two
+/// among the words: none in code, an address, a mark or an HTML tag or
+/// comment the page shows as written (`<div class="a--b">`, `<!-- … -->`),
+/// nor where either dash is escaped (`\--`, `-\-`, both kept as written);
+/// a run of three or more is kept as written too (`---`, `----`), as it
+/// reads as neither a dash nor a divider in a line, and so is an arrow
+/// (`-->`, `<--`).
+pub fn dashes(text: &str) -> Vec<(usize, usize)> {
+    if !text.contains("--") {
+        return Vec::new();
+    }
+    read(text).dashes
+}
+
+fn dashes_of(text: &str, st: &[Style], quiet: &[bool]) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    if !text.contains("--") {
+        return out;
+    }
+    let tags = shown_tags(text, quiet);
+    let mut t = 0;
+    let mut i = 0;
+    while let Some(k) = text[i..].find('-') {
+        let at = i + k;
+        let n = run_len(b, at, b'-');
+        i = at + n;
+        // An arrow, `-->` or `<--`, is kept as written.
+        let arrow = (at > 0 && b[at - 1] == b'<') || b.get(at + 2) == Some(&b'>');
+        if n != 2 || arrow || (at..at + 2).any(|j| quiet[j] || st[j].marker) {
+            continue;
+        }
+        while t < tags.len() && tags[t].1 <= at {
+            t += 1;
+        }
+        if tags.get(t).is_some_and(|&(s, _)| s <= at) {
+            continue;
+        }
+        out.push((at, at + 2));
+    }
+    out
+}
+
+/// HTML the page shows as written, as `(start, end)` in order: a tag of no
+/// style Carnet reads (`<div …>`, `</p>`), from its `<` to its `>`, and a
+/// comment, `<!--` to `-->`. Outside code and the marks already read.
+fn shown_tags(text: &str, quiet: &[bool]) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    // Where the next `>` is, from each byte: one walk back along the line.
+    let mut next_gt = vec![usize::MAX; b.len() + 1];
+    for k in (0..b.len()).rev() {
+        next_gt[k] = if b[k] == b'>' { k } else { next_gt[k + 1] };
+    }
+    let mut comments = true;
+    let mut i = 0;
+    while let Some(k) = text[i..].find('<') {
+        let at = i + k;
+        i = at + 1;
+        if quiet[at] {
+            continue;
+        }
+        if comments && text[at..].starts_with("<!--") {
+            match text[at + 4..].find("-->") {
+                Some(e) => {
+                    let end = at + 4 + e + 3;
+                    out.push((at, end));
+                    i = end;
+                }
+                // None closes: nor will any after it.
+                None => comments = false,
+            }
+            continue;
+        }
+        let opens = b.get(at + 1).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'/' || c == b'!' || c == b'?');
+        let end = next_gt[at + 1];
+        if opens && end != usize::MAX {
+            out.push((at, end + 1));
+            i = end + 1;
+        }
+    }
+    out
+}
+
+/// Words `a..b` of `text` as they are drawn: each of `dashes` wholly in
+/// them an em dash ([`dashes`]).
+pub fn dashed(text: &str, (a, b): (usize, usize), dashes: &[(usize, usize)]) -> String {
+    let mut out = String::with_capacity(b - a);
+    let mut at = a;
+    for &(s, e) in dashes.iter().filter(|&&(s, e)| a <= s && e <= b) {
+        out.push_str(&text[at..s]);
+        out.push_str(EM_DASH);
+        at = e;
+    }
+    out.push_str(&text[at..b]);
+    out
 }
 
 /// The marks of each hard line break in `text`, outside code (`quiet`):
@@ -1228,10 +1334,81 @@ pub struct Visible {
     /// A cell's pictures, in the source: each one word, its `!`, and
     /// the caret after it past all of it.
     pub atoms: Vec<(usize, usize)>,
+    /// Each `--` drawn as one letter, an em dash ([`dashes`]), in the
+    /// source: the caret steps over it whole, never between its dashes,
+    /// and an edit takes both. Only in [`Visible::page`]'s.
+    pub dashes: Vec<(usize, usize)>,
+}
+
+/// A stretch of the words: where it is in the source, and whether it is a
+/// `--` drawn as an em dash.
+#[derive(Clone, Copy)]
+struct Piece {
+    from: usize,
+    to: usize,
+    dash: bool,
+}
+
+impl Piece {
+    /// How long it is drawn.
+    fn len(&self) -> usize {
+        if self.dash { EM_DASH.len() } else { self.to - self.from }
+    }
+}
+
+/// [`Visible`]'s words stretch by stretch ([`Piece`]).
+struct Pieces<'a> {
+    runs: &'a [(usize, usize)],
+    dashes: &'a [(usize, usize)],
+    /// The run under way, and where in the source it has got to.
+    r: usize,
+    at: usize,
+    /// The first dash not yet passed.
+    k: usize,
+}
+
+impl Iterator for Pieces<'_> {
+    type Item = Piece;
+
+    fn next(&mut self) -> Option<Piece> {
+        loop {
+            let &(f, to) = self.runs.get(self.r)?;
+            let at = self.at.max(f);
+            if at >= to {
+                self.r += 1;
+                continue;
+            }
+            while self.dashes.get(self.k).is_some_and(|d| d.0 < at) {
+                self.k += 1;
+            }
+            let piece = match self.dashes.get(self.k) {
+                Some(&(s, e)) if e <= to && s == at => {
+                    self.k += 1;
+                    Piece { from: s, to: e, dash: true }
+                }
+                Some(&(s, e)) if e <= to => Piece { from: at, to: s, dash: false },
+                _ => Piece { from: at, to, dash: false },
+            };
+            self.at = piece.to;
+            return Some(piece);
+        }
+    }
 }
 
 impl Visible {
+    /// The words, marks left out. Each `--` as its two dashes: what an
+    /// edit reads the words as ([`Visible::page`] for what is drawn).
     pub fn of(text: &str) -> Self {
+        Self::read(text, false)
+    }
+
+    /// The words as the page draws them: [`Visible::of`], each `--` an em
+    /// dash ([`dashes`]).
+    pub fn page(text: &str) -> Self {
+        Self::read(text, true)
+    }
+
+    fn read(text: &str, dashed: bool) -> Self {
         let r = read(text);
         let mut runs: Vec<(usize, usize)> = Vec::new();
         for (a, b, s) in runs_of(&r.styles) {
@@ -1244,81 +1421,111 @@ impl Visible {
             }
         }
         let atoms = r.pictures.iter().map(|p| p.at).collect();
-        Self { len: text.len(), runs, atoms }
+        let dashes = if dashed { r.dashes } else { Vec::new() };
+        Self { len: text.len(), runs, atoms, dashes }
     }
 
     /// Every byte a word: code, kept as written.
     pub fn all(text: &str) -> Self {
         let runs = if text.is_empty() { Vec::new() } else { vec![(0, text.len())] };
-        Self { len: text.len(), runs, atoms: Vec::new() }
+        Self { len: text.len(), runs, atoms: Vec::new(), dashes: Vec::new() }
     }
 
+    /// The words in stretches, in order: each run of them, cut round the
+    /// dashes in it, each dash a stretch of its own.
+    fn pieces(&self) -> Pieces<'_> {
+        Pieces { runs: &self.runs, dashes: &self.dashes, r: 0, at: 0, k: 0 }
+    }
 
     /// How long the words are.
     pub fn drawn_len(&self) -> usize {
-        self.runs.iter().map(|(a, b)| b - a).sum()
+        self.pieces().map(|p| p.len()).sum()
     }
 
     /// The words alone.
     pub fn text(&self, source: &str) -> String {
-        self.runs.iter().map(|&(a, b)| &source[a..b]).collect()
+        self.pieces().map(|p| if p.dash { EM_DASH } else { &source[p.from..p.to] }).collect()
+    }
+
+    /// The words stretch by stretch, in order: `(from, to, dash)` in the
+    /// source, each `--` drawn as an em dash one of its own (`dash`),
+    /// drawn [`EM_DASH`]`.len()` bytes long.
+    pub fn stretches(&self) -> Vec<(usize, usize, bool)> {
+        self.pieces().map(|p| (p.from, p.to, p.dash)).collect()
     }
 
     /// Where source byte `b` is in the words: past the marks before it.
+    /// Between a dash's two dashes is past it.
     pub fn drawn(&self, b: usize) -> usize {
         let mut out = 0;
-        for &(f, to) in &self.runs {
-            if b <= f {
+        for p in self.pieces() {
+            if b <= p.from {
                 break;
             }
-            out += b.min(to) - f;
+            out += if p.dash { p.len() } else { b.min(p.to) - p.from };
         }
         out
     }
 
-    /// The source byte of word byte `d` itself (the end, past them all).
+    /// The source byte of word byte `d` itself (the end, past them all);
+    /// in a dash, its first.
     pub fn source(&self, d: usize) -> usize {
         let mut left = d;
-        for &(f, to) in &self.runs {
-            if left < to - f {
-                return f + left;
+        for p in self.pieces() {
+            if left < p.len() {
+                return if p.dash { p.from } else { p.from + left };
             }
-            left -= to - f;
+            left -= p.len();
         }
         self.len
     }
 
     /// The source ranges that hold words `a..b`, one per stretch of
     /// words between marks: each can be wrapped in a new pair of tags
-    /// that nests inside whatever marks are around it.
+    /// that nests inside whatever marks are around it. A dash is held
+    /// whole.
     pub fn spans(&self, a: usize, b: usize) -> Vec<(usize, usize)> {
-        let mut out = Vec::new();
+        let mut out: Vec<(usize, usize)> = Vec::new();
         let mut d = 0;
-        for &(f, to) in &self.runs {
-            let (lo, hi) = (a.max(d), b.min(d + to - f));
+        for p in self.pieces() {
+            let (lo, hi) = (a.max(d), b.min(d + p.len()));
             if lo < hi {
-                out.push((f + lo - d, f + hi - d));
+                let r = if p.dash { (p.from, p.to) } else { (p.from + lo - d, p.from + hi - d) };
+                match out.last_mut() {
+                    Some(last) if last.1 == r.0 => last.1 = r.1,
+                    _ => out.push(r),
+                }
             }
-            d += to - f;
+            d += p.len();
         }
         out
+    }
+
+    /// Byte `b` of the source, out from between a dash's two dashes to
+    /// past it: where the caret drawn after the dash is.
+    pub fn settle(&self, b: usize) -> usize {
+        self.dashes.iter().find(|&&(s, e)| s < b && b < e).map_or(b, |d| d.1)
     }
 
     /// Where the caret goes for place `d` in the words: right after the
     /// letter before it, inside that letter's marks, so typing carries its
     /// style on; at the very start, before the first letter, inside its.
+    /// In a dash, after it.
     pub fn at(&self, d: usize) -> usize {
         if d == 0 {
             return self.runs.first().map_or(0, |r| r.0);
         }
         let mut left = d;
-        for &(f, to) in &self.runs {
-            if left <= to - f {
+        for p in self.pieces() {
+            if left <= p.len() {
+                if p.dash {
+                    return p.to;
+                }
                 // After a picture's `!`: past the rest of it.
-                let b = f + left;
+                let b = p.from + left;
                 return self.atoms.iter().find(|a| a.0 + 1 == b).map_or(b, |a| a.1);
             }
-            left -= to - f;
+            left -= p.len();
         }
         self.len
     }
@@ -2851,5 +3058,89 @@ mod tests {
         // As the property test found it, among stray marks.
         let t = "](https://example.com)|ё<u>!<mark>!</u>>  <mark style=\"background: #D8EAC0CC\"></u>Ünï<span style=\"color: #C0553F; background: #F8EBA6CC\">";
         assert!(emphasis(t, 2, 25, Kind::Italic).is_some());
+    }
+
+    /// The words of `t` as the page draws them.
+    fn drawn(t: &str) -> String {
+        Visible::page(t).text(t)
+    }
+
+    /// Two dashes among the words are drawn as an em dash; the text keeps
+    /// them, and an edit reads them as two ([`Visible::of`]).
+    #[test]
+    fn two_dashes_are_drawn_as_an_em_dash() {
+        assert_eq!(dashes("a -- b"), [(2, 4)]);
+        assert_eq!(drawn("a -- b"), "a — b");
+        assert_eq!(drawn("word--word and--"), "word—word and—");
+        assert_eq!(drawn("--"), "—");
+        assert_eq!(Visible::of("a -- b").text("a -- b"), "a -- b", "read for an edit, two dashes");
+        assert_eq!(plain("a -- b"), "a -- b", "the words as a preview has them");
+        // Styled, the dash wears the style of its words.
+        assert_eq!(drawn("**a -- b**"), "a — b");
+        assert_eq!(drawn("*--*"), "—");
+        assert_eq!(drawn("[a -- b](https://x.y)"), "a — b", "a link's words");
+        assert_eq!(drawn("<u>a -- b</u> ==c--d=="), "a — b c—d");
+    }
+
+    /// Never in code, an address, a mark or HTML shown as written.
+    #[test]
+    fn no_dash_in_code_links_or_tags() {
+        for t in [
+            "`a -- b`",
+            "``x--y``",
+            "[x](https://a--b.example/c--d)",
+            "<https://a--b.example>",
+            "see https://a--b.example/x--y here",
+            "me--you@mail.example",
+            "<div class=\"a--b\">",
+            "<!-- a -- b -->",
+            "</x--y>",
+        ] {
+            assert_eq!(dashes(t), [], "{t}");
+        }
+        assert_eq!(drawn("[x](https://a--b.example) -- `c--d`"), "x — c--d");
+        assert_eq!(drawn("<mark style=\"background: #F8EBA6CC\">a -- b</mark>"), "a — b", "inside the tag's words, not its marks");
+        assert_eq!(drawn("<!-- x --> y -- z"), "<!-- x --> y — z", "after a comment");
+        assert_eq!(drawn("a < b -- c > d"), "a < b — c > d", "not a tag");
+    }
+
+    /// A run of three or more dashes, an arrow and an escaped dash are
+    /// kept as written.
+    #[test]
+    fn runs_arrows_and_escapes_keep_their_dashes() {
+        for t in ["a --- b", "a ---- b", "x---", "a --> b", "a <-- b", "<-->", "a \\-- b", "a -\\- b", "a \\-\\- b", "a \\--- b"] {
+            assert_eq!(dashes(t), [], "{t}");
+        }
+        assert_eq!(drawn("a \\-- b"), "a -- b", "the backslash hidden, both dashes shown");
+        assert_eq!(drawn("a -\\- b"), "a -- b");
+        assert_eq!(drawn("a \\\\-- b"), "a \\— b", "an escaped backslash escapes no dash");
+        assert_eq!(drawn("- -- -"), "- — -", "runs apart");
+        assert_eq!(drawn("a--b---c--d"), "a—b---c—d");
+    }
+
+    /// The dash is one letter for its two bytes: the words map past it
+    /// whole, never between its dashes.
+    #[test]
+    fn a_dash_is_one_letter_to_the_caret() {
+        let t = "a -- b";
+        let v = Visible::page(t);
+        let em = EM_DASH.len();
+        assert_eq!(v.drawn_len(), 2 + em + 2);
+        assert_eq!((v.drawn(2), v.drawn(4), v.drawn(5)), (2, 2 + em, 3 + em));
+        assert_eq!(v.drawn(3), 2 + em, "between the dashes is past the dash");
+        assert_eq!((v.at(2), v.at(2 + em), v.at(3 + em)), (2, 4, 5));
+        assert_eq!(v.at(3), 4, "inside the letter: after it");
+        assert_eq!((v.source(2), v.source(3), v.source(2 + em)), (2, 2, 4));
+        assert_eq!(v.spans(2, 2 + em), [(2, 4)]);
+        assert_eq!(v.spans(0, 3 + em), [(0, 5)], "one stretch of words");
+        assert_eq!((v.settle(3), v.settle(2), v.settle(4)), (4, 2, 4));
+        // Among marks: `**a**--` puts the caret after `a` inside its marks.
+        let t = "**a**--b";
+        let v = Visible::page(t);
+        assert_eq!(v.text(t), "a—b");
+        assert_eq!((v.at(1), v.at(1 + em), v.source(1)), (3, 7, 5));
+        // A cut keeps the dashes as written.
+        assert_eq!(slice("x -- y", 0, 6), "x -- y");
+        assert_eq!(delete("a -- b", 2, 4), ("a  b".to_string(), 2), "both dashes go");
     }
 }

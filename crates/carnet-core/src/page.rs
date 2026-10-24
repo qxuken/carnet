@@ -174,7 +174,7 @@ pub fn fix(doc: &Doc, c: Caret) -> Caret {
                 byte -= 1;
             }
         }
-        Pos { slot, byte }
+        settle_pos(doc, Pos { slot, byte })
     };
     Caret {
         head: fix_pos(c.head),
@@ -424,7 +424,7 @@ pub fn drawn(doc: &Doc, slot: Slot) -> Visible {
     match kind_at(doc, slot) {
         Some(Kind::Raw(_)) if slot.cell.is_none() => {
             let (lo, hi) = writable(doc, slot);
-            Visible { len: hi, runs: vec![(lo, hi)], atoms: Vec::new() }
+            Visible { len: hi, runs: vec![(lo, hi)], atoms: Vec::new(), dashes: Vec::new() }
         }
         _ => visible(doc, slot),
     }
@@ -447,11 +447,28 @@ pub fn reading(slot: Slot) -> inline::CellText {
 }
 
 /// A slot's words as the page draws them: its marks hidden, code whole;
-/// a picture in a cell one word, stepped over whole.
+/// a picture in a cell one word, stepped over whole, and so is a `--`,
+/// drawn as an em dash ([`inline::dashes`]).
 pub fn visible(doc: &Doc, slot: Slot) -> Visible {
     let _r = reading(slot);
     let t = text(doc, slot);
-    if styled(doc, slot) { Visible::of(t) } else { Visible::all(t) }
+    if styled(doc, slot) { Visible::page(t) } else { Visible::all(t) }
+}
+
+/// `p` out from between the two dashes of a `--` drawn as one em dash,
+/// to past it, where the caret is drawn: never a place to type or break
+/// the line at, which would part them.
+fn settle_pos(doc: &Doc, p: Pos) -> Pos {
+    if !styled(doc, p.slot) || !text(doc, p.slot).contains("--") {
+        return p;
+    }
+    Pos { byte: visible(doc, p.slot).settle(p.byte), ..p }
+}
+
+/// A caret with neither end between the two dashes of an em dash
+/// ([`settle_pos`]): what an edit leaves, whatever made the words.
+pub fn settle(doc: &Doc, c: Caret) -> Caret {
+    Caret { anchor: settle_pos(doc, c.anchor), head: settle_pos(doc, c.head) }
 }
 
 /// `rest` put on the end of `t`, pairs left touching joined; returns
@@ -471,7 +488,8 @@ fn join_text(t: &mut String, rest: &str, styled: bool) -> usize {
     }
     let d = Visible::of(t).drawn_len();
     *t = inline::merge(&inline::join(t, rest));
-    Visible::of(t).at(d)
+    // Where `-` met `-`: past the dash they make.
+    Visible::page(t).settle(Visible::of(t).at(d))
 }
 
 /// A paragraph's lines made one line, a space where each broke: the
@@ -1021,8 +1039,9 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let s = if single { s.replace('\n', " ") } else { s.to_string() };
     let old = text(doc, p.slot).to_string();
     let marks = styled(doc, p.slot);
+    let byte = if marks { settle_pos(doc, p).byte } else { p.byte };
     let Some(t) = text_mut(doc, p.slot) else { return false };
-    let mut byte = floor_char(t, p.byte);
+    let mut byte = floor_char(t, byte);
     // A line broken after its last letter: the marks closing the words
     // and those of the break it had stay that line's, the new break after
     // them ([`break_at`]).
@@ -1205,7 +1224,8 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
                 t.replace_range(from..to, "");
             }
         }
-        *c = Caret::at(Pos { byte: at, ..p });
+        // Where `-` came to meet `-`: past the dash they make.
+        *c = settle(doc, Caret::at(Pos { byte: at, ..p }));
         return true;
     }
     // At the start of a slot.
@@ -1363,6 +1383,7 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
                 t.replace_range(from..to, "");
             }
         }
+        *c = settle(doc, *c);
         return true;
     }
     if p.slot.cell.is_some() || matches!(doc.blocks()[i].kind, Kind::Raw(_)) {
@@ -4877,6 +4898,81 @@ mod tests {
         let (mut d, mut c) = para("[docs](u)", 2);
         t.type_text(&mut d, &mut c, "x");
         assert_eq!(text(&d, c.head.slot), "[doxcs](u)");
+    }
+
+    /// `--` typed is drawn as an em dash, one letter: the arrows step over
+    /// it whole, Backspace and Delete take both dashes, a copy keeps them,
+    /// and the text has them as typed. A third dash typed after it is
+    /// three dashes, as written.
+    #[test]
+    fn two_dashes_typed_are_one_em_dash_to_the_caret() {
+        let (mut d, mut c) = para("", 0);
+        let s = c.head.slot;
+        let mut t = Typing::default();
+        keys(&mut t, &mut d, &mut c, "a -- b");
+        assert_eq!(text(&d, s), "a -- b", "the text keeps both dashes");
+        assert_eq!(visible(&d, s).text(text(&d, s)), "a — b");
+        let em = inline::EM_DASH.len();
+        let drawn = |d: &Doc, c: Caret| visible(d, s).drawn(c.head.byte);
+        assert_eq!(drawn(&d, c), 4 + em);
+        // ← steps over the dash whole, and → back.
+        let mut places = vec![drawn(&d, c)];
+        for _ in 0..5 {
+            c = left(&d, c, false, false);
+            places.push(drawn(&d, c));
+        }
+        assert_eq!(places, [4 + em, 3 + em, 2 + em, 2, 1, 0]);
+        let mut back = Vec::new();
+        for _ in 0..5 {
+            c = right(&d, c, false, false);
+            back.push(c.head.byte);
+        }
+        assert_eq!(back, [1, 2, 4, 5, 6], "never between the dashes");
+        // Shift+← over it: a copy keeps the dashes.
+        let mut sel = Caret::at(Pos { slot: s, byte: 5 });
+        sel = left(&d, sel, false, true);
+        sel = left(&d, sel, false, true);
+        assert_eq!((sel.head.byte, sel.anchor.byte), (2, 5));
+        assert_eq!(copy(&d, sel).as_deref(), Some("-- "));
+        // Backspace after it takes both dashes.
+        let mut c = Caret::at(Pos { slot: s, byte: 4 });
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!((text(&d, s), c.head.byte), ("a  b", 2));
+        // Delete before it, the same.
+        let (mut d, mut c) = para("a -- b", 2);
+        assert!(delete(&mut d, &mut c, false));
+        assert_eq!((text(&d, c.head.slot), c.head.byte), ("a  b", 2));
+        // A third dash typed after it: three dashes, drawn as written.
+        let (mut d, mut c) = para("a --", 2 + em);
+        let s = c.head.slot;
+        assert_eq!(c.head.byte, 4);
+        keys(&mut Typing::default(), &mut d, &mut c, "-");
+        assert_eq!(visible(&d, s).text(text(&d, s)), "a ---");
+        // A place between the dashes (an edit elsewhere made them meet)
+        // is past the dash: typed there, the letter goes after it.
+        let (mut d, _) = para("a--b", 0);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret::at(Pos { slot: s, byte: 2 });
+        assert_eq!(settle(&d, c).head.byte, 3);
+        assert!(insert(&mut d, &mut c, "x"));
+        assert_eq!(text(&d, s), "a--xb");
+    }
+
+    /// Lines joined where a `-` meets a `-`: the caret past the dash they
+    /// make, not between them.
+    #[test]
+    fn dashes_meeting_at_a_joint_leave_the_caret_past_them() {
+        let mut d = doc(vec![Block::text("a-"), Block::text("-b")]);
+        let mut c = at(&d, 1, 0);
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d)[0], "Text:a--b");
+        assert_eq!(c.head.byte, 3);
+        // A letter taken from between two dashes, the same.
+        let (mut d, _) = para("a-x-b", 0);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret::at(Pos { slot: s, byte: 3 });
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!((text(&d, s), c.head.byte), ("a--b", 3));
     }
 
     /// How a link opens, by the setting: ⌘-click (the default), a click,

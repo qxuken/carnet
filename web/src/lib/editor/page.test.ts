@@ -136,6 +136,37 @@ describe('typed with a picture chosen', () => {
   });
 });
 
+describe('two dashes', () => {
+  // As the desktop draws them (carnet-core's `inline::dashes`): one em
+  // dash, a letter of CodeMirror's text, the note keeping `--`.
+  it('typed, are shown as an em dash, and the note keeps them', () => {
+    const e = open('# T\n\nx\n');
+    e.update({ selection: { anchor: e.line(2).to } });
+    for (const ch of [' ', '-', '-', ' ', 'y']) {
+      const at = e.state().selection.main.head;
+      e.update({ changes: { from: at, insert: ch }, userEvent: 'input.type', selection: { anchor: at + 1 } });
+    }
+    expect(e.pe.markdown()).toBe('# T\n\nx -- y\n');
+    expect(e.state().doc.toString()).toBe('T\nx — y');
+    expect(e.state().selection.main.head).toBe(e.line(2).to);
+  });
+
+  it('are one letter to Backspace, which takes both', () => {
+    const e = open('# T\n\nx -- y\n');
+    expect(e.line(2).text).toBe('x — y');
+    const after = e.line(2).from + 3;
+    e.update({ selection: { anchor: after } });
+    e.update({ changes: { from: after - 1, to: after }, userEvent: 'delete.backward' });
+    expect(e.pe.markdown()).toBe('# T\n\nx  y\n');
+    expect(e.state().doc.toString()).toBe('T\nx  y');
+  });
+
+  it('stay as written in code and in a run of three', () => {
+    const e = open('# T\n\n`a--b` and c---d\n');
+    expect(e.line(2).text).toBe('a--b and c---d');
+  });
+});
+
 describe('a picture resized beside others', () => {
   // As the desktop: within a few px of a neighbour's height it takes it,
   // the width following its shape; further off, as dragged.
