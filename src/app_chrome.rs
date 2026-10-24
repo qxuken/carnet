@@ -1019,9 +1019,11 @@ impl Carnet {
         let mut insert = vec![
             def("t-table", Icon::Table, "Table", keys::hint("Table", keys::TABLE), Msg::InsertTable),
             def("t-rule", Icon::Divider, "Divider", keys::hint("Divider", keys::DIVIDER) + "  \u{b7}  ---", Msg::InsertDivider),
+            def("t-attach", Icon::Attach, "Add pictures or files", "Add pictures or files  \u{b7}  or drop them on the page".into(), Msg::AddFiles),
         ];
         insert[0].spec = Some(keys::TABLE);
         insert[1].spec = Some(keys::DIVIDER);
+        insert[2].enabled = !self.reading();
         groups.push(insert);
         let mut slot = Vec::new();
         if in_table {

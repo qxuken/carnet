@@ -923,8 +923,31 @@ const PICTURE_EXTENSIONS: [&str; 12] = ["png", "jpg", "jpeg", "gif", "webp", "bm
 
 /// Whether a file name or path names a picture, by its extension.
 pub fn is_picture_name(name: &str) -> bool {
+    has_extension(name, &PICTURE_EXTENSIONS)
+}
+
+/// The extensions of the files besides pictures a note keeps with it and
+/// links to, lowercase: documents, sheets, slides, sound and film, each
+/// opened from its link by an app of its own (the app's `opens_safely`).
+/// Nothing a system runs or a browser scripts (a program, a script,
+/// `.html`), none of Office's kinds that can carry macros (`.doc`,
+/// `.docm`, `.xlsm`), no bundle that is a folder (`.pages`), nothing that
+/// changes something as it opens (`.ics`), and no `.md`, which the notes
+/// folder would read as a note.
+const DOCUMENT_EXTENSIONS: [&str; 22] = [
+    "pdf", "txt", "csv", "rtf", "docx", "xlsx", "pptx", "odt", "ods", "odp", "m4a", "mp3", "wav", "aac", "aiff", "caf", "flac", "ogg",
+    "mov", "mp4", "m4v", "webm",
+];
+
+/// Whether a file name or path names a document a note may keep and link
+/// to ([`DOCUMENT_EXTENSIONS`]), by its extension.
+pub fn is_document_name(name: &str) -> bool {
+    has_extension(name, &DOCUMENT_EXTENSIONS)
+}
+
+fn has_extension(name: &str, of: &[&str]) -> bool {
     let name = name.rsplit('/').next().unwrap_or(name);
-    name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && PICTURE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+    name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && of.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 /// `![[photo.png]]` and its kin, alone on a line: a picture, when the
@@ -1874,6 +1897,19 @@ mod tests {
     }
 
     use super::*;
+
+    /// A document is one that opens in an app of its own and never runs:
+    /// by its extension, any case, never a bare name nor a page, a
+    /// script, a note or a sheet that carries macros.
+    #[test]
+    fn documents_are_named_by_kinds_that_never_run() {
+        for ok in ["report.pdf", "attachments/Notes.TXT", "a/b/sums.xlsx", "talk.m4a", "film.mov"] {
+            assert!(is_document_name(ok), "{ok}");
+        }
+        for no in ["page.html", "logo.svg", "run.sh", "setup.exe", "Tool.app", "sums.xlsm", "old.doc", "note.md", "readme", ".pdf", "photo.png"] {
+            assert!(!is_document_name(no), "{no}");
+        }
+    }
 
     /// Found by fuzzing: a line led by wide whitespace was cut inside a
     /// letter looking for a quote's `>`.

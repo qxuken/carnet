@@ -2857,22 +2857,34 @@ impl Carnet {
         }
     }
 
-    /// Files pasted or picked: the pictures among them go in at the caret.
+    /// Files pasted or picked: the pictures and documents among them go in
+    /// at the caret.
     pub(super) fn insert_files(&mut self, paths: &[std::path::PathBuf]) {
         self.insert_files_at(paths, None);
     }
 
-    /// Files dropped or pasted: the pictures among them are copied in
-    /// beside the notes and put in before block `at` (the drop line), or
-    /// at the caret.
+    /// Files dropped, pasted or picked: copied in beside the notes, the
+    /// pictures put in as pictures and the documents
+    /// ([`carnet_core::doc::is_document_name`]) as links to them, before
+    /// block `at` (the drop line) or at the caret. Anything else — a
+    /// program, a script, a page — is left out, and said so.
     pub(super) fn insert_files_at(&mut self, paths: &[std::path::PathBuf], at: Option<usize>) {
         if self.reading() {
             return;
         }
         let folder = self.store.notes[self.current].folder.clone();
         let mut srcs = Vec::new();
+        let mut links: Vec<(String, String)> = Vec::new();
         let mut skipped = 0;
         for p in paths {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if !images::is_image(p) && carnet_core::doc::is_document_name(name) {
+                match self.store.import_attachment(&folder, p) {
+                    Ok(src) => links.push((name.to_string(), src)),
+                    Err(e) => self.error = Some(format!("Couldn't copy {}: {e}", p.display())),
+                }
+                continue;
+            }
             if !images::is_image(p) {
                 skipped += 1;
                 continue;
@@ -2895,13 +2907,25 @@ impl Carnet {
         }
         if skipped > 0 {
             self.notify(
-                if skipped == 1 { "Left out a file that isn't a picture".to_string() }
-                else { format!("Left out {skipped} files that aren't pictures") },
+                if skipped == 1 { "Left out a file that isn't a picture or a document".to_string() }
+                else { format!("Left out {skipped} files that aren't pictures or documents") },
                 None,
             );
         }
+        // Dropped between blocks with no picture: the links a line of their
+        // own at the drop line. Else at the caret: among its words, or
+        // under the pictures just put in.
+        let line = at.filter(|_| srcs.is_empty());
         if !srcs.is_empty() {
             self.insert_pictures(srcs, at);
+        }
+        if !links.is_empty() {
+            self.editing = true;
+            self.focus_page = true;
+            self.edit(Step::Other, |d, c| match line {
+                Some(i) => page::insert_links_at(d, c, i, &links),
+                None => page::insert_links(d, c, &links),
+            });
         }
     }
 

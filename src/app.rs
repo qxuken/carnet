@@ -109,6 +109,8 @@ pub enum Msg {
     DeleteBlock,
     InsertTable,
     InsertDivider,
+    /// The toolbar's paperclip: pictures and documents chosen to go in.
+    AddFiles,
     AddRow,
     AddCol,
     DelRow,
@@ -356,6 +358,8 @@ pub enum Msg {
     /// The folder dialog's answer, and the pictures dialog's.
     PickedDir,
     PickedPictures,
+    /// The paperclip's dialog's answer: pictures and documents.
+    PickedFiles,
 }
 
 /// `Msg::SelectFolder`'s every note, and `Msg::SetFont`'s default face:
@@ -770,6 +774,8 @@ pub struct Carnet {
     slash_off: Option<u64>,
     /// Ask for picture files on the next frame.
     pick_pictures: bool,
+    /// Ask for pictures and documents on the next frame (the paperclip).
+    pick_files: bool,
     /// Files being dragged over the window, until they drop or leave.
     file_drag: Option<FileDrag>,
     /// Where dropped pictures would go: before this block (the page's
@@ -1142,6 +1148,7 @@ impl Carnet {
             slash_word: String::new(),
             slash_off: None,
             pick_pictures: false,
+            pick_files: false,
             file_drag: None,
             drop_index: None,
             card_rects: Vec::new(),
@@ -3371,6 +3378,11 @@ impl Carnet {
             Msg::InsertDivider => {
                 self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Divider));
             }
+            Msg::AddFiles => {
+                if !self.reading() {
+                    self.pick_files = true;
+                }
+            }
             Msg::AddRow => {
                 self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::AddRow, false));
             }
@@ -3731,7 +3743,8 @@ impl Carnet {
             | Msg::WindowFocus
             | Msg::FilesOver
             | Msg::PickedDir
-            | Msg::PickedPictures => {}
+            | Msg::PickedPictures
+            | Msg::PickedFiles => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {
                     self.pending_menu = Some((k, at, MenuFor::Tools));
@@ -4562,6 +4575,14 @@ impl App for Carnet {
                     .tag(Msg::PickedPictures),
             );
         }
+        if std::mem::take(&mut self.pick_files) {
+            ui.request_files(
+                kui_native::FileDialog::open()
+                    .multiple()
+                    .title("Add pictures or files")
+                    .tag(Msg::PickedFiles),
+            );
+        }
         // Asked on every frame the answer is outstanding: the core queues
         // one ask at a time.
         if self.paste_pending {
@@ -4768,7 +4789,7 @@ impl App for Carnet {
                     self.dir_change = Some(Some(std::path::PathBuf::from(dir)));
                 }
             }
-            (Msg::PickedPictures, Event::Files(paths)) => {
+            (Msg::PickedPictures | Msg::PickedFiles, Event::Files(paths)) => {
                 let files: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
                 self.insert_files(&files);
             }
@@ -4793,7 +4814,8 @@ impl App for Carnet {
                 | Msg::WindowFocus
                 | Msg::FilesOver
                 | Msg::PickedDir
-                | Msg::PickedPictures,
+                | Msg::PickedPictures
+                | Msg::PickedFiles,
                 _,
             ) => {}
             (msg, event) => self.on_msg(msg, event, ev.key, core),

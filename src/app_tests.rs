@@ -986,9 +986,11 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     let a = png_file(&outside, "Holiday photo.png");
     let txt = outside.join("notes.txt");
     std::fs::write(&txt, "hi").unwrap();
+    let script = outside.join("run.sh");
+    std::fs::write(&script, "echo hi").unwrap();
     d.frame(&mut app);
     let at = Vec2::new(600.0, 300.0);
-    let paths = vec![a.display().to_string(), txt.display().to_string()];
+    let paths = vec![a.display().to_string(), txt.display().to_string(), script.display().to_string()];
     d.input(&mut app, InputEvent::DragFiles { paths: paths.clone(), at });
     d.input(&mut app, InputEvent::DropFiles { paths, at });
     d.frame(&mut app);
@@ -996,7 +998,53 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     assert_eq!(srcs, ["attachments/Holiday-photo.png"]);
     assert!(dir.join("attachments").join("Holiday-photo.png").is_file());
     assert!(a.exists(), "copied, not moved");
-    assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("isn't a picture")));
+    // A document goes in as a link to its copy, under the picture; a
+    // script is left out, and said so.
+    assert!(texts(&app).iter().any(|t| t == "[notes.txt](attachments/notes.txt)"), "{:?}", texts(&app));
+    assert!(dir.join("attachments").join("notes.txt").is_file());
+    assert!(!dir.join("attachments").join("run.sh").exists() && !dir.join("attachments").join("run.png").exists());
+    assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("isn't a picture or a document")), "{:?}", app.notice.as_ref().map(|n| &n.text));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// The toolbar's paperclip asks for any file; what comes back goes in at
+/// the caret: a picture as a picture, a document as a link among the
+/// words, set apart from them by a space.
+#[test]
+fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
+    let (mut app, mut d, dir) = body("paperclip");
+    type_in(&mut app, &mut d, "See the plan");
+    for _ in 0..4 {
+        key(&mut app, &mut d, "left");
+    }
+    d.frame(&mut app);
+    // On the strip, or in More where the strip is too narrow for it.
+    match d.key_of("t-attach") {
+        Some(clip) => {
+            d.click_key(&mut app, clip);
+        }
+        None => {
+            assert!(app.overflow.iter().any(|t| matches!(t.msg, Msg::AddFiles)), "the paperclip, in More");
+            app.on_plain(Msg::AddFiles);
+        }
+    }
+    d.frame(&mut app);
+    let asked = d.core.take_file_requests();
+    assert_eq!(asked.len(), 1, "one dialog");
+    assert!(asked[0].filters.is_empty(), "any file: {:?}", asked[0].filters);
+    let outside = std::env::temp_dir().join(format!("carnet-clip-src-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let pdf = outside.join("Trip plan (v2).pdf");
+    std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+    app.insert_files(std::slice::from_ref(&pdf));
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "See the [Trip plan (v2).pdf](attachments/Trip-plan-%28v2%29.pdf) plan", "{:?}", texts(&app));
+    assert_eq!(std::fs::read(dir.join("attachments/Trip-plan-(v2).pdf")).unwrap(), b"%PDF-1.4");
+    // The link reads as one, and opens the copy.
+    assert_eq!(drawn_text(&app, &d, app.caret.head.slot), "See the Trip plan (v2).pdf plan");
+    let (_, _, url) = page::link_at(app.doc(), page::Caret::at(page::Pos { byte: 10, ..app.caret.head })).expect("a link");
+    assert_eq!(app.store.linked_file("", &url).as_deref(), Some(dir.join("attachments/Trip-plan-(v2).pdf").as_path()));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }

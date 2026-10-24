@@ -182,9 +182,13 @@ impl Store {
         let dir = self.dir.join(ATTACHMENTS);
         fs::create_dir_all(&dir)?;
         let stem = slug(&stem_of(from)).replace(' ', "-");
-        // A picture's own kind, or none: never a name that would open as
-        // something else.
-        let ext = from.extension().and_then(|e| e.to_str()).map(str::to_lowercase).filter(|e| doc::is_picture_name(&format!("x.{e}")));
+        // A picture's or a document's own kind, or none: never a name
+        // that would open as something else, or run.
+        let ext = from
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .filter(|e| doc::is_picture_name(&format!("x.{e}")) || doc::is_document_name(&format!("x.{e}")));
         let to = free_file(&dir, &stem, ext.as_deref().unwrap_or("png"));
         if !(link && fs::hard_link(from, &to).is_ok()) {
             fs::copy(from, &to)?;
@@ -451,7 +455,14 @@ impl Store {
         let low = |p: &str| p.to_lowercase();
         let mut used: HashSet<String> = self.pictures_in_use().iter().chain(busy).map(|p| low(p)).collect();
         // The swept ones keep their place in the trash, and aren't here.
-        let mut unshown: Vec<(String, PathBuf)> = self.attachments().into_iter().filter(|(rel, _)| !used.contains(&low(rel))).collect();
+        // Only pictures: what shows one is all `used` knows of. A document
+        // a note links to (one the paperclip or a gathered export put
+        // here) would read as shown by nothing, and is never swept.
+        let mut unshown: Vec<(String, PathBuf)> = self
+            .attachments()
+            .into_iter()
+            .filter(|(rel, _)| doc::is_picture_name(rel) && !used.contains(&low(rel)))
+            .collect();
         if !unshown.is_empty() {
             // A note in the trash this device's history doesn't know (put
             // there by hand, or before): any text there that names it.
@@ -669,7 +680,16 @@ mod tests {
     fn a_copy_in_is_named_as_a_picture() {
         let dir = temp_dir("copy-in-kind");
         let s = Store::open(dir.clone()).unwrap();
-        for (name, kind) in [("photo.JPG", "jpg"), ("id_rsa", "png"), ("run.command", "png"), ("x.webp", "webp")] {
+        // A document keeps its kind too; a page or a macro's sheet doesn't.
+        for (name, kind) in [
+            ("photo.JPG", "jpg"),
+            ("id_rsa", "png"),
+            ("run.command", "png"),
+            ("x.webp", "webp"),
+            ("Report.PDF", "pdf"),
+            ("page.html", "png"),
+            ("sums.xlsm", "png"),
+        ] {
             fs::write(dir.join(name), b"x").unwrap();
             let to = s.copy_in(&dir.join(name), false).unwrap();
             assert_eq!(to.extension().and_then(|e| e.to_str()), Some(kind), "{name}");
@@ -708,6 +728,27 @@ mod tests {
         // Shown again (a paste's undo undone, a version restored): back.
         edit(&mut s, i, "![](../attachments/pasted.png)");
         assert!(dir.join("attachments/pasted.png").exists());
+    }
+
+    /// A document in the attachments folder (one the paperclip put there,
+    /// or an export gathered) is never swept: a note links to it rather
+    /// than shows it, which the sweep's "in use" doesn't see. It used to
+    /// go to the trash a week after it came.
+    #[test]
+    fn a_document_in_the_attachments_is_never_swept() {
+        let dir = temp_dir("sweep-docs");
+        let mut s = Store::open(dir.clone()).unwrap();
+        fs::create_dir_all(dir.join(ATTACHMENTS)).unwrap();
+        fs::write(dir.join("attachments/report.pdf"), b"%PDF").unwrap();
+        fs::write(dir.join("attachments/pasted.png"), b"p").unwrap();
+        note(&mut s, "", "Trip", "See [report.pdf](attachments/report.pdf).");
+        let t0 = SystemTime::now();
+        let none = BTreeSet::new();
+        assert!(s.sweep_pictures(&none, t0).unwrap().is_empty());
+        assert_eq!(s.sweep_pictures(&none, t0 + 15 * DAY).unwrap(), vec!["attachments/pasted.png".to_string()], "the unshown picture goes");
+        assert!(dir.join("attachments/report.pdf").is_file(), "the document stays");
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Pictures among a table's cells' words are pictures as any other:

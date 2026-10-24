@@ -2742,6 +2742,62 @@ pub fn make_link(doc: &mut Doc, c: &mut Caret, url: &str) -> bool {
     edit_ranges(doc, c, |t, a, b| inline::make_link(t, a, b, url))
 }
 
+/// Links to files, `(name, src)`, put in at the caret one after another
+/// with a space between, each `[name](src)`, its name's brackets made
+/// round so it reads as one link; what was selected goes. Where the caret
+/// can't hold words (a picture chosen, code, a divider), a paragraph of
+/// their own goes in after its block. The caret after the last.
+pub fn insert_links(doc: &mut Doc, c: &mut Caret, links: &[(String, String)]) -> bool {
+    if links.is_empty() {
+        return false;
+    }
+    if !c.is_empty() && styled(doc, c.head.slot) && styled(doc, c.anchor.slot) {
+        delete_selection(doc, c);
+    }
+    if !c.is_empty() || !styled(doc, c.head.slot) {
+        let at = doc.index_of(ordered(doc, *c).1.slot.block).map_or(doc.len(), |i| i + 1);
+        return insert_links_at(doc, c, at, links);
+    }
+    let md = links_markdown(links);
+    let p = c.head;
+    let _r = reading(p.slot);
+    let Some(t) = text_mut(doc, p.slot) else { return false };
+    // Apart from the words either side.
+    let pre = if p.byte > 0 && !t[..p.byte].ends_with(char::is_whitespace) { " " } else { "" };
+    let post = if p.byte < t.len() && !t[p.byte..].starts_with(char::is_whitespace) { " " } else { "" };
+    let put = format!("{pre}{md}{post}");
+    t.insert_str(p.byte, &put);
+    let end = p.byte + pre.len() + md.len();
+    let v = Visible::of(t);
+    *c = Caret::at(Pos { byte: v.at(v.drawn(end)), ..p });
+    true
+}
+
+/// Links to files as [`insert_links`] writes them, a paragraph of their
+/// own before block `at` (a drop line), the caret after the last.
+pub fn insert_links_at(doc: &mut Doc, c: &mut Caret, at: usize, links: &[(String, String)]) -> bool {
+    if links.is_empty() || !insert_blocks_at(doc, c, at, vec![Kind::Text(links_markdown(links))]) {
+        return false;
+    }
+    *c = Caret::at(end(doc, c.head.slot));
+    true
+}
+
+/// `[name](src)` for each, a space between; a name's brackets made round,
+/// so it reads as one link. The path as it is, a relative one (never
+/// taken for a web address, as a typed one would be), with nothing in it
+/// to end the link early.
+fn links_markdown(links: &[(String, String)]) -> String {
+    links
+        .iter()
+        .map(|(name, src)| {
+            let path = src.replace('%', "%25").replace(' ', "%20").replace('(', "%28").replace(')', "%29");
+            format!("[{}]({path})", name.replace('[', "(").replace(']', ")"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `s` typed at the caret inside `pre` and `post`: a style switched on
 /// (or off) with nothing selected.
 pub fn insert_styled(doc: &mut Doc, c: &mut Caret, s: &str, pre: &str, post: &str) -> bool {

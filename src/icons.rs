@@ -78,6 +78,8 @@ pub enum Glyph {
     Undo,
     /// Sent up: an arrow out of a tray.
     Upload,
+    /// A file or a picture added to the note: a paperclip.
+    Attach,
     /// A new version to get: an arrow into a tray.
     Download,
     /// Saves packed into one: three sheets stacked.
@@ -249,6 +251,10 @@ impl Glyph {
                 "M12 15V4.5 M7.5 9L12 4.5 16.5 9 M4.5 14.5v3.5c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-3.5",
                 "",
             ),
+            Attach => (
+                "M21.44 11.05l-9.19 9.19a6 6 0 0 1 -8.49 -8.49l8.57 -8.57a4 4 0 0 1 5.67 5.66l-8.59 8.57a2 2 0 0 1 -2.83 -2.83l8.49 -8.48",
+                "",
+            ),
             Download => (
                 "M12 4.5V15 M7.5 10.5L12 15 16.5 10.5 M4.5 14.5v3.5c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2v-3.5",
                 "",
@@ -301,7 +307,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 68] = [
+    pub const ALL: [Glyph; 69] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Underline, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -311,7 +317,7 @@ impl Glyph {
         Glyph::FloatRight, Glyph::Inline, Glyph::Sidebar, Glyph::Zen, Glyph::Check, Glyph::Undo, Glyph::Upload,
         Glyph::Download, Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
         Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
-        Glyph::TableHeader, Glyph::ChevronRight,
+        Glyph::TableHeader, Glyph::ChevronRight, Glyph::Attach,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.
