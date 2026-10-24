@@ -30,12 +30,16 @@
 //! named of those in the vault is let go (dropped there, so the server
 //! may drop it); the files stay where they are, the user's.
 //!
-//! Only pictures sync ([`syncs`]): a file of `attachments/` by a picture's
-//! name, as an import names one. Another device (or one that isn't what
-//! it seems) can't put a program or a script in the notes folder by
-//! naming it in the vault. And on macOS what comes is marked as from
-//! elsewhere ([`quarantine`]), as a download is, so opening it from the
-//! Finder asks first.
+//! Only pictures and documents sync ([`syncs`]): a file of `attachments/`
+//! by a picture's name, as an import names one, or a document's (a PDF,
+//! a sheet, a recording: the kinds that open in an app of their own and
+//! never run). Another device (or one that isn't what it seems) can't put
+//! a program, a script or a page in the notes folder by naming it in the
+//! vault. Documents are named in a map of the vault's own (vault.rs), as
+//! a Carnet from before them would let them go in the pictures'. And what
+//! comes is marked as from elsewhere ([`quarantine`]), as a download is:
+//! on macOS the Finder asks before opening it, on Windows Office opens
+//! it in Protected View.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -50,9 +54,11 @@ use crate::store::{Store, is_owned};
 
 /// Whether a path from the notes folder is one sync puts up or brings
 /// down: Carnet's ([`is_owned`]), and a picture by its name, of the kinds
-/// an import takes ([`carnet_core::doc::is_picture_name`]).
+/// an import takes ([`carnet_core::doc::is_picture_name`]), or a document
+/// a note links to, of the kinds that open in an app of their own and
+/// never run ([`carnet_core::doc::is_document_name`]).
 pub fn syncs(rel: &str) -> bool {
-    is_owned(rel) && carnet_core::doc::is_picture_name(rel)
+    is_owned(rel) && (carnet_core::doc::is_picture_name(rel) || carnet_core::doc::is_document_name(rel))
 }
 
 /// A picture come by sync, written at `path`: whole or not at all, and
@@ -89,8 +95,20 @@ pub fn quarantine(path: &Path) {
     }
 }
 
+/// On Windows the mark is the Mark of the Web: a `Zone.Identifier`
+/// stream beside the file, the Internet's zone, as a browser leaves on a
+/// download, so Office opens a document in Protected View and Windows
+/// warns before opening what it doubts. Not marked, it's still the file;
+/// so a failure is let be (a disk without such streams, FAT).
+#[cfg(windows)]
+pub fn quarantine(path: &Path) {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    let _ = fs::write(PathBuf::from(stream), "[ZoneTransfer]\r\nZoneId=3\r\n");
+}
+
 /// Elsewhere there's no such mark: nothing to do.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn quarantine(_: &Path) {}
 
 /// The index's first line: whose ids it holds ([`Pictures::mark`]).

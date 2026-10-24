@@ -455,13 +455,13 @@ impl Store {
         let low = |p: &str| p.to_lowercase();
         let mut used: HashSet<String> = self.pictures_in_use().iter().chain(busy).map(|p| low(p)).collect();
         // The swept ones keep their place in the trash, and aren't here.
-        // Only pictures: what shows one is all `used` knows of. A document
-        // a note links to (one the paperclip or a gathered export put
-        // here) would read as shown by nothing, and is never swept.
+        // Only what syncs (pictures, and documents, which `used` has when
+        // a note links to them): a file of another kind is no one's to
+        // judge, and stays.
         let mut unshown: Vec<(String, PathBuf)> = self
             .attachments()
             .into_iter()
-            .filter(|(rel, _)| doc::is_picture_name(rel) && !used.contains(&low(rel)))
+            .filter(|(rel, _)| crate::pictures::syncs(rel) && !used.contains(&low(rel)))
             .collect();
         if !unshown.is_empty() {
             // A note in the trash this device's history doesn't know (put
@@ -731,22 +731,26 @@ mod tests {
     }
 
     /// A document in the attachments folder (one the paperclip put there,
-    /// or an export gathered) is never swept: a note links to it rather
-    /// than shows it, which the sweep's "in use" doesn't see. It used to
-    /// go to the trash a week after it came.
+    /// or an export gathered) a note links to is in use, as a picture it
+    /// shows is, and stays; one no note links to is swept as an unshown
+    /// picture is. A file of another kind is never swept. (A linked one
+    /// used to go to the trash a week after it came.)
     #[test]
-    fn a_document_in_the_attachments_is_never_swept() {
+    fn a_document_is_swept_only_when_no_note_links_to_it() {
         let dir = temp_dir("sweep-docs");
         let mut s = Store::open(dir.clone()).unwrap();
         fs::create_dir_all(dir.join(ATTACHMENTS)).unwrap();
-        fs::write(dir.join("attachments/report.pdf"), b"%PDF").unwrap();
-        fs::write(dir.join("attachments/pasted.png"), b"p").unwrap();
+        for f in ["report.pdf", "old.pdf", "pasted.png", "tool.sh"] {
+            fs::write(dir.join(ATTACHMENTS).join(f), b"x").unwrap();
+        }
         note(&mut s, "", "Trip", "See [report.pdf](attachments/report.pdf).");
         let t0 = SystemTime::now();
         let none = BTreeSet::new();
         assert!(s.sweep_pictures(&none, t0).unwrap().is_empty());
-        assert_eq!(s.sweep_pictures(&none, t0 + 15 * DAY).unwrap(), vec!["attachments/pasted.png".to_string()], "the unshown picture goes");
-        assert!(dir.join("attachments/report.pdf").is_file(), "the document stays");
+        let swept = s.sweep_pictures(&none, t0 + 15 * DAY).unwrap();
+        assert_eq!(swept, ["attachments/old.pdf", "attachments/pasted.png"], "the unlinked document and the unshown picture");
+        assert!(dir.join("attachments/report.pdf").is_file(), "the linked document stays");
+        assert!(dir.join("attachments/tool.sh").is_file(), "no kind of Carnet's: never touched");
         let _ = fs::remove_dir_all(dir.with_extension("replica"));
         let _ = fs::remove_dir_all(&dir);
     }

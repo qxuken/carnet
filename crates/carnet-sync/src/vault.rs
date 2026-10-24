@@ -45,6 +45,11 @@ pub const ROOM: &str = "vault";
 const NOTES: &str = "notes";
 const FOLDERS: &str = "folders";
 const PICTURES: &str = "pictures";
+/// The documents a note links to (a PDF, a recording), kept as pictures
+/// are but in a map of their own: a Carnet from before them reads only
+/// [`PICTURES`], and lets go there every path it doesn't take for a
+/// picture's — which, there, would drop them on every device.
+const FILES: &str = "files";
 const INVITES: &str = "invites";
 
 /// How long an invite made is kept here though the server doesn't list
@@ -210,17 +215,22 @@ impl NoteDoc {
         true
     }
 
+    /// The pictures' map and the documents' as one: each path in the map
+    /// its name puts it in ([`map_of`]), so a path is never in both.
     fn picture_map(&self) -> BTreeMap<String, String> {
-        match self.loro().get_map(PICTURES).get_deep_value() {
+        let read = |name: &str| match self.loro().get_map(name).get_deep_value() {
             LoroValue::Map(m) => m
                 .iter()
                 .filter_map(|(k, v)| match v {
-                    LoroValue::String(s) if is_plain_path(k) => Some((k.clone(), s.to_string())),
+                    LoroValue::String(s) if is_plain_path(k) && map_of(k) == name => Some((k.clone(), s.to_string())),
                     _ => None,
                 })
                 .collect(),
             _ => BTreeMap::new(),
-        }
+        };
+        let mut all = read(PICTURES);
+        all.extend(read(FILES));
+        all
     }
 
     /// The pictures: each path in the notes folder (`attachments/…`) and
@@ -258,7 +268,7 @@ impl NoteDoc {
         if all.get(path).map(String::as_str) == Some(id) {
             return (false, None);
         }
-        let _ = self.loro().get_map(PICTURES).insert(path, id);
+        let _ = self.loro().get_map(map_of(path)).insert(path, id);
         self.loro().commit();
         let unused = old.filter(|o| !all.iter().any(|(p, v)| p != path && v == o));
         (true, unused)
@@ -598,6 +608,13 @@ pub fn folder_name(typed: &str) -> Result<String, FolderRefusal> {
         return Err(FolderRefusal::ForPictures);
     }
     Ok(name)
+}
+
+/// The map a file's path is kept in: a document's ([`FILES`]) by a
+/// document's name and not a picture's; anything else the pictures',
+/// where a Carnet from before reads it (and lets go what it can't take).
+fn map_of(path: &str) -> &'static str {
+    if carnet_core::doc::is_document_name(path) && !carnet_core::doc::is_picture_name(path) { FILES } else { PICTURES }
 }
 
 /// The folder `folder` is in ("" for the top).
@@ -973,5 +990,32 @@ mod tests {
         // writing its own.
         assert!(v.set_place(bad_name, &place("", "Found")));
         assert_eq!(v.place(bad_name), Some(place("", "Found")));
+    }
+
+    /// A document's path is kept in its own map, where a Carnet from
+    /// before documents doesn't look (it lets go of every path in the
+    /// pictures' it doesn't take for a picture's), and read back with the
+    /// pictures as one; dropped and brought back as a picture is. One
+    /// written into the other map than its name's is read as not there.
+    #[test]
+    fn documents_are_kept_apart_from_pictures() {
+        let v = NoteDoc::new(1);
+        assert!(v.set_picture("attachments/a.png", "aa"));
+        assert!(v.set_picture("attachments/report.pdf", "bb"));
+        let raw = |m: &str| match v.loro().get_map(m).get_deep_value() {
+            LoroValue::Map(m) => m.keys().cloned().collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        assert_eq!((raw(PICTURES), raw(FILES)), (vec!["attachments/a.png".to_string()], vec!["attachments/report.pdf".to_string()]));
+        assert_eq!(v.pictures().into_keys().collect::<Vec<_>>(), ["attachments/a.png", "attachments/report.pdf"]);
+        assert_eq!(v.drop_picture("attachments/report.pdf"), (true, Some("bb".to_string())));
+        assert_eq!(v.dropped_pictures().into_iter().collect::<Vec<_>>(), ["attachments/report.pdf"]);
+        assert_eq!(v.dropped_id("attachments/report.pdf").as_deref(), Some("bb"));
+        // Each in the other's map, as no Carnet writes them.
+        v.loro().get_map(PICTURES).insert("attachments/notes.txt", "cc").unwrap();
+        v.loro().get_map(FILES).insert("attachments/b.png", "dd").unwrap();
+        v.loro().get_map(FILES).insert("attachments/run.sh", "ee").unwrap();
+        v.loro().commit();
+        assert_eq!(v.pictures().into_keys().collect::<Vec<_>>(), ["attachments/a.png"]);
     }
 }

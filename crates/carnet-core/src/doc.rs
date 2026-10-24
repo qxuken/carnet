@@ -1415,14 +1415,15 @@ pub fn find_picture(folder: &str, src: &str, wiki: bool, files: &Files) -> Optio
     top.or(here)
 }
 
-/// The pictures a note in `folder` shows, as paths from the notes folder:
-/// what keeps a picture wanted — one on a line of its own, and one among
-/// a table cell's words. A line that only looks like one (in a code
-/// block, say) counts too: a picture kept by mistake costs little, one
-/// lost is gone. `files` is where an Obsidian embed's picture is looked
-/// for ([`find_picture`]).
+/// The pictures a note in `folder` shows, and the documents it links to
+/// ([`document_paths`]), as paths from the notes folder: what keeps a
+/// file wanted — a picture on a line of its own, and one among a table
+/// cell's words. A line that only looks like one (in a code block, say)
+/// counts too: a file kept by mistake costs little, one lost is gone.
+/// `files` is where an Obsidian embed's picture is looked for
+/// ([`find_picture`]).
 pub fn picture_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
+    let mut out = document_paths(folder, md, files);
     for line in md.lines() {
         match image_line(line) {
             Some(Kind::Image { src, wiki, .. }) => out.extend(find_picture(folder, &src, wiki, files)),
@@ -1435,6 +1436,93 @@ pub fn picture_paths(folder: &str, md: &str, files: &Files) -> std::collections:
         }
     }
     out
+}
+
+/// The documents ([`is_document_name`]) a note in `folder` links to, as
+/// paths from the notes folder: `[…](report.pdf)`, `[…](<a b.pdf>)` and
+/// an Obsidian `[[report.pdf]]`, its `%` escapes read. Only by a
+/// document's name, so a link to a note or a page is none; one in code
+/// counts too, as for pictures.
+pub fn document_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let b = md.as_bytes();
+    let mut i = 0;
+    while let Some(at) = md[i..].find("](") {
+        let start = i + at + 2;
+        let line_end = md[start..].find('\n').map_or(md.len(), |n| start + n);
+        let rest = &md[start..line_end];
+        // `<…>`, or up to the `)` that closes it (parentheses in pairs),
+        // a title after it left out. The next looked for past what this
+        // one read — its end, or the line's when it has none — so a line
+        // of a thousand `](` is read once, not a thousand times.
+        let (target, read) = match rest.strip_prefix('<') {
+            Some(r) => match r.find('>') {
+                Some(e) => (Some(&r[..e]), e + 1),
+                None => (None, rest.len()),
+            },
+            None => {
+                let mut depth = 0usize;
+                let close = rest.char_indices().find(|&(_, c)| match c {
+                    '(' => {
+                        depth += 1;
+                        false
+                    }
+                    ')' if depth == 0 => true,
+                    ')' => {
+                        depth -= 1;
+                        false
+                    }
+                    _ => false,
+                });
+                match close {
+                    Some((e, _)) => {
+                        let t = &rest[..e];
+                        (Some(t.find(" \"").or_else(|| t.find(" '")).map_or(t, |s| &t[..s]).trim()), e)
+                    }
+                    None => (None, rest.len()),
+                }
+            }
+        };
+        if let Some(t) = target.map(percent_decoded).filter(|t| is_document_name(t)) {
+            out.extend(resolve_picture(folder, &t));
+        }
+        i = (start + read).min(b.len());
+    }
+    let mut i = 0;
+    while let Some(at) = md[i..].find("[[") {
+        let start = i + at + 2;
+        let Some(len) = md[start..].find(['|', ']', '[', '\n']) else { break };
+        let t = md[start..start + len].trim();
+        if is_document_name(t) {
+            out.extend(find_picture(folder, t, true, files));
+        }
+        i = start + len;
+    }
+    out
+}
+
+/// `%` escapes read back (`%20` a space, `%28` a parenthesis); one that
+/// isn't two hex digits, or that makes no UTF-8, kept as written.
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = b
+                .get(i + 1..i + 3)
+                .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// `<img src="…" alt="…" width="…">` (or `/>`), as an export writes a
@@ -1909,6 +1997,23 @@ mod tests {
         for no in ["page.html", "logo.svg", "run.sh", "setup.exe", "Tool.app", "sums.xlsm", "old.doc", "note.md", "readme", ".pdf", "photo.png"] {
             assert!(!is_document_name(no), "{no}");
         }
+    }
+
+    /// A document a note links to is wanted as a picture it shows is:
+    /// by a path (escapes read, `<…>`, a title after it), from the
+    /// note's folder, or an Obsidian link found by its name. A link to a
+    /// page, a note or a program is no document.
+    #[test]
+    fn the_documents_a_note_links_to_are_in_use() {
+        let md = "See [the plan](../attachments/Trip-plan-%28v2%29.pdf \"v2\") and [notes](<../attachments/a b.txt>).\n\
+                  ![](../attachments/p.png)\n\
+                  And [[talk.m4a]], [[Other note]], [x](https://example.com/a.pdf), [y](run.sh)";
+        let files = Files::new(["attachments/talk.m4a"]);
+        let found: Vec<String> = document_paths("Trips", md, &files).into_iter().collect();
+        assert_eq!(found, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/talk.m4a"]);
+        let all: Vec<String> = picture_paths("Trips", md, &files).into_iter().collect();
+        assert_eq!(all, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/p.png", "attachments/talk.m4a"]);
+        assert_eq!(percent_decoded("a%20b%2"), "a b%2");
     }
 
     /// Found by fuzzing: a line led by wide whitespace was cut inside a
