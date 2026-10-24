@@ -4261,20 +4261,32 @@ impl Carnet {
             }
             DropPhase::Drop => {
                 let paths: Vec<std::path::PathBuf> = d.paths.iter().map(std::path::PathBuf::from).collect();
-                // On a card: into that note, at its end, whether it opened
-                // while the files rested there or not.
-                let card = self.file_drag.as_ref().and_then(|d| d.card).map(|(n, _)| n);
-                if let Some(n) = card {
-                    self.open(n);
-                    self.drop_index = Some(self.doc().len());
-                } else if let Some(cell) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y)) {
-                    // On a table's cell: into it, at its end.
-                    self.caret = Caret::at(page::end(self.doc(), cell));
-                    self.drop_index = None;
+                // Markdown files are notes of their own: brought in beside
+                // the others, never put in the note open. Alone, the first
+                // opens; with pictures, the note they went into stays.
+                let (notes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| store::is_markdown(p));
+                let folder = self.drop_folder(self.file_drag.as_ref().and_then(|d| d.at));
+                if !paths.is_empty() {
+                    // On a card: into that note, at its end, whether it
+                    // opened while the files rested there or not.
+                    let card = self.file_drag.as_ref().and_then(|d| d.card).map(|(n, _)| n);
+                    if let Some(n) = card {
+                        self.open(n);
+                        self.drop_index = Some(self.doc().len());
+                    } else if let Some(cell) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y)) {
+                        // On a table's cell: into it, at its end.
+                        self.caret = Caret::at(page::end(self.doc(), cell));
+                        self.drop_index = None;
+                    }
+                    let at = self.drop_index.take();
+                    self.file_drag = None;
+                    self.insert_files_at(&paths, at);
                 }
-                let at = self.drop_index.take();
                 self.file_drag = None;
-                self.insert_files_at(&paths, at);
+                self.drop_index = None;
+                if !notes.is_empty() {
+                    self.import_notes(&notes, &folder, paths.is_empty());
+                }
             }
             DropPhase::Enter | DropPhase::Move => {
                 let drag = self.file_drag.get_or_insert(FileDrag { at: None, card: None });
@@ -4283,6 +4295,91 @@ impl Carnet {
                 }
             }
         }
+    }
+
+    /// Whether `at` is over the library: its pane beside the page, or,
+    /// on a narrow window showing the list, anywhere.
+    fn over_library(&self, at: Vec2) -> bool {
+        if self.view_w < self.library_least() + PAGE_MIN {
+            return self.list_view && !self.settings_open;
+        }
+        at.x < self.side_w(false)
+    }
+
+    /// Where Markdown files dropped at `at` go: into the folder whose row
+    /// they were let go over (All notes': the top level), else the folder
+    /// the library shows, as a new note does.
+    fn drop_folder(&self, at: Option<Vec2>) -> String {
+        let inside = |p: Vec2, r: &Rect| p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+        let row = at
+            .filter(|&p| self.over_library(p))
+            .and_then(|p| self.folder_rects.iter().find(|(_, r)| inside(p, r)))
+            .map(|(f, _)| f.clone());
+        row.unwrap_or_else(|| self.folder.clone().unwrap_or_default())
+    }
+
+    /// Markdown files brought in as notes in `folder`, each a copy
+    /// ([`Store::import_note`]). With `open`, the first is opened and
+    /// chosen in the library, which shows its folder if it showed another.
+    /// One already a note here is that note, not a second copy of it. What
+    /// couldn't come in is said, the first of them by name.
+    fn import_notes(&mut self, paths: &[std::path::PathBuf], folder: &str, open: bool) {
+        let mut first = None;
+        let mut came: Vec<u64> = Vec::new();
+        let mut failed: Vec<(String, std::io::Error)> = Vec::new();
+        for p in paths {
+            let i = match self.store.note_of_file(p) {
+                Some(i) => i,
+                None => match self.store.import_note(folder, p) {
+                    Ok(i) => {
+                        came.push(self.store.notes[i].id);
+                        i
+                    }
+                    Err(e) => {
+                        let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
+                        failed.push((name, e));
+                        continue;
+                    }
+                },
+            };
+            first.get_or_insert(self.store.notes[i].id);
+        }
+        if let (true, Some(id)) = (open, first) {
+            self.close_peek();
+            self.deleted = false;
+            self.query.clear();
+            let at = self.store.notes.iter().find(|n| n.id == id).map(|n| n.folder.clone()).unwrap_or_default();
+            if self.folder.as_ref().is_some_and(|f| *f != at) {
+                self.folder = (!at.is_empty()).then_some(at);
+            }
+            self.reorder();
+            if let Some(i) = self.store.notes.iter().position(|n| n.id == id) {
+                self.open(i);
+            }
+        } else {
+            self.reorder();
+        }
+        // Said once it is open: a notice goes with the note it came on.
+        match came.as_slice() {
+            [] => {}
+            [id] => {
+                let title = self.store.notes.iter().find(|n| n.id == *id).map_or("", |n| n.display_title()).to_string();
+                self.notify(format!("Imported \u{201c}{title}\u{201d}{}", Self::into_words(folder)), None);
+            }
+            all => self.notify(format!("Imported {} notes{}", all.len(), Self::into_words(folder)), None),
+        }
+        if let Some((name, e)) = failed.first() {
+            let more = match failed.len() {
+                1 => String::new(),
+                n => format!(" (and {} more)", n - 1),
+            };
+            self.error = Some(format!("Couldn't import \u{201c}{name}\u{201d}{more}: {}", store::plain_error(e)));
+        }
+    }
+
+    /// " into “Work”", for a folder; nothing for the top level.
+    fn into_words(folder: &str) -> String {
+        if folder.is_empty() { String::new() } else { format!(" into \u{201c}{}\u{201d}", folder_name(folder)) }
     }
 
     /// Back from another app: catch up with what it did to the folder.
