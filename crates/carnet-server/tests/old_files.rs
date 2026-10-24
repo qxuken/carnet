@@ -1,10 +1,10 @@
-//! A server beside pictures it has no records for (the deploy drill's
+//! A server beside files it has no records for (the deploy drill's
 //! hazard): its records not put back (a new data folder, an empty
 //! database), or put back from before some accounts were made, on a
-//! bucket a server kept pictures in. The sweep takes the pictures of
+//! bucket a server kept files in. The sweep takes the files of
 //! accounts removed here (recorded so in the bucket, `gone/`), and no
 //! others; a store with no account refuses to start beside others'
-//! pictures unless told to.
+//! files unless told to.
 //!
 //! With the `s3` feature, against a real bucket (`CARNET_TEST_S3`, as in
 //! `tests/s3.rs`), and Postgres (`CARNET_TEST_POSTGRES`, with the
@@ -26,12 +26,12 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 fn temp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("carnet-old-pictures-{name}-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("carnet-old-files-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     d
 }
 
-/// A bucket's removal records: put by `forget`, before its pictures go;
+/// A bucket's removal records: put by `forget`, before its files go;
 /// not an account folder; and the sweep takes what's put after, of that
 /// account alone.
 #[test]
@@ -42,7 +42,7 @@ fn a_bucket_records_a_removal_and_the_sweep_keeps_strangers() {
         s3.put(&s3.key(a, &[1; 32]), b"sealed").unwrap();
     }
     w.run(Job::Gone { account: b"removed".to_vec() }, &mut |_| {});
-    assert_eq!(w.blobs.held(b"removed"), [], "its pictures gone");
+    assert_eq!(w.blobs.held(b"removed"), [], "its files gone");
     assert_eq!(w.blobs.removed(), [b"removed".to_vec()].into(), "its removal recorded");
     let mut owners = w.blobs.owners();
     owners.sort();
@@ -57,7 +57,7 @@ fn a_bucket_records_a_removal_and_the_sweep_keeps_strangers() {
     empty(&s3, &config);
 }
 
-/// The bucket's pictures: one of an account `old`, never removed here,
+/// The bucket's files: one of an account `old`, never removed here,
 /// and one of `removed`, removed (recorded), put after.
 fn fill(s3: &mut S3Blobs) {
     s3.put(&s3.key(b"old", &[1; 32]), b"sealed").unwrap();
@@ -98,14 +98,14 @@ async fn stop((stop, done): Running) {
     tokio::time::timeout(Duration::from_secs(10), done).await.expect("stops").unwrap().unwrap();
 }
 
-/// How many pictures each account has in the bucket (off the async
+/// How many files each account has in the bucket (off the async
 /// threads: the bucket's client blocks).
 async fn held(s3: &S3Blobs, accounts: &'static [&'static [u8]]) -> Vec<usize> {
     let mut b = s3.clone();
     tokio::task::spawn_blocking(move || accounts.iter().map(|a| b.held(a).len()).collect()).await.unwrap()
 }
 
-/// Waits (up to five seconds) for the account's pictures to be gone.
+/// Waits (up to five seconds) for the account's files to be gone.
 async fn goes(s3: &S3Blobs, account: &'static [u8]) -> bool {
     for _ in 0..50 {
         let mut b = s3.clone();
@@ -117,9 +117,9 @@ async fn goes(s3: &S3Blobs, account: &'static [u8]) -> bool {
     false
 }
 
-/// A new data folder on a bucket a server kept pictures in: refused, as
+/// A new data folder on a bucket a server kept files in: refused, as
 /// it says, nothing made or deleted. Told to start anyway, it does: the
-/// removed account's late picture goes, the other is kept.
+/// removed account's late file goes, the other is kept.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_data_folder_on_a_used_bucket_refuses_to_start() {
     let Some((s3, config)) = bucket("new-folder") else { return };
@@ -130,14 +130,14 @@ async fn a_new_data_folder_on_a_used_bucket_refuses_to_start() {
     let (refused, running) = serve(&data, &config, None, Start::default()).await;
     assert!(running.is_none());
     let said = refused.expect_err("refused").to_string();
-    assert!(said.contains("The bucket holds pictures of 1 account, and there are no accounts here"), "{said}");
-    assert!(said.contains("another bucket (or another folder in it)") && said.contains("--keep-untracked-pictures"), "{said}");
+    assert!(said.contains("The bucket holds files of 1 account, and there are no accounts here"), "{said}");
+    assert!(said.contains("another bucket (or another folder in it)") && said.contains("--keep-untracked-files"), "{said}");
     assert!(carnet_server::Sharded::open(&data).unwrap().invites().is_empty(), "no invite made");
     assert_eq!(held(&s3, &[b"old", b"removed"]).await, [1, 1], "nothing deleted");
 
-    let (started, running) = serve(&data, &config, None, Start { keep_untracked_pictures: true }).await;
+    let (started, running) = serve(&data, &config, None, Start { keep_untracked_files: true }).await;
     started.unwrap();
-    assert!(goes(&s3, b"removed").await, "the removed account's late picture: gone");
+    assert!(goes(&s3, b"removed").await, "the removed account's late file: gone");
     assert_eq!(held(&s3, &[b"old"]).await, [1], "the other kept");
     stop(running.unwrap()).await;
     empty(&s3, &config);
@@ -147,13 +147,13 @@ async fn a_new_data_folder_on_a_used_bucket_refuses_to_start() {
 /// Postgres: an empty database on a used bucket refuses to start, as a
 /// new data folder does; one put back from an older backup (it has
 /// accounts, not every one the bucket has) starts, and its sweep takes
-/// the removed account's late picture and keeps those of the account
+/// the removed account's late file and keeps those of the account
 /// made after the backup.
 #[cfg(feature = "postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_database_put_back_from_before_keeps_the_newer_accounts_pictures() {
+async fn a_database_put_back_from_before_keeps_the_newer_accounts_files() {
     use carnet_server::postgres::Postgres;
-    let Some((url, _schema)) = common::database("old_pictures") else { return };
+    let Some((url, _schema)) = common::database("old_files") else { return };
     let Some((s3, config)) = bucket("restored") else { return };
     let data = temp("restored");
     let mut b = s3.clone();
@@ -164,9 +164,9 @@ async fn a_database_put_back_from_before_keeps_the_newer_accounts_pictures() {
     let (refused, running) = serve(&data, &config, Some(Box::new(pg)), Start::default()).await;
     assert!(running.is_none());
     let said = refused.expect_err("refused").to_string();
-    assert!(said.contains("The bucket holds pictures of 1 account"), "{said}");
+    assert!(said.contains("The bucket holds files of 1 account"), "{said}");
 
-    // The backup's: an account from before, with a picture of its own.
+    // The backup's: an account from before, with a file of its own.
     let mut pg = open(url.clone()).await.unwrap();
     let pg = tokio::task::spawn_blocking(move || {
         pg.add_account(b"before", true).unwrap();
@@ -179,7 +179,7 @@ async fn a_database_put_back_from_before_keeps_the_newer_accounts_pictures() {
     tokio::task::spawn_blocking(move || b.put(&b.key(b"before", &[1; 32]), b"sealed").unwrap()).await.unwrap();
     let (started, running) = serve(&data, &config, Some(Box::new(pg)), Start::default()).await;
     started.unwrap();
-    assert!(goes(&s3, b"removed").await, "the removed account's late picture: gone");
+    assert!(goes(&s3, b"removed").await, "the removed account's late file: gone");
     assert_eq!(held(&s3, &[b"before", b"old"]).await, [1, 1], "the account's own, and the newer account's, kept");
     stop(running.unwrap()).await;
     empty(&s3, &config);

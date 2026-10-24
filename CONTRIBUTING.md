@@ -129,7 +129,7 @@ A nightly CI job runs every target from the corpus earlier nights built up. A cr
 | `src/look.rs` | the settings turned into the `Look` every view paints with |
 | `src/settings.rs` | the settings and their file |
 | `src/images.rs` | pictures decoded off the UI thread and handed to kui |
-| `src/pictures.rs` | pictures between devices, each a sealed blob on the server |
+| `src/files.rs` | files between devices (pictures, and documents notes link to), each a sealed blob on the server |
 | `src/clip.rs` | the clipboard beyond text: pictures and copied files |
 | `crates/carnet-core/` | the note's Markdown, with no UI in it, so it also builds for wasm |
 | `crates/carnet-core/src/doc.rs` | the block model and its GFM Markdown form |
@@ -140,7 +140,7 @@ A nightly CI job runs every target from the corpus earlier nights built up. A cr
 | `crates/carnet-core/src/name.rs` | a note's file name from its title, the same on every device |
 | `crates/carnet-core/src/export.rs` | Markdown to HTML, for copying |
 | `crates/carnet-sync/` | each note as a [Loro](https://loro.dev) CRDT, the replica beside the notes folder, encryption, pairing, recovery, and the wire ([docs/SYNC.md](docs/SYNC.md)) |
-| `crates/carnet-server/` | the sync server: the hub (logins, rooms, the change feed), SQLite or Postgres storage, pictures on disk or in S3, the binary; `tests/sim.rs` simulates devices, the server and a faulty network from a seed |
+| `crates/carnet-server/` | the sync server: the hub (logins, rooms, the change feed), SQLite or Postgres storage, files on disk or in S3, the binary; `tests/sim.rs` simulates devices, the server and a faulty network from a seed |
 | `crates/carnet-web/` | the web app's Rust, as wasm ([docs/SYNC.md](docs/SYNC.md) §8) |
 | `web/` | the web app (Svelte 5) |
 | `fuzz/` | fuzz targets |

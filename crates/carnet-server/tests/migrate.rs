@@ -3,10 +3,10 @@
 //! use, or a database or bucket a server ran on, refused. And the whole
 //! way end to end: a server on SQLite filled over its sockets, moved,
 //! started on Postgres and a bucket, and serving what it kept as before
-//! (notes, a deleted one refused, a picture by the bucket's link). The
+//! (notes, a deleted one refused, a file by the bucket's link). The
 //! apps know nothing of it: to them it's the same server.
 //!
-//! With the `postgres` feature (and `s3` for the pictures), against a
+//! With the `postgres` feature (and `s3` for the files), against a
 //! real database (`CARNET_TEST_POSTGRES`) and bucket (`CARNET_TEST_S3`,
 //! as in `tests/s3.rs`). Without them, each test says so and passes.
 #![cfg(feature = "postgres")]
@@ -35,7 +35,7 @@ const R: &str = "000000000000000000000000000000r1";
 /// A folder with a bit of everything a server keeps: two accounts,
 /// devices (one removed by the other, its keys sealed again), records
 /// live and set aside by a base, a room removed, the log, a recovery
-/// code, a password, two passkeys, invites, pictures as files (one marked to go) and
+/// code, a password, two passkeys, invites, files on disk (one marked to go) and
 /// one still in an account's database.
 fn fill(data: &Path) {
     let mut s = Sharded::open(data).unwrap();
@@ -72,12 +72,12 @@ fn fill(data: &Path) {
     s.put(bob, R, 3, 0, 1, b"bob's".to_vec()).unwrap();
     drop(s);
     let files = BlobFiles::open(data).unwrap();
-    files.keep(alice, &[1; 32], b"PICTURE-ONE").unwrap();
-    files.keep(alice, &[2; 32], b"PICTURE-TWO").unwrap();
+    files.keep(alice, &[1; 32], b"FILE-ONE").unwrap();
+    files.keep(alice, &[2; 32], b"FILE-TWO").unwrap();
     files.mark(alice, &[2; 32], 1234).unwrap();
     // One a server before kept in the database, not moved out yet.
     let db = rusqlite::Connection::open(Sharded::account_path(data, bob).unwrap()).unwrap();
-    db.execute("INSERT INTO blobs (id, bytes) VALUES (?1, ?2)", rusqlite::params![[3u8; 32].as_slice(), b"PICTURE-OLD".as_slice()]).unwrap();
+    db.execute("INSERT INTO blobs (id, bytes) VALUES (?1, ?2)", rusqlite::params![[3u8; 32].as_slice(), b"FILE-OLD".as_slice()]).unwrap();
 }
 
 /// Every answer the server asks of a store, the same from both.
@@ -173,8 +173,8 @@ fn migrate_copies_a_folder_whole_and_a_rerun_finds_nothing() {
     assert!(!pg.served().unwrap(), "migrate isn't a server");
     #[cfg(feature = "s3")]
     if let Some((s3, _)) = &bucket {
-        assert_eq!((done.pictures, done.put, done.marks), (3, 3, 1), "two files and one from a database; one marked");
-        assert_eq!(s3.get(&s3.key(b"bob", &[3; 32])).unwrap().as_deref(), Some(b"PICTURE-OLD".as_slice()));
+        assert_eq!((done.files, done.put, done.marks), (3, 3, 1), "two files and one from a database; one marked");
+        assert_eq!(s3.get(&s3.key(b"bob", &[3; 32])).unwrap().as_deref(), Some(b"FILE-OLD".as_slice()));
         assert_eq!(s3.marked(b"alice", &[2; 32]).unwrap(), Some(1234));
     }
 
@@ -208,16 +208,16 @@ fn migrate_copies_a_folder_whole_and_a_rerun_finds_nothing() {
     assert_eq!(fixed.copied, 1);
     #[cfg(feature = "s3")]
     if let Some((s3, config)) = &bucket {
-        // A picture gone from the bucket is put again; one only there goes.
+        // A file gone from the bucket is put again; one only there goes.
         s3.delete(&s3.key(b"alice", &[1; 32])).unwrap();
         s3.put(&s3.key(b"alice", &[9; 32]), b"STRAY").unwrap();
         let mended = migrate::run(&plan, &mut |_| {}).unwrap();
-        assert_eq!((mended.put, mended.pictures_skipped, mended.pictures), (1, 2, 3));
+        assert_eq!((mended.put, mended.files_skipped, mended.files), (1, 2, 3));
         assert!(s3.head(&s3.key(b"alice", &[9; 32])).unwrap().is_none());
         common::empty(s3, config);
     }
 
-    // The pictures' files and what isn't a database: as they were. (The
+    // The files on disk and what isn't a database: as they were. (The
     // databases are compared by their rows above: SQLite may fold a WAL
     // into its file as any open does.)
     let after = snapshot(&data);
@@ -328,9 +328,9 @@ async fn reqwest_free_get(addr: std::net::SocketAddr, path: &str) -> std::io::Re
 }
 
 /// The whole way: a server on SQLite, filled by devices over its sockets
-/// (notes, a second device and then not, a password, a picture, a note
+/// (notes, a second device and then not, a password, a file, a note
 /// deleted for good); stopped; migrated; started on Postgres and a
-/// bucket. A device logs in and has every note, fetches the picture by
+/// bucket. A device logs in and has every note, fetches the file by
 /// the bucket's link; the password lets a new device in; the deleted
 /// note stays deleted. And `migrate` won't run over it again.
 #[cfg(feature = "s3")]
@@ -405,7 +405,7 @@ async fn migrate_to_postgres_and_a_bucket_serves_what_it_kept() {
     a.write(device::ROOM, "# Shop\n\n- [ ] milk\n- [ ] eggs\n");
     a.settle(&mut ws).await;
 
-    // A password, and a picture put at the server's own link.
+    // A password, and a file put at the server's own link.
     a.session.set_password("ann@example.com", "correct horse battery", &mut OsRandom).unwrap();
     a.settle(&mut ws).await;
     assert!(a.events.contains(&Event::PasswordSet), "{:?}", a.events);
@@ -427,7 +427,7 @@ async fn migrate_to_postgres_and_a_bucket_serves_what_it_kept() {
     let plan = Plan { from: data.clone(), postgres: Some(url.clone()), s3: Some(s3_config.clone()), ..Plan::default() };
     let mut said = Vec::new();
     let done = migrate::run(&plan, &mut |l| said.push(l.to_string())).unwrap_or_else(|e| panic!("{e}: {said:#?}"));
-    assert_eq!((done.rows.accounts, done.pictures, done.put), (1, 1, 1), "{said:#?}");
+    assert_eq!((done.rows.accounts, done.files, done.put), (1, 1, 1), "{said:#?}");
 
     // Started on Postgres and the bucket, the same data folder beside them
     // for its keys (the OPAQUE key above all), at the same origin.
@@ -445,7 +445,7 @@ async fn migrate_to_postgres_and_a_bucket_serves_what_it_kept() {
     let second = device::start(&data, Some(&origin), host).await;
 
     // A device of the account, from nothing but its keys: every note but
-    // the one deleted, and the picture by the bucket's link.
+    // the one deleted, and the file by the bucket's link.
     let mut again = Device::new(Identity { ring: a.session.ring().clone(), ..identity.clone() }, 3);
     let mut ws = again.connect(second.addr).await;
     again.settle(&mut ws).await;
@@ -510,17 +510,17 @@ async fn migrated(plan: &Plan) -> (Result<migrate::Done, carnet_server::storage:
     .unwrap()
 }
 
-/// The pictures go first, the server running on the folder, a picture
+/// The files go first, the server running on the folder, a file
 /// half put meanwhile: no lock (the server carries on, and the put ends
 /// well), only finished files copied, and no records. Then the stop: one
-/// picture swept since, and the run after copies the records and only
-/// the picture since, finds the others there already, takes the swept
+/// file swept since, and the run after copies the records and only
+/// the file since, finds the others there already, takes the swept
 /// one from the bucket, and its check passes. Again on the stopped
 /// folder, the folder is as it was; on a bucket a server has run on,
 /// refused.
 #[cfg(feature = "s3")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn migrate_pictures_first_while_the_server_runs() {
+async fn migrate_files_first_while_the_server_runs() {
     use carnet_server::server::{self, Host};
     use carnet_sync::crypto::{DeviceKey, OsRandom, Ring, VaultKey};
     use carnet_sync::session::{Event, Identity, Transfer};
@@ -540,15 +540,15 @@ async fn migrate_pictures_first_while_the_server_runs() {
     let mut a = Device::new(identity, 1);
     let mut ws = a.connect(running.addr).await;
     a.settle(&mut ws).await;
-    a.write(device::ROOM, "# Pictures\n");
+    a.write(device::ROOM, "# Files\n");
     a.settle(&mut ws).await;
 
-    // A picture offered, and its put to do.
-    async fn offer(a: &mut Device, ws: &mut Socket, picture: &[u8]) -> ([u8; 32], String, Vec<u8>) {
-        let id = a.session.blob_id(picture);
-        a.session.offer_blobs(vec![(id, picture.len())]);
+    // A file offered, and its put to do.
+    async fn offer(a: &mut Device, ws: &mut Socket, file: &[u8]) -> ([u8; 32], String, Vec<u8>) {
+        let id = a.session.blob_id(file);
+        a.session.offer_blobs(vec![(id, file.len())]);
         a.settle(ws).await;
-        assert!(a.session.put_blob(picture, &mut OsRandom));
+        assert!(a.session.put_blob(file, &mut OsRandom));
         let [Transfer::Put { url, sealed, .. }] = &a.session.take_transfers()[..] else { panic!("a put") };
         (id, url.clone(), sealed.clone())
     }
@@ -585,13 +585,13 @@ async fn migrate_pictures_first_while_the_server_runs() {
     }
     assert!(coming, "half of it in the spool");
 
-    // The pictures first, beside the running server.
-    let first = Plan { from: data.clone(), postgres: Some(url.clone()), s3: Some(s3_config.clone()), pictures_first: true, ..Plan::default() };
+    // The files first, beside the running server.
+    let first = Plan { from: data.clone(), postgres: Some(url.clone()), s3: Some(s3_config.clone()), files_first: true, ..Plan::default() };
     let (done, said) = migrated(&first).await;
     let done = done.unwrap_or_else(|e| panic!("{e}: {said:#?}"));
-    assert_eq!((done.pictures, done.put, done.pictures_skipped), (3, 3, 0), "{said:#?}");
+    assert_eq!((done.files, done.put, done.files_skipped), (3, 3, 0), "{said:#?}");
     let bytes: u64 = ids.iter().map(|id| std::fs::metadata(files.path(&account, id)).unwrap().len()).sum();
-    assert_eq!((done.picture_bytes, done.put_bytes), (bytes, bytes));
+    assert_eq!((done.file_bytes, done.put_bytes), (bytes, bytes));
     assert!(said.last().unwrap().contains("3 put now") && said.last().unwrap().contains("stop the server"), "{said:#?}");
     for id in &ids {
         assert_eq!(s3.get(&s3.key(&account, id)).unwrap(), Some(std::fs::read(files.path(&account, id)).unwrap()), "whole, as the folder has it");
@@ -616,13 +616,13 @@ async fn migrate_pictures_first_while_the_server_runs() {
     files.mark(&account, &ids[1], 1).unwrap();
     assert_eq!(files.sweep(2), 1);
 
-    // Stopped: the run copies the records, the picture since and the
+    // Stopped: the run copies the records, the file since and the
     // mark; the two still in the folder are there already; the swept one
     // goes from the bucket.
-    let plan = Plan { pictures_first: false, ..first.clone() };
+    let plan = Plan { files_first: false, ..first.clone() };
     let (done, said) = migrated(&plan).await;
     let done = done.unwrap_or_else(|e| panic!("{e}: {said:#?}"));
-    assert_eq!((done.rows.accounts, done.pictures, done.put, done.pictures_skipped, done.marks), (1, 3, 1, 2, 1), "{said:#?}");
+    assert_eq!((done.rows.accounts, done.files, done.put, done.files_skipped, done.marks), (1, 3, 1, 2, 1), "{said:#?}");
     assert!(s3.head(&s3.key(&account, &ids[1])).unwrap().is_none(), "swept: gone from the bucket too");
     assert!(s3.marked(&account, &ids[2]).unwrap().is_some());
     let (checked, said) = migrated(&Plan { verify_only: true, ..plan.clone() }).await;
@@ -632,7 +632,7 @@ async fn migrate_pictures_first_while_the_server_runs() {
     let before = snapshot(&data);
     let (again, said) = migrated(&first).await;
     let again = again.unwrap_or_else(|e| panic!("{e}: {said:#?}"));
-    assert_eq!((again.pictures, again.put, again.pictures_skipped), (3, 0, 3));
+    assert_eq!((again.files, again.put, again.files_skipped), (3, 0, 3));
     assert_eq!(snapshot(&data), before, "the folder as it was");
 
     // Without a bucket, or only to check: refused. A bucket a server has

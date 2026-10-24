@@ -121,6 +121,7 @@ impl Carnet {
                 page("Underline", keys::UNDERLINE),
                 page("Code", keys::CODE),
                 page("Highlight", keys::HIGHLIGHT),
+                page("Change Case", keys::CHANGE_CASE),
                 MenuItem::separator(),
                 page("Table", keys::TABLE),
                 page("Divider", keys::DIVIDER),

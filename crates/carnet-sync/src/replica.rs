@@ -11,7 +11,7 @@
 //! ```
 //!
 //! The desktop keeps two more files here, under the same layout:
-//! `pictures.txt` (pictures.rs) and `forgotten.txt` (sync.rs).
+//! `files.txt` (files.rs) and `forgotten.txt` (sync.rs).
 //!
 //! A replica from a release that laid it out differently is brought up to
 //! date as it opens, a step at a time ([`LAYOUT`]); one from a newer

@@ -923,8 +923,31 @@ const PICTURE_EXTENSIONS: [&str; 12] = ["png", "jpg", "jpeg", "gif", "webp", "bm
 
 /// Whether a file name or path names a picture, by its extension.
 pub fn is_picture_name(name: &str) -> bool {
+    has_extension(name, &PICTURE_EXTENSIONS)
+}
+
+/// The extensions of the files besides pictures a note keeps with it and
+/// links to, lowercase: documents, sheets, slides, sound and film, each
+/// opened from its link by an app of its own (the app's `opens_safely`).
+/// Nothing a system runs or a browser scripts (a program, a script,
+/// `.html`), none of Office's kinds that can carry macros (`.doc`,
+/// `.docm`, `.xlsm`), no bundle that is a folder (`.pages`), nothing that
+/// changes something as it opens (`.ics`), and no `.md`, which the notes
+/// folder would read as a note.
+const DOCUMENT_EXTENSIONS: [&str; 22] = [
+    "pdf", "txt", "csv", "rtf", "docx", "xlsx", "pptx", "odt", "ods", "odp", "m4a", "mp3", "wav", "aac", "aiff", "caf", "flac", "ogg",
+    "mov", "mp4", "m4v", "webm",
+];
+
+/// Whether a file name or path names a document a note may keep and link
+/// to ([`DOCUMENT_EXTENSIONS`]), by its extension.
+pub fn is_document_name(name: &str) -> bool {
+    has_extension(name, &DOCUMENT_EXTENSIONS)
+}
+
+fn has_extension(name: &str, of: &[&str]) -> bool {
     let name = name.rsplit('/').next().unwrap_or(name);
-    name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && PICTURE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+    name.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && of.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
 /// `![[photo.png]]` and its kin, alone on a line: a picture, when the
@@ -1232,7 +1255,7 @@ impl<'a> Pictures<'a> {
 
 /// Every picture in a line of words, as [`inline_picture`] reads them,
 /// one after another: a line that only looks like one counts (in code,
-/// say), as for [`picture_paths`].
+/// say), as for [`file_paths`].
 pub fn inline_pictures(text: &str) -> Vec<CellPicture> {
     let mut out = Vec::new();
     let mut pictures = Pictures::new(text);
@@ -1392,14 +1415,15 @@ pub fn find_picture(folder: &str, src: &str, wiki: bool, files: &Files) -> Optio
     top.or(here)
 }
 
-/// The pictures a note in `folder` shows, as paths from the notes folder:
-/// what keeps a picture wanted — one on a line of its own, and one among
-/// a table cell's words. A line that only looks like one (in a code
-/// block, say) counts too: a picture kept by mistake costs little, one
-/// lost is gone. `files` is where an Obsidian embed's picture is looked
-/// for ([`find_picture`]).
-pub fn picture_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
-    let mut out = std::collections::BTreeSet::new();
+/// The pictures a note in `folder` shows, and the documents it links to
+/// ([`document_paths`]), as paths from the notes folder: what keeps a
+/// file wanted — a picture on a line of its own, and one among a table
+/// cell's words. A line that only looks like one (in a code block, say)
+/// counts too: a file kept by mistake costs little, one lost is gone.
+/// `files` is where an Obsidian embed's picture is looked for
+/// ([`find_picture`]).
+pub fn file_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
+    let mut out = document_paths(folder, md, files);
     for line in md.lines() {
         match image_line(line) {
             Some(Kind::Image { src, wiki, .. }) => out.extend(find_picture(folder, &src, wiki, files)),
@@ -1412,6 +1436,93 @@ pub fn picture_paths(folder: &str, md: &str, files: &Files) -> std::collections:
         }
     }
     out
+}
+
+/// The documents ([`is_document_name`]) a note in `folder` links to, as
+/// paths from the notes folder: `[…](report.pdf)`, `[…](<a b.pdf>)` and
+/// an Obsidian `[[report.pdf]]`, its `%` escapes read. Only by a
+/// document's name, so a link to a note or a page is none; one in code
+/// counts too, as for pictures.
+pub fn document_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let b = md.as_bytes();
+    let mut i = 0;
+    while let Some(at) = md[i..].find("](") {
+        let start = i + at + 2;
+        let line_end = md[start..].find('\n').map_or(md.len(), |n| start + n);
+        let rest = &md[start..line_end];
+        // `<…>`, or up to the `)` that closes it (parentheses in pairs),
+        // a title after it left out. The next looked for past what this
+        // one read — its end, or the line's when it has none — so a line
+        // of a thousand `](` is read once, not a thousand times.
+        let (target, read) = match rest.strip_prefix('<') {
+            Some(r) => match r.find('>') {
+                Some(e) => (Some(&r[..e]), e + 1),
+                None => (None, rest.len()),
+            },
+            None => {
+                let mut depth = 0usize;
+                let close = rest.char_indices().find(|&(_, c)| match c {
+                    '(' => {
+                        depth += 1;
+                        false
+                    }
+                    ')' if depth == 0 => true,
+                    ')' => {
+                        depth -= 1;
+                        false
+                    }
+                    _ => false,
+                });
+                match close {
+                    Some((e, _)) => {
+                        let t = &rest[..e];
+                        (Some(t.find(" \"").or_else(|| t.find(" '")).map_or(t, |s| &t[..s]).trim()), e)
+                    }
+                    None => (None, rest.len()),
+                }
+            }
+        };
+        if let Some(t) = target.map(percent_decoded).filter(|t| is_document_name(t)) {
+            out.extend(resolve_picture(folder, &t));
+        }
+        i = (start + read).min(b.len());
+    }
+    let mut i = 0;
+    while let Some(at) = md[i..].find("[[") {
+        let start = i + at + 2;
+        let Some(len) = md[start..].find(['|', ']', '[', '\n']) else { break };
+        let t = md[start..start + len].trim();
+        if is_document_name(t) {
+            out.extend(find_picture(folder, t, true, files));
+        }
+        i = start + len;
+    }
+    out
+}
+
+/// `%` escapes read back (`%20` a space, `%28` a parenthesis); one that
+/// isn't two hex digits, or that makes no UTF-8, kept as written.
+fn percent_decoded(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = b
+                .get(i + 1..i + 3)
+                .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
 }
 
 /// `<img src="…" alt="…" width="…">` (or `/>`), as an export writes a
@@ -1874,6 +1985,36 @@ mod tests {
     }
 
     use super::*;
+
+    /// A document is one that opens in an app of its own and never runs:
+    /// by its extension, any case, never a bare name nor a page, a
+    /// script, a note or a sheet that carries macros.
+    #[test]
+    fn documents_are_named_by_kinds_that_never_run() {
+        for ok in ["report.pdf", "attachments/Notes.TXT", "a/b/sums.xlsx", "talk.m4a", "film.mov"] {
+            assert!(is_document_name(ok), "{ok}");
+        }
+        for no in ["page.html", "logo.svg", "run.sh", "setup.exe", "Tool.app", "sums.xlsm", "old.doc", "note.md", "readme", ".pdf", "photo.png"] {
+            assert!(!is_document_name(no), "{no}");
+        }
+    }
+
+    /// A document a note links to is wanted as a picture it shows is:
+    /// by a path (escapes read, `<…>`, a title after it), from the
+    /// note's folder, or an Obsidian link found by its name. A link to a
+    /// page, a note or a program is no document.
+    #[test]
+    fn the_documents_a_note_links_to_are_in_use() {
+        let md = "See [the plan](../attachments/Trip-plan-%28v2%29.pdf \"v2\") and [notes](<../attachments/a b.txt>).\n\
+                  ![](../attachments/p.png)\n\
+                  And [[talk.m4a]], [[Other note]], [x](https://example.com/a.pdf), [y](run.sh)";
+        let files = Files::new(["attachments/talk.m4a"]);
+        let found: Vec<String> = document_paths("Trips", md, &files).into_iter().collect();
+        assert_eq!(found, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/talk.m4a"]);
+        let all: Vec<String> = file_paths("Trips", md, &files).into_iter().collect();
+        assert_eq!(all, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/p.png", "attachments/talk.m4a"]);
+        assert_eq!(percent_decoded("a%20b%2"), "a b%2");
+    }
 
     /// Found by fuzzing: a line led by wide whitespace was cut inside a
     /// letter looking for a quote's `>`.
@@ -2348,7 +2489,7 @@ Second line of the same paragraph.
     /// whichever folder it is in; web addresses and paths out are none.
     #[test]
     fn a_notes_pictures_are_found_from_its_folder() {
-        use super::{picture_paths, resolve_picture};
+        use super::{file_paths, resolve_picture};
         assert_eq!(resolve_picture("", "attachments/a.png").as_deref(), Some("attachments/a.png"));
         assert_eq!(resolve_picture("Trips/Lisbon", "../../attachments/a%20b.png").as_deref(), Some("attachments/a b.png"));
         assert_eq!(resolve_picture("", "../x.png"), None, "out of the notes folder");
@@ -2361,7 +2502,7 @@ Second line of the same paragraph.
             assert_eq!(resolve_picture("", src), None, "{src:?}");
         }
         let md = "# Trip\n\n![](../attachments/a.png)\n\nText ![not](inline.png) here\n![w|right|300](<../attachments/b c.png>)\n![](https://e.com/x.png)\n";
-        let found: Vec<String> = picture_paths("Trips", md, &Files::default()).into_iter().collect();
+        let found: Vec<String> = file_paths("Trips", md, &Files::default()).into_iter().collect();
         assert_eq!(found, ["attachments/a.png", "attachments/b c.png"]);
     }
 
@@ -2432,7 +2573,7 @@ Second line of the same paragraph.
         // The pictures a note shows: those in its cells too, not a
         // paragraph's among its words.
         let md = "| a | b |\n| --- | --- |\n| ![](../attachments/a.png) | ![[b.png]] ![](<../attachments/c d.png>) |\n\nText ![not](inline.png) here\n";
-        let found: Vec<String> = picture_paths("Trips", md, &Files::new(["attachments/b.png"])).into_iter().collect();
+        let found: Vec<String> = file_paths("Trips", md, &Files::new(["attachments/b.png"])).into_iter().collect();
         assert_eq!(found, ["attachments/a.png", "attachments/b.png", "attachments/c d.png"]);
         // A cell's pictures given new sources, the rest as it was; code
         // holds none.
@@ -2448,7 +2589,7 @@ Second line of the same paragraph.
     /// the shortest path next.
     #[test]
     fn an_embeds_picture_is_found_as_obsidian_finds_it() {
-        use super::{find_picture, picture_paths};
+        use super::{find_picture, file_paths};
         let files = Files::new(["Trips/here.png", "attachments/a.png", "Old/deep/a.png", "Old/b.png", "Older/x/b.png", "Trips/Lisbon/c.png", "Photo.PNG"]);
         let find = |folder: &str, src: &str| find_picture(folder, src, true, &files);
         assert_eq!(find("Trips", "here.png").as_deref(), Some("Trips/here.png"), "beside the note");
@@ -2462,7 +2603,7 @@ Second line of the same paragraph.
         // A Markdown link is where its path says, whatever is elsewhere.
         assert_eq!(find_picture("Trips", "a.png", false, &files).as_deref(), Some("Trips/a.png"));
         let md = "![[a.png]]\n![](here.png)\n![[Lisbon/c.png|200]]\n![[Other note]]\n";
-        let found: Vec<String> = picture_paths("Trips", md, &files).into_iter().collect();
+        let found: Vec<String> = file_paths("Trips", md, &files).into_iter().collect();
         assert_eq!(found, ["Trips/Lisbon/c.png", "Trips/here.png", "attachments/a.png"]);
     }
 
@@ -2489,7 +2630,7 @@ Second line of the same paragraph.
             // it, and the cell's own words.
             let t0 = std::time::Instant::now();
             let _ = parse_blocks(&md);
-            let _ = picture_paths("", &md, &Files::default());
+            let _ = file_paths("", &md, &Files::default());
             let _ = crate::export::viewer(&md, |s, _| crate::export::Picture::Url(s.into()));
             let _ = inline::cell_pictures(cell);
             let _cell = inline::cell_text(true);

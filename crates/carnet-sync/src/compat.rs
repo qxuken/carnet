@@ -35,7 +35,7 @@ pub mod feature {
     pub const PASSKEYS: &str = "passkeys";
     /// An account deleted from one of its devices.
     pub const ACCOUNT_DELETE: &str = "account-delete";
-    /// Notes deleted forever and pictures dropped.
+    /// Notes deleted forever and files dropped.
     pub const REMOVE: &str = "remove";
     /// What an account keeps, and may.
     pub const USAGE: &str = "usage";

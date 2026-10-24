@@ -1,4 +1,4 @@
-//! Pictures in a bucket (`s3.rs`), against a real S3-compatible store:
+//! Files in a bucket (`s3.rs`), against a real S3-compatible store:
 //! with the `s3` feature, and `CARNET_TEST_S3` naming a bucket
 //! (`http://127.0.0.1:9000/carnet-test`, made if it isn't there) whose
 //! keys are in `CARNET_S3_ACCESS_KEY` and `CARNET_S3_SECRET_KEY`. Each
@@ -37,7 +37,7 @@ fn agent() -> ureq::Agent {
 /// gets it back, for the link's time in a browser's cache. A link one way
 /// doesn't go the other, or changed.
 #[test]
-fn a_picture_goes_straight_to_the_bucket_and_back() {
+fn a_file_goes_straight_to_the_bucket_and_back() {
     let Some((s3, config)) = bucket("roundtrip") else { return };
     let mut w = Worker::new(s3.clone());
     let acct = b"acct".to_vec();
@@ -74,13 +74,13 @@ fn a_picture_goes_straight_to_the_bucket_and_back() {
     assert_eq!(r.body_mut().with_config().limit(MAX).read_to_vec().unwrap(), sealed);
     assert_eq!(agent().put(get).send(&b"other"[..]).unwrap().status().as_u16(), 403, "a get link doesn't put");
 
-    // A put past what a picture may be: never said kept, and gone.
+    // A put past what a file may be: never said kept, and gone.
     let big = vec![7u8; MAX as usize + 1];
     s3.put(&s3.key(&acct, &[3; 32]), &big).unwrap();
     assert_eq!(w.blobs.size(&acct, &[3; 32]), None);
     assert!(s3.head(&s3.key(&acct, &[3; 32])).unwrap().is_none(), "deleted");
 
-    // An account removed: its pictures go.
+    // An account removed: its files go.
     w.run(Job::Gone { account: acct.clone() }, &mut |_| {});
     assert_eq!(w.blobs.size(&acct, &[1; 32]), None);
     assert_eq!(w.blobs.usage(&acct), 0);
@@ -106,7 +106,7 @@ fn marks_and_sweeps_as_files_do() {
     assert_eq!(s3.sweep(1001), 1);
     assert_eq!((s3.size(acct, &[1; 32]), s3.size(acct, &[2; 32])), (None, Some(5)));
     assert_eq!(s3.marked(acct, &[1; 32]).unwrap(), None);
-    assert_eq!(s3.usage(acct), 5, "marks aren't pictures");
+    assert_eq!(s3.usage(acct), 5, "marks aren't files");
 
     assert!(!s3.served().unwrap());
     s3.serving().unwrap();

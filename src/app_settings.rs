@@ -1174,8 +1174,8 @@ impl Carnet {
                 let usage = self.sync.usage.clone();
                 let read_only = self.sync.read_only;
                 let update_soon = self.sync.update_soon;
-                let waiting = (self.sync.waiting(), self.sync.pictures_waiting());
-                let held_pictures = self.sync.pictures_held();
+                let waiting = (self.sync.waiting(), self.sync.files_waiting());
+                let held_files = self.sync.files_held();
                 let (wait_said, again) = self.wait_line.said(ui.now(), waiting != (0, 0));
                 if let Some(at) = again {
                     ui.request_frame_at(at);
@@ -1211,15 +1211,15 @@ impl Carnet {
                         Some(Waited::Sent) => said(ui, Icon::Check, t.muted, ALL_SENT),
                         None => {}
                     }
-                    // Pictures that won't go however often they're tried:
+                    // Files that won't go however often they're tried:
                     // why, beside how many wait (the web's words).
-                    if let Some(why) = held_pictures {
+                    if let Some(why) = held_files {
                         said(ui, Icon::Warning, t.warning, why);
                     }
                     // What the server keeps for the account, and, on a
                     // hosted plan, how much it may.
                     if let Some(u) = &usage {
-                        let kept = size_words(u.notes.saturating_add(u.pictures));
+                        let kept = size_words(u.notes.saturating_add(u.files));
                         let mut line = match u.limit {
                             Some(limit) => format!("{kept} of {} used", size_words(limit)),
                             None => format!("{kept} kept on the server"),
@@ -1234,7 +1234,7 @@ impl Carnet {
                         if u.writable
                             && !read_only
                             && let Some(limit) = u.limit
-                            && let Some(over) = over_limit(u.notes.saturating_add(u.pictures), limit)
+                            && let Some(over) = over_limit(u.notes.saturating_add(u.files), limit)
                         {
                             said(ui, Icon::Warning, t.warning, &over);
                         }
@@ -1611,7 +1611,7 @@ impl Carnet {
                             let armed = self.sync_account_armed.as_deref() == Some(a.id.as_slice());
                             let what = format!("{devices}, {seen} \u{b7} {short}");
                             let what = if armed {
-                                format!("{what}. Removed, everything it keeps on this server goes: its notes there, its pictures, its devices' way in. What's on their devices stays.")
+                                format!("{what}. Removed, everything it keeps on this server goes: its notes there, its files, its devices' way in. What's on their devices stays.")
                             } else {
                                 what
                             };
@@ -1657,7 +1657,7 @@ impl Carnet {
                     rule(ui, l);
                     let armed = self.delete_account_armed;
                     let what = if armed {
-                        "Every note and picture the server keeps goes, for good, and every device leaves the account. The notes stay here as files, and on each device as they are."
+                        "Every note and file the server keeps goes, for good, and every device leaves the account. The notes stay here as Markdown files, and on each device as they are."
                     } else {
                         "Everything the server keeps of it, on every device."
                     };
@@ -2146,8 +2146,8 @@ const KEEP_DAYS: u64 = 30;
 
 /// Bytes as people say them: "340 KB", "1.2 GB".
 /// What's said of an account at or over its plan's limit, if it is: the
-/// server takes no new picture then (notes' text it always takes:
-/// docs/SYNC.md §11), so new pictures wait here.
+/// server takes no new file then (notes' text it always takes:
+/// docs/SYNC.md §11), so new files wait here.
 pub(super) fn over_limit(kept: u64, limit: u64) -> Option<String> {
     let what = if kept > limit {
         format!("Over this plan's {}", size_words(limit))
@@ -2156,7 +2156,7 @@ pub(super) fn over_limit(kept: u64, limit: u64) -> Option<String> {
     } else {
         return None;
     };
-    Some(format!("{what}: new pictures stay on this device until there's room. Notes still sync."))
+    Some(format!("{what}: new files stay on this device until there's room. Notes still sync."))
 }
 
 /// How long something waits to be sent before the line says so: a wait
@@ -2219,20 +2219,20 @@ impl WaitLine {
     }
 }
 
-/// Changes and pictures waiting to be sent, in words.
-pub(super) fn waiting_words(changes: usize, pictures: usize) -> String {
-    format!("Waiting to send {}", waiting_count(changes, pictures))
+/// Changes and files waiting to be sent, in words.
+pub(super) fn waiting_words(changes: usize, files: usize) -> String {
+    format!("Waiting to send {}", waiting_count(changes, files))
 }
 
-/// "2 changes", "1 picture", "2 changes and 1 picture" (none of both is
+/// "2 changes", "1 file", "2 changes and 1 file" (none of both is
 /// never asked).
-pub(super) fn waiting_count(changes: usize, pictures: usize) -> String {
+pub(super) fn waiting_count(changes: usize, files: usize) -> String {
     let count = |n: usize, one: &str| match n {
         0 => None,
         1 => Some(format!("1 {one}")),
         n => Some(format!("{n} {one}s")),
     };
-    match (count(changes, "change"), count(pictures, "picture")) {
+    match (count(changes, "change"), count(files, "file")) {
         (Some(c), Some(p)) => format!("{c} and {p}"),
         (c, p) => c.or(p).unwrap_or_default(),
     }

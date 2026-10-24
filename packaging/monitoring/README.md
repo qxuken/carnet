@@ -194,8 +194,8 @@ expression). Four rows:
   logins let in and refused; connections turned away, and closed by the
   server's limits; messages and bytes each way; logins by app.
 - **Data**: accounts, what the databases take on disk, records and
-  pictures kept, batches refused, pairings; then those over time,
-  pictures' links and transfers, pictures let go, and new devices
+  files kept, batches refused, pairings; then those over time,
+  files' links and transfers, files let go, and new devices
   (invites, pairings, recoveries).
 - **Logs**: the server's lines that speak of trouble (empty is good), and
   all its lines.

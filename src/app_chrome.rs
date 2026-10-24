@@ -603,7 +603,7 @@ impl Carnet {
     /// depth with how many notes it holds. Shown once there is a folder (or
     /// one is being named); a click shows its notes, a right-click its menu.
     /// One with folders inside has a chevron before it, which folds them
-    /// away and back.
+    /// away and back — All notes too, every folder being inside it.
     fn folders(&mut self, ui: &mut Ui<'_>, l: &Look) {
         if self.store.folders.is_empty() && self.naming.is_none() && self.trash.is_empty() {
             self.folder_rects.clear();
@@ -631,6 +631,37 @@ impl Carnet {
                 .cross_align(Align::Center)
                 .selected(selected);
             if selected { spec.bg(t.accent_soft) } else { spec.hover_bg(t.hover) }
+        };
+        // A row of the tree at `depth` (All notes and Deleted 1): the
+        // chevron's room (or a blank as wide) in the indent, the folder's
+        // icon where it would be without one.
+        let tree_pad = |depth: usize| Edges { l: depth as f32 * 14.0 - (FOLD_W + 9.0 - 14.0), r: 12.0, t: 0.0, b: 0.0 };
+        // The chevron that folds folder `index` (`ALL`: All notes), said
+        // as `said`.
+        let chevron = |ui: &mut Ui<'_>, index: u64, open: bool, said: &str| {
+            ui.with_keyed(
+                "fold",
+                // The row's height and all the indent there is: an easy
+                // target.
+                NodeSpec::row()
+                    .size(FOLD_W, 30.0)
+                    .radius(radius::CONTROL)
+                    .hover_bg(t.pressed)
+                    .on_click(Msg::FoldFolder { index })
+                    .label(said)
+                    .expanded(open)
+                    // The rows' ← and → do it from the keyboard: not a Tab
+                    // stop of its own.
+                    .focus_region()
+                    .center(),
+                |ui| {
+                    // Turned a quarter, open; a short turn between.
+                    ui.with(
+                        NodeSpec::row().size(12.0, 12.0).rotate(if open { 0.25 } else { 0.0 }).transition(120.0).role(Role::None),
+                        |ui| icon(ui, Icon::ChevronRight, t.muted, 12.0, false),
+                    );
+                },
+            );
         };
         let label = |ui: &mut Ui<'_>, name: &str, count: usize, selected: bool| {
             ui.text_in(
@@ -663,19 +694,28 @@ impl Carnet {
                     let chosen = !f.is_empty() && self.is_picked(&Pick::Folder(f.to_string()));
                     if hover.as_deref() == Some(f) || chosen { spec.bg(t.selection) } else { spec }
                 };
-                let k = ui.with_keyed(
-                    "f-all",
-                    lit(row(0, all), "")
-                        .on_click(Msg::SelectFolder { index: ALL })
-                        .on_context_menu(Msg::FolderMenu { index: ALL })
-                        .on_menu(Msg::Chose)
-                        .on_layout(Value::Null)
-                        .label("All notes"),
-                    |ui| {
-                        icon(ui, Icon::Folder, if all { t.accent } else { t.muted }, 16.0, false);
-                        label(ui, "All notes", self.store.notes.len(), all);
-                    },
-                );
+                // Every folder is inside All notes: with one, it folds.
+                let any = !self.store.folders.is_empty();
+                let all_open = !self.settings.collapsed.contains("");
+                let mut spec = lit(row(1, all), "")
+                    .padding(tree_pad(1))
+                    .on_click(Msg::SelectFolder { index: ALL })
+                    .on_context_menu(Msg::FolderMenu { index: ALL })
+                    .on_menu(Msg::Chose)
+                    .on_layout(Value::Null)
+                    .label("All notes");
+                if any {
+                    spec = spec.expanded(all_open);
+                }
+                let k = ui.with_keyed("f-all", spec, |ui| {
+                    if any {
+                        chevron(ui, ALL, all_open, if all_open { "Hide the folders" } else { "Show the folders" });
+                    } else {
+                        gap(ui, FOLD_W);
+                    }
+                    icon(ui, Icon::Folder, if all { t.accent } else { t.muted }, 16.0, false);
+                    label(ui, "All notes", self.store.notes.len(), all);
+                });
                 rows.push((k, FolderRow::All));
                 // The name as typed so far (a rename's starts as the
                 // folder's); each naming its own field, so one starts
@@ -701,23 +741,21 @@ impl Carnet {
                     if self.folder_hidden(f) {
                         continue;
                     }
-                    let depth = f.matches('/').count() + 1;
+                    // A level in from All notes.
+                    let depth = f.matches('/').count() + 2;
                     let selected = !self.deleted && self.folder.as_deref() == Some(f.as_str());
                     if let Some(r) = ui.layout_of(ui.child_key_indexed(i as u64)) {
                         rects.push((f.clone(), r));
                     }
                     // Being renamed: its field in its place.
                     if let Some(n) = naming.as_ref().filter(|n| n.rename.as_deref() == Some(f.as_str())) {
-                        name_key = Some(field(ui, depth.min(4), n));
+                        name_key = Some(field(ui, depth.min(5), n));
                         continue;
                     }
                     let parent = parents.contains(f.as_str());
                     let open = !self.settings.collapsed.contains(f);
-                    let mut spec = lit(row(depth.min(4), selected), f)
-                        // The chevron's room (or a blank as wide) in the
-                        // indent: the folder's icon where it would be
-                        // without one.
-                        .padding(Edges { l: depth.min(4) as f32 * 14.0 - (FOLD_W + 9.0 - 14.0), r: 12.0, t: 0.0, b: 0.0 })
+                    let mut spec = lit(row(depth.min(5), selected), f)
+                        .padding(tree_pad(depth.min(5)))
                         .on_layout(Value::Null)
                         .on_click(Msg::SelectFolder { index: i as u64 })
                         // Dragged to another folder row: moved inside it.
@@ -734,30 +772,7 @@ impl Carnet {
                         |ui| {
                             if parent {
                                 let said = format!("{} the folders inside \u{201c}{}\u{201d}", if open { "Hide" } else { "Show" }, folder_name(f));
-                                ui.with_keyed(
-                                    "fold",
-                                    // The row's height and all the indent
-                                    // there is: an easy target.
-                                    NodeSpec::row()
-                                        .size(FOLD_W, 30.0)
-                                        .radius(radius::CONTROL)
-                                        .hover_bg(t.pressed)
-                                        .on_click(Msg::FoldFolder { index: i as u64 })
-                                        .label(said.as_str())
-                                        .expanded(open)
-                                        // The rows' ← and → do it from the
-                                        // keyboard: not a Tab stop of its own.
-                                        .focus_region()
-                                        .center(),
-                                    |ui| {
-                                        // Turned a quarter, open; a short
-                                        // turn between.
-                                        ui.with(
-                                            NodeSpec::row().size(12.0, 12.0).rotate(if open { 0.25 } else { 0.0 }).transition(120.0).role(Role::None),
-                                            |ui| icon(ui, Icon::ChevronRight, t.muted, 12.0, false),
-                                        );
-                                    },
-                                );
+                                chevron(ui, i as u64, open, &said);
                             } else {
                                 gap(ui, FOLD_W);
                             }
@@ -771,14 +786,14 @@ impl Carnet {
                         && n.rename.is_none()
                         && n.parent == *f
                     {
-                        name_key = Some(field(ui, (depth + 1).min(4), n));
+                        name_key = Some(field(ui, (depth + 1).min(5), n));
                     }
                 }
                 if let Some(n) = &naming
                     && n.rename.is_none()
                     && n.parent.is_empty()
                 {
-                    name_key = Some(field(ui, 1, n));
+                    name_key = Some(field(ui, 2, n));
                 }
                 // Last, what was deleted: all of it, for as long as it is
                 // in the trash.
@@ -786,8 +801,10 @@ impl Carnet {
                     let on = self.deleted;
                     let k = ui.with_keyed(
                         "f-deleted",
-                        row(0, on).on_click(Msg::ShowDeleted).label("Deleted"),
+                        row(1, on).padding(tree_pad(1)).on_click(Msg::ShowDeleted).label("Deleted"),
                         |ui| {
+                            // Level with All notes' icon.
+                            gap(ui, FOLD_W);
                             icon(ui, Icon::Trash, if on { t.accent } else { t.muted }, 16.0, false);
                             label(ui, "Deleted", self.trash.len(), on);
                         },
@@ -1002,9 +1019,11 @@ impl Carnet {
         let mut insert = vec![
             def("t-table", Icon::Table, "Table", keys::hint("Table", keys::TABLE), Msg::InsertTable),
             def("t-rule", Icon::Divider, "Divider", keys::hint("Divider", keys::DIVIDER) + "  \u{b7}  ---", Msg::InsertDivider),
+            def("t-attach", Icon::Attach, "Add pictures or files", "Add pictures or files  \u{b7}  or drop them on the page".into(), Msg::AddFiles),
         ];
         insert[0].spec = Some(keys::TABLE);
         insert[1].spec = Some(keys::DIVIDER);
+        insert[2].enabled = !self.reading();
         groups.push(insert);
         let mut slot = Vec::new();
         if in_table {

@@ -82,7 +82,7 @@ pub struct PasskeyRow {
     pub made: u64,
 }
 
-/// Everything one account keeps, but its pictures.
+/// Everything one account keeps, but its files.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccountRows {
     pub id: Vec<u8>,

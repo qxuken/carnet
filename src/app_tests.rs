@@ -323,6 +323,47 @@ fn the_caret_is_drawn_where_the_text_ends() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The caret of a line scrolled up past the page's top is cut there, as
+/// its words are: never drawn over the toolbar.
+#[test]
+fn a_caret_scrolled_past_the_page_is_cut_with_its_line() {
+    let (mut app, mut d, dir) = body("caret-cut");
+    type_in(&mut app, &mut d, "The first line");
+    for i in 0..40 {
+        key(&mut app, &mut d, "enter");
+        type_in(&mut app, &mut d, &format!("Line {i}"));
+    }
+    key_with(&mut app, &mut d, "up", CTRL);
+    key(&mut app, &mut d, "end");
+    assert_eq!(app.doc().get(app.caret.head.slot.block).and_then(|b| b.text_ref()), Some("The first line"));
+    d.core.set_inspect(true);
+    // The wheel, a little at a time, until the caret's line is half
+    // under the page's top.
+    let page = app.page_rect.expect("the page");
+    let mut bar = None;
+    for _ in 0..200 {
+        d.wheel(&mut app, page.x + page.w / 2.0, page.y + page.h / 2.0, 0.0, -4.0);
+        d.frame(&mut app);
+        let r = d.key_of("caret").and_then(|k| d.rect_of(k));
+        if r.is_some_and(|r| r.y < page.y && r.y + r.h > page.y) {
+            bar = r;
+            break;
+        }
+    }
+    let bar = bar.expect("the caret half under the page's top");
+    // Its quad, in physical pixels, and what clips it.
+    let s = d.core.scale();
+    let (list, _) = d.core.output();
+    let quad = list
+        .quads
+        .iter()
+        .find(|q| (q.rect.x - bar.x * s).abs() < 1.0 && (q.rect.y - bar.y * s).abs() < 1.0 && (q.rect.w - bar.w * s).abs() < 1.0)
+        .expect("the caret's quad");
+    let clip = list.clips[quad.clip as usize].rect;
+    assert!(clip.y >= page.y * s - 1.0, "cut at the page's top {}: {clip:?}", page.y * s);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn search_with_no_match_makes_the_note_and_then_clears() {
     let (store, dir) = temp_store("search");
@@ -945,9 +986,11 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     let a = png_file(&outside, "Holiday photo.png");
     let txt = outside.join("notes.txt");
     std::fs::write(&txt, "hi").unwrap();
+    let script = outside.join("run.sh");
+    std::fs::write(&script, "echo hi").unwrap();
     d.frame(&mut app);
     let at = Vec2::new(600.0, 300.0);
-    let paths = vec![a.display().to_string(), txt.display().to_string()];
+    let paths = vec![a.display().to_string(), txt.display().to_string(), script.display().to_string()];
     d.input(&mut app, InputEvent::DragFiles { paths: paths.clone(), at });
     d.input(&mut app, InputEvent::DropFiles { paths, at });
     d.frame(&mut app);
@@ -955,9 +998,88 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     assert_eq!(srcs, ["attachments/Holiday-photo.png"]);
     assert!(dir.join("attachments").join("Holiday-photo.png").is_file());
     assert!(a.exists(), "copied, not moved");
-    assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("isn't a picture")));
+    // A document goes in as a link to its copy, under the picture; a
+    // script is left out, and said so.
+    assert!(texts(&app).iter().any(|t| t == "[notes.txt](attachments/notes.txt)"), "{:?}", texts(&app));
+    assert!(dir.join("attachments").join("notes.txt").is_file());
+    assert!(!dir.join("attachments").join("run.sh").exists() && !dir.join("attachments").join("run.png").exists());
+    assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("isn't a picture or a document")), "{:?}", app.notice.as_ref().map(|n| &n.text));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
+}
+
+/// The toolbar's paperclip asks for any file; what comes back goes in at
+/// the caret: a picture as a picture, a document as a link among the
+/// words, set apart from them by a space.
+#[test]
+fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
+    let (mut app, mut d, dir) = body("paperclip");
+    type_in(&mut app, &mut d, "See the plan");
+    for _ in 0..4 {
+        key(&mut app, &mut d, "left");
+    }
+    d.frame(&mut app);
+    // On the strip, or in More where the strip is too narrow for it.
+    match d.key_of("t-attach") {
+        Some(clip) => {
+            d.click_key(&mut app, clip);
+        }
+        None => {
+            assert!(app.overflow.iter().any(|t| matches!(t.msg, Msg::AddFiles)), "the paperclip, in More");
+            app.on_plain(Msg::AddFiles);
+        }
+    }
+    d.frame(&mut app);
+    let asked = d.core.take_file_requests();
+    assert_eq!(asked.len(), 1, "one dialog");
+    assert!(asked[0].filters.is_empty(), "any file: {:?}", asked[0].filters);
+    let outside = std::env::temp_dir().join(format!("carnet-clip-src-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let pdf = outside.join("Trip plan (v2).pdf");
+    std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+    app.insert_files(std::slice::from_ref(&pdf));
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "See the [Trip plan (v2).pdf](attachments/Trip-plan-%28v2%29.pdf) plan", "{:?}", texts(&app));
+    assert_eq!(std::fs::read(dir.join("attachments/Trip-plan-(v2).pdf")).unwrap(), b"%PDF-1.4");
+    // The link reads as one, and opens the copy.
+    assert_eq!(drawn_text(&app, &d, app.caret.head.slot), "See the Trip plan (v2).pdf plan");
+    let (_, _, url) = page::link_at(app.doc(), page::Caret::at(page::Pos { byte: 10, ..app.caret.head })).expect("a link");
+    assert_eq!(app.store.linked_file("", &url).as_deref(), Some(dir.join("attachments/Trip-plan-(v2).pdf").as_path()));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// Shift+F3 goes round the cases of the word the caret is in, as Word's
+/// does, the caret staying; the page's menu puts the selection in one,
+/// Markdown's marks as they were. Each is one undo.
+#[test]
+fn the_case_changes_by_shift_f3_and_the_menu() {
+    let (mut app, mut d, dir) = body("case");
+    type_in(&mut app, &mut d, "hello **brave** world");
+    let at = app.caret;
+    for want in ["hello **brave** WORLD", "hello **brave** World", "hello **brave** world"] {
+        key_with(&mut app, &mut d, "f3", SHIFT);
+        assert_eq!(texts(&app)[0], want);
+    }
+    assert_eq!(app.caret, at, "the caret where it was");
+    key_with(&mut app, &mut d, "a", CTRL);
+    app.page_action("case:title");
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "Hello **Brave** World");
+    app.page_action("case:upper");
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "HELLO **BRAVE** WORLD");
+    app.page_action("case:sentence");
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "Hello **brave** world");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app)[0], "HELLO **BRAVE** WORLD", "one undo");
+    // In the page's menu, under Change case.
+    let menu = app.page_menu();
+    let sub = menu.iter().find(|i| i.label == "Change case").expect("Change case");
+    let names: Vec<&str> = sub.submenu.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(names, ["lowercase", "UPPERCASE", "Capitalize Each Word", "Sentence case"]);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Dropped under the words, past the empty line after them: in that
@@ -1518,6 +1640,23 @@ fn with_picture(name: &str) -> (Carnet, Drive, std::path::PathBuf) {
     d.frame(&mut app);
     d.frame(&mut app);
     (app, d, dir)
+}
+
+/// Ctrl+C on a chosen picture puts its pixels on the clipboard, through
+/// kui as text goes.
+#[test]
+fn a_chosen_picture_copies_as_a_picture() {
+    let (mut app, mut d, dir) = with_picture("copy-picture");
+    d.core.take_menu_actions();
+    key_with(&mut app, &mut d, "c", CTRL);
+    let picture = d.core.take_menu_actions().into_iter().find_map(|a| match a {
+        kui_native::MenuAction::SetClipboardImage { width, height, rgba } => Some((width, height, rgba)),
+        _ => None,
+    });
+    let (w, h, rgba) = picture.expect("a picture on the clipboard");
+    assert_eq!((w, h, rgba.len()), (400, 300, 400 * 300 * 4));
+    assert_eq!(&rgba[..4], &[200, 150, 120, 255]);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn image_width(app: &Carnet) -> Option<Option<u32>> {
@@ -4110,9 +4249,11 @@ fn left_and_right_fold_unfold_and_walk_the_tree() {
     assert_eq!(folded(&app), ["A"]);
     assert_eq!(rows_drawn(&app), ["A", "B"]);
     assert_eq!(focused_row(&app, &d), Some(folder("A")), "the keyboard stays on it");
-    // Folded, at the top: ← goes nowhere.
+    // Folded, at the top: ← goes up to All notes, → back down to A.
     key(&mut app, &mut d, "left");
-    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    assert_eq!((focused_row(&app, &d), app.folder.as_deref()), (Some(FolderRow::All), None));
+    key(&mut app, &mut d, "right");
+    assert_eq!((focused_row(&app, &d), app.folder.as_deref()), (Some(folder("A")), Some("A")));
     key(&mut app, &mut d, "right");
     assert!(folded(&app).is_empty());
     assert_eq!(focused_row(&app, &d), Some(folder("A")));
@@ -4145,6 +4286,54 @@ fn left_and_right_fold_unfold_and_walk_the_tree() {
     d.frame(&mut app);
     key(&mut app, &mut d, "right");
     assert_eq!(folded(&app), ["A/Sub"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// All notes has a chevron once there is a folder, every folder being
+/// inside it: a click folds them all away, the folder shown giving way to
+/// All notes, and back; Deleted stays. Its name sits a level out from the
+/// folders'. ← and → on its row do the same, and → then goes in.
+#[test]
+fn all_notes_folds_every_folder_away_and_back() {
+    let (mut app, mut d, dir) = on_folder_row("fold-all", &["A", "A/Sub", "B"]);
+    // Something deleted, for a Deleted row: the welcome note (an empty
+    // one is not kept).
+    let welcome = app.store.notes.iter().position(|n| !n.markdown().trim().is_empty()).unwrap();
+    app.delete_note_at(welcome);
+    app.show_folder(Some("A/Sub".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert!(chevron(&mut d, &mut app, "").is_some(), "All notes' chevron");
+    assert_eq!(heard_open(&mut d, "All notes"), Some(true));
+    let name_x = |d: &Drive, f: &str| d.core.nodes().iter().find(|n| n.text.as_deref() == Some(f)).map(|n| n.rect.x).unwrap();
+    assert_eq!(name_x(&d, "A") - name_x(&d, "All notes"), 14.0, "the folders a level in");
+    assert_eq!(name_x(&d, "Deleted"), name_x(&d, "All notes"), "Deleted level with All notes");
+    click_chevron(&mut app, &mut d, "", KeyMods::NONE);
+    assert_eq!(folded(&app), [""]);
+    assert!(rows_drawn(&app).is_empty(), "{:?}", rows_drawn(&app));
+    assert_eq!(app.folder, None, "the folder shown was inside: All notes shown");
+    assert!(app.folder_rows.iter().any(|(_, r)| *r == FolderRow::Deleted), "Deleted is not inside it");
+    assert_eq!(heard_open(&mut d, "All notes"), Some(false));
+    click_chevron(&mut app, &mut d, "", KeyMods::NONE);
+    assert!(folded(&app).is_empty());
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "B"]);
+    // From the keyboard: ← folds, → unfolds, → again goes to the first
+    // folder.
+    focus_row(&mut app, &mut d, FolderRow::All);
+    key(&mut app, &mut d, "left");
+    assert_eq!((folded(&app), rows_drawn(&app).len()), (vec![""], 0));
+    assert_eq!(focused_row(&app, &d), Some(FolderRow::All), "the keyboard stays on it");
+    key(&mut app, &mut d, "right");
+    assert!(folded(&app).is_empty());
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    // A new folder at the top, All notes folded: unfolded for its field.
+    focus_row(&mut app, &mut d, FolderRow::All);
+    key(&mut app, &mut d, "left");
+    app.name_folder("");
+    d_frame_twice(&mut app, &mut d);
+    assert!(folded(&app).is_empty(), "{:?}", folded(&app));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -5907,7 +6096,7 @@ fn settings_sync_draws_a_servers_impossible_times() {
     devices.push(DeviceInfo { id: vec![9; 16], name: Some("Old phone".into()), seen: far, you: false, online: false });
     a.sync.devices = Some(devices);
     a.sync.passkeys = vec![PasskeyInfo { id: [7; 32], name: Some("A far passkey".into()), credential: vec![1], made: far }];
-    a.sync.usage = Some(Usage { notes: far, pictures: far, limit: Some(far), writable: true, plan: "Forever".into(), until: Some(far) });
+    a.sync.usage = Some(Usage { notes: far, files: far, limit: Some(far), writable: true, plan: "Forever".into(), until: Some(far) });
     a.sync.invites = Some(crate::sync::Invites {
         owner: true,
         waiting: vec![InviteRow { hash: [3; 32], until: far }],
@@ -6073,7 +6262,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
             std::thread::sleep(Duration::from_millis(5));
         }
     };
-    let named = |x: &Carnet| x.store.replica.as_ref().is_some_and(|r| r.vault().pictures().keys().any(|p| p.starts_with("attachments/")));
+    let named = |x: &Carnet| x.store.replica.as_ref().is_some_and(|r| r.vault().files().keys().any(|p| p.starts_with("attachments/")));
     let (mut a, mut da, dir_a) = fresh("held-a");
     a.sync_server = origin.clone();
     a.sync_code = invite.text();
@@ -6090,7 +6279,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(!named(&a), "not sent while full");
-    assert_eq!(a.sync.pictures_waiting(), 1, "counted as waiting, not up to date");
+    assert_eq!(a.sync.files_waiting(), 1, "counted as waiting, not up to date");
 
     let hub = handle.lock().unwrap().clone().unwrap();
     let account = rt.block_on(async move { hub.run(|hub, _| hub.store().account_list()[0].0.clone()).await.unwrap() });
@@ -6102,7 +6291,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     until("sent, once there's room", &mut a, &mut da, &named);
     assert!(t0.elapsed() < Duration::from_secs(10));
     assert_eq!(a.sync.error, None, "full, taken back");
-    until("nothing waiting", &mut a, &mut da, &|x| x.sync.pictures_waiting() == 0);
+    until("nothing waiting", &mut a, &mut da, &|x| x.sync.files_waiting() == 0);
 
     let _ = stop.send(());
     rt.block_on(served).unwrap().unwrap();
@@ -6470,9 +6659,9 @@ fn two_apps_sync_through_a_server() {
     assert!(laptop.online && list.iter().all(|d| d.online));
     assert!(drawn(&mut da, &mut a, &format!("Online now \u{b7} {}", short(&laptop.id))));
     // Over a (tiny) plan's limit: said plainly, and what it means.
-    a.sync.usage = Some(carnet_sync::session::Usage { notes: 700, pictures: 41, limit: Some(42), writable: true, plan: "Tiny".into(), until: None });
+    a.sync.usage = Some(carnet_sync::session::Usage { notes: 700, files: 41, limit: Some(42), writable: true, plan: "Tiny".into(), until: None });
     assert!(drawn(&mut da, &mut a, "741 bytes of 42 bytes used \u{b7} Tiny"));
-    assert!(drawn(&mut da, &mut a, "Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
+    assert!(drawn(&mut da, &mut a, "Over this plan's 42 bytes: new files stay on this device until there's room. Notes still sync."));
     // An invite waiting, its code in the vault, so on the laptop too.
     a.on_plain(Msg::SyncInvite);
     let waiting = carnet_sync::invite::InviteCode::parse(&a.sync.invite.clone().expect("an invite")).unwrap();
@@ -7041,18 +7230,18 @@ fn deleting_a_folder_with_only_other_files_moves_it_to_the_trash() {
 }
 
 /// Settings → Sync's lines of the account: at or over a plan's limit, what
-/// that means (the server takes no new picture, and every note's text);
-/// changes and pictures waiting, counted.
+/// that means (the server takes no new file, and every note's text);
+/// changes and files waiting, counted.
 #[test]
 fn over_a_plans_limit_and_changes_waiting_are_said_plainly() {
     use super::settings_view::{over_limit, waiting_words};
     assert_eq!(over_limit(41, 42), None);
-    assert_eq!(over_limit(741, 42).as_deref(), Some("Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
-    assert_eq!(over_limit(2_000_000, 2_000_000).as_deref(), Some("Reached this plan's 2.0 MB: new pictures stay on this device until there's room. Notes still sync."));
+    assert_eq!(over_limit(741, 42).as_deref(), Some("Over this plan's 42 bytes: new files stay on this device until there's room. Notes still sync."));
+    assert_eq!(over_limit(2_000_000, 2_000_000).as_deref(), Some("Reached this plan's 2.0 MB: new files stay on this device until there's room. Notes still sync."));
     assert_eq!(waiting_words(1, 0), "Waiting to send 1 change");
     assert_eq!(waiting_words(3, 0), "Waiting to send 3 changes");
-    assert_eq!(waiting_words(0, 1), "Waiting to send 1 picture");
-    assert_eq!(waiting_words(2, 1), "Waiting to send 2 changes and 1 picture");
+    assert_eq!(waiting_words(0, 1), "Waiting to send 1 file");
+    assert_eq!(waiting_words(2, 1), "Waiting to send 2 changes and 1 file");
 }
 
 /// A notice is one line. One too long for the room beside the note's meta
@@ -7360,7 +7549,7 @@ fn a_picture_on_its_way_by_sync_says_so_then_shows() {
     type_in(&mut a, &mut da, "The boats");
     a.save_current();
     until("A's picture on the server", &mut [(&mut a, &mut da)], &|x| {
-        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty()) && x[0].0.sync.pictures_waiting() == 0
+        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty()) && x[0].0.sync.files_waiting() == 0
     });
     a.on_plain(Msg::SyncPair);
     until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
@@ -7372,7 +7561,7 @@ fn a_picture_on_its_way_by_sync_says_so_then_shows() {
     b.sync_code = a.sync.code.clone().unwrap();
     b.on_plain(Msg::SyncStart);
     until("B has the note, its picture asked for", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
-        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty())
+        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty())
     });
     let i = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
     b.open(i);

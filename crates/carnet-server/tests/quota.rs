@@ -1,5 +1,5 @@
 //! What an account may keep (docs/SYNC.md §11): a server of one's own
-//! keeps everything; a hosted plan's limit stops new pictures once it's
+//! keeps everything; a hosted plan's limit stops new files once it's
 //! reached, never notes' text; a lapsed plan reads, and writes nothing,
 //! and the device keeps what it wrote until it can. On memory and SQLite.
 
@@ -40,7 +40,7 @@ fn offer(net: &mut Net, conn: carnet_server::ConnId, pic: &[u8]) -> Vec<Event> {
 }
 
 #[test]
-fn a_plan_limits_pictures_and_a_lapsed_one_reads_only() {
+fn a_plan_limits_files_and_a_lapsed_one_reads_only() {
     for store in stores() {
         let mut net = Net::new(80, store);
         let plan = Arc::new(Plan(Mutex::new(Limit { bytes: Some(10_000), writable: true, plan: "Personal".into(), until: 1_900_000_000 })));
@@ -52,10 +52,10 @@ fn a_plan_limits_pictures_and_a_lapsed_one_reads_only() {
 
         // What it keeps, and may.
         let u = usage(&mut net, a);
-        assert!(u.notes > 0 && u.pictures == 0);
+        assert!(u.notes > 0 && u.files == 0);
         assert_eq!((u.limit, u.writable, u.plan.as_str(), u.until), (Some(10_000), true, "Personal", Some(1_900_000_000)));
 
-        // Under the limit: a picture goes in, and may take it over.
+        // Under the limit: a file goes in, and may take it over.
         let big = vec![7u8; 9_990];
         assert!(offer(&mut net, a, &big).iter().any(|e| matches!(e, Event::BlobWanted(_))));
         {
@@ -64,7 +64,7 @@ fn a_plan_limits_pictures_and_a_lapsed_one_reads_only() {
             assert!(d.session.put_blob(&big, rng));
         }
         net.pump();
-        assert!(usage(&mut net, a).pictures > 9_990, "over the limit by one picture");
+        assert!(usage(&mut net, a).files > 9_990, "over the limit by one file");
         // Over it: the next waits, said once; one kept is still said kept.
         let said = offer(&mut net, a, &[8u8; 100]);
         assert!(said.contains(&Event::Refused(FULL.into())), "{said:?}");
@@ -77,7 +77,7 @@ fn a_plan_limits_pictures_and_a_lapsed_one_reads_only() {
         let before = net.hub.store().usage(&account);
 
         // Lapsed: read only. A device logging in is told once; what it
-        // writes stays with it, and nothing is sent; pictures wait.
+        // writes stays with it, and nothing is sent; files wait.
         plan.0.lock().unwrap().writable = false;
         let away = net.take(a);
         let a = net.back(away);

@@ -102,7 +102,7 @@ groups:
         annotations:
           summary: carnet-server failed to write {{ printf "%.0f" $values.A.Value }} times in 10 minutes
           description: >-
-            Writes to the server's databases (or of pictures) failed. A full
+            Writes to the server's databases (or of files) failed. A full
             disk is the usual reason; a damaged file or a bucket out of reach
             the others. Devices keep their changes and send them again, but
             nothing new is kept until it's fixed.
@@ -204,6 +204,6 @@ groups:
           summary: carnet-server's data grew by {{ humanize1024 $values.A.Value }}B in an hour
           description: >-
             The databases took over 1 GiB more disk in the last hour: far
-            more than notes usually do. Pictures kept in the databases (no
+            more than notes usually do. Files kept in the databases (no
             bucket) count here. Check the free space of the data's disk.
         notification_settings: { receiver: carnet-n8n }

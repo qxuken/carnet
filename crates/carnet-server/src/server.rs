@@ -10,7 +10,7 @@
 //! GET  /v1/health     200 {"ok": true} while the hub answers; 503 if not
 //! GET  /v1/sync       the WebSocket: Carnet frames and Loro Protocol rooms
 //!                     (an invite is used there too: `Enroll`)
-//! GET  /v1/blobs/T    a sealed picture, by a link the socket gave (`links.rs`)
+//! GET  /v1/blobs/T    a sealed file, by a link the socket gave (`links.rs`)
 //! PUT  /v1/blobs/T    one put, the same way
 //! ```
 //!
@@ -45,7 +45,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use crate::blobs::{self as pictures, BlobFiles, Blobs, Counts, FileBlobs, Job, Worker};
+use crate::blobs::{BlobFiles, Blobs, Counts, FileBlobs, Job, Worker};
 use crate::links::Signer;
 use crate::hub::{BACKFILL_PART, ConnId, Hub, Open, Out, Stats};
 use crate::limits::{self, ClientHeader, Limiter, Network};
@@ -127,7 +127,7 @@ pub const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a request may take, its body read and its answer begun: the
 /// API's, the web app's files, a host's routes. Past it, 408.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// A picture's put or fetch by its link: its largest, 32 MiB, on a line
+/// A file's put or fetch by its link: its largest, 32 MiB, on a line
 /// as slow as 56 kB/s. (A socket, once upgraded, has its own limits.) A
 /// put's room is held as long past its link's time (`links::PUT_TAKES`).
 pub const BLOB_TIMEOUT: Duration = Duration::from_secs(crate::links::PUT_TAKES);
@@ -178,7 +178,7 @@ enum ToHub {
     Closed { conn: ConnId },
     /// Whether the hub answers: `/v1/health`.
     Ping { reply: oneshot::Sender<()> },
-    /// A frame the picture worker made, for a socket: passed on as it is.
+    /// A frame the file worker made, for a socket: passed on as it is.
     Deliver { conn: ConnId, bytes: Vec<u8> },
     /// A socket with more of a room's records to come has written most of
     /// what it was sent: the next part ([`Hub::drained`]).
@@ -330,12 +330,12 @@ pub struct Snapshot {
     pub waited: Duration,
     /// Sockets refused before they opened: too many from one address.
     pub sockets_refused: u64,
-    /// Pictures: kept (put new), their bytes, links given; and over HTTP,
+    /// Files: kept (put new), their bytes, links given; and over HTTP,
     /// fetched, put, and puts that failed.
     pub blobs_stored: u64,
     pub blob_bytes: u64,
     pub blob_links: u64,
-    /// Pictures a device said no note shows (marked), and those gone 30
+    /// Files a device said no note shows (marked), and those gone 30
     /// days on.
     pub blobs_dropped: u64,
     pub blobs_swept: u64,
@@ -533,7 +533,7 @@ fn hub_thread(
 }
 
 /// What the hub said, done: frames queued for their sockets, sockets
-/// closed, pictures handed to the worker.
+/// closed, files handed to the worker.
 fn route(hub: &mut Hub<Store>, sockets: &mut std::collections::HashMap<ConnId, Line>, outs: Vec<Out>, seen: &mut Snapshot, worker: &std::sync::mpsc::Sender<Job>) {
     for o in outs {
         match o {
@@ -558,7 +558,7 @@ fn route(hub: &mut Hub<Store>, sockets: &mut std::collections::HashMap<ConnId, L
                     }
                 }
             }
-            // Pictures: allowed, and handed on; the worker does them.
+            // Files: allowed, and handed on; the worker does them.
             Out::Blob(job) => {
                 let _ = worker.send(job);
             }
@@ -597,13 +597,13 @@ pub async fn serve_limited(
 /// How a server starts on what it finds.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Start {
-    /// Start with no account beside pictures of accounts the store
+    /// Start with no account beside files of accounts the store
     /// doesn't have (and whose removal isn't recorded): refused unless
     /// said, as the records were likely not put back (a new data folder,
-    /// an empty database) on pictures a server kept before. They're kept
-    /// either way: the sweep takes only the pictures of accounts removed
+    /// an empty database) on files a server kept before. They're kept
+    /// either way: the sweep takes only the files of accounts removed
     /// here (`blobs::Worker::sweep_unowned`).
-    pub keep_untracked_pictures: bool,
+    pub keep_untracked_files: bool,
 }
 
 /// [`serve_limited`], started as `start` says.
@@ -623,7 +623,7 @@ pub async fn serve_started(
     let passwords = if passwords { Some(opaque_key(&config.data)?) } else { None };
     let takes_passwords = passwords.is_some();
     let takes_signups = signup.is_some();
-    // Pictures: files beside the databases, reached by signed links,
+    // Files: on disk beside the databases, reached by signed links,
     // unless the host keeps them elsewhere.
     let files = BlobFiles::open(&config.data)?;
     let signer = Arc::new(Signer::open(&config.data, || OsRandom.bytes())?);
@@ -652,17 +652,17 @@ pub async fn serve_started(
                     }
                 }
                 if moved > 0 {
-                    println!("carnet-server: moved {moved} pictures out of the databases, into {}", kept.root.display());
+                    println!("carnet-server: moved {moved} files out of the databases, into {}", kept.root.display());
                 }
                 Box::new(store)
             }
         };
-        if store.accounts() == 0 && !start.keep_untracked_pictures {
+        if store.accounts() == 0 && !start.keep_untracked_files {
             let strangers = crate::blobs::strangers(blobs.as_mut(), |a| store.has_account(a));
             if !strangers.is_empty() {
                 let (place, other) = if in_bucket { ("The bucket", "another bucket (or another folder in it)") } else { ("The data folder", "another data folder") };
                 return Err(std::io::Error::other(format!(
-                    "{place} holds pictures of {}, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on {other}. To start anyway, with those pictures kept and unused, give --keep-untracked-pictures (CARNET_KEEP_UNTRACKED_PICTURES=1)",
+                    "{place} holds files of {}, and there are no accounts here: their records are missing. Put the records back first (the data folder, or the Postgres database, from a backup), or start on {other}. To start anyway, with those files kept and unused, give --keep-untracked-files (CARNET_KEEP_UNTRACKED_FILES=1)",
                     accounts(strangers.len())
                 )));
             }
@@ -681,18 +681,18 @@ pub async fn serve_started(
     let origin = config.origin.clone();
     let compact_after = config.compact_after;
     let http = Arc::new(BlobHttp::default());
-    // The picture worker: its own thread; what it sends goes to the
+    // The file worker: its own thread; what it sends goes to the
     // sockets through the hub's queue.
     let csp = web_csp(&config.origin, blobs.origin().as_deref());
     let mut worker = Worker::new(blobs);
     let counts = worker.counts.clone();
     let (jobs, queued) = std::sync::mpsc::channel::<Job>();
     let deliver = tx.clone();
-    // Once an hour, pictures dropped more than 30 days ago go, and those
+    // Once an hour, files dropped more than 30 days ago go, and those
     // of accounts removed (a put by a link given before its account was
     // deleted): the hub says which accounts the store doesn't have, and
     // of those, the ones whose removal is recorded go.
-    let pictures = std::thread::Builder::new().name("carnet-pictures".into()).spawn(move || {
+    let file_thread = std::thread::Builder::new().name("carnet-files".into()).spawn(move || {
         let mut swept = Instant::now() - Duration::from_secs(3600);
         let mut kept_before = 0;
         loop {
@@ -711,14 +711,14 @@ pub async fn serve_started(
                     answer.blocking_recv().unwrap_or_default()
                 });
                 if unowned.gone > 0 {
-                    println!("carnet-server: pictures of {} removed, gone", accounts(unowned.gone));
+                    println!("carnet-server: files of {} removed, gone", accounts(unowned.gone));
                 }
                 // Said when it changes: not every hour.
                 if unowned.kept != kept_before {
                     kept_before = unowned.kept;
                     if unowned.kept > 0 {
                         println!(
-                            "carnet-server: pictures of {} this server has no record of are kept, not deleted (records restored from before they were made?)",
+                            "carnet-server: files of {} this server has no record of are kept, not deleted (records restored from before they were made?)",
                             accounts(unowned.kept)
                         );
                     }
@@ -777,11 +777,11 @@ pub async fn serve_started(
         }
         None => None,
     };
-    // Each request in its time: a picture's in minutes, any other in
+    // Each request in its time: a file's in minutes, any other in
     // seconds (a socket's only until it's upgraded).
     let blobs: Router = Router::new()
         .route("/v1/blobs/{token}", get(blob_get).put(blob_put))
-        .layer(axum::extract::DefaultBodyLimit::max(pictures::MAX as usize))
+        .layer(axum::extract::DefaultBodyLimit::max(crate::blobs::MAX as usize))
         .layer(timeout(BLOB_TIMEOUT))
         .with_state(Links { signer, files, http, hub: tx.clone() });
     let api = Router::new()
@@ -834,7 +834,7 @@ pub async fn serve_started(
     let _ = tokio::task::spawn_blocking(move || {
         let _ = hub.join();
         // Its queue closed with the hub: it finishes what it has, and ends.
-        let _ = pictures.join();
+        let _ = file_thread.join();
     })
     .await;
     served
@@ -923,10 +923,10 @@ where
 
 /// The web app's Content-Security-Policy (docs/SYNC.md §8): its own
 /// scripts and the wasm, inline styles (Svelte's and the notes' colours),
-/// pictures as the page draws them (`blob:`, `data:`; none from the web),
+/// files as the page draws them (`blob:`, `data:`; none from the web),
 /// and connections to this server (its socket named too, for browsers
-/// whose `'self'` leaves out `ws:`) and where pictures are, if elsewhere.
-pub fn web_csp(origin: &str, pictures: Option<&str>) -> String {
+/// whose `'self'` leaves out `ws:`) and where files are, if elsewhere.
+pub fn web_csp(origin: &str, files: Option<&str>) -> String {
     let mut connect = vec!["'self'".to_string()];
     let host = |rest: &str| rest.split(['/', '?', '#']).next().unwrap_or_default().to_string();
     if let Some(rest) = origin.strip_prefix("https://") {
@@ -934,7 +934,7 @@ pub fn web_csp(origin: &str, pictures: Option<&str>) -> String {
     } else if let Some(rest) = origin.strip_prefix("http://") {
         connect.push(format!("ws://{}", host(rest)));
     }
-    connect.extend(pictures.map(str::to_string));
+    connect.extend(files.map(str::to_string));
     format!(
         "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src {}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; worker-src 'self'; manifest-src 'self'",
         connect.join(" ")
@@ -1117,22 +1117,22 @@ pub fn metrics_text(s: &Snapshot, data_bytes: u64, started: u64) -> String {
     one("carnet_record_bytes_total", "counter", "Bytes of sealed records kept.", &[("", n(st.record_bytes))]);
     one("carnet_batches_refused_total", "counter", "Batches of records refused.", &[("", n(st.batches_refused))]);
     one("carnet_snapshots_total", "counter", "Rooms compacted.", &[("", n(st.snapshots))]);
-    one("carnet_blobs_total", "counter", "Sealed pictures kept.", &[("", n(s.blobs_stored))]);
-    one("carnet_blob_bytes_total", "counter", "Bytes of sealed pictures kept.", &[("", n(s.blob_bytes))]);
-    one("carnet_blob_links_total", "counter", "Links given to put or fetch a picture.", &[("", n(s.blob_links))]);
+    one("carnet_blobs_total", "counter", "Sealed files kept.", &[("", n(s.blobs_stored))]);
+    one("carnet_blob_bytes_total", "counter", "Bytes of sealed files kept.", &[("", n(s.blob_bytes))]);
+    one("carnet_blob_links_total", "counter", "Links given to put or fetch a file.", &[("", n(s.blob_links))]);
     one(
         "carnet_blobs_dropped_total",
         "counter",
-        "Pictures no note shows any more: marked by a device's word, and gone 30 days on.",
+        "Files no note shows any more: marked by a device's word, and gone 30 days on.",
         &[("{step=\"marked\"}", n(s.blobs_dropped)), ("{step=\"gone\"}", n(s.blobs_swept))],
     );
     one(
         "carnet_blob_requests_total",
         "counter",
-        "Pictures fetched and put over HTTP, by their links.",
+        "Files fetched and put over HTTP, by their links.",
         &[("{way=\"get\"}", n(s.blob_gets)), ("{way=\"put\"}", n(s.blob_puts))],
     );
-    one("carnet_storage_failures_total", "counter", "Writes to the databases that failed, pictures' too.", &[("", n(st.storage_failures + s.blob_failures))]);
+    one("carnet_storage_failures_total", "counter", "Writes to the databases that failed, files' too.", &[("", n(st.storage_failures + s.blob_failures))]);
     one(
         "carnet_limited_total",
         "counter",
@@ -1151,7 +1151,7 @@ pub fn metrics_text(s: &Snapshot, data_bytes: u64, started: u64) -> String {
     out
 }
 
-/// What a picture's link is checked by, and where its file is.
+/// What a file's link is checked by, and where it is on disk.
 #[derive(Clone)]
 struct Links {
     signer: Arc<Signer>,
@@ -1172,7 +1172,7 @@ async fn account_here(hub: &mpsc::UnboundedSender<ToHub>, account: Vec<u8>) -> b
     hub.send(ToHub::Run(ask)).is_ok() && answer.await.unwrap_or(false)
 }
 
-/// Pictures over HTTP, for `/metrics`.
+/// Files over HTTP, for `/metrics`.
 #[derive(Default)]
 struct BlobHttp {
     gets: AtomicU64,
@@ -1192,7 +1192,7 @@ fn granted(l: &Links, token: &str, put: bool) -> Result<crate::links::Grant, (St
     }
 }
 
-/// A sealed picture, by its link: as a file is served, ranges and all,
+/// A sealed file, by its link: as one on disk is served, ranges and all,
 /// kept by the device's browser no longer than the link is good.
 async fn blob_get(State(l): State<Links>, axum::extract::Path(token): axum::extract::Path<String>, req: axum::extract::Request) -> axum::response::Response {
     use tower::ServiceExt;
@@ -1225,9 +1225,9 @@ async fn blob_get(State(l): State<Links>, axum::extract::Path(token): axum::extr
     }
 }
 
-/// A sealed picture put by its link: its length said up front, and the
+/// A sealed file put by its link: its length said up front, and the
 /// length the link was given for (the device said it when it offered the
-/// picture), written to the spool as it comes, then kept whole and on the
+/// file), written to the spool as it comes, then kept whole and on the
 /// disk before the 204 that says so. Already kept, it stays as it was.
 async fn blob_put(
     State(l): State<Links>,
@@ -1280,7 +1280,7 @@ async fn blob_put(
         return failed(&l, &tmp, StatusCode::BAD_REQUEST);
     }
     // On the disk before it's said kept: the 204 is the device's word
-    // that the picture is safe, and it names it in its notes on that.
+    // that the file is safe, and it names it in its notes on that.
     if file.flush().await.is_err() || file.sync_all().await.is_err() {
         return failed(&l, &tmp, StatusCode::INTERNAL_SERVER_ERROR);
     }

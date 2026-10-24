@@ -29,8 +29,8 @@ pub type ConnId = u64;
 pub enum Out {
     Send(ConnId, Vec<u8>),
     Close(ConnId),
-    /// Picture work it has allowed, for the worker (`blobs`): links given,
-    /// and pictures put checked, off the hub's thread.
+    /// File work it has allowed, for the worker (`blobs`): links given,
+    /// and files put checked, off the hub's thread.
     Blob(Job),
 }
 
@@ -1042,13 +1042,13 @@ impl<S: Storage> Hub<S> {
                     reason: "that room's base can't be rolled back: what it stands for is no longer kept".into(),
                 })],
             },
-            // Pictures: allowed here (logged in, this account); the worker
+            // Files: allowed here (logged in, this account); the worker
             // gives the links, and checks what was put. No more than
             // `MAX_IDS` of a frame are answered: a device sends no more.
             Carnet::BlobOffer { mut ids, mut sizes } => {
                 ids.truncate(wire::MAX_IDS);
                 sizes.truncate(ids.len());
-                // Room left for pictures: the limit, less the notes.
+                // Room left for files: the limit, less the notes.
                 let limit = self.quota.limit(&account);
                 let room = limit.bytes.map(|b| b.saturating_sub(self.store.usage(&account)));
                 vec![Out::Blob(Job::Offer { conn, account, ids, sizes, room, writable: limit.writable })]
@@ -1134,7 +1134,7 @@ impl<S: Storage> Hub<S> {
         }
     }
 
-    /// The account gone, and everything it kept, its pictures too; its
+    /// The account gone, and everything it kept, its files too; its
     /// devices online told, and let go. What to send comes back.
     pub fn remove_account(&mut self, gone: &[u8]) -> Result<Vec<Out>, storage::Failed> {
         let removed = self.store.remove_account(gone);
@@ -1268,8 +1268,8 @@ impl<S: Storage> Hub<S> {
 
     /// `account`'s limit changed (a plan set or ended, a suspension put on
     /// or lifted: docs/SYNC.md §11): each of its sockets logged in is told
-    /// now, unasked, as a `UsageIs` (by way of the picture worker, which
-    /// counts the pictures). A device read only until now joins its rooms
+    /// now, unasked, as a `UsageIs` (by way of the file worker, which
+    /// counts the files). A device read only until now joins its rooms
     /// again, writable, and sends what waited; one read only from now on
     /// stops sending. The host calls it once the quota answers anew.
     pub fn limit_changed(&mut self, account: &[u8]) -> Vec<Out> {

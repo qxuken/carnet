@@ -2945,9 +2945,9 @@ dependencies = [
 
 [[package]]
 name = "kui-core"
-version = "0.1.0-alpha.65"
+version = "0.1.0-alpha.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3debf91b77fc17539886236569494ff2af25f58b5ac31386f48ee2574b00f507"
+checksum = "f4973f0f83db7fb7b3328f10b3f917750bffc4b97c39faea38cc50e82b5e6943"
 dependencies = [
  "cosmic-text",
  "kui-derive",
@@ -2963,9 +2963,9 @@ dependencies = [
 
 [[package]]
 name = "kui-derive"
-version = "0.1.0-alpha.65"
+version = "0.1.0-alpha.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f771271a96b434e1fe6d83b39af899f051608f045cc03773cbe64c6cdb1d202"
+checksum = "ed795bf9eabd4e2ad11fc60a5810fc87558d82bef2ff71f86dbcca9dd965e9f4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2974,21 +2974,25 @@ dependencies = [
 
 [[package]]
 name = "kui-native"
-version = "0.1.0-alpha.65"
+version = "0.1.0-alpha.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "793ee5e9ce455a62b50dc9757107ea817700c28ab21771f47efa081f8e9c0f2a"
+checksum = "8628cd3eb8cc0fe389d19aa34f6eaea78c4efed62fb78185ec632cd74d1f6ce0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
  "arboard",
+ "block2 0.6.2",
+ "gif",
  "image",
  "kira",
  "kui-core",
  "kui-wgpu",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+ "png",
  "pollster 1.0.1",
  "rfd",
  "wayland-backend",
@@ -3002,9 +3006,9 @@ dependencies = [
 
 [[package]]
 name = "kui-wgpu"
-version = "0.1.0-alpha.65"
+version = "0.1.0-alpha.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d58b6b691f45ea1669eee553aeabfce3dd0927e9076e0082e74d78e53ad77bdc"
+checksum = "282d2c31fee37660b139b690da29abe403c114d22debb45aaa6218fcb5903b63"
 dependencies = [
  "bytemuck",
  "kui-core",

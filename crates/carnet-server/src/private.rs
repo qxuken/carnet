@@ -1,6 +1,6 @@
 //! What the server keeps on disk is its own user's alone (docs/SYNC.md
 //! §6): the data folder `0700`, the folders in it `0700`, the databases
-//! and pictures `0600`. Sealed or public as all of it is, who has an
+//! and files `0600`. Sealed or public as all of it is, who has an
 //! account, how big, and when it last wrote are still nobody else's on
 //! the machine. (Elsewhere than unix, the folder's own permissions.)
 

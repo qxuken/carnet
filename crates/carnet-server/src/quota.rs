@@ -2,19 +2,19 @@
 //! §11): the seam a hosted service's plans plug into. A server of one's
 //! own keeps everything, always ([`Unlimited`]).
 //!
-//! The hub asks before it takes a write, and the picture worker before it
-//! gives a link to put a new picture. Notes' text is small: it's counted,
+//! The hub asks before it takes a write, and the file worker before it
+//! gives a link to put a new file. Notes' text is small: it's counted,
 //! and not refused at the account's limit, only when the account can't
 //! write at all, or past [`Quota::notes_ceiling`], far above what notes
 //! take (a ceiling against an account that never compacts, not a plan).
-//! A picture is let in while the account is under its limit, with the
-//! pictures it has links to put and hasn't yet counted in, so one picture
+//! A file is let in while the account is under its limit, with the
+//! files it has links to put and hasn't yet counted in, so one file
 //! may take it over, never two.
 
 /// What an account may keep now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Limit {
-    /// Bytes, notes and pictures together (as sealed); `None`: no limit.
+    /// Bytes, notes and files together (as sealed); `None`: no limit.
     pub bytes: Option<u64>,
     /// False: read only (a plan lapsed). What's there stays, and syncs to
     /// every device; nothing new is taken until it can write again.

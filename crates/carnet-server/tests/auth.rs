@@ -31,7 +31,7 @@ struct Raw {
     a2: DeviceKey,
     b1: DeviceKey,
     vault: VaultKey,
-    /// The picture worker, as the server runs one beside the hub.
+    /// The file worker, as the server runs one beside the hub.
     worker: Worker<MemoryBlobs>,
 }
 
@@ -62,7 +62,7 @@ impl Raw {
         (conn, nonce.expect("a challenge first"))
     }
 
-    /// What the hub sends for `frame`, picture work done as the server does
+    /// What the hub sends for `frame`, file work done as the server does
     /// it (by the worker, its frames sent on).
     fn send(&mut self, conn: ConnId, frame: &Frame) -> Vec<Out> {
         let outs = self.hub.receive(conn, &wire::encode(frame), &mut self.rng);
@@ -285,7 +285,7 @@ fn an_invite_or_a_recovery_must_be_real() {
 
 /// Logged in, a device works in its own account only: the account is the
 /// one it logged in to, whatever a frame names. Rooms of the same name in
-/// two accounts never meet; lists, pictures and the inspector are its own.
+/// two accounts never meet; lists, files and the inspector are its own.
 #[test]
 fn an_account_never_sees_another() {
     for store in stores() {
@@ -320,7 +320,7 @@ fn an_account_never_sees_another() {
         });
         assert_eq!(list.unwrap().iter().map(|d| d.id.clone()).collect::<Vec<_>>(), [b"b1".to_vec()]);
 
-        // A's picture, asked for by B: B has none, and gets no link to it.
+        // A's file, asked for by B: B has none, and gets no link to it.
         raw.worker.blobs.put(A, &[4; 32], &[9; 100]);
         let outs = raw.send(b, &Frame::Carnet(Carnet::BlobFetch { ids: vec![[4; 32]] }));
         assert_eq!(frames(&outs, b), [Frame::Carnet(Carnet::BlobNone { id: [4; 32] })]);
@@ -333,7 +333,7 @@ fn an_account_never_sees_another() {
             other => panic!("{other:?}"),
         }
 
-        // Dropped by B: B's own account only; A's picture stays unmarked.
+        // Dropped by B: B's own account only; A's file stays unmarked.
         raw.send(b, &Frame::Carnet(Carnet::BlobDrop { ids: vec![[4; 32]] }));
         assert!(!raw.worker.blobs.is_marked(A, &[4; 32]));
 

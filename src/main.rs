@@ -17,7 +17,7 @@ mod settings;
 mod signup;
 mod slash;
 mod store;
-mod pictures;
+mod files;
 mod sync;
 mod update;
 mod watch;

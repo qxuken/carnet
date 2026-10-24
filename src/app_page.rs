@@ -57,6 +57,20 @@ struct Cx {
     focus: Option<u64>,
 }
 
+/// The cases the page's menu offers: each written as it makes the words,
+/// and its name in the menu's action.
+const CASES: [(&str, &str, inline::Case); 4] = [
+    ("lowercase", "lower", inline::Case::Lower),
+    ("UPPERCASE", "upper", inline::Case::Upper),
+    ("Capitalize Each Word", "title", inline::Case::Title),
+    ("Sentence case", "sentence", inline::Case::Sentence),
+];
+
+/// A case by its name in an action ("case:upper").
+fn case_named(name: &str) -> Option<inline::Case> {
+    CASES.iter().find(|c| c.1 == name).map(|c| c.2)
+}
+
 fn hash(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
@@ -1007,8 +1021,8 @@ impl Carnet {
     fn unshown_why(&self, entry: Option<&images::Entry>, file: Option<&std::path::Path>, theirs: bool, src: &str, wiki: bool) -> (Glyph, &'static str) {
         match entry {
             // Carnet's own, not here yet: sync is bringing it from the
-            // server (pictures.rs). Missing only once it's given up on.
-            Some(images::Entry::Failed(e)) if e == "not found" && !theirs && file.is_some_and(|f| self.sync.picture_coming(&self.store, f)) => {
+            // server (files.rs). Missing only once it's given up on.
+            Some(images::Entry::Failed(e)) if e == "not found" && !theirs && file.is_some_and(|f| self.sync.file_coming(&self.store, f)) => {
                 (Glyph::Cloud, DOWNLOADING)
             }
             // The user's own picture, not here: with sync on, it's on the
@@ -1477,7 +1491,7 @@ impl Carnet {
                 .radius(1.0)
                 .bg(t.accent)
                 .opacity(if blink { 1.0 } else { 0.0 })
-                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0))
+                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0).clipped())
                 .role(Role::None)
         };
         let Some((nw, nh)) = natural else {
@@ -1804,7 +1818,7 @@ impl Carnet {
                 ui.text_in_keyed(
                     "hint",
                     NodeSpec::row()
-                        .float(FloatConfig::parent())
+                        .float(FloatConfig::parent().clipped())
                         .enter(kui_native::Enter::default().opacity(0.0))
                         .transition(320.0)
                         .role(Role::None),
@@ -1817,14 +1831,16 @@ impl Carnet {
             }
             // The bar is declared on every frame and blinks by its opacity:
             // a float that came and went with the blink would come back
-            // each time over whatever opened since (the `/` menu).
+            // each time over whatever opened since (the `/` menu). It takes
+            // the page's clip: a float escapes it, and the caret of a line
+            // scrolled up under the toolbar was drawn over the toolbar.
             let bar = |h: f32, (dx, dy): (f32, f32), on: bool| {
                 NodeSpec::row()
                     .size(2.0, h.max(8.0))
                     .radius(1.0)
                     .bg(t.accent)
                     .opacity(if on { 1.0 } else { 0.0 })
-                    .float(FloatConfig::parent().offset(dx, dy))
+                    .float(FloatConfig::parent().offset(dx, dy).clipped())
                     .role(Role::None)
             };
             // On an empty line the caret is the line's start: nothing to
@@ -2062,6 +2078,12 @@ impl Carnet {
             item("Highlight", "highlight").accel(keys::HIGHLIGHT),
             item("Text colour\u{2026}", "tint-menu:1"),
             item("Highlight colour\u{2026}", "tint-menu:0"),
+            // The selection's words, or the word the caret is in, each
+            // case written as it makes them; Shift+F3 goes round them.
+            MenuItem::submenu(
+                "Change case",
+                CASES.iter().map(|(label, name, _)| item(label, &format!("case:{name}"))).collect(),
+            ),
             MenuItem::separator(),
         ]);
         if in_table {
@@ -2184,6 +2206,12 @@ impl Carnet {
                 }
             }
             "highlight" => self.on_plain(Msg::Tint { ink: 0, color: inline::HIGHLIGHT as u64 }),
+            // Shift+F3: the next case round, as Word goes.
+            "case" => {
+                if let Some(to) = page::case_after(self.doc(), self.caret) {
+                    self.edit(Step::Other, |d, c| page::change_case(d, c, to));
+                }
+            }
             "addrow" => self.on_plain(Msg::AddRow),
             "addcol" => self.on_plain(Msg::AddCol),
             "delrow" => self.on_plain(Msg::DelRow),
@@ -2221,6 +2249,8 @@ impl Carnet {
                     self.tint_from = None;
                 } else if let Some(to) = a.strip_prefix("turn:").and_then(|n| n.parse().ok()) {
                     self.on_plain(Msg::Turn { to });
+                } else if let Some(to) = a.strip_prefix("case:").and_then(case_named) {
+                    self.edit(Step::Other, |d, c| page::change_case(d, c, to));
                 }
             }
         }
@@ -2400,6 +2430,7 @@ impl Carnet {
             KeyCode::Char('x') | KeyCode::Char('X') if chord => self.page_action("cut"),
             KeyCode::Char('v') | KeyCode::Char('V') if chord => self.paste(),
             KeyCode::Char('h') if chord && shift => self.page_action("highlight"),
+            KeyCode::F(3) if shift && !chord && !m.alt => self.page_action("case"),
             KeyCode::Char('l') if chord && m.alt => self.page_action("float:1"),
             KeyCode::Char('r') if chord && m.alt => self.page_action("float:2"),
             // The block becomes: Ctrl/Cmd+Alt+0 text, 1–3 headings,
@@ -2778,15 +2809,19 @@ impl Carnet {
         }
     }
 
-    /// A picture's pixels on the clipboard.
+    /// A picture's pixels on the clipboard, which kui puts there on the
+    /// next frame.
     fn copy_picture(&mut self, src: &str, wiki: bool) {
         let folder = self.store.notes[self.current].folder.clone();
         let result = match self.store.picture_file(&folder, src, wiki) {
-            Some(p) => images::decode(&p).and_then(|d| clip::write_image(d.w, d.h, d.rgba)),
+            Some(p) => images::decode(&p),
             None => Err("it is on the web".into()),
         };
         match result {
-            Ok(()) => self.say = Some("Picture copied".into()),
+            Ok(d) => {
+                self.picture_out = Some((d.w, d.h, d.rgba));
+                self.say = Some("Picture copied".into());
+            }
             Err(e) => self.error = Some(format!("Couldn't copy the picture: {e}")),
         }
     }
@@ -2822,22 +2857,34 @@ impl Carnet {
         }
     }
 
-    /// Files pasted or picked: the pictures among them go in at the caret.
+    /// Files pasted or picked: the pictures and documents among them go in
+    /// at the caret.
     pub(super) fn insert_files(&mut self, paths: &[std::path::PathBuf]) {
         self.insert_files_at(paths, None);
     }
 
-    /// Files dropped or pasted: the pictures among them are copied in
-    /// beside the notes and put in before block `at` (the drop line), or
-    /// at the caret.
+    /// Files dropped, pasted or picked: copied in beside the notes, the
+    /// pictures put in as pictures and the documents
+    /// ([`carnet_core::doc::is_document_name`]) as links to them, before
+    /// block `at` (the drop line) or at the caret. Anything else — a
+    /// program, a script, a page — is left out, and said so.
     pub(super) fn insert_files_at(&mut self, paths: &[std::path::PathBuf], at: Option<usize>) {
         if self.reading() {
             return;
         }
         let folder = self.store.notes[self.current].folder.clone();
         let mut srcs = Vec::new();
+        let mut links: Vec<(String, String)> = Vec::new();
         let mut skipped = 0;
         for p in paths {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            if !images::is_image(p) && carnet_core::doc::is_document_name(name) {
+                match self.store.import_attachment(&folder, p) {
+                    Ok(src) => links.push((name.to_string(), src)),
+                    Err(e) => self.error = Some(format!("Couldn't copy {}: {e}", p.display())),
+                }
+                continue;
+            }
             if !images::is_image(p) {
                 skipped += 1;
                 continue;
@@ -2860,13 +2907,25 @@ impl Carnet {
         }
         if skipped > 0 {
             self.notify(
-                if skipped == 1 { "Left out a file that isn't a picture".to_string() }
-                else { format!("Left out {skipped} files that aren't pictures") },
+                if skipped == 1 { "Left out a file that isn't a picture or a document".to_string() }
+                else { format!("Left out {skipped} files that aren't pictures or documents") },
                 None,
             );
         }
+        // Dropped between blocks with no picture: the links a line of their
+        // own at the drop line. Else at the caret: among its words, or
+        // under the pictures just put in.
+        let line = at.filter(|_| srcs.is_empty());
         if !srcs.is_empty() {
             self.insert_pictures(srcs, at);
+        }
+        if !links.is_empty() {
+            self.editing = true;
+            self.focus_page = true;
+            self.edit(Step::Other, |d, c| match line {
+                Some(i) => page::insert_links_at(d, c, i, &links),
+                None => page::insert_links(d, c, &links),
+            });
         }
     }
 

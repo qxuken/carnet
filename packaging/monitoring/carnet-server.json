@@ -312,7 +312,7 @@
       "id": 5,
       "type": "stat",
       "title": "Failed writes",
-      "description": "Writes to the databases (or pictures to disk or the bucket) that failed in the time shown. Anything but 0 needs a look: a full disk, a broken file, a bucket out of reach.",
+      "description": "Writes to the databases (or files to disk or the bucket) that failed in the time shown. Anything but 0 needs a look: a full disk, a broken file, a bucket out of reach.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1373,7 +1373,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Bytes",
-      "description": "Bytes of messages from devices and to them, per second. Pictures go by their own links and are not counted here.",
+      "description": "Bytes of messages from devices and to them, per second. Files go by their own links and are not counted here.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1608,7 +1608,7 @@
       "id": 22,
       "type": "stat",
       "title": "On disk",
-      "description": "What the server's databases take on disk (pictures in a bucket are not counted).",
+      "description": "What the server's databases take on disk (files in a bucket are not counted).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -1736,8 +1736,8 @@
     {
       "id": 24,
       "type": "stat",
-      "title": "Pictures kept",
-      "description": "Pictures the server kept in the time shown.",
+      "title": "Files kept",
+      "description": "Files the server kept in the time shown.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2016,7 +2016,7 @@
       "id": 28,
       "type": "timeseries",
       "title": "Kept",
-      "description": "Records (changes to notes) and pictures kept, per minute; notes compacted into one record.",
+      "description": "Records (changes to notes) and files kept, per minute; notes compacted into one record.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2045,7 +2045,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "sum(rate(carnet_blobs_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval])) * 60",
-          "legendFormat": "pictures",
+          "legendFormat": "files",
           "range": true,
           "instant": false,
           "refId": "B"
@@ -2142,7 +2142,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "Bytes kept",
-      "description": "Bytes of records and of pictures kept, per second (sealed, as stored).",
+      "description": "Bytes of records and of files kept, per second (sealed, as stored).",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2171,7 +2171,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "sum(rate(carnet_blob_bytes_total{job=~\"$job\",instance=~\"$instance\"}[$__rate_interval]))",
-          "legendFormat": "pictures",
+          "legendFormat": "files",
           "range": true,
           "instant": false,
           "refId": "B"
@@ -2229,8 +2229,8 @@
     {
       "id": 30,
       "type": "timeseries",
-      "title": "Picture links and transfers",
-      "description": "Links given to put or fetch a picture, and pictures fetched (get) and put by them, per minute.",
+      "title": "File links and transfers",
+      "description": "Links given to put or fetch a file, and files fetched (get) and put by them, per minute.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
@@ -2317,8 +2317,8 @@
     {
       "id": 31,
       "type": "timeseries",
-      "title": "Pictures let go",
-      "description": "Pictures no note shows any more, per minute: marked when a device says so, gone (deleted) 30 days later.",
+      "title": "Files let go",
+      "description": "Files no note shows any more, per minute: marked when a device says so, gone (deleted) 30 days later.",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"

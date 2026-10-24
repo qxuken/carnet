@@ -4,7 +4,7 @@
 //! What the bytes say is the session's business, on the app's own thread:
 //! the session and the notes' CRDTs stay where the notes are, and only
 //! the waiting on a network leaves. The thread wakes the app when bytes
-//! come, as `images.rs`'s decoder does when a picture is ready.
+//! come, as `images.rs`'s decoder does when a file is ready.
 //!
 //! It connects, and when the socket drops, connects again, waiting longer
 //! each time (1 s, 2 s, 4 s … a minute at most), the wait cut short when
@@ -82,7 +82,7 @@ fn tls(trusted: &[Vec<u8>]) -> Connector {
     Connector::Rustls(client_config(trusted))
 }
 
-/// TLS as the desktop speaks it, to its server and the server's picture
+/// TLS as the desktop speaks it, to its server and the server's file
 /// links alike: rustls with ring, the web's roots, and these besides.
 pub(crate) fn client_config(trusted: &[Vec<u8>]) -> Arc<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
@@ -222,7 +222,7 @@ impl Link {
     }
 
     /// The address the socket is (or was last) connected to: what a
-    /// picture's link to the server's own host may lead to, and whether
+    /// file's link to the server's own host may lead to, and whether
     /// the server is on this computer or its network (`http`).
     pub fn peer(&self) -> Option<IpAddr> {
         *self.peer.lock().unwrap_or_else(|e| e.into_inner())
@@ -316,7 +316,7 @@ mod tests {
         let trusting = Link::start_trusting(url.clone(), vec![der], || {}).unwrap();
         let seen = wait(&trusting);
         assert_eq!(seen, [NetEvent::Connected, NetEvent::Frame(b"hello".to_vec())]);
-        // Where the socket is: what a picture's link may lead to.
+        // Where the socket is: what a file's link may lead to.
         assert!(trusting.peer().is_some_and(|ip| ip.is_loopback()), "{:?}", trusting.peer());
         trusting.send(b"back".to_vec());
         assert_eq!(heard.recv_timeout(Duration::from_secs(5)).unwrap(), b"back");

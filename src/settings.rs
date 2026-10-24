@@ -170,7 +170,8 @@ pub struct Settings {
     pub sidebar: bool,
     /// The folders whose subfolders the library hides, by path: this
     /// device's view of them, not the notes'. One `collapsed = path` line
-    /// each.
+    /// each; "" is the notes folder itself, All notes with every folder
+    /// folded away, written `folders = folded`.
     pub collapsed: BTreeSet<String>,
     /// Colours given lately, newest first (0xRRGGBBAA): the picker's
     /// recent row.
@@ -302,6 +303,9 @@ impl Settings {
                 "collapsed" if !v.is_empty() => {
                     s.collapsed.insert(v.to_string());
                 }
+                "folders" if v == "folded" => {
+                    s.collapsed.insert(String::new());
+                }
                 "colors" => {
                     s.colors = v.split(',').filter_map(carnet_core::inline::parse_color).take(10).collect();
                 }
@@ -331,7 +335,11 @@ impl Settings {
             Sort::Created => "created",
         };
         let dir = self.dir.as_deref().map(Path::display).map(|d| d.to_string()).unwrap_or_default();
-        let collapsed: String = self.collapsed.iter().map(|f| format!("collapsed = {f}\n")).collect();
+        let collapsed: String = self
+            .collapsed
+            .iter()
+            .map(|f| if f.is_empty() { "folders = folded\n".to_string() } else { format!("collapsed = {f}\n") })
+            .collect();
         format!(
             "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\ncode_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nlinks = {}\nsidebar = {}\n{collapsed}colors = {}\ncheck_updates = {}\ntold_update = {}\ndir = {dir}\n",
             self.palette.key(),
@@ -444,7 +452,7 @@ mod tests {
             typewriter: true,
             link_open: carnet_core::page::LinkOpen::DoubleClick,
             sidebar: false,
-            collapsed: ["Work".to_string(), "Work/Old, kept = 2".to_string()].into(),
+            collapsed: [String::new(), "Work".to_string(), "Work/Old, kept = 2".to_string()].into(),
             colors: vec![0xc0504dff, 0x12345680],
             check_updates: false,
             told_update: "0.1.2".into(),
@@ -452,6 +460,9 @@ mod tests {
             file: None,
         };
         assert_eq!(Settings::parse(&s.to_text()), s);
+        // All notes folded is a word of its own, not an empty path.
+        assert!(s.to_text().contains("\nfolders = folded\n") && !s.to_text().contains("collapsed = \n"));
+        assert!(Settings::parse("collapsed = \nfolders = open\n").collapsed.is_empty());
         let odd = Settings::parse("size = 400\nwhat\ntheme = purple\n");
         assert_eq!(odd.size, 24);
         assert_eq!(odd.theme, ThemePref::System);

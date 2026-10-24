@@ -109,6 +109,8 @@ pub enum Msg {
     DeleteBlock,
     InsertTable,
     InsertDivider,
+    /// The toolbar's paperclip: pictures and documents chosen to go in.
+    AddFiles,
     AddRow,
     AddCol,
     DelRow,
@@ -356,6 +358,8 @@ pub enum Msg {
     /// The folder dialog's answer, and the pictures dialog's.
     PickedDir,
     PickedPictures,
+    /// The paperclip's dialog's answer: pictures and documents.
+    PickedFiles,
 }
 
 /// `Msg::SelectFolder`'s every note, and `Msg::SetFont`'s default face:
@@ -677,6 +681,9 @@ pub struct Carnet {
     blur: bool,
     /// Text to put on the clipboard on the next frame, and its HTML.
     clip_out: Option<(String, Option<String>)>,
+    /// A picture to put on the clipboard on the next frame: its size and
+    /// straight RGBA.
+    picture_out: Option<(u32, u32, Vec<u8>)>,
     /// A context menu to open on the next frame: the node it is about,
     /// where, and what.
     pending_menu: Option<(Key, Vec2, MenuFor)>,
@@ -767,6 +774,8 @@ pub struct Carnet {
     slash_off: Option<u64>,
     /// Ask for picture files on the next frame.
     pick_pictures: bool,
+    /// Ask for pictures and documents on the next frame (the paperclip).
+    pick_files: bool,
     /// Files being dragged over the window, until they drop or leave.
     file_drag: Option<FileDrag>,
     /// Where dropped pictures would go: before this block (the page's
@@ -1101,6 +1110,7 @@ impl Carnet {
             step: None,
             blur: false,
             clip_out: None,
+            picture_out: None,
             pending_menu: None,
             list_view: false,
             folder: None,
@@ -1138,6 +1148,7 @@ impl Carnet {
             slash_word: String::new(),
             slash_off: None,
             pick_pictures: false,
+            pick_files: false,
             file_drag: None,
             drop_index: None,
             card_rects: Vec::new(),
@@ -1244,16 +1255,16 @@ impl Carnet {
         self.notify(format!("Moved {what} to the attachments folder"), None);
     }
 
-    /// The sweep (store_owned.rs): the pictures of Carnet's no note has
-    /// shown for a week go to the trash, and other devices let go of
+    /// The sweep (store_owned.rs): the files of Carnet's no note has
+    /// shown or linked to for a week go to the trash, and other devices let go of
     /// theirs. Quietly: nothing shown went.
-    fn sweep_pictures(&mut self) {
+    fn sweep_files(&mut self) {
         let Some(busy) = self.sync.sweep_may_run() else {
             self.next_sweep = Instant::now() + SWEEP_LATER;
             return;
         };
         self.next_sweep = Instant::now() + SWEEP_EVERY;
-        if let Ok(swept) = self.store.sweep_pictures(&busy, SystemTime::now())
+        if let Ok(swept) = self.store.sweep_files(&busy, SystemTime::now())
             && !swept.is_empty()
         {
             self.sync.poke();
@@ -2232,7 +2243,7 @@ impl Carnet {
                 _ => {}
             }
         }
-        if remote.iter().any(|r| matches!(r, store::Remote::Pictures)) {
+        if remote.iter().any(|r| matches!(r, store::Remote::Files)) {
             self.store.index_files();
             self.images.retry_failed();
         }
@@ -2610,11 +2621,9 @@ impl Carnet {
     fn name_folder(&mut self, parent: &str) {
         self.finish_naming(true, false);
         // Its field goes under its parent's row: that row, and the field
-        // under it, in sight.
-        if !parent.is_empty() {
-            self.unfold_to(parent);
-            self.fold(parent, true, false);
-        }
+        // under it, in sight (All notes unfolded, for one at the top).
+        self.unfold_to(parent);
+        self.fold(parent, true, false);
         self.namings += 1;
         self.naming = Some(Naming { parent: parent.to_string(), name: String::new(), nth: self.namings, key: None, rename: None });
         self.focus(Field::Folder);
@@ -2721,17 +2730,18 @@ impl Carnet {
         self.reorder();
     }
 
-    /// Whether folder `f` has folders inside it.
+    /// Whether folder `f` has folders inside it ("": the notes folder, any
+    /// folder at all).
     pub(super) fn has_subfolders(&self, f: &str) -> bool {
-        let under = format!("{f}/");
+        let under = inside(f);
         self.store.folders.iter().any(|g| g.starts_with(&under))
     }
 
     /// Whether folder `f`'s row is out of sight: a folder it is inside is
-    /// folded.
+    /// folded, All notes among them.
     pub(super) fn folder_hidden(&self, f: &str) -> bool {
         let c = &self.settings.collapsed;
-        !c.is_empty() && f.match_indices('/').any(|(i, _)| c.contains(&f[..i]))
+        !c.is_empty() && (c.contains("") || f.match_indices('/').any(|(i, _)| c.contains(&f[..i])))
     }
 
     /// The folders as the library lists them now: those folded away left
@@ -2741,11 +2751,12 @@ impl Carnet {
     }
 
     /// Folds folder `f` — its subfolders hidden — or unfolds it (`open`);
-    /// with `deep`, every folder inside it the same. A folder shown that
-    /// folding hides gives way to `f`: the folder shown is never out of
-    /// sight. Kept in this device's settings.
+    /// with `deep`, every folder inside it the same. "" is All notes,
+    /// every folder inside it. A folder shown that folding hides gives way
+    /// to `f`: the folder shown is never out of sight. Kept in this
+    /// device's settings.
     pub(super) fn fold(&mut self, f: &str, open: bool, deep: bool) {
-        let under = format!("{f}/");
+        let under = inside(f);
         let mut these = vec![f.to_string()];
         if deep {
             these.extend(self.store.folders.iter().filter(|g| g.starts_with(&under)).cloned());
@@ -2760,11 +2771,16 @@ impl Carnet {
             };
         }
         if !open && !self.deleted && self.folder.as_deref().is_some_and(|s| s.starts_with(&under)) {
-            self.show_folder(Some(f.to_string()));
+            self.show_folder((!f.is_empty()).then(|| f.to_string()));
         }
         if changed {
             self.save_folds();
         }
+    }
+
+    /// The folder a chevron's `index` names: `ALL`, All notes ("").
+    fn fold_target(&self, index: u64) -> Option<String> {
+        if index == ALL { Some(String::new()) } else { self.store.folders.get(index as usize).cloned() }
     }
 
     /// A folder's chevron: folded, it unfolds; unfolded, it folds — with
@@ -2774,10 +2790,11 @@ impl Carnet {
         self.fold(f, open, deep);
     }
 
-    /// The folders `f` is inside unfolded, so its row is in sight.
+    /// The folders `f` is inside unfolded, All notes first, so its row is
+    /// in sight.
     pub(super) fn unfold_to(&mut self, f: &str) {
         let c = &mut self.settings.collapsed;
-        let mut changed = false;
+        let mut changed = !f.is_empty() && c.remove("");
         for (i, _) in f.match_indices('/') {
             changed |= c.remove(&f[..i]);
         }
@@ -2863,30 +2880,35 @@ impl Carnet {
         // → unfolds a folder (⌥: and every folder inside it), or, open
         // already, goes to the first inside it; ← folds it, or, folded or
         // with nothing to fold, goes to the folder it is in — as a tree's
-        // rows do in Finder.
+        // rows do in Finder. All notes is the folder every other is in.
+        let tree = match row {
+            FolderRow::Folder(f) => Some(f.clone()),
+            FolderRow::All => Some(String::new()),
+            FolderRow::Deleted => None,
+        };
         if !(m.shift || m.ctrl || m.super_key)
             && matches!(k.code, KeyCode::Left | KeyCode::Right)
-            && let FolderRow::Folder(f) = row
+            && let Some(f) = tree
         {
-            let f = f.clone();
             let folded = self.settings.collapsed.contains(&f);
             let parent = self.has_subfolders(&f);
             match k.code {
                 KeyCode::Right if parent && (folded || m.alt) => self.fold(&f, true, m.alt),
                 KeyCode::Right if parent => {
-                    let under = format!("{f}/");
+                    let under = inside(&f);
                     if let Some(first) = self.store.folders.iter().find(|g| g.starts_with(&under)).cloned() {
                         self.go_to_row(FolderRow::Folder(first));
                     }
                 }
                 KeyCode::Left if parent && (!folded || m.alt) => self.fold(&f, false, m.alt),
                 KeyCode::Left if f.contains('/') => self.go_to_row(FolderRow::Folder(parent_of(&f).to_string())),
+                KeyCode::Left if !f.is_empty() => self.go_to_row(FolderRow::All),
                 _ => {}
             }
             // The keyboard stays on the row (a folded one's subfolder that
             // had it is gone from sight).
             if self.focus_row.is_none() {
-                self.focus_row = Some(FolderRow::Folder(f));
+                self.focus_row = Some(if f.is_empty() { FolderRow::All } else { FolderRow::Folder(f) });
             }
             return true;
         }
@@ -3246,7 +3268,7 @@ impl Carnet {
                 }
             }
             Msg::FoldFolder { index } => {
-                if let Some(f) = self.store.folders.get(index as usize).cloned() {
+                if let Some(f) = self.fold_target(index) {
                     self.toggle_fold(&f, core.modifiers().alt);
                 }
             }
@@ -3355,6 +3377,11 @@ impl Carnet {
             }
             Msg::InsertDivider => {
                 self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Divider));
+            }
+            Msg::AddFiles => {
+                if !self.reading() {
+                    self.pick_files = true;
+                }
             }
             Msg::AddRow => {
                 self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::AddRow, false));
@@ -3699,7 +3726,7 @@ impl Carnet {
             }
             Msg::Slash { index } => self.run_slash(index as usize),
             Msg::FoldFolder { index } => {
-                if let Some(f) = self.store.folders.get(index as usize).cloned() {
+                if let Some(f) = self.fold_target(index) {
                     self.toggle_fold(&f, false);
                 }
             }
@@ -3716,7 +3743,8 @@ impl Carnet {
             | Msg::WindowFocus
             | Msg::FilesOver
             | Msg::PickedDir
-            | Msg::PickedPictures => {}
+            | Msg::PickedPictures
+            | Msg::PickedFiles => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {
                     self.pending_menu = Some((k, at, MenuFor::Tools));
@@ -4350,6 +4378,12 @@ pub fn parent_of(folder: &str) -> &str {
     carnet_sync::vault::parent_of(folder)
 }
 
+/// What every path inside `folder` starts with: "" for the notes folder
+/// itself, every folder being inside it.
+fn inside(folder: &str) -> String {
+    if folder.is_empty() { String::new() } else { format!("{folder}/") }
+}
+
 fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Reveal in Finder"
@@ -4477,7 +4511,7 @@ impl App for Carnet {
         }
         // The pictures no note shows, now and then.
         if Instant::now() >= self.next_sweep {
-            self.sweep_pictures();
+            self.sweep_files();
         }
         due.push(self.next_sweep.saturating_duration_since(Instant::now()));
         // Sync's turn after what happened: the notes' places and pictures
@@ -4509,6 +4543,9 @@ impl App for Carnet {
         if let Some((text, html)) = self.clip_out.take() {
             ui.set_clipboard(text, html);
         }
+        if let Some((w, h, rgba)) = self.picture_out.take() {
+            ui.set_clipboard_image(w, h, rgba);
+        }
         // Pictures the last frame didn't draw may go; a frame is asked
         // for when the next could, should nothing else draw one.
         if let Some(wait) = self.images.sweep(ui.core(), std::time::Instant::now()) {
@@ -4536,6 +4573,14 @@ impl App for Carnet {
                     .title("Choose pictures")
                     .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
                     .tag(Msg::PickedPictures),
+            );
+        }
+        if std::mem::take(&mut self.pick_files) {
+            ui.request_files(
+                kui_native::FileDialog::open()
+                    .multiple()
+                    .title("Add pictures or files")
+                    .tag(Msg::PickedFiles),
             );
         }
         // Asked on every frame the answer is outstanding: the core queues
@@ -4744,7 +4789,7 @@ impl App for Carnet {
                     self.dir_change = Some(Some(std::path::PathBuf::from(dir)));
                 }
             }
-            (Msg::PickedPictures, Event::Files(paths)) => {
+            (Msg::PickedPictures | Msg::PickedFiles, Event::Files(paths)) => {
                 let files: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
                 self.insert_files(&files);
             }
@@ -4769,7 +4814,8 @@ impl App for Carnet {
                 | Msg::WindowFocus
                 | Msg::FilesOver
                 | Msg::PickedDir
-                | Msg::PickedPictures,
+                | Msg::PickedPictures
+                | Msg::PickedFiles,
                 _,
             ) => {}
             (msg, event) => self.on_msg(msg, event, ev.key, core),

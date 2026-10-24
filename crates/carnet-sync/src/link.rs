@@ -1,7 +1,7 @@
-//! A picture's link, as the server gives it (docs/SYNC.md §6): read, and
+//! A file's link, as the server gives it (docs/SYNC.md §6): read, and
 //! checked before anything is sent to it.
 //!
-//! The server says where a picture is put or fetched: its own
+//! The server says where a file is put or fetched: its own
 //! `/v1/blobs/…`, or an object store's signed link, on a host of its own.
 //! A server that isn't what it seems could say anywhere: a service on this
 //! computer or its network (a database, a printer's page, a router's), or

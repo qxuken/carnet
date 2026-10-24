@@ -1,20 +1,20 @@
 // What the page says, and a few small choices it makes, worked out apart
 // from the screens so they can be tested on their own (words.test.ts).
 
-/// "1 change", "3 pictures"; nothing for none.
+/// "1 change", "3 files"; nothing for none.
 export const count = (n: number, one: string) => (n === 0 ? null : n === 1 ? `1 ${one}` : `${n} ${one}s`);
 
 export type Footer = {
   /// The socket's state in words (`sync.status`).
   status: string;
   changes: number;
-  pictures: number;
+  files: number;
   /// What waits has waited long enough to be said.
   waitShown: boolean;
   /// All of it sent a moment ago.
   allSent: boolean;
   readOnly: boolean;
-  /// Why the pictures wait, when it won't mend by itself (`sync.picturesHeld`).
+  /// Why the files wait, when it won't mend by itself (`sync.filesHeld`).
   held?: string | null;
 };
 
@@ -23,18 +23,18 @@ export type Footer = {
 export const offlineStatus = (online: boolean) => (online ? 'Offline: trying again' : 'Offline');
 
 /// The footer's line: up to date only when nothing waits to be sent;
-/// else how many changes and pictures wait, and, offline or read only,
-/// why. (The desktop's Settings says it in the same words.) Pictures
+/// else how many changes and files wait, and, offline or read only,
+/// why. (The desktop's Settings says it in the same words.) Files
 /// that can't go from here: why too, under it (`why`). Its icon: a check
 /// when all's well, a cloud struck through offline, else a clock.
 export function footer(f: Footer): { ok: boolean; text: string; icon: string; why?: string } {
   const line = footerLine(f);
   const icon = line.ok ? 'check' : f.status.startsWith('Offline') ? 'cloud-off' : 'clock';
-  return f.held && f.pictures > 0 ? { ...line, icon, why: f.held } : { ...line, icon };
+  return f.held && f.files > 0 ? { ...line, icon, why: f.held } : { ...line, icon };
 }
 
 function footerLine(f: Footer): { ok: boolean; text: string } {
-  const parts = f.waitShown ? [count(f.changes, 'change'), count(f.pictures, 'picture')].filter((p) => p !== null) : [];
+  const parts = f.waitShown ? [count(f.changes, 'change'), count(f.files, 'file')].filter((p) => p !== null) : [];
   const ok = f.status === 'Up to date';
   if (!parts.length && ok && f.allSent && !f.readOnly) return { ok: true, text: 'All sent' };
   if (!parts.length) return ok && f.readOnly ? { ok: false, text: 'Read only for now' } : { ok, text: f.status };

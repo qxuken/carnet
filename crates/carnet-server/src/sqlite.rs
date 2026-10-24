@@ -36,7 +36,7 @@ use carnet_sync::wire::{decode_vv, encode_vv};
 use crate::rows::{AccountRows, BaseRow, DeviceRow, InviteRow, PasskeyRow, PasswordRow, RecordRow, RecoveryRow, RekeyRow};
 use crate::storage::{Base, Device, Failed, Live, Logged, PasskeySlot, PasswordSlot, Shelf, Span, Storage, covers};
 
-/// A picture as a database kept it: its id, its sealed bytes.
+/// A file as a database kept it: its id, its sealed bytes.
 pub type Kept = ([u8; 32], Vec<u8>);
 
 /// Account databases kept open at once.
@@ -44,7 +44,7 @@ pub const OPEN: usize = 256;
 
 /// The schemas' version, in every file's `user_version`. 2: recovery.
 /// 3: device cards, last seen, key epochs and the keys sealed for them.
-/// 4: bases (compaction), records set aside, the log. 5: pictures.
+/// 4: bases (compaction), records set aside, the log. 5: files.
 /// 6: rooms removed. 7: passwords. 8: passkeys. 9: what each room holds
 /// live, kept counted ([`ROOMS`]).
 const VERSION: i64 = 9;
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS bases (
     shelved_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS bases_room ON bases (room, shelved_by);
--- Pictures, sealed, by id: kept once however many notes show them.
+-- Files, sealed, by id: kept once however many notes show them.
 CREATE TABLE IF NOT EXISTS blobs (
     id BLOB PRIMARY KEY,
     bytes BLOB NOT NULL,
@@ -368,7 +368,7 @@ impl Sharded {
         Ok(Sharded { place: Place::Memory, directory, open: RefCell::default(), clock: Cell::new(0) })
     }
 
-    /// The pictures still kept in `account`'s database, taken out: they
+    /// The files still kept in `account`'s database, taken out: they
     /// live as files now (`blobs::BlobFiles`), and are moved there once.
     pub fn take_blobs(&self, account: &[u8]) -> Result<Vec<Kept>, Failed> {
         self.with(account, |db| -> Result<Vec<Kept>, Failed> {
@@ -384,7 +384,7 @@ impl Sharded {
         .unwrap_or(Ok(Vec::new()))
     }
 
-    /// Those pictures gone from the database, once they're files.
+    /// Those files gone from the database, once they're on disk.
     pub fn drop_blobs(&self, account: &[u8]) -> Result<(), Failed> {
         self.with(account, |db| db.execute("DELETE FROM blobs", []).map(|_| ()).map_err(failed))?.unwrap_or(Ok(()))
     }
@@ -475,10 +475,10 @@ impl Sharded {
         self.backup_with(to, true)
     }
 
-    /// [`Sharded::backup`], with the pictures or without them: without,
-    /// for a server whose pictures are in a bucket, backed up by its own
+    /// [`Sharded::backup`], with the files or without them: without,
+    /// for a server whose files are in a bucket, backed up by its own
     /// means (a folder of them, if any, is from before, and left out).
-    pub fn backup_with(&self, to: &Path, pictures: bool) -> Result<usize, Failed> {
+    pub fn backup_with(&self, to: &Path, files: bool) -> Result<usize, Failed> {
         let Place::Disk(data) = &self.place else { return Err(Failed("nothing on disk to back up".into())) };
         let io = |e: std::io::Error| Failed(e.to_string());
         crate::private::dir(&to.join("accounts")).map_err(io)?;
@@ -507,9 +507,9 @@ impl Sharded {
                 into(&db, dest)?;
             }
         }
-        // The pictures, files beside the databases: each written whole
+        // The files, on disk beside the databases: each written whole
         // and never changed, so a copy while the server runs is whole too.
-        if pictures {
+        if files {
             copy_tree(&data.join("blobs"), &to.join("blobs")).map_err(|e| Failed(e.to_string()))?;
         }
         Ok(ids.len())
@@ -655,7 +655,7 @@ impl Locked {
         })
     }
 
-    /// Pictures a server before kept in the account's own file (a
+    /// Files a server before kept in the account's own file (a
     /// server's start moves them out; one that never started since still
     /// has them).
     pub fn kept_blobs(&self, account: &[u8]) -> Result<Vec<Kept>, Failed> {
@@ -1568,16 +1568,16 @@ mod tests {
             s.add_device(a, b"d", [7; 32]).unwrap();
             s.put(a, "r", 1, 0, 2, vec![9; 8]).unwrap();
         }
-        // A picture, a file beside the databases (blobs::BlobFiles).
+        // A file, on disk beside the databases (blobs::BlobFiles).
         std::fs::create_dir_all(data.join("blobs").join("6132")).unwrap();
         std::fs::write(data.join("blobs").join("6132").join("07"), b"SEALED").unwrap();
         let copy = temp("delete-copy");
         assert_eq!(s.backup(&copy).unwrap(), 2);
-        assert_eq!(std::fs::read(copy.join("blobs").join("6132").join("07")).unwrap(), b"SEALED", "pictures too");
-        // Without the pictures (they're in a bucket): the records alone.
+        assert_eq!(std::fs::read(copy.join("blobs").join("6132").join("07")).unwrap(), b"SEALED", "files too");
+        // Without the files (they're in a bucket): the records alone.
         let records = temp("delete-records");
         assert_eq!(s.backup_with(&records, false).unwrap(), 2);
-        assert!(records.join("carnet.db").exists() && !records.join("blobs").exists(), "no pictures");
+        assert!(records.join("carnet.db").exists() && !records.join("blobs").exists(), "no files");
         assert_eq!(Sharded::open(&records).unwrap().spans(b"a2", "r").len(), 1);
         let _ = std::fs::remove_dir_all(&records);
         let restored = Sharded::open(&copy).unwrap();
@@ -1594,7 +1594,7 @@ mod tests {
 
     /// A backup holds what the data folder does, OPAQUE's records and
     /// emails among it: the server's user's alone, as the data folder is,
-    /// whatever the umask, and whatever the pictures' files were.
+    /// whatever the umask, and whatever the files' own modes were.
     #[cfg(unix)]
     #[test]
     fn a_backup_is_the_servers_user_alone() {
@@ -1603,11 +1603,11 @@ mod tests {
         let mut s = Sharded::open(&data).unwrap();
         s.add_account(b"a1", false).unwrap();
         s.put(b"a1", "r", 1, 0, 2, vec![9; 8]).unwrap();
-        let pictures = data.join("blobs").join("6131");
-        std::fs::create_dir_all(&pictures).unwrap();
-        std::fs::write(pictures.join("07"), b"SEALED").unwrap();
-        std::fs::set_permissions(pictures.join("07"), std::fs::Permissions::from_mode(0o644)).unwrap();
-        std::fs::set_permissions(&pictures, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let files = data.join("blobs").join("6131");
+        std::fs::create_dir_all(&files).unwrap();
+        std::fs::write(files.join("07"), b"SEALED").unwrap();
+        std::fs::set_permissions(files.join("07"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o755)).unwrap();
         let copy = temp("private-copy");
         assert_eq!(s.backup(&copy).unwrap(), 1);
         let mut seen = 0;
@@ -1623,7 +1623,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(seen, 3, "the directory, the account and the picture");
+        assert_eq!(seen, 3, "the directory, the account and the file");
         // A file there already isn't written over.
         let again = s.backup(&copy).unwrap_err();
         assert!(again.to_string().contains("is there already"), "{again}");

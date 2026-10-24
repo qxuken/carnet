@@ -1,4 +1,4 @@
-//! The desktop's HTTP, for pictures (docs/SYNC.md §6): a picture's sealed
+//! The desktop's HTTP, for files (docs/SYNC.md §6): a file's sealed
 //! bytes put to, or fetched from, the short-lived link the server gave
 //! ([`Transfer`]). A thread of its own, as the socket has, and nothing
 //! else: what the bytes are is the session's business. And now and then
@@ -12,7 +12,7 @@
 //!
 //! A link the session found fair (`link::fair`) names its host as
 //! written; a public-looking name can still be given an address on this
-//! computer or its network by the DNS. So a picture's host is looked up
+//! computer or its network by the DNS. So a file's host is looked up
 //! once, every address it has checked as `link` checks one written out,
 //! and the connection made to those same addresses: a second lookup can't
 //! answer otherwise. An address on this computer or its network is only
@@ -36,7 +36,7 @@ use crate::session::Transfer;
 /// How long a transfer may take, all of it.
 const TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The most an answer may be: the largest picture, sealed.
+/// The most an answer may be: the largest file, sealed.
 const MOST: usize = MAX_BLOB + 64;
 
 /// How a transfer went: for a fetch, the sealed bytes. For
@@ -325,7 +325,7 @@ async fn exchange(mut s: impl AsyncRead + AsyncWrite + Unpin, u: &Url, method: &
     s.flush().await.map_err(|e| e.to_string())?;
 
     // The answer: its head, then its body by length, in chunks, or to the
-    // end. Read as it comes; never past what a picture may be.
+    // end. Read as it comes; never past what a file may be.
     let mut buf = Vec::new();
     let mut chunk = [0u8; 16 * 1024];
     let (status, length, chunked, start, headers) = loop {

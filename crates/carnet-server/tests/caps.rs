@@ -1,5 +1,5 @@
 //! What one account may ask of the server at once, and hold of notes
-//! (docs/SYNC.md §6, §11): an offer of pictures is answered for so many
+//! (docs/SYNC.md §6, §11): an offer of files is answered for so many
 //! and gets no more links than there's room for; a room id is short; a
 //! room past what it keeps uncompacted takes no more until it is, an
 //! account no more rooms or notes past its own caps; and what compaction
@@ -41,7 +41,7 @@ fn events(net: &mut Net, conn: ConnId) -> Vec<Event> {
     std::mem::take(&mut net.device(conn).events)
 }
 
-/// `frame` from `conn` as it is, and what comes back to it, the picture
+/// `frame` from `conn` as it is, and what comes back to it, the file
 /// worker's answers among them, read here rather than by the device.
 fn raw(net: &mut Net, conn: ConnId, frame: &Frame) -> Vec<Frame> {
     let outs = net.hub.receive(conn, &wire::encode(frame), &mut net.rng);
@@ -73,10 +73,10 @@ fn write_to(net: &mut Net, conn: ConnId, room: &str, text: &str) {
     net.pump();
 }
 
-/// An offer of thousands of pictures is answered for [`MAX_IDS`] of
+/// An offer of thousands of files is answered for [`MAX_IDS`] of
 /// them, and of those, no more get a link than there's room for, the
 /// links out counted in; another offer before any is put gets none. A
-/// device sends its offers in frames of that many, each picture with its
+/// device sends its offers in frames of that many, each file with its
 /// length sealed.
 #[test]
 fn an_offer_is_answered_for_so_many_and_no_more_than_there_is_room_for() {
@@ -90,7 +90,7 @@ fn an_offer_is_answered_for_so_many_and_no_more_than_there_is_room_for() {
         let offer = |from: u32, n: u32| Frame::Carnet(Carnet::BlobOffer { ids: (from..from + n).map(id).collect(), sizes: vec![1000; n as usize] });
         let said = raw(&mut net, a, &offer(0, 5000));
         let links = said.iter().filter(|f| matches!(f, Frame::Carnet(Carnet::BlobLink { put: true, .. }))).count();
-        assert_eq!(links, 20, "20,000 bytes of room, 1,000 a picture");
+        assert_eq!(links, 20, "20,000 bytes of room, 1,000 a file");
         assert!(said.len() <= MAX_IDS, "{} answers", said.len());
         assert_eq!(said.iter().filter(|f| **f == Frame::Carnet(Carnet::Refused { reason: FULL.into() })).count(), 1);
         assert_eq!(net.worker.pending(ACCOUNT), (20, 20_000));
@@ -98,7 +98,7 @@ fn an_offer_is_answered_for_so_many_and_no_more_than_there_is_room_for() {
         let said = raw(&mut net, a, &offer(10_000, 64));
         assert!(!said.iter().any(|f| matches!(f, Frame::Carnet(Carnet::BlobLink { .. }))), "{said:?}");
 
-        // A device's offer of 150: three frames, each picture's length as
+        // A device's offer of 150: three frames, each file's length as
         // sealed said with it.
         let pics: Vec<([u8; 32], usize)> = (0..150).map(|n| (id(20_000 + n), 100 + n as usize)).collect();
         net.device(a).session.offer_blobs(pics.clone());

@@ -185,7 +185,7 @@ pub fn passkey_salt() -> Vec<u8> {
     carnet_sync::passkey::salt().to_vec()
 }
 
-/// The most a picture's sealed bytes may be: the largest picture
+/// The most a file's sealed bytes may be: the largest file
 /// (`MAX_BLOB`), sealed. A fetch stops past it.
 #[wasm_bindgen]
 pub fn max_sealed() -> f64 {
@@ -279,10 +279,10 @@ impl Vault {
         self.notes.session.waiting() as u32
     }
 
-    /// How many pictures put in here the server hasn't got yet: on their
+    /// How many files put in here the server hasn't got yet: on their
     /// way, or held back (the account full, or read only).
-    pub fn pictures_waiting(&self) -> u32 {
-        self.notes.pictures_waiting() as u32
+    pub fn files_waiting(&self) -> u32 {
+        self.notes.files_waiting() as u32
     }
 
     pub fn receive(&mut self, frame: &[u8]) {
@@ -293,7 +293,7 @@ impl Vault {
         frames(self.notes.session.take_out())
     }
 
-    /// Pictures to put or fetch over HTTP, by the short-lived links the
+    /// Files to put or fetch over HTTP, by the short-lived links the
     /// server gave: each `{id, url, put, body}`, the id in hex, `body` a
     /// put's sealed bytes. Each done is said with [`Vault::transferred`].
     pub fn take_transfers(&mut self) -> js_sys::Array {
@@ -352,9 +352,9 @@ impl Vault {
         std::mem::take(&mut self.notes.errors)
     }
 
-    /// Pictures come since last asked: `[id hex, bytes]` pairs.
-    pub fn take_pictures(&mut self) -> js_sys::Array {
-        std::mem::take(&mut self.notes.pictures)
+    /// Files come since last asked: `[id hex, bytes]` pairs.
+    pub fn take_files(&mut self) -> js_sys::Array {
+        std::mem::take(&mut self.notes.files)
             .into_iter()
             .map(|(id, bytes)| {
                 let pair = js_sys::Array::new();
@@ -365,7 +365,7 @@ impl Vault {
             .collect()
     }
 
-    /// Pictures asked for that didn't come since last asked: their ids,
+    /// Files asked for that didn't come since last asked: their ids,
     /// in hex.
     pub fn take_missing(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes.missing).iter().map(|id| hex(id)).collect()
@@ -402,12 +402,12 @@ impl Vault {
     }
 
     /// The notes of `rooms` (from [`Vault::unsent`]) as Markdown files, and
-    /// the pictures given (their paths, and bytes in the same order), as
+    /// the files given (their paths, and bytes in the same order), as
     /// one ZIP file: what a browser removed from its account hands over of
     /// what it hadn't sent.
-    pub fn unsent_zip(&self, rooms: Vec<String>, picture_paths: Vec<String>, pictures: js_sys::Array) -> Vec<u8> {
+    pub fn unsent_zip(&self, rooms: Vec<String>, file_paths: Vec<String>, file_bytes: js_sys::Array) -> Vec<u8> {
         let mut files: Vec<(String, Vec<u8>)> = self.notes.note_files(&rooms).into_iter().map(|(p, t)| (p, t.into_bytes())).collect();
-        for (path, bytes) in picture_paths.into_iter().zip(pictures.iter()) {
+        for (path, bytes) in file_paths.into_iter().zip(file_bytes.iter()) {
             files.push((path, js_sys::Uint8Array::new(&bytes).to_vec()));
         }
         crate::zip::zip(&files)
@@ -454,14 +454,14 @@ impl Vault {
         self.notes.set_trashed(key, trashed, &mut WebRandom)
     }
 
-    /// A note in Deleted, deleted forever, on every device; the pictures
-    /// only it showed go too.
+    /// A note in Deleted, deleted forever, on every device; the files
+    /// only it showed or linked to go too.
     pub fn delete_forever(&mut self, key: &str) -> bool {
         self.notes.delete_forever(key, &mut WebRandom)
     }
 
     /// A new folder named `name` inside `parent` ("" for the top), on
-    /// every device: its path. Refused (the pictures' folder's name) with
+    /// every device: its path. Refused (the attachments folder's name) with
     /// the reason, in words.
     pub fn make_folder(&mut self, parent: &str, name: &str) -> Result<String, JsError> {
         self.notes.make_folder(parent, name, &mut WebRandom).map_err(|e| JsError::new(&e))
@@ -521,9 +521,9 @@ impl Vault {
         self.notes.picture_path(folder, src, wiki)
     }
 
-    /// The id of the picture at `path`, or none.
-    pub fn picture_id(&self, path: &str) -> Option<String> {
-        self.notes.picture_id(path)
+    /// The id of the file at `path`, or none.
+    pub fn file_id(&self, path: &str) -> Option<String> {
+        self.notes.file_id(path)
     }
 
     /// Asks for the picture at `path`; its id, or none.
@@ -546,31 +546,31 @@ impl Vault {
         self.notes.picture_free(stem, ext)
     }
 
-    /// A picture put in here at `path`: sent, then put in the vault (said
+    /// A file put in here at `path`: sent, then put in the vault (said
     /// as `uploaded`). Its id; none for one too big.
     pub fn upload(&mut self, path: &str, bytes: &[u8]) -> Option<String> {
         self.notes.upload(path, bytes.to_vec())
     }
 
-    /// The pictures put in here and not on the server yet, by id.
+    /// The files put in here and not on the server yet, by id.
     pub fn uploading(&self) -> Vec<String> {
         self.notes.uploading()
     }
 
-    /// Why the pictures waiting wait, when it's something that won't mend
+    /// Why the files waiting wait, when it's something that won't mend
     /// by itself, in words; none else.
-    pub fn pictures_held(&self) -> Option<String> {
-        self.notes.pictures_held().map(str::to_string)
+    pub fn files_held(&self) -> Option<String> {
+        self.notes.files_held().map(str::to_string)
     }
 
-    /// The pictures waiting, offered again.
-    pub fn retry_pictures(&mut self) {
-        self.notes.retry_pictures();
+    /// The files waiting, offered again.
+    pub fn retry_files(&mut self) {
+        self.notes.retry_files();
     }
 
-    /// Every picture the vault names, by id: what is worth keeping here.
-    pub fn picture_ids(&self) -> Vec<String> {
-        self.notes.picture_ids()
+    /// Every file the vault names, by id: what is worth keeping here.
+    pub fn file_ids(&self) -> Vec<String> {
+        self.notes.file_ids()
     }
 
     /// This browser's device id, in hex.
@@ -659,9 +659,9 @@ impl Vault {
                 Said::Writable => r#"{"writable":true}"#.to_string(),
                 Said::ReadOnly => r#"{"readOnly":true}"#.to_string(),
                 Said::Usage(u) => format!(
-                    r#"{{"usage":{{"notes":{},"pictures":{},"limit":{},"writable":{},"plan":{},"until":{}}}}}"#,
+                    r#"{{"usage":{{"notes":{},"files":{},"limit":{},"writable":{},"plan":{},"until":{}}}}}"#,
                     u.notes,
-                    u.pictures,
+                    u.files,
                     u.limit.map_or("null".into(), |l| l.to_string()),
                     u.writable,
                     json(&u.plan),

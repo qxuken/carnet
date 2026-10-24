@@ -1,6 +1,6 @@
-//! The clipboard beyond text, which kui's own paste and copy carry: a
-//! picture, or files copied in a file manager. Tests never touch the
-//! system clipboard.
+//! What a paste brings beyond text, which kui's own paste carries: a
+//! picture, or files copied in a file manager. A copy, text or picture,
+//! goes out through kui. Tests never touch the system clipboard.
 
 use std::path::PathBuf;
 
@@ -36,21 +36,4 @@ pub fn read_media() -> Option<Media> {
 #[cfg(test)]
 pub fn read_media() -> Option<Media> {
     None
-}
-
-/// Puts a picture on the clipboard.
-#[cfg(not(test))]
-pub fn write_image(w: u32, h: u32, rgba: Vec<u8>) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_image(arboard::ImageData {
-        width: w as usize,
-        height: h as usize,
-        bytes: rgba.into(),
-    })
-    .map_err(|e| e.to_string())
-}
-
-#[cfg(test)]
-pub fn write_image(_w: u32, _h: u32, _rgba: Vec<u8>) -> Result<(), String> {
-    Ok(())
 }

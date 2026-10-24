@@ -537,12 +537,12 @@ fn path_of(url: &str) -> String {
     format!("/{}", url.split_once("://").unwrap().1.split_once('/').unwrap().1)
 }
 
-/// A picture over HTTP, by the links the socket gives: offered, put at
+/// A file over HTTP, by the links the socket gives: offered, put at
 /// its link, kept on disk by its 204 (the device's word); fetched by its link,
 /// whole, ranges too. A link the other way, changed, or past its size
 /// gets nowhere; the file on disk is sealed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_picture_goes_by_its_links_over_http() {
+async fn a_file_goes_by_its_links_over_http() {
     use carnet_sync::session::Transfer;
     let data = temp("links");
     std::fs::create_dir_all(&data).unwrap();
@@ -649,10 +649,10 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Pictures a server kept in its databases before move out into files
+/// Files a server kept in its databases before move out onto disk
 /// on its next start, once, sealed as they were.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pictures_kept_in_a_database_move_to_files_on_start() {
+async fn files_kept_in_a_database_move_out_to_disk_on_start() {
     use carnet_server::Storage;
     let data = temp("move");
     {
@@ -743,7 +743,7 @@ async fn a_host_adds_routes_and_works_on_the_hub() {
 
 /// A host's pages beside the web app: its own headers, not the app's CSP;
 /// the app's files and any other address, the app's; and the CSP lets
-/// the page fetch pictures where the host keeps them.
+/// the page fetch files where the host keeps them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hosts_pages_keep_their_headers_beside_the_app() {
     use axum::routing::get;
@@ -769,7 +769,7 @@ async fn a_hosts_pages_keep_their_headers_beside_the_app() {
     let (status, head, _) = request(addr, "GET", "/", "", b"").await;
     assert_eq!(status, 200);
     assert!(head.contains("connect-src 'self' wss://notes.example;"), "{head}");
-    // Pictures elsewhere (a bucket): its origin allowed too.
+    // Files elsewhere (a bucket): its origin allowed too.
     assert!(server::web_csp("https://notes.example/", Some("https://pics.s3.example")).contains("connect-src 'self' wss://notes.example https://pics.s3.example;"));
     let _ = stop.send(());
     tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
@@ -788,7 +788,7 @@ fn hex(b: &[u8]) -> String {
 
 /// What the server keeps is its own user's alone: a data folder left open
 /// to others is closed on start, and the folders it makes, its databases
-/// and its pictures are made so. A link to put a picture given before its
+/// and its files are made so. A link to put a file given before its
 /// account was deleted puts nothing after: the account's folder isn't
 /// made again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -864,7 +864,7 @@ async fn the_data_is_private_and_a_deleted_accounts_link_puts_nothing() {
         }
     }
 
-    // A second picture's link, then the account deleted.
+    // A second file's link, then the account deleted.
     let second: Vec<u8> = vec![2; 7000];
     offer(&mut a, &second);
     a.settle(&mut ws).await;
@@ -879,7 +879,7 @@ async fn the_data_is_private_and_a_deleted_accounts_link_puts_nothing() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(!folder.exists(), "its pictures gone with it");
+    assert!(!folder.exists(), "its files gone with it");
     let removal = data.join("blobs").join("gone").join(hex(&account));
     assert!(removal.exists(), "its removal recorded, for the sweep");
     #[cfg(unix)]
@@ -929,15 +929,15 @@ async fn goes(path: &Path) -> bool {
     !path.exists()
 }
 
-/// The hourly sweep (the first at start) takes the pictures of accounts
+/// The hourly sweep (the first at start) takes the files of accounts
 /// removed here, and no others. An account removed has that recorded
-/// beside the pictures, so a picture put after (by a link given before,
+/// beside the files, so a file put after (by a link given before,
 /// which a bucket can't refuse) goes on the next sweep; an account's own
 /// stay; those of an account the store never knew (its records restored
 /// from before that account was made) are kept; a folder that names no
 /// account is left alone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn only_pictures_of_accounts_removed_here_are_swept() {
+async fn only_files_of_accounts_removed_here_are_swept() {
     use carnet_server::Storage;
     let data = temp("unowned");
     {
@@ -948,39 +948,39 @@ async fn only_pictures_of_accounts_removed_here_are_swept() {
         }
     }
     let blobs = data.join("blobs");
-    let picture = |owner: &str, id: &str| {
+    let file = |owner: &str, id: &str| {
         std::fs::create_dir_all(blobs.join(owner)).unwrap();
         std::fs::write(blobs.join(owner).join(id.repeat(32)), b"SEALED").unwrap();
     };
     for owner in [hex(b"here"), hex(b"leaving"), hex(b"newer"), "not-an-account".into()] {
-        picture(&owner, "07");
+        file(&owner, "07");
     }
     let (srv, hub) = start_hosted(&data, server::Start::default()).await;
     hub.run(|hub, outs| outs.extend(hub.remove_account(b"leaving").unwrap())).await.unwrap();
-    assert!(goes(&blobs.join(hex(b"leaving"))).await, "an account removed: its pictures gone with it");
+    assert!(goes(&blobs.join(hex(b"leaving"))).await, "an account removed: its files gone with it");
     assert!(blobs.join("gone").join(hex(b"leaving")).exists(), "and that recorded");
     // A put by a link given before, landing after.
-    picture(&hex(b"leaving"), "08");
+    file(&hex(b"leaving"), "08");
     srv.stop().await;
 
     let (srv, _hub) = start_hosted(&data, server::Start::default()).await;
-    assert!(goes(&blobs.join(hex(b"leaving"))).await, "a removed account's late picture: gone on the sweep");
+    assert!(goes(&blobs.join(hex(b"leaving"))).await, "a removed account's late file: gone on the sweep");
     assert!(blobs.join(hex(b"here")).join("07".repeat(32)).exists(), "an account's own stay");
     assert!(blobs.join(hex(b"newer")).join("07".repeat(32)).exists(), "an account the store never knew: kept");
-    assert!(blobs.join("not-an-account").exists(), "not a picture folder: left as it is");
+    assert!(blobs.join("not-an-account").exists(), "not a file folder: left as it is");
     srv.stop().await;
     let _ = std::fs::remove_dir_all(&data);
 }
 
-/// A data folder with no account beside pictures of accounts it has no
-/// record of (its records not put back, the pictures left): the server
+/// A data folder with no account beside files of accounts it has no
+/// record of (its records not put back, the files left): the server
 /// refuses to start, says why and what to do, and makes nothing (no
-/// invite). Told to start anyway, it does, and keeps them. Pictures of
+/// invite). Told to start anyway, it does, and keeps them. Files of
 /// accounts whose removal is recorded alone don't stop it: they go.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn no_accounts_beside_untracked_pictures_refuses_to_start() {
+async fn no_accounts_beside_untracked_files_refuses_to_start() {
     use carnet_server::Storage;
-    let data = temp("old-pictures");
+    let data = temp("old-files");
     let blobs = data.join("blobs");
     let old = blobs.join(hex(b"old")).join("07".repeat(32));
     std::fs::create_dir_all(old.parent().unwrap()).unwrap();
@@ -994,27 +994,29 @@ async fn no_accounts_beside_untracked_pictures_refuses_to_start() {
     let config = Config { data: data.clone(), origin: "http://127.0.0.1:1".into(), compact_after: server::COMPACT_AFTER, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None };
     let refused = tokio::time::timeout(Duration::from_secs(10), server::serve(config, listener, std::future::pending())).await.expect("refuses at once").expect_err("refused");
     let said = refused.to_string();
-    assert!(said.contains("The data folder holds pictures of 1 account, and there are no accounts here"), "{said}");
-    assert!(said.contains("Put the records back first") && said.contains("--keep-untracked-pictures"), "{said}");
+    assert!(said.contains("The data folder holds files of 1 account, and there are no accounts here"), "{said}");
+    assert!(said.contains("Put the records back first") && said.contains("--keep-untracked-files"), "{said}");
     assert!(Sharded::open(&data).unwrap().invites().is_empty(), "no invite made");
     assert!(old.exists() && removed.exists(), "nothing deleted");
 
-    let start = server::Start { keep_untracked_pictures: true };
+    let start = server::Start { keep_untracked_files: true };
     let (srv, hub) = start_hosted(&data, start).await;
-    assert!(goes(&removed).await, "a removed account's pictures go");
-    assert!(old.exists(), "the old pictures kept");
+    assert!(goes(&removed).await, "a removed account's files go");
+    assert!(old.exists(), "the old files kept");
     assert_eq!(hub.run(|hub, _| hub.store().invites().len()).await, Some(1), "the first invite, as on any first start");
     srv.stop().await;
     let _ = std::fs::remove_dir_all(&data);
 }
 
-/// The binary, beside pictures of accounts it has no record of: it stops
-/// and names `--keep-untracked-pictures`; given it, or
-/// `CARNET_KEEP_UNTRACKED_PICTURES=1`, it starts, and prints the first
-/// account's invite, good for a day. The flag's name before it is no
-/// option (it was never released).
+/// The binary, beside files of accounts it has no record of: it stops
+/// and names `--keep-untracked-files`; given it, or
+/// `CARNET_KEEP_UNTRACKED_FILES=1`, it starts, and prints the first
+/// account's invite, good for a day. Its names from when the server kept
+/// only pictures, `--keep-untracked-pictures` and
+/// `CARNET_KEEP_UNTRACKED_PICTURES=1`, still do; the flag's name before
+/// those is no option (it was never released).
 #[test]
-fn the_binary_starts_beside_untracked_pictures_when_told() {
+fn the_binary_starts_beside_untracked_files_when_told() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     let data = temp("keep-untracked");
@@ -1036,10 +1038,15 @@ fn the_binary_starts_beside_untracked_pictures_when_told() {
         String::from_utf8_lossy(&out.stderr).into_owned()
     };
     let refused = said(server(&[], &[]));
-    assert!(refused.contains("--keep-untracked-pictures (CARNET_KEEP_UNTRACKED_PICTURES=1)"), "{refused}");
+    assert!(refused.contains("--keep-untracked-files (CARNET_KEEP_UNTRACKED_FILES=1)"), "{refused}");
     let old_name = said(server(&["--beside-old-pictures"], &[]));
     assert!(old_name.contains("--beside-old-pictures: not an option"), "{old_name}");
-    for (args, vars) in [(&["--keep-untracked-pictures"][..], &[][..]), (&[][..], &[("CARNET_KEEP_UNTRACKED_PICTURES", "1")][..])] {
+    for (args, vars) in [
+        (&["--keep-untracked-files"][..], &[][..]),
+        (&[][..], &[("CARNET_KEEP_UNTRACKED_FILES", "1")][..]),
+        (&["--keep-untracked-pictures"][..], &[][..]),
+        (&[][..], &[("CARNET_KEEP_UNTRACKED_PICTURES", "1")][..]),
+    ] {
         let mut child = server(args, vars).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
         let lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let invite = lines.map_while(Result::ok).find(|l| l.contains("(single use")).unwrap_or_default();
@@ -1047,7 +1054,7 @@ fn the_binary_starts_beside_untracked_pictures_when_told() {
         let _ = child.wait();
         assert!(invite.ends_with("(single use, good for 1 day: if it has run out, restart the server for a new one)"), "{invite:?}");
     }
-    assert!(old.exists(), "the pictures kept");
+    assert!(old.exists(), "the files kept");
     let _ = std::fs::remove_dir_all(&data);
 }
 

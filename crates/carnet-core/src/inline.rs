@@ -1966,9 +1966,119 @@ pub fn switch_at(text: &str, at: usize, kind: Kind) -> (String, String) {
     }
 }
 
+// ------------------------------------------------------------ case
+
+/// What a change of case makes of the words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Case {
+    /// lowercase
+    Lower,
+    /// UPPERCASE
+    Upper,
+    /// Capitalize Each Word: a word's first letter up, the rest down.
+    Title,
+    /// Sentence case: a sentence's first letter up, the rest down.
+    Sentence,
+}
+
+impl Case {
+    /// After `now`, as Word's Shift+F3 goes: lowercase, UPPERCASE,
+    /// Capitalize Each Word, and round again; words of any other mix go
+    /// lowercase first.
+    pub fn after(now: &str) -> Option<Case> {
+        if !now.chars().any(|c| c.is_lowercase() || c.is_uppercase()) {
+            return None;
+        }
+        Some(if now == now.to_lowercase() {
+            Case::Upper
+        } else if now == now.to_uppercase() {
+            Case::Title
+        } else {
+            Case::Lower
+        })
+    }
+}
+
+/// The letters of `a..b` in `case`: only the words drawn, never a mark or
+/// a link's address, which are as written. What begins a word or a
+/// sentence is read across the marks, from the line's start, so
+/// `**hello** world` capitalizes as the words read. The new text and the
+/// range now holding the same words; `None` when nothing changes.
+pub fn change_case(text: &str, a: usize, b: usize, case: Case) -> Option<(String, usize, usize)> {
+    let st = styles(text);
+    let mut out = String::with_capacity(text.len());
+    // The two letters drawn before this one, and whether a sentence's end
+    // (`.`, `!` or `?`, then a space) has come since the last word.
+    let (mut prev, mut prev2): (Option<char>, Option<char>) = (None, None);
+    let (mut stop, mut start) = (false, true);
+    let mut end = b;
+    for (i, ch) in text.char_indices() {
+        let drawn = st.get(i).is_some_and(|s| !s.marker && !s.picture);
+        if !drawn {
+            out.push(ch);
+            continue;
+        }
+        // A word starts after anything but a letter, or an apostrophe
+        // inside a word ("don't").
+        let word_start = !prev.is_some_and(char::is_alphanumeric) && !(matches!(prev, Some('\'' | '\u{2019}')) && prev2.is_some_and(char::is_alphanumeric));
+        let first = match case {
+            Case::Title => word_start,
+            Case::Sentence => start,
+            _ => false,
+        };
+        if (a..b).contains(&i) {
+            let up = case == Case::Upper || (first && ch.is_alphanumeric());
+            let n = out.len();
+            if up { out.extend(ch.to_uppercase()) } else { out.extend(ch.to_lowercase()) }
+            // A letter whose other case is longer or shorter (ß, İ).
+            end = end + (out.len() - n) - ch.len_utf8();
+        } else {
+            out.push(ch);
+        }
+        if ch.is_alphanumeric() {
+            start = false;
+            stop = false;
+        } else if matches!(ch, '.' | '!' | '?') {
+            stop = true;
+        } else if ch.is_whitespace() && stop {
+            start = true;
+        } else if !ch.is_whitespace() && !matches!(ch, '"' | '\'' | ')' | '\u{201d}' | '\u{2019}') {
+            stop = false;
+        }
+        (prev2, prev) = (prev, Some(ch));
+    }
+    (out != text).then_some((out, a, end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each case on plain words, marks kept as written and read across,
+    /// a link's address untouched, and letters whose other case is longer.
+    #[test]
+    fn a_change_of_case_changes_the_words_and_not_the_marks() {
+        let all = |t: &str, c: Case| change_case(t, 0, t.len(), c).map(|r| r.0);
+        assert_eq!(all("Hello World", Case::Lower).as_deref(), Some("hello world"));
+        assert_eq!(all("Hello World", Case::Upper).as_deref(), Some("HELLO WORLD"));
+        assert_eq!(all("hello wORLD, don't 'quote' it", Case::Title).as_deref(), Some("Hello World, Don't 'Quote' It"));
+        assert_eq!(all("ONE. two! three? 3.5 four", Case::Sentence).as_deref(), Some("One. Two! Three? 3.5 four"));
+        assert_eq!(all("**hello** world", Case::Title).as_deref(), Some("**Hello** World"));
+        assert_eq!(all("see [the Docs](https://Ex.com/A) now", Case::Upper).as_deref(), Some("SEE [THE DOCS](https://Ex.com/A) NOW"));
+        assert_eq!(all("<mark style=\"color: #c0504d\">Red</mark>", Case::Lower).as_deref(), Some("<mark style=\"color: #c0504d\">red</mark>"));
+        assert_eq!(all("already", Case::Lower), None, "nothing to change");
+        // Part of a line: what begins a word is read from before it.
+        assert_eq!(change_case("one tWO", 1, 7, Case::Title), Some(("one Two".to_string(), 1, 7)));
+        // ß goes up as SS; a dotless ı up is a letter a byte shorter, and
+        // the range shrinks with it.
+        assert_eq!(change_case("straße", 0, 7, Case::Upper), Some(("STRASSE".to_string(), 0, 7)));
+        assert_eq!(change_case("ı x", 0, 2, Case::Upper), Some(("I x".to_string(), 0, 1)));
+        // Shift+F3's round.
+        assert_eq!(Case::after("word"), Some(Case::Upper));
+        assert_eq!(Case::after("WORD"), Some(Case::Title));
+        assert_eq!(Case::after("Word Two"), Some(Case::Lower));
+        assert_eq!(Case::after("3.5 —"), None);
+    }
 
     /// A dropped first letter is written as a tag around the letter and
     /// read back off it, the words as they were — styled, coloured, after
