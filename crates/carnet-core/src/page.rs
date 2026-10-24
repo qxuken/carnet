@@ -2563,6 +2563,44 @@ pub fn tint(doc: &mut Doc, c: &mut Caret, ink: bool, color: u32) -> bool {
     edit_ranges(doc, c, |t, a, b| inline::tint(t, a, b, ink, color))
 }
 
+/// The selection's words in `case` (`inline::change_case`), or, with
+/// nothing selected, the word the caret is in, the caret staying where it
+/// was. Code and pictures are passed over.
+pub fn change_case(doc: &mut Doc, c: &mut Caret, case: inline::Case) -> bool {
+    if !c.is_empty() {
+        return edit_ranges(doc, c, |t, a, b| inline::change_case(t, a, b, case));
+    }
+    let mut word = word_at(doc, c.head);
+    if word.is_empty() || !edit_ranges(doc, &mut word, |t, a, b| inline::change_case(t, a, b, case)) {
+        return false;
+    }
+    *c = Caret::at(clamp(doc, c.head));
+    true
+}
+
+/// The case Shift+F3 turns the selection's words to next ([`inline::Case::after`]),
+/// or the word the caret is in; `None` with no letters there.
+pub fn case_after(doc: &Doc, c: Caret) -> Option<inline::Case> {
+    let c = if c.is_empty() { word_at(doc, c.head) } else { c };
+    let (a, b) = ordered(doc, c);
+    let parts: Vec<(Slot, usize, usize)> = if a.slot == b.slot {
+        vec![(a.slot, a.byte, b.byte)]
+    } else {
+        coverage(doc, c).parts.iter().map(|(s, &(f, t))| (*s, f, t)).collect()
+    };
+    let mut words = String::new();
+    for (s, from, to) in parts {
+        if from >= to || !styled(doc, s) {
+            continue;
+        }
+        let _r = reading(s);
+        let t = text(doc, s);
+        let st = inline::styles(t);
+        words.extend(t[from..to].char_indices().filter(|(i, _)| st.get(from + i).is_some_and(|s| !s.marker && !s.picture)).map(|(_, ch)| ch));
+    }
+    inline::Case::after(&words)
+}
+
 /// The link the caret is in: its slot, a place in its words and its
 /// address.
 pub fn link_at(doc: &Doc, c: Caret) -> Option<(Slot, usize, String)> {

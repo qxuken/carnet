@@ -1001,6 +1001,39 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
+/// Shift+F3 goes round the cases of the word the caret is in, as Word's
+/// does, the caret staying; the page's menu puts the selection in one,
+/// Markdown's marks as they were. Each is one undo.
+#[test]
+fn the_case_changes_by_shift_f3_and_the_menu() {
+    let (mut app, mut d, dir) = body("case");
+    type_in(&mut app, &mut d, "hello **brave** world");
+    let at = app.caret;
+    for want in ["hello **brave** WORLD", "hello **brave** World", "hello **brave** world"] {
+        key_with(&mut app, &mut d, "f3", SHIFT);
+        assert_eq!(texts(&app)[0], want);
+    }
+    assert_eq!(app.caret, at, "the caret where it was");
+    key_with(&mut app, &mut d, "a", CTRL);
+    app.page_action("case:title");
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "Hello **Brave** World");
+    app.page_action("case:upper");
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "HELLO **BRAVE** WORLD");
+    app.page_action("case:sentence");
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "Hello **brave** world");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app)[0], "HELLO **BRAVE** WORLD", "one undo");
+    // In the page's menu, under Change case.
+    let menu = app.page_menu();
+    let sub = menu.iter().find(|i| i.label == "Change case").expect("Change case");
+    let names: Vec<&str> = sub.submenu.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(names, ["lowercase", "UPPERCASE", "Capitalize Each Word", "Sentence case"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// Dropped under the words, past the empty line after them: in that
 /// line's place, as a paste is, so the file has one blank line between
 /// the words and the picture.

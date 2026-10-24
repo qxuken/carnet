@@ -57,6 +57,20 @@ struct Cx {
     focus: Option<u64>,
 }
 
+/// The cases the page's menu offers: each written as it makes the words,
+/// and its name in the menu's action.
+const CASES: [(&str, &str, inline::Case); 4] = [
+    ("lowercase", "lower", inline::Case::Lower),
+    ("UPPERCASE", "upper", inline::Case::Upper),
+    ("Capitalize Each Word", "title", inline::Case::Title),
+    ("Sentence case", "sentence", inline::Case::Sentence),
+];
+
+/// A case by its name in an action ("case:upper").
+fn case_named(name: &str) -> Option<inline::Case> {
+    CASES.iter().find(|c| c.1 == name).map(|c| c.2)
+}
+
 fn hash(s: &str) -> u64 {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
@@ -2064,6 +2078,12 @@ impl Carnet {
             item("Highlight", "highlight").accel(keys::HIGHLIGHT),
             item("Text colour\u{2026}", "tint-menu:1"),
             item("Highlight colour\u{2026}", "tint-menu:0"),
+            // The selection's words, or the word the caret is in, each
+            // case written as it makes them; Shift+F3 goes round them.
+            MenuItem::submenu(
+                "Change case",
+                CASES.iter().map(|(label, name, _)| item(label, &format!("case:{name}"))).collect(),
+            ),
             MenuItem::separator(),
         ]);
         if in_table {
@@ -2186,6 +2206,12 @@ impl Carnet {
                 }
             }
             "highlight" => self.on_plain(Msg::Tint { ink: 0, color: inline::HIGHLIGHT as u64 }),
+            // Shift+F3: the next case round, as Word goes.
+            "case" => {
+                if let Some(to) = page::case_after(self.doc(), self.caret) {
+                    self.edit(Step::Other, |d, c| page::change_case(d, c, to));
+                }
+            }
             "addrow" => self.on_plain(Msg::AddRow),
             "addcol" => self.on_plain(Msg::AddCol),
             "delrow" => self.on_plain(Msg::DelRow),
@@ -2223,6 +2249,8 @@ impl Carnet {
                     self.tint_from = None;
                 } else if let Some(to) = a.strip_prefix("turn:").and_then(|n| n.parse().ok()) {
                     self.on_plain(Msg::Turn { to });
+                } else if let Some(to) = a.strip_prefix("case:").and_then(case_named) {
+                    self.edit(Step::Other, |d, c| page::change_case(d, c, to));
                 }
             }
         }
@@ -2402,6 +2430,7 @@ impl Carnet {
             KeyCode::Char('x') | KeyCode::Char('X') if chord => self.page_action("cut"),
             KeyCode::Char('v') | KeyCode::Char('V') if chord => self.paste(),
             KeyCode::Char('h') if chord && shift => self.page_action("highlight"),
+            KeyCode::F(3) if shift && !chord && !m.alt => self.page_action("case"),
             KeyCode::Char('l') if chord && m.alt => self.page_action("float:1"),
             KeyCode::Char('r') if chord && m.alt => self.page_action("float:2"),
             // The block becomes: Ctrl/Cmd+Alt+0 text, 1–3 headings,

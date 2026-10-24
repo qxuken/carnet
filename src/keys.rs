@@ -26,6 +26,8 @@ pub const UNDERLINE: &str = "mod+u";
 pub const CODE: &str = "mod+e";
 pub const LINK: &str = "mod+k";
 pub const HIGHLIGHT: &str = "mod+shift+h";
+/// lowercase, UPPERCASE, Capitalize Each Word, round again: Word's key.
+pub const CHANGE_CASE: &str = "shift+f3";
 // Pictures.
 pub const FLOAT_LEFT: &str = "mod+alt+l";
 pub const FLOAT_RIGHT: &str = "mod+alt+r";
@@ -59,7 +61,7 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 44] = [
+pub const ALL: [(&str, &str); 45] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
     ("Rename folder", RENAME_FOLDER),
@@ -101,6 +103,7 @@ pub const ALL: [(&str, &str); 44] = [
     ("Code", CODE),
     ("Link", LINK),
     ("Highlight", HIGHLIGHT),
+    ("Change case", CHANGE_CASE),
     ("Paste a picture", PASTE),
     ("Picture left of the text", FLOAT_LEFT),
     ("Picture right of the text", FLOAT_RIGHT),
