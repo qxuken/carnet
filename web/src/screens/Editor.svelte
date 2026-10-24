@@ -70,6 +70,8 @@
   let sortedHow = $state(0);
   /// The caret's table has a header row.
   let tableHeader = $state(true);
+  /// Which ways the caret's row and column can move: up, down, left, right.
+  let tableMoves = $state([false, false, false, false]);
   let chooser: HTMLInputElement | undefined = $state();
   let folderOf = '';
 
@@ -127,6 +129,7 @@
     inTable = !!pe.cell_caret();
     sortedHow = pe.sorted();
     tableHeader = pe.table_header();
+    tableMoves = Array.from(pe.table_moves(), (n) => n === 1);
     turned = Object.fromEntries(Object.entries(TURN).map(([k, v]) => [k, pe!.turned_to(v)]));
     flags = pe.style_here();
     const t = pe.tint_here();
@@ -165,14 +168,19 @@
   const heading = (pe: PageEditor) =>
     pe.turned_to(TURN.h1) ? pe.turn(TURN.h2) : pe.turned_to(TURN.h2) ? pe.turn(TURN.h3) : pe.turned_to(TURN.h3) ? pe.turn(TURN.h3) : pe.turn(TURN.h1);
 
-  type Tool = { icon: () => string; label: string; f: (pe: PageEditor) => boolean; on?: () => boolean; gap?: boolean };
+  type Tool = { icon: () => string; label: string; f: (pe: PageEditor) => boolean; on?: () => boolean; off?: () => boolean; gap?: boolean };
 
-  /// In a table's cell: its rows and columns.
+  /// In a table's cell: its rows and columns. A move past the table's
+  /// edge, or the header's up or down, is greyed.
   const tableTools: Tool[] = [
     { icon: () => 'add-row', label: 'Add a row below', f: (pe) => pe.table_op(0) },
     { icon: () => 'add-col', label: 'Add a column after', f: (pe) => pe.table_op(1) },
     { icon: () => 'del-row', label: 'Remove the row', f: (pe) => pe.table_op(2) },
     { icon: () => 'del-col', label: 'Remove the column', f: (pe) => pe.table_op(3) },
+    { icon: () => 'row-up', label: 'Move the row up', f: (pe) => pe.table_op(5), off: () => !tableMoves[0] },
+    { icon: () => 'row-down', label: 'Move the row down', f: (pe) => pe.table_op(6), off: () => !tableMoves[1] },
+    { icon: () => 'col-left', label: 'Move the column left', f: (pe) => pe.table_op(7), off: () => !tableMoves[2] },
+    { icon: () => 'col-right', label: 'Move the column right', f: (pe) => pe.table_op(8), off: () => !tableMoves[3] },
     { icon: () => 'table-header', label: 'Header row', f: (pe) => pe.table_op(4), on: () => tableHeader },
     {
       icon: () => ['sort', 'sort-up', 'sort-down'][sortedHow],
@@ -440,7 +448,7 @@
       <div class="tools" bind:this={toolsEl} use:ends>
         {#each inTable ? [...tableTools, ...tools.slice(7)] : pic ? pictureTools : tools as t (t.label)}
           {#if t.gap}<span class="gap"></span>{/if}
-          <button class:on={t.on?.()} aria-label={t.label} aria-pressed={t.on ? t.on() : undefined} title={t.label} onclick={() => act(t.f)}>
+          <button class:on={t.on?.()} disabled={t.off?.()} aria-label={t.label} aria-pressed={t.on ? t.on() : undefined} title={t.label} onclick={() => act(t.f)}>
             <Icon name={t.icon()} size={20} />
           </button>
         {/each}
@@ -503,6 +511,7 @@
     border: 0; border-radius: var(--radius); background: none; color: var(--ink); cursor: pointer;
   }
   button.on { background: var(--accent-soft); color: var(--accent-ink); }
+  button:disabled { opacity: 0.35; cursor: default; }
   .gap { flex: none; width: 1px; height: 22px; margin: 0 4px; background: var(--border-strong); }
   .away { border-left: 1px solid var(--border); border-radius: 0; width: 48px; height: 48px; color: var(--muted); }
   .sheet { padding: 12px 14px 4px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }

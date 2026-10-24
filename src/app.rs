@@ -115,6 +115,11 @@ pub enum Msg {
     AddCol,
     DelRow,
     DelCol,
+    /// The caret's table row up (`by` −1) or down (1), past the next; the
+    /// header stays on top.
+    MoveRow { by: i64 },
+    /// The caret's table column left (`by` −1) or right (1).
+    MoveCol { by: i64 },
     /// The table's header row taken away, or put back.
     TableHeader,
     Sort,
@@ -3314,6 +3319,8 @@ impl Carnet {
                 | Msg::AddCol
                 | Msg::DelRow
                 | Msg::DelCol
+                | Msg::MoveRow { .. }
+                | Msg::MoveCol { .. }
                 | Msg::TableHeader
                 | Msg::Sort
                 | Msg::Tint { .. }
@@ -3394,6 +3401,12 @@ impl Carnet {
             }
             Msg::DelCol => {
                 self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::DelCol, false));
+            }
+            Msg::MoveRow { by } => {
+                self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::MoveRow { by: by as isize }, false));
+            }
+            Msg::MoveCol { by } => {
+                self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::MoveCol { by: by as isize }, false));
             }
             Msg::TableHeader => {
                 self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::Header, false));

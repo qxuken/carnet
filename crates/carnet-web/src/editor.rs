@@ -700,16 +700,28 @@ impl Editor {
     }
 
     /// A row or a column added after the caret's, or the caret's taken
-    /// out: `0` row, `1` column, `2` take the row out, `3` the column.
+    /// out: `0` row, `1` column, `2` take the row out, `3` the column;
+    /// `4` the header row; the caret's row moved `5` up or `6` down, its
+    /// column `7` left or `8` right.
     pub fn table_op(&mut self, op: u8) -> bool {
         let op = match op {
             0 => TableOp::AddRow,
             1 => TableOp::AddCol,
             2 => TableOp::DelRow,
             3 => TableOp::DelCol,
+            5 => TableOp::MoveRow { by: -1 },
+            6 => TableOp::MoveRow { by: 1 },
+            7 => TableOp::MoveCol { by: -1 },
+            8 => TableOp::MoveCol { by: 1 },
             _ => TableOp::Header,
         };
         self.edit(Step::Other, |d, c| page::table_op(d, c, op, false))
+    }
+
+    /// Which ways the caret's row and column can move: up, down, left,
+    /// right ([`page::table_moves`]).
+    pub fn table_moves(&self) -> [bool; 4] {
+        page::table_moves(&self.doc, self.caret)
     }
 
     /// The table sorted by the caret's column, A to Z; again, Z to A.
@@ -1555,6 +1567,25 @@ mod tests {
         assert!(e.look(1).head);
         assert_eq!(e.look(1).cells.len(), 2);
         assert!(e.markdown().contains("| Day | Miles |\n| --- | --- |\n| Fri | 30 |"), "{}", e.markdown());
+    }
+
+    /// A row and a column moved, as the desktop moves them: the caret with
+    /// its words, the header on top, a column's alignment with it; one
+    /// undo each.
+    #[test]
+    fn a_tables_rows_and_columns_move() {
+        let mut e = Editor::open("# T\n\n| Day | Miles |\n| --- | --: |\n| Mon | 12 |\n| Tue | 30 |\n");
+        e.cell_select(1, 1, 1, 1, 1);
+        assert_eq!(e.table_moves(), [false, true, true, false]);
+        assert!(e.table_op(6));
+        assert_eq!(e.cell_caret(), Some((1, 2, 1, 1, 1)), "the caret with its words");
+        assert!(!e.table_op(6), "the bottom row goes no lower");
+        assert!(e.table_op(7));
+        assert!(e.markdown().contains("| Miles | Day |\n| --: | --- |\n| 30 | Tue |\n| 12 | Mon |"), "{}", e.markdown());
+        e.cell_select(1, 0, 0, 0, 0);
+        assert_eq!(e.table_moves(), [false, false, false, true], "the header neither up nor down");
+        assert!(e.undo());
+        assert!(e.markdown().contains("| Day | Miles |\n| --- | --: |\n| Tue | 30 |\n| Mon | 12 |"), "{}", e.markdown());
     }
 
     /// The toolbar's divider, as the desktop's: between two paragraphs it

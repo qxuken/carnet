@@ -39,6 +39,13 @@ pub const OUTDENT: &str = "shift+tab";
 pub const DUPLICATE: &str = "mod+d";
 pub const REMOVE: &str = "mod+shift+k";
 pub const TICK: &str = "mod+enter";
+// In a table's cell, the block's move with Shift: its row or its column.
+// (Alt+Shift+←→ selects by word elsewhere; in a cell Ctrl+Shift still
+// does, but not Option+Shift on a Mac.)
+pub const ROW_UP: &str = "alt+shift+up";
+pub const ROW_DOWN: &str = "alt+shift+down";
+pub const COL_LEFT: &str = "alt+shift+left";
+pub const COL_RIGHT: &str = "alt+shift+right";
 // Moving around.
 pub const TOP: &str = "mod+up";
 pub const BOTTOM: &str = "mod+down";
@@ -61,7 +68,7 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 45] = [
+pub const ALL: [(&str, &str); 49] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
     ("Rename folder", RENAME_FOLDER),
@@ -95,6 +102,10 @@ pub const ALL: [(&str, &str); 45] = [
     ("Duplicate block", DUPLICATE),
     ("Remove block", REMOVE),
     ("Table", TABLE),
+    ("Move table row up", ROW_UP),
+    ("Move table row down", ROW_DOWN),
+    ("Move table column left", COL_LEFT),
+    ("Move table column right", COL_RIGHT),
     ("Divider", DIVIDER),
     ("Bold", BOLD),
     ("Italic", ITALIC),

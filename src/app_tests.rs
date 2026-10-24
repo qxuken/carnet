@@ -226,6 +226,82 @@ fn backspace_takes_empty_lines_and_then_a_table_and_undo_brings_it_back() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A table's row moves with Alt+Shift+↑↓ and its column with Alt+Shift+←→,
+/// or from the toolbar and the page's menu, which grey a move past the
+/// table's edge or the header; the caret goes with its words, and each
+/// move is one undo.
+#[test]
+fn a_tables_rows_and_columns_move_and_the_caret_with_them() {
+    // Wide, so the table's tools all show in the strip.
+    let (store, dir) = temp_store("table-move");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1800.0, 760.0).framing();
+    d.frame(&mut app);
+    app.new_note();
+    d.frame(&mut app);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    let table = Table::from_cells(vec![
+        vec!["Day".into(), "Miles".into()],
+        vec!["Mon".into(), "12".into()],
+        vec!["Tue".into(), "30".into()],
+    ]);
+    let (top, mon, day, miles) = (table.rows[0].id, table.rows[1].id, table.cols[0], table.cols[1]);
+    app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
+    let slot = Slot { block: blocks(&app)[0].id, cell: Some((mon, day)) };
+    app.caret = Caret::at(Pos { slot, byte: 2 });
+    d.frame(&mut app);
+    d.frame(&mut app);
+    let words = |app: &Carnet| {
+        let Kind::Table(t) = &blocks(app)[0].kind else { panic!() };
+        t.rows.iter().map(|r| r.cells.join(" ")).collect::<Vec<_>>()
+    };
+    let alt_shift = KeyMods { shift: true, ctrl: false, alt: true, super_key: false };
+    d.core.set_inspect(true);
+    let enabled = |d: &mut Drive, key: &str| {
+        let k = d.key_of(key).expect(key);
+        d.core.nodes().iter().any(|n| n.key == k && !n.flags.contains(&"disabled"))
+    };
+    let menu = |app: &Carnet, label: &str| app.page_menu().into_iter().find(|m| m.label == label).expect(label).enabled;
+    // Under the header, at the left: only down and right.
+    assert_eq!(app.table_moves(), [false, true, false, true]);
+    assert!(!enabled(&mut d, "t-rowup") && enabled(&mut d, "t-rowdown"));
+    assert!(!enabled(&mut d, "t-colleft") && enabled(&mut d, "t-colright"));
+    assert!(!menu(&app, "Move row up") && menu(&app, "Move column right"));
+    key_with(&mut app, &mut d, "down", alt_shift);
+    assert_eq!(words(&app), ["Day Miles", "Tue 30", "Mon 12"]);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 2 }), "the caret in its words");
+    assert!(enabled(&mut d, "t-rowup") && !enabled(&mut d, "t-rowdown"), "the bottom row");
+    key_with(&mut app, &mut d, "right", alt_shift);
+    assert_eq!(words(&app), ["Miles Day", "30 Tue", "12 Mon"]);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 2 }));
+    // From the toolbar and the menu.
+    let up = d.key_of("t-rowup").unwrap();
+    d.click_key(&mut app, up);
+    d.frame(&mut app);
+    assert_eq!(words(&app), ["Miles Day", "12 Mon", "30 Tue"]);
+    app.page_action("colleft");
+    d.frame(&mut app);
+    assert_eq!(words(&app), ["Day Miles", "Mon 12", "Tue 30"]);
+    // Up again from under the header: nothing, the header stays on top.
+    key_with(&mut app, &mut d, "up", alt_shift);
+    assert_eq!(words(&app)[0], "Day Miles");
+    // From the header, the row doesn't go down; its column does go.
+    app.caret = Caret::at(Pos { slot: Slot { cell: Some((top, miles)), ..slot }, byte: 0 });
+    d.frame(&mut app);
+    assert_eq!(app.table_moves(), [false, false, true, false]);
+    key_with(&mut app, &mut d, "down", alt_shift);
+    assert_eq!(words(&app)[0], "Day Miles", "the header stays the header");
+    // Each move one undo.
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(words(&app), ["Miles Day", "12 Mon", "30 Tue"]);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(words(&app), ["Miles Day", "30 Tue", "12 Mon"]);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_selection_runs_across_blocks_and_copies_as_markdown() {
     let (mut app, mut d, dir) = body("select");

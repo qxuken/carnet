@@ -84,6 +84,10 @@ impl Carnet {
         );
         // A row for the note's blocks: greyed off the page.
         let page = |label: &str, spec: &str| key(label, spec).enabled(on_page);
+        // A row for the table the caret is in: greyed elsewhere, so its
+        // key (Option+Shift+←, say) is the page's own there.
+        let in_table = on_page && self.caret.head.slot.cell.is_some();
+        let table = |label: &str, spec: &str| key(label, spec).enabled(in_table);
         let edit = BarMenu::new(
             "Edit",
             vec![
@@ -128,6 +132,10 @@ impl Carnet {
                 MenuItem::separator(),
                 page("Move Block Up", keys::MOVE_UP),
                 page("Move Block Down", keys::MOVE_DOWN),
+                table("Move Row Up", keys::ROW_UP),
+                table("Move Row Down", keys::ROW_DOWN),
+                table("Move Column Left", keys::COL_LEFT),
+                table("Move Column Right", keys::COL_RIGHT),
                 page("Tick or Untick", keys::TICK),
             ],
         );
