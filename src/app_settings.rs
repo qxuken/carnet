@@ -825,6 +825,11 @@ impl Carnet {
                 segmented(ui, l, "check-updates", &["Off", "On"], usize::from(check), |to| Msg::SetCheckUpdates { to });
             });
         });
+        // The welcome note again, for whoever let it go: an afterthought,
+        // last of all and faint, but a button all the same, to Tab to.
+        ui.with(NodeSpec::row().grow_width().padding(Edges { l: 0.0, r: 0.0, t: 14.0, b: 0.0 }), |ui| {
+            faint_button(ui, l, "add-welcome", "Add the getting-started note", Msg::AddWelcome);
+        });
     }
 
     /// Settings → Sync (docs/SYNC.md §5, §7): off, the way in chosen and
@@ -2438,6 +2443,26 @@ fn quiet_button(ui: &mut Ui<'_>, l: &Look, key: &str, word: &str, msg: Msg) {
             .label(word),
         word,
         TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
+    );
+}
+
+/// A button for an afterthought, quieter still: its word in the faintest
+/// grey that reads (3.3:1 on the page), on a well under the pointer so
+/// light that it still reads there (3:1 and up).
+fn faint_button(ui: &mut Ui<'_>, l: &Look, key: &str, word: &str, msg: Msg) {
+    let t = l.t;
+    ui.text_in_keyed(
+        key,
+        NodeSpec::row()
+            .pad_xy(6.0, 4.0)
+            .radius(radius::CONTROL)
+            .hover_bg(t.bg.mix(t.fg, 0.03))
+            .pressed_bg(t.bg.mix(t.fg, 0.04))
+            .on_click(msg)
+            .role(Role::Button)
+            .label(word),
+        word,
+        TextStyle::new(Type::SMALL.size).color(t.faint).nowrap(),
     );
 }
 

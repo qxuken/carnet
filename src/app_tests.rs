@@ -3635,6 +3635,83 @@ fn the_application_menu_is_the_macs_own() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Settings' last line, quiet and faint: the welcome note again. The
+/// first written in, a fresh one comes beside it at the top level, opened
+/// and chosen in the library (every note shown, the folder it was on let
+/// go), Settings closed. From the keyboard, a second time: that one,
+/// untouched, not a third. On a Mac, Help ▸ Getting Started Note.
+#[test]
+fn the_welcome_note_comes_again_from_settings_and_the_help_menu() {
+    let (mut app, mut d, dir) = fresh_mac("welcome-again");
+    let first = app.store.notes.iter().position(|n| n.title == "Welcome to Carnet").expect("the welcome");
+    app.store.notes[first].doc.push(Block::text("mine now"));
+    app.store.notes[first].touch();
+    app.store.save(first, true).unwrap();
+    let first = app.store.notes[first].id;
+    let work = app.store.create_folder("", "Work").unwrap();
+    app.show_folder(Some(work));
+    app.on_plain(Msg::ShowSettings);
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    // A button, named for a reader, in the faintest ink that reads.
+    let k = d.key_named("Add the getting-started note").expect("the line, by its name");
+    assert_eq!(d.key_of("add-welcome"), Some(k));
+    let node = d.core.nodes().into_iter().find(|n| n.key == k).unwrap();
+    assert_eq!(node.role, Some(Role::Button));
+    assert!(node.flags.contains(&"click"), "{:?}", node.flags);
+    // Its faint word reads on the page, and on its well under the pointer
+    // and pressed, in every palette.
+    for p in crate::design::Palette::ALL {
+        for dark in [false, true] {
+            let c = crate::design::Colors::of(p, dark);
+            for (on, k) in [("page", 0.0), ("hover", 0.03), ("pressed", 0.04)] {
+                let ratio = crate::design::contrast(c.faint, c.page.mix(c.ink, k));
+                assert!(ratio >= 3.0, "{} {}: {ratio} on the {on}", p.name(), if dark { "dark" } else { "light" });
+            }
+        }
+    }
+    // Last of all: scrolled to, and clicked.
+    for _ in 0..60 {
+        if d.rect_of(k).is_some_and(|r| r.y > 60.0 && r.y + r.h < 740.0) {
+            break;
+        }
+        d.wheel(&mut app, 700.0, 400.0, 0.0, -240.0);
+        d.frame(&mut app);
+    }
+    let at = d.rect_of(k).expect("in the window").center();
+    d.click(&mut app, at.x, at.y);
+    d_frame_twice(&mut app, &mut d);
+    assert!(!app.settings_open);
+    let added = app.current;
+    let note = &app.store.notes[added];
+    assert_eq!((note.title.as_str(), note.folder.as_str()), ("Welcome to Carnet", ""));
+    assert_eq!(note.path.as_deref(), Some(dir.join("Welcome to Carnet 2.md").as_path()), "beside the first, saved");
+    assert_eq!(app.store.notes.len(), 2, "the first, and it");
+    assert_eq!(app.folder, None, "every note shown");
+    assert!(app.order.contains(&added), "its card in the library");
+    // From the keyboard, again: the same one, untouched, not a third.
+    app.on_plain(Msg::ShowSettings);
+    d_frame_twice(&mut app, &mut d);
+    let k = d.key_of("add-welcome").unwrap();
+    d.focus(&mut app, k);
+    d.frame(&mut app);
+    assert_eq!(d.core.focus(), Some(k), "in the Tab ring");
+    key(&mut app, &mut d, "enter");
+    assert!(!app.settings_open);
+    assert_eq!(app.current, added);
+    assert_eq!(app.store.notes.len(), 2);
+    // Help ▸ Getting Started Note, from the first: the same one opens.
+    let i = app.store.notes.iter().position(|n| n.id == first).unwrap();
+    app.on_plain(Msg::OpenNote { note: i as u64 });
+    d.frame(&mut app);
+    choose(&mut app, &mut d, "Help", "Getting Started Note");
+    assert_eq!(app.current, added);
+    assert_eq!(app.store.notes.len(), 2);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_apps_chords_reach_it_from_the_title_and_the_search() {
     let (mut app, mut d, dir) = fresh("field-chords");

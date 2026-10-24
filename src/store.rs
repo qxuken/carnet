@@ -2282,7 +2282,7 @@ impl Store {
     pub fn drop_welcome(&mut self) -> io::Result<bool> {
         // As this Carnet makes it, or as one before it did.
         let fresh = [welcome().markdown(), welcome_until_0_1_3().markdown()];
-        let welcome = |n: &Note| !n.dirty && n.folder.is_empty() && n.path.is_some() && fresh.contains(&n.markdown());
+        let welcome = |n: &Note| n.folder.is_empty() && fresh.iter().any(|f| untouched_welcome(n, f));
         let Some(i) = self.notes.iter().position(welcome) else { return Ok(false) };
         if self.notes.iter().enumerate().any(|(j, n)| j != i && !(n.is_blank() && n.path.is_none())) {
             return Ok(false);
@@ -2321,6 +2321,28 @@ impl Store {
         self.notes.push(welcome());
         self.save(self.notes.len() - 1, true)?;
         Ok(true)
+    }
+
+    /// The welcome note asked for again (Settings, or Help on a Mac): the
+    /// one nobody has touched, wherever it is, if there is one, rather
+    /// than a second the same beside it; otherwise a fresh one at the top
+    /// level, saved and kept to send as any new note is, under the first
+    /// free name ("Welcome to Carnet 2" beside one written in). Untouched,
+    /// it is still the welcome [`drop_welcome`](Store::drop_welcome) lets
+    /// go of on joining an account with nothing else here. A failed save
+    /// leaves nothing behind. Its index.
+    pub fn add_welcome(&mut self) -> io::Result<usize> {
+        let fresh = welcome().markdown();
+        if let Some(i) = self.notes.iter().position(|n| untouched_welcome(n, &fresh)) {
+            return Ok(i);
+        }
+        self.notes.push(welcome());
+        let i = self.notes.len() - 1;
+        if let Err(e) = self.save(i, true) {
+            self.notes.pop();
+            return Err(e);
+        }
+        Ok(i)
     }
 
     /// Brings a trashed file back as a note under its old name (or the
@@ -3286,6 +3308,12 @@ pub fn reveal(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `n` is the welcome note as [`welcome`] makes it (`fresh`, its
+/// Markdown), saved, and nobody has written in it since.
+fn untouched_welcome(n: &Note, fresh: &str) -> bool {
+    !n.dirty && n.path.is_some() && n.markdown() == fresh
+}
+
 fn welcome() -> Note {
     use crate::keys;
     let k = keys::label;
@@ -3643,6 +3671,48 @@ mod tests {
         assert_ne!(s.notes[0].markdown(), welcome().markdown(), "the older words");
         assert!(s.drop_welcome().unwrap());
         assert!(s.notes.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The welcome note asked for again: the untouched one, not a second
+    /// the same; written in, or gone to Deleted, a fresh one at the top
+    /// level under the next free name, saved and sent. The one added is
+    /// still a welcome a joining device lets go of when nothing else is
+    /// here, and the account's own keeps it from being put back twice.
+    #[test]
+    fn the_welcome_note_comes_again_when_asked_for() {
+        let dir = temp_dir("welcome-again");
+        let mut s = Store::open(dir.clone()).unwrap();
+        assert_eq!(s.add_welcome().unwrap(), 0, "untouched: that one");
+        assert_eq!(s.notes.len(), 1);
+        // Written in: a fresh one beside it, to be sent.
+        s.notes[0].doc.push(Block::text("mine now"));
+        s.notes[0].touch();
+        s.save(0, true).unwrap();
+        let _ = s.take_changed();
+        let i = s.add_welcome().unwrap();
+        assert_eq!((i, s.notes.len()), (1, 2));
+        assert_eq!(s.notes[i].title, "Welcome to Carnet");
+        assert!(s.notes[i].folder.is_empty(), "at the top level");
+        assert_eq!(s.notes[i].path.as_deref(), Some(dir.join("Welcome to Carnet 2.md").as_path()));
+        assert_eq!(fs::read_to_string(dir.join("Welcome to Carnet 2.md")).unwrap(), welcome().markdown());
+        let key = s.notes[i].key.expect("kept to send");
+        assert!(s.take_changed().contains(&key), "sent");
+        // Asked again: the fresh one, untouched, not a third.
+        assert_eq!(s.add_welcome().unwrap(), i);
+        assert_eq!(s.notes.len(), 2);
+        // Beside the one written in, it stays as a device joins; alone,
+        // it goes as the first would have.
+        assert!(!s.drop_welcome().unwrap());
+        s.trash(0).unwrap();
+        assert!(s.drop_welcome().unwrap());
+        assert!(s.notes.is_empty());
+        // Both in Deleted or gone: asked for, a fresh one all the same,
+        // under the first name again; and then the account has one.
+        let i = s.add_welcome().unwrap();
+        assert_eq!(s.notes[i].path.as_deref(), Some(dir.join("Welcome to Carnet.md").as_path()));
+        assert!(!s.welcome_unless_the_account_has_one().unwrap());
+        assert_eq!(s.notes.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
