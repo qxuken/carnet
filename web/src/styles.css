@@ -114,13 +114,22 @@ button { font: inherit; color: inherit; }
 .note th { background: var(--sunken); color: var(--muted); font: 400 13px/18px var(--sans); padding: 9px 14px; }
 .note tr:first-child > :first-child { border-top-left-radius: calc(var(--radius) - 1px); }
 .note tr:first-child > :last-child { border-top-right-radius: calc(var(--radius) - 1px); }
-/* A divider as the desktop draws it by default (settings `divider =
-   dots`): three dots 3px round, 15px apart, faint, with the desktop's
-   space round them; below the pictures at an edge. */
+/* A divider as the desktop draws it, in the way this browser chose
+   (lib/divider.ts sets the `--divider-*` properties on the root; the
+   editor reads the same, theme.ts): a line tall, centred, never wider
+   than the text, with the desktop's space round it (three dots at the
+   middle of it, 27px below the block before and 29px above the next);
+   below the pictures at an edge. An ornament is the faint ink seen
+   through its outlines; the reader's own words are in the page's face
+   and that ink, cut short where they'd be too wide; their picture is
+   drawn as it is. */
 .note hr {
-  width: 33px; height: 3px; margin: 26px auto 28px; border: 0; clear: both; color: var(--faint);
-  background: radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x;
+  box-sizing: content-box; width: min(var(--divider-w), 100%); height: 27px; margin: 14px auto 16px; padding: 0; border: 0; clear: both;
+  overflow: hidden; color: var(--faint); font: inherit; line-height: 27px; text-align: center; white-space: nowrap; text-overflow: ellipsis;
+  background: var(--divider-image) center / contain no-repeat var(--divider-ink);
+  -webkit-mask: var(--divider-mask) center / contain no-repeat; mask: var(--divider-mask) center / contain no-repeat;
 }
+.note hr::after { content: var(--divider-words); }
 .note a { color: var(--accent-ink); text-decoration-color: color-mix(in srgb, var(--accent-ink) 40%, transparent); }
 /* Underlined words, a little below the letters; a link's words underlined
    keep the link's one line. */

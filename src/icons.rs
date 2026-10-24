@@ -473,6 +473,24 @@ pub fn ornament_width(d: Divider) -> f32 {
     ornament_parts(d).0
 }
 
+/// A divider's ornament as an SVG file at its size at 16px text, in
+/// `ink`: the same outlines the page draws, round-capped as kui strokes
+/// them, for the web's dividers (`carnet --icons`).
+pub fn ornament_svg(d: Divider, ink: &str) -> String {
+    let (w, h, stroke, fill, sw) = ornament_parts(d);
+    let mut body = String::new();
+    if !fill.trim().is_empty() {
+        body.push_str(&format!("<path d=\"{}\" fill=\"{ink}\"/>", fill.trim()));
+    }
+    if !stroke.trim().is_empty() {
+        body.push_str(&format!(
+            "<path d=\"{}\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"{sw}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+            stroke.trim()
+        ));
+    }
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">{body}</svg>\n")
+}
+
 /// A divider's ornament in `ink`, at `k` times its size at 16px text.
 pub fn ornament(ui: &mut Ui<'_>, d: Divider, ink: Color, k: f32) {
     let (stroke, fill, w, h, sw) = ORNAMENTS.with(|c| {
@@ -515,6 +533,19 @@ mod tests {
                 assert!(!part.contains('\\'), "{d:?}: a stray backslash");
             }
             assert!(scaled(&s, 0.75).is_some() || scaled(&f, 0.75).is_some(), "{d:?} draws something");
+        }
+    }
+
+    /// The web draws its dividers from the files `carnet --icons` writes
+    /// (web/src/icons/ornament-*.svg, in the text's colour): the same
+    /// shapes as the page here, not ones drawn again by hand.
+    #[test]
+    fn the_webs_ornaments_are_these() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/src/icons");
+        for d in Divider::ALL.into_iter().filter(|d| !matches!(d, Divider::Text | Divider::Picture)) {
+            let file = dir.join(format!("ornament-{}.svg", d.key()));
+            let web = std::fs::read_to_string(&file).unwrap_or_default().replace("\r\n", "\n");
+            assert_eq!(web, ornament_svg(d, "currentColor"), "{}", file.display());
         }
     }
 
