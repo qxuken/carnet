@@ -1197,6 +1197,34 @@ fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
+/// `/file` asks for files as the paperclip does, of any kind, and what
+/// comes goes in on the line it was typed on, which it leaves empty.
+#[test]
+fn slash_file_asks_for_files_and_links_them_on_its_line() {
+    let (mut app, mut d, dir) = body("slash-file");
+    type_in(&mut app, &mut d, "Intro");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "/file");
+    d.frame(&mut app);
+    assert!(app.slash_now().is_some_and(|(_, shown)| crate::slash::COMMANDS[shown[0]].name == "File"), "offered first");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app), ["Intro", ""], "the line left empty for the files");
+    d.frame(&mut app);
+    let asked = d.core.take_file_requests();
+    assert_eq!(asked.len(), 1, "one dialog");
+    assert!(asked[0].filters.is_empty(), "any file: {:?}", asked[0].filters);
+    let outside = std::env::temp_dir().join(format!("carnet-slash-file-src-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let pdf = outside.join("Tickets.pdf");
+    std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+    app.insert_files(std::slice::from_ref(&pdf));
+    d.frame(&mut app);
+    assert_eq!(texts(&app), ["Intro", "[Tickets.pdf](attachments/Tickets.pdf)"]);
+    assert!(dir.join("attachments/Tickets.pdf").is_file());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
 /// Shift+F3 goes round the cases of the word the caret is in, as Word's
 /// does, the caret staying; the page's menu puts the selection in one,
 /// Markdown's marks as they were. Each is one undo.

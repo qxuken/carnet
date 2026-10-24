@@ -2595,16 +2595,18 @@ impl Carnet {
         (!shown.is_empty()).then_some((block, shown))
     }
 
-    /// Runs a `/` command on the line it was typed on.
+    /// Runs a `/` command on the line it was typed on: a picture's or a
+    /// file's asks for them, to go in on the line it leaves empty.
     pub(super) fn run_slash(&mut self, i: usize) {
-        let picture = slash::COMMANDS
-            .get(i)
-            .is_some_and(|c| c.action == slash::Action::Picture);
+        let action = slash::COMMANDS.get(i).map(|c| c.action);
         self.focus_page = true;
         self.edit(Step::Other, |d, c| slash::apply(d, c, i));
         self.slash_sel = 0;
-        if picture {
-            self.pick_pictures = true;
+        match action {
+            Some(slash::Action::Picture) => self.pick_pictures = true,
+            // The paperclip's dialog: pictures and files of every kind.
+            Some(slash::Action::File) => self.pick_files = true,
+            _ => {}
         }
     }
 

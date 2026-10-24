@@ -3339,6 +3339,7 @@ fn welcome() -> Note {
                 &["/divider", "a divider"],
                 &["/code", "a code block"],
                 &["/picture", "pictures from your files"],
+                &["/file", "any file, linked among the words"],
             ]))),
             Block::text("A start is enough: /ta is a table, /h the headings. Beside most, the menu shows what to type instead next time: #, -, ---."),
             heading("Tables that stay put"),
