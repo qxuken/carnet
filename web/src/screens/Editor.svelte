@@ -21,8 +21,19 @@
   import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
   import { drawnPicture, picked as pictureHere, textWidth, type Picked } from '../lib/editor/picture';
   import { linkOpening } from '../lib/editor/links';
+  import { commands, follow as followSlash, hintOf, iconOf, slashHere, slashKeys, type Slash } from '../lib/editor/slash';
+  import { LIST_TURNS, toolSet } from '../lib/editor/tools';
 
-  let props: { key: string; folder: string; fresh: boolean } = $props();
+  let props: {
+    key: string;
+    folder: string;
+    fresh: boolean;
+    /// A file that isn't a picture, picked for a note in `folder` (the
+    /// paperclip, `/file`): kept beside the notes and synced, its `src` as
+    /// the note links it. Without it the editor takes pictures alone: the
+    /// paperclip is the picture chooser, and `/file` is not offered.
+    addFile?: (folder: string, file: File) => Promise<string>;
+  } = $props();
   // Which note, as it was opened: an editor is for one note (the reader
   // makes a new one for another), and its props may be gone by the time
   // it closes.
@@ -64,30 +75,103 @@
   let opens = $state<string | null>(null);
   /// The words' colour and highlighter at the caret.
   let tint = $state<[number, number]>([0, 0]);
-  /// The caret is in a table's cell.
-  let inTable = $state(false);
   /// How the caret's column was last sorted: 0 not, 1 A to Z, 2 Z to A.
   let sortedHow = $state(0);
   /// The caret's table has a header row.
   let tableHeader = $state(true);
   /// Which ways the caret's row and column can move: up, down, left, right.
   let tableMoves = $state([false, false, false, false]);
+  /// What the caret is in (`PageEditor.kind_here`: `words`, `list`,
+  /// `table`, `code`, `divider`, `picture`, `blocks`, `title`), which
+  /// tools show; for a mix of blocks, what they hold (`blocks_here`).
+  let kind = $state('words');
+  let holds = $state(0);
+  /// The caret's paragraphs' first letter: 0 no paragraph, 1 in the
+  /// line, 2 dropped. Its to-do: 0 none, 1 not done, 2 done.
+  let initial = $state(0);
+  let ticked = $state(0);
+  /// The `/` menu while it shows, its highlighted row, and where it
+  /// hangs: under its line, or over it when there's no room below.
+  let slash = $state<Slash | null>(null);
+  let slashSel = $state(0);
+  let slashAt = $state<{ left: number; top?: number; bottom?: number } | null>(null);
+  let writing: HTMLElement;
   let chooser: HTMLInputElement | undefined = $state();
+  let anyFile: HTMLInputElement | undefined = $state();
   let folderOf = '';
 
-  /// A picture chosen (or taken with the camera): kept, sent, and put in
+  /// Pictures chosen (or taken with the camera): kept, sent, and put in
   /// the note below the caret.
   async function picked(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
+    const files = [...(input.files ?? [])];
     input.value = '';
-    if (!file || !pe) return;
-    try {
-      const src = await sync.addPicture(folderOf, file);
-      act((pe) => pe.insert_picture(src));
-    } catch (err) {
-      sync.say(err instanceof Error ? err.message : String(err));
+    await take(files);
+  }
+
+  /// Files picked with the paperclip or `/file`, as the desktop takes
+  /// them: a picture put in as a picture, every other file kept beside
+  /// the notes (`addFile`) and linked among the caret's words.
+  async function take(files: File[]) {
+    if (!pe) return;
+    const names: string[] = [];
+    const srcs: string[] = [];
+    for (const file of files) {
+      try {
+        if (file.type.startsWith('image/')) {
+          const src = await sync.addPicture(folderOf, file);
+          act((pe) => pe.insert_picture(src));
+        } else if (props.addFile) {
+          srcs.push(await props.addFile(folderOf, file));
+          names.push(file.name);
+        }
+      } catch (err) {
+        sync.say(err instanceof Error ? err.message : String(err));
+      }
     }
+    if (srcs.length) act((pe) => pe.insert_links(names, srcs));
+  }
+
+  /// The paperclip's dialog: pictures and files of every kind where the
+  /// web can keep them, pictures alone where it can't.
+  const pick = () => (props.addFile ? anyFile : chooser)?.click();
+
+  /// `/` command `i` made of its line; a picture's or a file's then asks
+  /// for them, to go in on the line it leaves empty.
+  function runSlash(i: number) {
+    const what = commands()[i]?.act;
+    act((pe) => pe.run_slash(i));
+    if (what === 'picture') chooser?.click();
+    else if (what === 'file') pick();
+  }
+
+  /// The `/` menu as the page has it now. `/file` only where the web
+  /// can keep a file.
+  function slashNow(pe: PageEditor): Slash | null {
+    const s = slashHere(pe);
+    if (!s) return null;
+    const shown = s.shown.filter((i) => commands()[i].act !== 'file' || !!props.addFile);
+    return shown.length ? { ...s, shown } : null;
+  }
+
+  /// The menu hung from its line, once the view is drawn (CodeMirror's
+  /// layout isn't read during its update): under it, at the text's start
+  /// a little to the left, or over it when what's seen has no room below
+  /// and has some above. Never over the line being typed.
+  function hang() {
+    requestAnimationFrame(() => {
+      if (!slash || !view || !writing) return void (slashAt = null);
+      const line = view.state.doc.line(Math.min(slash.line + 1, view.state.doc.lines));
+      const at = view.coordsAtPos(line.from, 1);
+      if (!at) return void (slashAt = null);
+      const box = writing.getBoundingClientRect();
+      const tall = 12 + slash.shown.length * 35;
+      const vv = window.visualViewport;
+      const foot = (vv ? vv.offsetTop + vv.height : innerHeight) - (small && bar ? barHeight : 0);
+      const above = at.bottom + tall + 8 > foot && at.top - tall - 8 >= 0;
+      const left = Math.max(0, Math.min(at.left - box.left - 16, box.width - Math.min(280, box.width)));
+      slashAt = above ? { left, bottom: box.bottom - at.top + 2 } : { left, top: at.bottom - box.top + 2 };
+    });
   }
   // On a phone, while the note has the keyboard (or a sheet is open); on
   // a wide screen, always, at the note's top.
@@ -126,7 +210,6 @@
   function moved() {
     if (!pe || !view) return;
     focused = view.hasFocus || !!document.activeElement?.closest('.cm-tablewrap');
-    inTable = !!pe.cell_caret();
     sortedHow = pe.sorted();
     tableHeader = pe.table_header();
     tableMoves = Array.from(pe.table_moves(), (n) => n === 1);
@@ -136,6 +219,14 @@
     tint = [t[0], t[1]];
     pic = pictureHere(pe);
     if (!pic && sheet === 'size') sheet = null;
+    kind = pe.kind_here();
+    holds = pe.blocks_here();
+    initial = pe.initial_here();
+    ticked = pe.tick_here();
+    const s = slashNow(pe);
+    slashSel = followSlash(slash, s, slashSel);
+    slash = s;
+    hang();
   }
 
   function openLink() {
@@ -168,7 +259,7 @@
   const heading = (pe: PageEditor) =>
     pe.turned_to(TURN.h1) ? pe.turn(TURN.h2) : pe.turned_to(TURN.h2) ? pe.turn(TURN.h3) : pe.turned_to(TURN.h3) ? pe.turn(TURN.h3) : pe.turn(TURN.h1);
 
-  type Tool = { icon: () => string; label: string; f: (pe: PageEditor) => boolean; on?: () => boolean; off?: () => boolean; gap?: boolean };
+  type Tool = { icon: () => string; label: string; f: (pe: PageEditor) => boolean; on?: () => boolean; off?: () => boolean };
 
   /// In a table's cell: its rows and columns. A move past the table's
   /// edge, or the header's up or down, is greyed.
@@ -191,16 +282,14 @@
     { icon: () => 'trash', label: 'Remove the table', f: (pe) => pe.remove_table() },
   ];
 
-  /// A picture selected: where it sits, its size, taking it out. What a
-  /// block becomes and the words' styles do nothing to it, so these stand
-  /// in their place, as on the desktop.
-  const pictureTools: Tool[] = [
+  /// A picture selected: where it sits and its size. What a block becomes
+  /// and the words' styles do nothing to it, so these stand in their
+  /// place, as on the desktop; it goes up, down and away as any block.
+  const placeTools: Tool[] = [
     { icon: () => 'inline', label: 'On its own line', f: (pe) => pe.set_picture_float(0, false), on: () => pic?.float === 0 },
     { icon: () => 'float-left', label: 'Left of the text', f: (pe) => pe.set_picture_float(1, false), on: () => pic?.float === 1 },
     { icon: () => 'float-right', label: 'Right of the text', f: (pe) => pe.set_picture_float(2, false), on: () => pic?.float === 2 },
-    { icon: () => 'resize', label: 'Size', f: () => ((sheet = sheet === 'size' ? null : 'size'), false), on: () => sheet === 'size', gap: true },
-    { icon: () => 'trash', label: 'Remove picture', f: (pe) => pe.remove_picture() },
-    { icon: () => 'undo', label: 'Undo', f: (pe) => pe.undo(), gap: true },
+    { icon: () => 'resize', label: 'Size', f: () => ((sheet = sheet === 'size' ? null : 'size'), false), on: () => sheet === 'size' },
   ];
 
   /// The sizes a picture is given from the list: shares of the text's
@@ -213,35 +302,86 @@
     return !!el && Math.abs(el.getBoundingClientRect().width - sizeOf(pct)) < 2;
   }
 
-  const tools: Tool[] = [
+  /// What the block becomes; a paragraph's first letter dropped, greyed
+  /// on a heading or a quote, which share the paragraph's tools.
+  const turnTools: Tool[] = [
     { icon: () => 'todo', label: 'Checklist', f: (pe) => pe.turn(TURN.todo), on: () => turned.todo },
     { icon: () => 'bullets', label: 'Bulleted list', f: (pe) => pe.turn(TURN.bullet), on: () => turned.bullet },
     { icon: () => 'numbers', label: 'Numbered list', f: (pe) => pe.turn(TURN.number), on: () => turned.number },
     { icon: () => (turned.h1 ? 'h2' : 'h1'), label: 'Heading', f: heading, on: () => turned.h1 || turned.h2 || turned.h3 },
     { icon: () => 'quote', label: 'Quote', f: (pe) => pe.turn(TURN.quote), on: () => turned.quote },
-    { icon: () => 'table', label: 'Table', f: (pe) => pe.insert_table() },
-    { icon: () => 'divider', label: 'Divider', f: (pe) => pe.insert_divider() },
-    { icon: () => 'picture', label: 'Picture', f: () => (chooser?.click(), false) },
-    ...STYLES.filter((s) => s.tool).map((s, i): Tool => ({ icon: () => s.icon, label: s.label, f: (pe) => pe.style(s.which), on: () => !!(flags & s.flag), gap: i === 0 })),
+    { icon: () => 'initial', label: 'Drop the first letter', f: (pe) => pe.toggle_initial(), on: () => initial === 2, off: () => initial === 0 },
+  ];
+  /// A list's: in and out, and a to-do's tick (Ctrl+Enter's).
+  const listTools: Tool[] = [
+    { icon: () => 'outdent', label: 'Outdent', f: (pe) => pe.tab(true) },
+    { icon: () => 'indent', label: 'Indent', f: (pe) => pe.tab(false) },
+  ];
+  const tickTool: Tool = { icon: () => 'check', label: 'Done', f: (pe) => pe.tick(), on: () => ticked === 2 };
+  const styleTools: Tool[] = [
+    ...STYLES.filter((s) => s.tool).map((s): Tool => ({ icon: () => s.icon, label: s.label, f: (pe) => pe.style(s.which), on: () => !!(flags & s.flag) })),
     { icon: () => 'highlight', label: 'Highlight', f: (pe) => pe.tint(false, flags & 32 ? 0 : HIGHLIGHT), on: () => !!(flags & 32) },
     { icon: () => 'text-color', label: 'Colour', f: () => ((sheet = sheet === 'color' ? null : 'color'), false), on: () => sheet === 'color' || !!tint[0] },
     { icon: () => 'link', label: 'Link', f: () => (sheet === 'link' ? (sheet = null) : openLink(), false), on: () => sheet === 'link' },
-    { icon: () => 'outdent', label: 'Outdent', f: (pe) => pe.tab(true), gap: true },
-    { icon: () => 'indent', label: 'Indent', f: (pe) => pe.tab(false) },
-    { icon: () => 'undo', label: 'Undo', f: (pe) => pe.undo(), gap: true },
   ];
-
-  /// The tools for what the caret is in, as on the desktop: never one that
-  /// does nothing there. In a list, its kinds and in and out, not a heading
-  /// or a quote (a paragraph's, once it is one); in anything else, not the
-  /// in and out, which there would only type a tab. A table's and a
-  /// picture's are their own.
-  const inList = $derived(turned.todo || turned.bullet || turned.number);
-  const LIST_ONLY = new Set(['Outdent', 'Indent']);
-  const TEXT_ONLY = new Set(['Heading', 'Quote']);
-  const shownTools = $derived(
-    inTable ? [...tableTools, ...tools.slice(7)] : pic ? pictureTools : tools.filter((t) => !(inList ? TEXT_ONLY : LIST_ONLY).has(t.label)),
+  /// The paperclip: pictures and files where the web can keep files, the
+  /// picture chooser where it can't.
+  const clipTool: Tool = $derived(
+    props.addFile
+      ? { icon: () => 'attach', label: 'Add pictures or files', f: () => (pick(), false) }
+      : { icon: () => 'picture', label: 'Picture', f: () => (pick(), false) },
   );
+  const insertTools: Tool[] = $derived([
+    { icon: () => 'table', label: 'Table', f: (pe) => pe.insert_table() },
+    { icon: () => 'divider', label: 'Divider', f: (pe) => pe.insert_divider() },
+    clipTool,
+  ]);
+  /// The block's own: up, down, away (Alt+↑ and ↓ move it too).
+  const moveTools: Tool[] = [
+    { icon: () => 'up', label: 'Move up', f: (pe) => pe.move_blocks(-1) },
+    { icon: () => 'down', label: 'Move down', f: (pe) => pe.move_blocks(1) },
+    { icon: () => 'cross', label: 'Remove block', f: (pe) => pe.remove_blocks() },
+  ];
+  const undoTool: Tool = { icon: () => 'undo', label: 'Undo', f: (pe) => pe.undo() };
+
+  /// The tools for what the caret is in, as on the desktop (tools.ts):
+  /// never one that does nothing there. In a list, its kinds, not a
+  /// heading, a quote or a first letter, which are a paragraph's.
+  const groups = $derived(
+    toolSet(kind, holds).map((g): Tool[] => {
+      switch (g) {
+        case 'turn':
+          return kind === 'list' ? turnTools.filter((t) => LIST_TURNS.has(t.label)) : turnTools;
+        case 'list':
+          return ticked ? [...listTools, tickTool] : listTools;
+        case 'styles':
+          return styleTools;
+        case 'insert':
+          return insertTools;
+        case 'clip':
+          return [clipTool];
+        case 'moves':
+          return moveTools;
+        case 'table':
+          return tableTools;
+        case 'place':
+          return placeTools;
+        case 'undo':
+          return [undoTool];
+      }
+    }),
+  );
+  /// A screen reader's name for the strip, as the desktop's: its set.
+  const SET_NAMES: Record<string, string> = {
+    title: 'Insert tools',
+    words: 'Text tools',
+    list: 'List tools',
+    table: 'Table tools',
+    code: 'Code block tools',
+    divider: 'Divider tools',
+    picture: 'Picture tools',
+    blocks: 'Block tools',
+  };
 
   /// What's written, sent; what came meanwhile, merged in.
   function send() {
@@ -353,6 +493,16 @@
         extensions: [
           ...page.extensions,
           linkOpening(pe),
+          slashKeys({
+            menu: () => slash,
+            sel: () => slashSel,
+            choose: (n) => (slashSel = n),
+            take: runSlash,
+            close: () => {
+              pe?.slash_close();
+              moved();
+            },
+          }),
           keymap.of([{ key: 'Mod-k', run: () => (openLink(), true) }, { key: 'Escape', run: () => (sheet !== null ? ((sheet = null), true) : false) }]),
           keymap.of(defaultKeymap),
           theme,
@@ -457,12 +607,14 @@
       {#if more.start}
         <button class="more start" tabindex="-1" aria-hidden="true" title="More tools" onclick={() => scrollTools(false)}><Icon name="chevron-right" size={18} /></button>
       {/if}
-      <div class="tools" bind:this={toolsEl} use:ends>
-        {#each shownTools as t (t.label)}
-          {#if t.gap}<span class="gap"></span>{/if}
-          <button class:on={t.on?.()} disabled={t.off?.()} aria-label={t.label} aria-pressed={t.on ? t.on() : undefined} title={t.label} onclick={() => act(t.f)}>
-            <Icon name={t.icon()} size={20} />
-          </button>
+      <div class="tools" role="group" aria-label={SET_NAMES[kind] ?? 'Tools'} bind:this={toolsEl} use:ends>
+        {#each groups as g, n (g)}
+          {#if n > 0}<span class="gap"></span>{/if}
+          {#each g as t (t.label)}
+            <button class:on={t.on?.()} disabled={t.off?.()} aria-label={t.label} aria-pressed={t.on ? t.on() : undefined} title={t.label} onclick={() => act(t.f)}>
+              <Icon name={t.icon()} size={20} />
+            </button>
+          {/each}
         {/each}
       </div>
       {#if more.end}
@@ -479,13 +631,48 @@
 {/snippet}
 
 {#if bar && !small}{@render toolbar()}{/if}
-<div class="editor" class:barred={bar && small} bind:this={host}></div>
-<input class="chooser" type="file" accept="image/*" bind:this={chooser} onchange={picked} tabindex="-1" aria-hidden="true" />
+<div class="writing" bind:this={writing}>
+  <div class="editor" class:barred={bar && small} bind:this={host}></div>
+  {#if slash && slashAt && focused}
+    <!-- The `/` menu: pressed without taking the keyboard from the note. -->
+    <div class="slash" role="listbox" aria-label="Blocks" tabindex="-1" style:left="{slashAt.left}px" style:top={slashAt.top !== undefined ? `${slashAt.top}px` : null} style:bottom={slashAt.bottom !== undefined ? `${slashAt.bottom}px` : null} onpointerdown={(e) => e.preventDefault()}>
+      {#each slash.shown as i, row (i)}
+        {@const c = commands()[i]}
+        <button role="option" aria-selected={row === slashSel} class:on={row === slashSel} onclick={() => runSlash(i)}>
+          <Icon name={iconOf(i)} size={18} />
+          <span class="name">{c.name}</span>
+          <span class="hint">{hintOf(c)}</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
+</div>
+<input class="chooser" type="file" accept="image/*" multiple bind:this={chooser} onchange={picked} tabindex="-1" aria-hidden="true" />
+{#if props.addFile}
+  <input class="chooser" type="file" multiple bind:this={anyFile} onchange={picked} tabindex="-1" aria-hidden="true" />
+{/if}
 {#if bar && small}{@render toolbar()}{/if}
 
 <style>
   /* A container, for the pictures' widths (theme.ts `cqi`): the text's. */
   .editor { min-height: 60vh; container-type: inline-size; }
+  /* The `/` menu, as the desktop's: a card under its line, each row a
+     command's icon, name and what to type for it next time, the one
+     Enter takes on the accent's wash. */
+  .writing { position: relative; }
+  .slash {
+    position: absolute; z-index: 6; width: 280px; max-width: 100%; padding: 6px; display: flex; flex-direction: column; gap: 1px;
+    border-radius: var(--radius-card); background: var(--card); border: 1px solid var(--border);
+    box-shadow: 0 4px 18px color-mix(in srgb, #000 16%, transparent); animation: hang 140ms ease-out;
+  }
+  @keyframes hang { from { opacity: 0; transform: translateY(-4px); } }
+  .slash button {
+    width: 100%; height: 34px; padding: 0 10px; gap: 10px; justify-content: flex-start; border-radius: var(--radius); color: var(--muted);
+  }
+  .slash button:hover { background: var(--hover); }
+  .slash button.on { background: var(--accent-soft); color: var(--ink); }
+  .slash .name { flex: 1; min-width: 0; text-align: left; font: 600 14px var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .slash .hint { font: 12.5px var(--mono); color: var(--muted); white-space: nowrap; }
   .chooser { display: none; }
   .editor.barred { padding-bottom: 64px; }
   .bar { z-index: 5; display: flex; flex-direction: column; }

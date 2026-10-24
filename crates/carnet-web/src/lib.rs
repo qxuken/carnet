@@ -1210,6 +1210,102 @@ fn float_number(f: carnet_core::doc::Float) -> u32 {
     }
 }
 
+/// What the caret is in, for the toolbar, and the `/` menu: the desktop's
+/// own rules ([`carnet_core::slash`]), the menu drawn by the page.
+#[wasm_bindgen]
+impl PageEditor {
+    /// What the caret is in, for the toolbar's tools: `title`, `picture`,
+    /// `table`, `words` (paragraphs, headings, quotes), `list`, `code`,
+    /// `divider`, or `blocks`, a selection over blocks of different kinds.
+    pub fn kind_here(&self) -> String {
+        self.e.kind_here().to_string()
+    }
+
+    /// What the caret's blocks hold, for a mix's tools: 1 one that turns
+    /// into another kind, 2 a list item, 4 words to style.
+    pub fn blocks_here(&self) -> u8 {
+        self.e.blocks_here()
+    }
+
+    /// The caret's blocks moved up (`by` < 0) or down past their neighbour.
+    pub fn move_blocks(&mut self, by: i32) -> bool {
+        self.e.move_blocks(i64::from(by))
+    }
+
+    /// The caret's blocks taken out.
+    pub fn remove_blocks(&mut self) -> bool {
+        self.e.remove_blocks()
+    }
+
+    /// The caret's paragraphs' first letters: 0 no paragraph there (the
+    /// tool greyed), 1 in the line, 2 dropped.
+    pub fn initial_here(&self) -> u8 {
+        self.e.initial_here().map_or(0, |on| 1 + u8::from(on))
+    }
+
+    pub fn toggle_initial(&mut self) -> bool {
+        self.e.toggle_initial()
+    }
+
+    /// The caret's to-do: 0 none there, 1 not done, 2 done.
+    pub fn tick_here(&self) -> u8 {
+        self.e.tick_here().map_or(0, |done| 1 + u8::from(done))
+    }
+
+    /// The caret's item ticked or unticked (Ctrl+Enter).
+    pub fn tick(&mut self) -> bool {
+        self.e.tick()
+    }
+
+    /// Links to files, each `names[i]` to `srcs[i]` as the note links it,
+    /// put in at the caret among its words (a document picked or dropped).
+    pub fn insert_links(&mut self, names: Vec<String>, srcs: Vec<String>) -> bool {
+        let links: Vec<(String, String)> = names.into_iter().zip(srcs).collect();
+        self.e.insert_links(&links)
+    }
+
+    /// The `/` menu, while the caret ends a `/word` line, as JSON:
+    /// `{line: CodeMirror's line, word, shown: [index into
+    /// slash_commands(), in the order shown]}`; none otherwise.
+    pub fn slash(&mut self) -> Option<String> {
+        let (line, word, shown) = self.e.slash_menu()?;
+        let shown: Vec<String> = shown.iter().map(usize::to_string).collect();
+        Some(format!(r#"{{"line":{line},"word":{},"shown":[{}]}}"#, json(&word), shown.join(",")))
+    }
+
+    /// Esc on the `/` menu: closed for its line.
+    pub fn slash_close(&mut self) -> bool {
+        self.e.slash_close()
+    }
+
+    /// `/` command `i` made of its line.
+    pub fn run_slash(&mut self, i: u32) -> bool {
+        self.e.run_slash(i as usize)
+    }
+}
+
+/// The `/` menu's commands, in its order, as JSON: `[{name, hint, act}]`,
+/// `act` one of `turn`, `table`, `divider`, `code`, `picture`, `file`.
+#[wasm_bindgen]
+pub fn slash_commands() -> String {
+    use carnet_core::slash::{Action, COMMANDS};
+    let rows: Vec<String> = COMMANDS
+        .iter()
+        .map(|c| {
+            let act = match c.action {
+                Action::Turn(_) => "turn",
+                Action::Table => "table",
+                Action::Divider => "divider",
+                Action::Code => "code",
+                Action::Picture => "picture",
+                Action::File => "file",
+            };
+            format!(r#"{{"name":{},"hint":{},"act":"{act}"}}"#, json(c.name), json(c.hint))
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
 /// How wide a picture `natural` pixels wide is drawn, as the desktop draws
 /// it ([`page::picture_width`]): `[width, the width it has with none
 /// given]`; `given` 0 for none.
