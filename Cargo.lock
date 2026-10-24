@@ -2945,9 +2945,9 @@ dependencies = [
 
 [[package]]
 name = "kui-core"
-version = "0.1.0-alpha.66"
+version = "0.1.0-alpha.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4973f0f83db7fb7b3328f10b3f917750bffc4b97c39faea38cc50e82b5e6943"
+checksum = "981ec51ba21d6d5a84f6ebf9b07a18f31ba289d963a341e0e57585ca5e89dc0e"
 dependencies = [
  "cosmic-text",
  "kui-derive",
@@ -2963,9 +2963,9 @@ dependencies = [
 
 [[package]]
 name = "kui-derive"
-version = "0.1.0-alpha.66"
+version = "0.1.0-alpha.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed795bf9eabd4e2ad11fc60a5810fc87558d82bef2ff71f86dbcca9dd965e9f4"
+checksum = "26428b25a5fc7d495bc2c6b3405ef3f534c14c97031da68cf8fdd4ff0160cf9c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2974,9 +2974,9 @@ dependencies = [
 
 [[package]]
 name = "kui-native"
-version = "0.1.0-alpha.66"
+version = "0.1.0-alpha.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8628cd3eb8cc0fe389d19aa34f6eaea78c4efed62fb78185ec632cd74d1f6ce0"
+checksum = "69b0daf04b0021a74dbe421aadd12b62827b3bc10ca83209c36f4113b9cdb4d1"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -3006,9 +3006,9 @@ dependencies = [
 
 [[package]]
 name = "kui-wgpu"
-version = "0.1.0-alpha.66"
+version = "0.1.0-alpha.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "282d2c31fee37660b139b690da29abe403c114d22debb45aaa6218fcb5903b63"
+checksum = "284f99362f552bfbc8bc70d85f8ca7e078890ddce372bd572c30a8183598e859"
 dependencies = [
  "bytemuck",
  "kui-core",
