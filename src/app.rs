@@ -5072,7 +5072,7 @@ impl Carnet {
                 kui_native::FileDialog::open()
                     .multiple()
                     .title("Choose pictures")
-                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"])
                     .tag(Msg::PickedPictures),
             );
         }

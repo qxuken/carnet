@@ -1226,6 +1226,30 @@ fn any_file_is_linked() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
+/// An SVG picked, dropped or pasted goes in as a picture, not a link: drawn
+/// on the page at its own size, as a photo is, and kept as the SVG it is.
+#[test]
+fn an_svg_goes_in_as_a_picture() {
+    let (mut app, mut d, dir) = body("svg-picture");
+    let outside = std::env::temp_dir().join(format!("carnet-svg-picture-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let picked = outside.join("logo.svg");
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="120"><circle cx="60" cy="60" r="50" fill="#c0553f"/></svg>"##;
+    std::fs::write(&picked, svg).unwrap();
+    app.insert_files(std::slice::from_ref(&picked));
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    let kept = dir.join("attachments/logo.svg");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), svg, "kept as it is");
+    let md = app.store.notes[app.current].markdown();
+    assert!(md.contains("![](attachments/logo.svg)") && !md.contains("[logo.svg]("), "a picture, not a link: {md:?}");
+    assert!(app.notice.is_none() && app.error.is_none(), "{:?} {:?}", app.notice.as_ref().map(|n| &n.text), app.error);
+    assert!(matches!(app.images.get(&kept), crate::images::Entry::Ready { w: 300, h: 120, .. }), "drawn, at its own size");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
 /// A link to a file opens it in its own app: a `README`, source code, a
 /// PDF at once. One that could run (a program, a script, a shortcut) asks
 /// first, naming it: Cancel (or Enter, which is on it, or Esc) opens
@@ -10393,7 +10417,7 @@ fn a_picture_in_a_cell_is_drawn_in_it_and_taken_whole() {
     let png = crate::images::encode_png(800, 400, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 800, h: 400, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 800, h: 400, rgba, shown: None });
     let pic = "![|left|9000](attachments/wide.png)";
     let table = Table::from_cells(vec![vec!["img1".into(), "img2".into()], vec![format!("{pic}Words"), String::new()]]);
     app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
@@ -10454,7 +10478,7 @@ fn a_picture_is_carried_into_a_cell_and_out_again() {
     let png = crate::images::encode_png(200, 100, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba, shown: None });
     let pic = Block::new(Kind::Image { src: "attachments/wide.png".into(), alt: String::new(), width: Some(150), float: Float::Right, wiki: false });
     let id = pic.id;
     let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec!["x".into(), "y".into()]]);
@@ -10560,7 +10584,7 @@ fn a_chosen_cell_picture_shows_its_ring_and_no_caret() {
     let png = crate::images::encode_png(200, 100, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba, shown: None });
     let pic = "![|60](attachments/wide.png)";
     let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec![format!("x{pic}"), String::new()]]);
     app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
@@ -10620,7 +10644,7 @@ fn a_click_on_a_cell_picture_draws_its_ring_at_once() {
     let png = crate::images::encode_png(200, 100, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba, shown: None });
     let pic = "![](attachments/wide.png)";
     let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec![format!("x{pic}"), String::new()]]);
     app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("after")]);

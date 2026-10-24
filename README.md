@@ -45,7 +45,7 @@ And what it leaves out, on purpose:
 - **Tables** with steady columns, Tab and Enter navigation, rows and columns added, removed and moved, and sorting by a column.
 - **Edits made in other apps are merged.** A note changed in Obsidian, VS Code or a sync client while it has edits here keeps both sets of edits.
 - **History.** Every version a note has been, with what each one added and took away. Restore any of them, or restore one as a copy.
-- **Pictures** pasted or dropped in, resized, and placed on their own line or beside the text.
+- **Pictures** pasted or dropped in, resized, and placed on their own line or beside the text: photos, screenshots, GIFs, and SVG drawings, which stay sharp however wide they're drawn (their scripts never run).
 - **Markdown files dropped in become notes.** Drop `.md` (or `.markdown`) files on a folder in the library and they go into that folder; anywhere else, into the folder the library shows. Each is a copy under its own name (`Plan 2` when `Plan` is taken), the pictures and documents it links to from beside it come along into `attachments/`, and the first one opens. Dropped with pictures, the pictures go into the open note as usual and the Markdown files come in beside it.
 - **Copy that keeps formatting.** A selection copies as Markdown with an HTML version beside it, so a paste into Mail, Word or Google Docs keeps headings, lists, checkboxes, tables, bold, underline and links.
 - **A trash you can restore from.** Deleted notes and folders go to a trash folder inside your notes folder, and each one goes back where it came from.

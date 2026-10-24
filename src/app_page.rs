@@ -2993,7 +2993,7 @@ impl Carnet {
             Ok(src) => {
                 // The pixels are in hand: shown at once, not read back.
                 if let Some(p) = self.store.resolve(&folder, &src) {
-                    self.images.preload(&p, images::Decoded { w, h, rgba: rgba.to_vec() });
+                    self.images.preload(&p, images::Decoded { w, h, rgba: rgba.to_vec(), shown: None });
                 }
                 self.insert_pictures(vec![src], None);
             }

@@ -1454,13 +1454,13 @@ async function myName(): Promise<string> {
   return kept ? new TextDecoder().decode(kept) : deviceName();
 }
 
-/// A picture file as the desktop takes it. PNG, GIF and WebP (a
+/// A picture file as the desktop takes it. PNG, GIF, WebP and SVG (a
 /// screenshot, a drawing) go as they are. A photo (JPEG, or an iPhone's
 /// HEIC) is drawn again: the right way up, at most `PHOTO` pixels on its
 /// long side, and with nothing the camera wrote in it, such as where it
 /// was taken.
 async function pictureFile(file: File): Promise<{ bytes: Uint8Array<ArrayBuffer>; ext: string; type: string }> {
-  const kept: Record<string, string> = { 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' };
+  const kept: Record<string, string> = { 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
   const ext = kept[file.type];
   if (ext) return { bytes: new Uint8Array(await file.arrayBuffer()), ext, type: file.type };
   const img = await createImageBitmap(file, { imageOrientation: 'from-image' });
