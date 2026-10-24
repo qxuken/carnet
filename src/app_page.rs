@@ -27,6 +27,9 @@ use crate::slash;
 const PICTURE_GAP: f32 = 28.0;
 /// The least room beside a picture worth running words in.
 const BESIDE_MIN: f32 = 180.0;
+/// How many blocks' rows are kept as last laid out, across notes, before
+/// those of notes not open are let go.
+const ROWS_KEPT: usize = 20_000;
 /// How strongly a picture that's the user's own file, not Carnet's, is
 /// drawn: faint, so it reads as apart from the note's own.
 const THEIRS_OPACITY: f32 = 0.45;
@@ -493,9 +496,6 @@ impl Carnet {
                 self.slash_off = None;
             }
         }
-        // The rows as last laid out: how tall the blocks beside a picture
-        // are.
-        let prev: HashMap<u64, Rect> = self.row_rects.iter().copied().collect();
         self.row_rects.clear();
         self.cell_rects.clear();
         self.cell_pieces.clear();
@@ -503,6 +503,27 @@ impl Carnet {
         self.shown.clear();
         // Pointers, not text: the blocks stay shared with the note.
         let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
+        // The rows as the last frame laid them out, each read by the key
+        // it had there: how tall the blocks beside a picture are. Not
+        // `row_rects`, which says it a frame later, and nothing for a
+        // block that went beside a picture or out from beside one (its
+        // key goes with its parent): read from that, a note opened again
+        // ran its words below its picture for two frames, the second
+        // taken for settled, and they stayed there until something else
+        // drew the page. A note opened again has nothing in the last
+        // frame: its rows as they were left.
+        if self.row_seen.len() > ROWS_KEPT {
+            let here: HashSet<u64> = blocks.iter().map(|b| b.id).collect();
+            self.row_seen.retain(|id, _| here.contains(id));
+        }
+        for b in &blocks {
+            if let Some((key, at)) = self.row_seen.get_mut(&b.id)
+                && let Some(r) = ui.layout_of(*key)
+            {
+                *at = Some(r);
+            }
+        }
+        let prev: HashMap<u64, Rect> = blocks.iter().filter_map(|b| Some((b.id, self.row_seen.get(&b.id)?.1?))).collect();
         let drop_at = self.drop_index;
         // First letters dropped: of each paragraph that asks for it.
         self.initial = blocks
@@ -651,6 +672,7 @@ impl Carnet {
         if let Some(r) = ui.layout_of(row) {
             self.row_rects.push((id, r));
         }
+        self.row_seen.entry(id).or_insert((row, None)).0 = row;
         let whole = cov.whole.contains(&id);
         // The caret alone on an empty line: it says what can go there —
         // once the writing pauses, not on every line Enter makes.
