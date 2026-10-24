@@ -3629,6 +3629,96 @@ fn a_colour_and_a_highlight_go_on_together_from_the_toolbar() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The welcome note's "Words" and the two paragraphs under it, selected
+/// from the heading's start to the second one's end, are drawn one way
+/// while the highlighter's picker is open, whatever the pointer is on:
+/// each block on the selection's wash. Resting on a swatch shows its name
+/// and changes nothing. One picked goes on all three blocks' words, and
+/// the three stay selected whole, drawn as before; its marks went inside
+/// the selection's ends, which drew the heading and the second paragraph
+/// as words chosen in them, their highlight put out by the selection's
+/// wash, and only the paragraph between as a block. Picked again, it
+/// comes off, and nothing has moved.
+#[test]
+fn a_selection_across_blocks_is_drawn_one_way_while_a_highlight_is_picked() {
+    let (mut app, mut d, dir) = body("tint-across");
+    d.core.set_inspect(true);
+    let welcome = app.store.notes.iter().find(|n| n.title == "Welcome to Carnet").unwrap().doc.clone();
+    let i = welcome.blocks().iter().position(|b| matches!(&b.kind, Kind::Heading { text, .. } if text == "Words")).unwrap();
+    let under = welcome.blocks()[i + 2].id;
+    app.edit(Step::Other, |doc, c| {
+        *doc = welcome.clone();
+        *c = Caret::at(page::start(Slot::block(doc.blocks()[i].id)));
+        true
+    });
+    settle(&mut app, &mut d);
+    // By Shift+arrows: down into the second paragraph, then to its end.
+    while app.caret.head.slot != Slot::block(under) {
+        key_with(&mut app, &mut d, "down", SHIFT);
+    }
+    key_with(&mut app, &mut d, "end", SHIFT);
+    assert_eq!(app.caret.head, page::end(app.doc(), Slot::block(under)));
+    // The three in the middle of the page, clear of its foot, where an
+    // edit brings the caret's line a little further in.
+    settle(&mut app, &mut d);
+    let scroller = app.scroll_key.unwrap();
+    let off = d.core.scroll_geometry(scroller).unwrap().offset.y;
+    d.core.set_scroll(scroller, Vec2::new(0.0, off + 160.0));
+    settle(&mut app, &mut d);
+    settle(&mut app, &mut d);
+    let three: Vec<usize> = page::spanned(app.doc(), app.caret).collect();
+    let words = |app: &Carnet| three.iter().map(|&i| texts(app)[i].clone()).collect::<Vec<_>>();
+    let plain = words(&app);
+    // The washes drawn, and the blocks the selection covers whole.
+    let drawn = |app: &Carnet, d: &Drive| {
+        let sel = d.core.theme().selection;
+        let washes: Vec<Rect> = d.core.nodes().iter().filter(|n| n.bg == sel && n.rect.w > 0.0).map(|n| n.rect).collect();
+        let mut whole: Vec<u64> = page::coverage(app.doc(), app.caret).whole.into_iter().collect();
+        whole.sort_unstable();
+        (washes, whole)
+    };
+    let rest = drawn(&app, &d);
+    assert_eq!((rest.0.len(), rest.1.len()), (3, 3), "each block washed, whole: {rest:?}");
+    let same = |app: &mut Carnet, d: &mut Drive, what: &str| {
+        for _ in 0..3 {
+            d.advance(0.2);
+            d.frame(app);
+        }        assert_eq!(drawn(app, d), rest, "{what}: drawn as before");
+    };
+    let r = d.core.nodes().iter().find(|n| n.label.as_deref() == Some("t-mark")).map(|n| n.rect).unwrap();
+    d.click(&mut app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    assert_eq!(app.tint_open.map(|t| t.0), Some(false), "the highlighter's picker");
+    same(&mut app, &mut d, "the picker open");
+    let swatch = |d: &mut Drive, name: &str| {
+        let k = d.key_named(name).expect(name);
+        d.rect_of(k).unwrap().center()
+    };
+    for name in ["Yellow", "Green"] {
+        let at = swatch(&mut d, name);
+        d.move_to(&mut app, at.x, at.y);
+        same(&mut app, &mut d, &format!("on {name}"));
+        assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some(name)), "its name shown");
+        assert_eq!(words(&app), plain, "on {name}: the note as it was");
+        d.move_to(&mut app, r.x + r.w / 2.0, 700.0);
+        same(&mut app, &mut d, &format!("off {name}"));
+    }
+    // Picked: on every block's words, the three still whole.
+    let at = swatch(&mut d, "Yellow");
+    d.click(&mut app, at.x, at.y);
+    same(&mut app, &mut d, "Yellow picked");
+    let marked = words(&app);
+    assert!(marked.iter().all(|w| w.starts_with("<mark style=\"background: #F8EBA6CC\">") && w.ends_with("</mark>")), "{marked:?}");
+    d.move_to(&mut app, r.x + r.w / 2.0, 700.0);
+    same(&mut app, &mut d, "off it, picked");
+    // Again: off every block's words.
+    d.click(&mut app, at.x, at.y);
+    same(&mut app, &mut d, "Yellow taken off");
+    assert_eq!(words(&app), plain);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_library_hides_and_comes_back() {
     let (mut app, mut d, dir) = body("sidebar");

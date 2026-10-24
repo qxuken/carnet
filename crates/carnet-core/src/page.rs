@@ -2534,12 +2534,19 @@ fn edit_ranges(
             continue;
         }
         let _r = reading(s);
+        let old = text(doc, s).len();
         let Some((t, x, y)) = f(text(doc, s), from, to) else { continue };
+        // Across blocks, an end at a slot's start or at its end stays
+        // there, outside the marks just put round its words: a block the
+        // selection covered whole is covered whole still (`coverage`),
+        // and drawn so. An end inside them drew it as words chosen in it,
+        // and the blocks between as wholes.
+        let across = a.slot != b.slot;
         if s == a.slot {
-            na.byte = x;
+            na.byte = if across && from == 0 { 0 } else { x };
         }
         if s == b.slot {
-            nb.byte = y;
+            nb.byte = if across && to == old { t.len() } else { y };
         }
         if let Some(text) = text_mut(doc, s) {
             *text = t;
@@ -4338,6 +4345,37 @@ mod tests {
         assert_eq!((c.anchor.byte, c.head.byte), (12, 16), "still selects the word");
         style(&mut d, &mut c, inline::Kind::Bold);
         assert_eq!(text(&d, s), "make this bold");
+    }
+
+    /// Across blocks, a block the selection covers whole is covered whole
+    /// still once its words are styled, its marks with it: an end at a
+    /// block's start or its end stays there, outside them. An end among
+    /// a block's words stays by its words.
+    #[test]
+    fn blocks_selected_whole_stay_whole_as_they_are_styled() {
+        let mut d = doc(vec![Block::text("Words"), Block::text("one two"), Block::text("three four")]);
+        let ids: Vec<u64> = d.blocks().iter().map(|b| b.id).collect();
+        let mut c = Caret { anchor: Pos { slot: Slot::block(ids[0]), byte: 0 }, head: end(&d, Slot::block(ids[2])) };
+        let whole = |d: &Doc, c: Caret| {
+            let mut w: Vec<u64> = coverage(d, c).whole.into_iter().collect();
+            w.sort_unstable();
+            w
+        };
+        assert_eq!(whole(&d, c), ids);
+        assert!(tint(&mut d, &mut c, false, inline::HIGHLIGHT));
+        assert_eq!(texts(&d), ["Text:==Words==", "Text:==one two==", "Text:==three four=="]);
+        assert_eq!(whole(&d, c), ids, "the three still whole");
+        assert!(style(&mut d, &mut c, inline::Kind::Bold));
+        assert_eq!(whole(&d, c), ids);
+        assert!(tint(&mut d, &mut c, false, inline::HIGHLIGHT));
+        assert_eq!(texts(&d), ["Text:**Words**", "Text:**one two**", "Text:**three four**"]);
+        assert_eq!((c.anchor.byte, c.head), (0, end(&d, Slot::block(ids[2]))));
+        // From inside the last one's words: that end by them.
+        let mut c = Caret { anchor: Pos { slot: Slot::block(ids[0]), byte: 0 }, head: Pos { slot: Slot::block(ids[2]), byte: "**three".len() } };
+        assert!(tint(&mut d, &mut c, false, inline::HIGHLIGHT));
+        let last = text(&d, Slot::block(ids[2]));
+        assert!(last.contains("==three==") && last[..c.head.byte].ends_with("three"), "{last} {}", c.head.byte);
+        assert_eq!(whole(&d, c), ids[..2]);
     }
 
     /// Underline on the selection, as Bold is: the file keeps `<u>`, a
