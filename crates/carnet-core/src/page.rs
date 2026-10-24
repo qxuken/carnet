@@ -182,6 +182,55 @@ pub fn fix(doc: &Doc, c: Caret) -> Caret {
     }
 }
 
+/// A caret carried through a change made somewhere else — the note edited
+/// in another window, another app's or sync's version read in — from the
+/// note's blocks as they were (`before`) to `after`. Each end stays with
+/// the words around it: a change earlier in its text moves it along, a
+/// change later leaves it, and one in the run it stood in takes it to that
+/// run's end. An end whose slot went lands where the nearest slot before
+/// it that is still there ended, carried the same way; for a line joined
+/// to the one above, with its words, as far into them as it was. Then
+/// [`fix`], so it stands on a character boundary.
+pub fn follow(before: &[std::rc::Rc<Block>], after: &Doc, c: Caret) -> Caret {
+    let same = before.len() == after.len() && before.iter().zip(after.blocks()).all(|(a, b)| std::rc::Rc::ptr_eq(a, b));
+    if same {
+        return c;
+    }
+    let mut was = Doc::default();
+    was.restore(before.to_vec());
+    let (then, now) = (slots(&was), slots(after));
+    // An end in a slot that is still there.
+    let along = |p: Pos| -> Pos {
+        if is_atomic(after, p.slot) || !then.contains(&p.slot) {
+            return p;
+        }
+        let (old, new) = (text(&was, p.slot).as_bytes(), text(after, p.slot).as_bytes());
+        let pre = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+        let room = old.len().min(new.len()) - pre;
+        let suf = old.iter().rev().zip(new.iter().rev()).take(room).take_while(|(a, b)| a == b).count();
+        let byte = if p.byte <= pre {
+            p.byte
+        } else if p.byte >= old.len() - suf {
+            p.byte + new.len() - old.len()
+        } else {
+            new.len() - suf
+        };
+        Pos { slot: p.slot, byte }
+    };
+    let carry = |p: Pos| -> Pos {
+        if now.contains(&p.slot) {
+            return along(p);
+        }
+        let at = then.iter().position(|s| *s == p.slot).unwrap_or(0);
+        let Some(&s) = then[..at].iter().rev().find(|s| now.contains(s)) else { return first(after) };
+        let base = along(Pos { slot: s, byte: len(&was, s) });
+        let gone = text(&was, p.slot);
+        let joined = !gone.is_empty() && text(after, s).get(base.byte..).is_some_and(|rest| rest.starts_with(gone));
+        Pos { slot: s, byte: base.byte + if joined { p.byte } else { 0 } }
+    };
+    fix(after, Caret { head: carry(c.head), anchor: carry(c.anchor) })
+}
+
 /// The first place in the note to put a caret.
 pub fn first(doc: &Doc) -> Pos {
     start(slots(doc).first().copied().unwrap_or(Slot::block(0)))
@@ -3589,6 +3638,41 @@ mod tests {
             num: 0,
             text: text.into(),
         })
+    }
+
+    /// Another window's edit carries this one's caret with the words: along
+    /// for words typed before it, left for words after, and to the line
+    /// above's end for a line joined to it. Nothing changed, nothing moves.
+    #[test]
+    fn a_caret_follows_an_edit_made_elsewhere() {
+        let mut d = doc(vec![Block::text("hello world"), Block::text("two")]);
+        let mine = Caret { head: Pos { byte: 8, ..at(&d, 0, 0).head }, anchor: at(&d, 0, 6).head };
+        let before = d.snapshot();
+        assert_eq!(follow(&before, &d, mine), mine);
+        let mut theirs = at(&d, 0, 0);
+        assert!(insert(&mut d, &mut theirs, "Oh, "));
+        let c = follow(&before, &d, mine);
+        assert_eq!((c.anchor.byte, c.head.byte), (10, 12), "{:?}", texts(&d));
+        assert_eq!(&text(&d, c.head.slot)[c.anchor.byte..c.head.byte], "wo");
+        // Typed after it: where it was.
+        let before = d.snapshot();
+        let mut theirs = at(&d, 0, 15);
+        assert!(insert(&mut d, &mut theirs, "!"));
+        assert_eq!(follow(&before, &d, c), c);
+        // Its line joined to the one above: still between "tw" and "o".
+        let before = d.snapshot();
+        let mine = at(&d, 1, 2);
+        let mut theirs = at(&d, 1, 0);
+        assert!(backspace(&mut d, &mut theirs, false));
+        let c = follow(&before, &d, mine);
+        assert_eq!(c, at(&d, 0, "Oh, hello world!tw".len()), "{:?}", texts(&d));
+        // Its block taken away: at the end of the one before.
+        let mut d = doc(vec![Block::text("one"), Block::text("two"), Block::text("three")]);
+        let before = d.snapshot();
+        let mine = at(&d, 1, 1);
+        let mut theirs = select_blocks(&d, 1, 1);
+        assert!(remove_block(&mut d, &mut theirs));
+        assert_eq!(follow(&before, &d, mine), at(&d, 0, 3), "{:?}", texts(&d));
     }
 
     /// A picture dropped goes in as a pasted one does: in place of an
