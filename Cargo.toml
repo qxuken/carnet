@@ -24,8 +24,9 @@ keyring = "4"
 # it was built with. To try kui's main, point this at a checkout with
 # `path = "../kui/crates/kui-native"`.
 kui-native = "=0.1.0-alpha.66"
-# Pictures in notes: the clipboard's (kui carries text only) and the files'.
-# Both are already in kui-native's tree; these name them for Carnet's use.
+# Pictures in notes: what a paste brings beyond text (kui puts a picture on
+# the clipboard but reads only text back) and the files'. Both are already
+# in kui-native's tree; these name them for Carnet's use.
 arboard = "3.6"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # The notes folder watched for other apps' changes: the system's file

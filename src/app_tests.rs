@@ -1561,6 +1561,23 @@ fn with_picture(name: &str) -> (Carnet, Drive, std::path::PathBuf) {
     (app, d, dir)
 }
 
+/// Ctrl+C on a chosen picture puts its pixels on the clipboard, through
+/// kui as text goes.
+#[test]
+fn a_chosen_picture_copies_as_a_picture() {
+    let (mut app, mut d, dir) = with_picture("copy-picture");
+    d.core.take_menu_actions();
+    key_with(&mut app, &mut d, "c", CTRL);
+    let picture = d.core.take_menu_actions().into_iter().find_map(|a| match a {
+        kui_native::MenuAction::SetClipboardImage { width, height, rgba } => Some((width, height, rgba)),
+        _ => None,
+    });
+    let (w, h, rgba) = picture.expect("a picture on the clipboard");
+    assert_eq!((w, h, rgba.len()), (400, 300, 400 * 300 * 4));
+    assert_eq!(&rgba[..4], &[200, 150, 120, 255]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn image_width(app: &Carnet) -> Option<Option<u32>> {
     app.doc().blocks().iter().find_map(|b| match &b.kind {
         Kind::Image { width, .. } => Some(*width),

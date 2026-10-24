@@ -2780,15 +2780,19 @@ impl Carnet {
         }
     }
 
-    /// A picture's pixels on the clipboard.
+    /// A picture's pixels on the clipboard, which kui puts there on the
+    /// next frame.
     fn copy_picture(&mut self, src: &str, wiki: bool) {
         let folder = self.store.notes[self.current].folder.clone();
         let result = match self.store.picture_file(&folder, src, wiki) {
-            Some(p) => images::decode(&p).and_then(|d| clip::write_image(d.w, d.h, d.rgba)),
+            Some(p) => images::decode(&p),
             None => Err("it is on the web".into()),
         };
         match result {
-            Ok(()) => self.say = Some("Picture copied".into()),
+            Ok(d) => {
+                self.picture_out = Some((d.w, d.h, d.rgba));
+                self.say = Some("Picture copied".into());
+            }
             Err(e) => self.error = Some(format!("Couldn't copy the picture: {e}")),
         }
     }

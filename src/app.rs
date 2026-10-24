@@ -677,6 +677,9 @@ pub struct Carnet {
     blur: bool,
     /// Text to put on the clipboard on the next frame, and its HTML.
     clip_out: Option<(String, Option<String>)>,
+    /// A picture to put on the clipboard on the next frame: its size and
+    /// straight RGBA.
+    picture_out: Option<(u32, u32, Vec<u8>)>,
     /// A context menu to open on the next frame: the node it is about,
     /// where, and what.
     pending_menu: Option<(Key, Vec2, MenuFor)>,
@@ -1101,6 +1104,7 @@ impl Carnet {
             step: None,
             blur: false,
             clip_out: None,
+            picture_out: None,
             pending_menu: None,
             list_view: false,
             folder: None,
@@ -4508,6 +4512,9 @@ impl App for Carnet {
         }
         if let Some((text, html)) = self.clip_out.take() {
             ui.set_clipboard(text, html);
+        }
+        if let Some((w, h, rgba)) = self.picture_out.take() {
+            ui.set_clipboard_image(w, h, rgba);
         }
         // Pictures the last frame didn't draw may go; a frame is asked
         // for when the next could, should nothing else draw one.
