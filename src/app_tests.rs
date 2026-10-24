@@ -3025,6 +3025,151 @@ fn a_selected_picture_has_its_place_in_the_toolbar() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The toolbar shows the tools for what the caret is in, and only those:
+/// walked through a paragraph, a list's items, a table's cell, code and a
+/// picture, each set has its own, and another's are not there at all —
+/// not greyed. What applies but can't act now (a row's move up from under
+/// the header) is greyed. Arrowing along the table changes nothing.
+#[test]
+fn the_toolbar_shows_the_tools_for_what_the_caret_is_in() {
+    // Wide, so every set shows whole and nothing is in More.
+    let (store, dir) = temp_store("tool-sets");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1800.0, 760.0).framing();
+    d.frame(&mut app);
+    app.new_note();
+    d.frame(&mut app);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    let table = Table::from_cells(vec![
+        vec!["Day".into(), "Miles".into()],
+        vec!["Mon".into(), "12".into()],
+        vec!["Tue".into(), "30".into()],
+    ]);
+    let (mon, day) = (table.rows[1].id, table.cols[0]);
+    let picture = Kind::Image { src: "nowhere.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false };
+    app.store.notes[app.current].doc = Doc::new(vec![
+        Block::text("Words"),
+        Block::new(Kind::item(ListStyle::Bullet, 0, "one")),
+        Block::new(Kind::item(ListStyle::Todo, 0, "two")),
+        Block::new(Kind::Table(table)),
+        Block::new(Kind::Raw("```\nlet x = 1;\n```".into())),
+        Block::new(picture),
+        Block::text(""),
+    ]);
+    let ids: Vec<u64> = blocks(&app).iter().map(|b| b.id).collect();
+    d.core.set_inspect(true);
+    let enabled = |d: &mut Drive, key: &str| {
+        let k = d.key_of(key).expect(key);
+        d.core.nodes().iter().any(|n| n.key == k && !n.flags.contains(&"disabled"))
+    };
+    // The caret to `c`, and the strip drawn for it.
+    let go = |app: &mut Carnet, d: &mut Drive, c: Caret| {
+        app.caret = c;
+        d.frame(app);
+        d.frame(app);
+    };
+    let check = |d: &mut Drive, app: &Carnet, set: chrome::ToolSet, shown: &[&str], absent: &[&str]| {
+        assert_eq!(app.tool_set, Some(set));
+        assert!(app.overflow.is_empty(), "{set:?}: nothing folded into More");
+        for k in shown {
+            assert!(d.key_of(k).is_some(), "{set:?} shows {k}");
+        }
+        for k in absent {
+            assert!(d.key_of(k).is_none(), "{set:?} has no {k}, greyed or not");
+        }
+    };
+
+    // A paragraph: what it becomes, its styles, what to put in, its moves.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[0]), byte: 2 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Words,
+        &["t-text", "t-h1", "t-h2", "t-h3", "t-bullet", "t-todo", "t-quote", "t-initial", "t-bold", "t-code", "t-mark", "t-color", "t-table", "t-rule", "t-attach", "t-up", "t-down", "t-del"],
+        &["t-out", "t-in", "t-tick", "t-addrow", "t-rowup", "t-sort", "t-inline", "t-left"],
+    );
+    assert!(enabled(&mut d, "t-initial"), "a paragraph's first letter drops");
+
+    // A bullet: a list's kinds and back to text, in and out; no headings.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[1]), byte: 1 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::List,
+        &["t-text", "t-bullet", "t-number", "t-todo", "t-out", "t-in", "t-bold", "t-color", "t-table", "t-attach", "t-up", "t-del"],
+        &["t-h1", "t-h2", "t-h3", "t-quote", "t-initial", "t-tick", "t-addrow", "t-inline"],
+    );
+    // A to-do: its tick too.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[2]), byte: 1 }));
+    check(&mut d, &app, chrome::ToolSet::List, &["t-todo", "t-out", "t-in", "t-tick"], &["t-h1", "t-initial"]);
+    let tick = d.key_of("t-tick").unwrap();
+    d.click_key(&mut app, tick);
+    d.frame(&mut app);
+    assert!(matches!(blocks(&app)[2].kind, Kind::Item { done: true, .. }), "ticked from the toolbar");
+
+    // A table's cell: its rows and columns, the styles, a picture; nothing
+    // a block becomes, nor a table or a divider to put in it.
+    let cell = Slot { block: ids[3], cell: Some((mon, day)) };
+    go(&mut app, &mut d, Caret::at(Pos { slot: cell, byte: 1 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Table,
+        &["t-addrow", "t-addcol", "t-delrow", "t-delcol", "t-rowup", "t-rowdown", "t-colleft", "t-colright", "t-header", "t-sort", "t-del", "t-bold", "t-color", "t-attach"],
+        &["t-text", "t-h1", "t-bullet", "t-todo", "t-quote", "t-initial", "t-out", "t-in", "t-table", "t-rule", "t-up", "t-down", "t-inline"],
+    );
+    assert!(!enabled(&mut d, "t-rowup") && enabled(&mut d, "t-rowdown"), "greyed under the header, not gone");
+    // Along the row and down the column: the same set, nothing moving.
+    let since = app.tool_set_at;
+    key(&mut app, &mut d, "tab");
+    key(&mut app, &mut d, "down");
+    assert!(app.caret.head.slot.cell.is_some(), "still in the table");
+    assert_eq!((app.tool_set, app.tool_set_at), (Some(chrome::ToolSet::Table), since), "no change, no motion");
+
+    // Code: its moves and what to put in after it; no styles.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[4]), byte: 5 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Code,
+        &["t-up", "t-down", "t-del", "t-table", "t-rule", "t-attach"],
+        &["t-text", "t-h1", "t-bullet", "t-initial", "t-bold", "t-code", "t-mark", "t-color", "t-out", "t-addrow", "t-inline"],
+    );
+
+    // A picture: where it sits, as it always had.
+    let chosen = page::select_blocks(app.doc(), 5, 5);
+    go(&mut app, &mut d, chosen);
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Picture,
+        &["t-inline", "t-left", "t-right", "t-up", "t-down", "t-del", "t-table", "t-attach"],
+        &["t-text", "t-h1", "t-bold", "t-color", "t-out", "t-addrow", "t-initial"],
+    );
+
+    // The title: only what goes in at the page's caret.
+    app.focus(Field::Title);
+    d.frame(&mut app);
+    d.frame(&mut app);
+    check(&mut d, &app, chrome::ToolSet::Away, &["t-table", "t-rule", "t-attach", "t-pin", "t-trash"], &["t-text", "t-bold", "t-up", "t-addrow", "t-inline"]);
+
+    // Narrow, in the table: what doesn't fit is in More, and it is the
+    // table's set there too.
+    let mut narrow = Drive::new(Core::new(), 620.0, 600.0).framing();
+    narrow.core.set_inspect(true);
+    app.edit_at(Pos { slot: cell, byte: 1 });
+    for _ in 0..3 {
+        narrow.frame(&mut app);
+    }
+    assert_eq!(app.tool_set, Some(chrome::ToolSet::Table));
+    assert!(narrow.key_of("t-more").is_some() && narrow.key_of("t-addrow").is_some(), "the table's first tools, then More");
+    let menu: Vec<String> = app.tools_menu().iter().map(|m| m.label.clone()).filter(|l| !l.is_empty()).collect();
+    assert!(menu.iter().any(|l| l == "Add pictures or files"), "{menu:?}");
+    assert!(!menu.iter().any(|l| l == "Heading 1" || l == "Move up" || l == "Divider"), "{menu:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn notes_sort_by_when_they_were_made() {
     let (mut app, mut d, dir) = fresh("sort-created");
@@ -11381,6 +11526,7 @@ fn a_note_opens_in_a_window_of_its_own() {
     assert_eq!(w.core.window_title(), Some("Plans"));
     assert!(w.key_of("t-bold").is_some() && w.key_of("t-trash").is_some(), "the toolbar");
     assert!(w.key_of("t-sidebar").is_none() && w.key_of("t-zen").is_none(), "nothing of the library's");
+    assert!(w.key_of("t-addrow").is_none() && w.key_of("t-out").is_none(), "a paragraph's tools, not a table's or a list's");
     assert!(w.texts_under("body").iter().any(|t| t == "draft"), "{:?}", w.texts_under("body"));
     assert!(!w.core.nodes().iter().any(|n| n.text.as_deref() == Some("Welcome to Carnet")), "no list of notes");
     assert!(w.core.focus().is_some() && w.core.focus() == app.windows[0].ed.page_key, "the page has the keyboard");

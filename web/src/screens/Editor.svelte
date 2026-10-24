@@ -231,6 +231,18 @@
     { icon: () => 'undo', label: 'Undo', f: (pe) => pe.undo(), gap: true },
   ];
 
+  /// The tools for what the caret is in, as on the desktop: never one that
+  /// does nothing there. In a list, its kinds and in and out, not a heading
+  /// or a quote (a paragraph's, once it is one); in anything else, not the
+  /// in and out, which there would only type a tab. A table's and a
+  /// picture's are their own.
+  const inList = $derived(turned.todo || turned.bullet || turned.number);
+  const LIST_ONLY = new Set(['Outdent', 'Indent']);
+  const TEXT_ONLY = new Set(['Heading', 'Quote']);
+  const shownTools = $derived(
+    inTable ? [...tableTools, ...tools.slice(7)] : pic ? pictureTools : tools.filter((t) => !(inList ? TEXT_ONLY : LIST_ONLY).has(t.label)),
+  );
+
   /// What's written, sent; what came meanwhile, merged in.
   function send() {
     clearTimeout(timer);
@@ -446,7 +458,7 @@
         <button class="more start" tabindex="-1" aria-hidden="true" title="More tools" onclick={() => scrollTools(false)}><Icon name="chevron-right" size={18} /></button>
       {/if}
       <div class="tools" bind:this={toolsEl} use:ends>
-        {#each inTable ? [...tableTools, ...tools.slice(7)] : pic ? pictureTools : tools as t (t.label)}
+        {#each shownTools as t (t.label)}
           {#if t.gap}<span class="gap"></span>{/if}
           <button class:on={t.on?.()} disabled={t.off?.()} aria-label={t.label} aria-pressed={t.on ? t.on() : undefined} title={t.label} onclick={() => act(t.f)}>
             <Icon name={t.icon()} size={20} />

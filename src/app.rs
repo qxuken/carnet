@@ -870,6 +870,11 @@ pub struct Carnet {
     overflow: Vec<chrome::ToolDef>,
     /// The More button, and where its menu opens.
     more: Option<(Key, Vec2)>,
+    /// The tools the strip showed last, for what the caret was in, and
+    /// when that last changed: for a moment after, the tools that stay
+    /// slide to their new places and those that come fade in.
+    tool_set: Option<chrome::ToolSet>,
+    tool_set_at: f64,
     /// Debug information: kui's frame-time graph (Shift+F12, or five
     /// quick clicks on the Settings page's title, so a release build has
     /// it too); and, while it shows, F12's devtools in a release build.
@@ -1117,6 +1122,8 @@ editor! {
     pic_drag: Option<PicDrag>,
     overflow: Vec<chrome::ToolDef>,
     more: Option<(Key, Vec2)>,
+    tool_set: Option<chrome::ToolSet>,
+    tool_set_at: f64 = f64::NEG_INFINITY,
     typing: bool,
     typed_at: f64,
     typing_cursor: Option<Option<Vec2>>,
@@ -1381,6 +1388,8 @@ impl Carnet {
             folder_rects: Vec::new(),
             overflow: Vec::new(),
             more: None,
+            tool_set: None,
+            tool_set_at: f64::NEG_INFINITY,
             hud: false,
             title_clicks: (0, Instant::now()),
             typing: false,
