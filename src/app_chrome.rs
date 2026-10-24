@@ -1031,6 +1031,23 @@ impl Carnet {
             slot.push(def("t-addcol", Icon::AddCol, "Add column", "Add a column to the right".into(), Msg::AddCol));
             slot.push(def("t-delrow", Icon::DelRow, "Remove row", "Remove this row".into(), Msg::DelRow));
             slot.push(def("t-delcol", Icon::DelCol, "Remove column", "Remove this column".into(), Msg::DelCol));
+            // Past its neighbour: greyed at the table's edge, and the
+            // header row, which stays on top, not up or down.
+            let moves = self.table_moves();
+            for ((key, icon, name, spec, msg), can) in [
+                ("t-rowup", Icon::RowUp, "Move row up", keys::ROW_UP, Msg::MoveRow { by: -1 }),
+                ("t-rowdown", Icon::RowDown, "Move row down", keys::ROW_DOWN, Msg::MoveRow { by: 1 }),
+                ("t-colleft", Icon::ColLeft, "Move column left", keys::COL_LEFT, Msg::MoveCol { by: -1 }),
+                ("t-colright", Icon::ColRight, "Move column right", keys::COL_RIGHT, Msg::MoveCol { by: 1 }),
+            ]
+            .into_iter()
+            .zip(moves)
+            {
+                let mut d = def(key, icon, name, keys::hint(name, spec), msg);
+                d.spec = Some(spec);
+                d.enabled = can;
+                slot.push(d);
+            }
             let header = self.table_here().is_some_and(|t| t.header);
             let mut d = def("t-header", Icon::TableHeader, "Header row", if header { "Remove the header row" } else { "Add a header row" }.into(), Msg::TableHeader);
             d.toggle = Some(header);

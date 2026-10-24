@@ -3469,6 +3469,10 @@ pub fn table_op(doc: &mut Doc, c: &mut Caret, op: TableOp, desc: bool) -> bool {
             let moved = t.sort_by(k, desc);
             return moved;
         }
+        // The caret's row or column goes past its neighbour, its ids with
+        // it: the caret stays where it was in its words.
+        TableOp::MoveRow { by } => return t.move_row(r, by),
+        TableOp::MoveCol { by } => return t.move_col(k, by),
         // The top row's words stay either way, and the caret with them.
         TableOp::Header => {
             let on = !t.header;
@@ -3484,12 +3488,29 @@ pub fn table_op(doc: &mut Doc, c: &mut Caret, op: TableOp, desc: bool) -> bool {
     }
 }
 
+/// Which ways the caret's table row and column can move: up, down, left,
+/// right. Not past the table's edges, and the header row neither up nor
+/// down; all four false outside a table.
+pub fn table_moves(doc: &Doc, c: Caret) -> [bool; 4] {
+    let p = c.head;
+    let (Some(i), Some((row, col))) = (doc.index_of(p.slot.block), p.slot.cell) else { return [false; 4] };
+    let Kind::Table(t) = &doc.blocks()[i].kind else { return [false; 4] };
+    let (Some(r), Some(k)) = (t.row_index(row), t.col_index(col)) else { return [false; 4] };
+    [t.can_move_row(r, -1), t.can_move_row(r, 1), t.can_move_col(k, -1), t.can_move_col(k, 1)]
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableOp {
     AddRow,
     AddCol,
     DelRow,
     DelCol,
+    /// The caret's row up (`by` −1) or down (1), among the plain rows:
+    /// the header stays on top ([`doc::Table::can_move_row`]).
+    MoveRow { by: isize },
+    /// The caret's column left (`by` −1) or right (1), its alignment with
+    /// it.
+    MoveCol { by: isize },
     Sort,
     /// The header row made the first plain row, or the first plain row
     /// made the header: no row comes or goes.
@@ -3786,6 +3807,55 @@ mod tests {
         let mut c = at(&d, 0, 0);
         assert!(table_op(&mut d, &mut c, TableOp::Header, false));
         assert_eq!(doc::to_markdown(None, &d), "| |\n| --- |\n| Only |\n");
+    }
+
+    /// A row moves among the plain rows, the caret with it where it was
+    /// in its words; the header stays on top, and nothing passes the
+    /// table's edge. A column moves with its alignment and its header.
+    #[test]
+    fn rows_and_columns_move_and_the_caret_goes_with_them() {
+        let mut t = Table::from_cells(vec![
+            vec!["Day".into(), "Miles".into(), "Note".into()],
+            vec!["Mon".into(), "12".into(), "flat".into()],
+            vec!["Tue".into(), "30".into(), "hills".into()],
+        ]);
+        t.aligns = vec!["---".into(), "--:".into(), ":-:".into()];
+        let (mon, miles) = (t.rows[1].id, t.cols[1]);
+        let mut d = doc(vec![Block::new(Kind::Table(t))]);
+        let block = d.blocks()[0].id;
+        let mut c = Caret::at(Pos { slot: Slot { block, cell: Some((mon, miles)) }, byte: 1 });
+        let was = c;
+        let md = |d: &Doc| doc::to_markdown(None, d);
+        assert_eq!(table_moves(&d, c), [false, true, true, true], "under the header: not up");
+        assert!(table_op(&mut d, &mut c, TableOp::MoveRow { by: 1 }, false));
+        assert_eq!(md(&d), "| Day | Miles | Note |\n| --- | --: | :-: |\n| Tue | 30 | hills |\n| Mon | 12 | flat |\n");
+        assert_eq!(c, was, "the caret in its cell, at its letter");
+        assert!(!table_op(&mut d, &mut c, TableOp::MoveRow { by: 1 }, false), "the bottom row goes no lower");
+        assert!(table_op(&mut d, &mut c, TableOp::MoveRow { by: -1 }, false));
+        assert!(!table_op(&mut d, &mut c, TableOp::MoveRow { by: -1 }, false), "nor above the header");
+        assert!(md(&d).starts_with("| Day | Miles | Note |\n| --- | --: | :-: |\n| Mon |"));
+        // The column, its alignment and its header with it.
+        assert!(table_op(&mut d, &mut c, TableOp::MoveCol { by: 1 }, false));
+        assert_eq!(md(&d), "| Day | Note | Miles |\n| --- | :-: | --: |\n| Mon | flat | 12 |\n| Tue | hills | 30 |\n");
+        assert_eq!(c, was);
+        assert!(!table_op(&mut d, &mut c, TableOp::MoveCol { by: 1 }, false), "the last column goes no further");
+        assert!(table_op(&mut d, &mut c, TableOp::MoveCol { by: -1 }, false));
+        assert!(table_op(&mut d, &mut c, TableOp::MoveCol { by: -1 }, false));
+        assert!(!table_op(&mut d, &mut c, TableOp::MoveCol { by: -1 }, false));
+        assert!(md(&d).starts_with("| Miles | Day | Note |\n| --: | --- | :-: |\n"));
+        // From the header: it doesn't move down, but its columns do.
+        let Kind::Table(t) = &d.blocks()[0].kind else { panic!() };
+        let (top, day) = (t.rows[0].id, t.cols[1]);
+        let mut c = Caret::at(Pos { slot: Slot { block, cell: Some((top, day)) }, byte: 0 });
+        assert!(!table_op(&mut d, &mut c, TableOp::MoveRow { by: 1 }, false), "the header stays the header");
+        assert!(table_op(&mut d, &mut c, TableOp::MoveCol { by: -1 }, false));
+        assert!(md(&d).starts_with("| Day | Miles | Note |\n"));
+        // Without a header every row is a plain one, the top one too.
+        let mut t = Table::from_cells(vec![vec!["a".into()], vec!["b".into()]]);
+        t.set_header(false);
+        assert!(t.can_move_row(0, 1) && !t.can_move_row(0, -1) && !t.can_move_row(1, 1));
+        assert!(t.move_row(0, 1));
+        assert_eq!(t.rows.iter().map(|r| r.cells[0].as_str()).collect::<Vec<_>>(), ["b", "a"]);
     }
 
     /// A picture copied (its one line of Markdown) and pasted into a line

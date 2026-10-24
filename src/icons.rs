@@ -31,6 +31,12 @@ pub enum Glyph {
     AddCol,
     DelRow,
     DelCol,
+    /// A table's row moved up or down, a column left or right: the frame
+    /// the adding and removing have, an arrow where their plus is.
+    RowUp,
+    RowDown,
+    ColLeft,
+    ColRight,
     /// A table's header row, there or not: the frame with its top band
     /// filled.
     TableHeader,
@@ -136,8 +142,8 @@ impl Glyph {
         match self {
             Glyph::Table | Glyph::TableHeader => FRAME_TABLE,
             Glyph::Picture => FRAME_PICTURE,
-            Glyph::AddRow | Glyph::DelRow => FRAME_ROW,
-            Glyph::AddCol | Glyph::DelCol => FRAME_COL,
+            Glyph::AddRow | Glyph::DelRow | Glyph::RowUp | Glyph::RowDown => FRAME_ROW,
+            Glyph::AddCol | Glyph::DelCol | Glyph::ColLeft | Glyph::ColRight => FRAME_COL,
             _ => "",
         }
     }
@@ -191,6 +197,10 @@ impl Glyph {
             DelRow => ("M3.5 8.8h17 M9.5 18h5", ""),
             AddCol => ("M8 3.5v17 M18 9.5v5 M15.5 12h5", ""),
             DelCol => ("M8 3.5v17 M15.5 12h5", ""),
+            RowUp => ("M3.5 8.8h17 M12 20.5v-5 M9.5 18l2.5-2.5 2.5 2.5", ""),
+            RowDown => ("M3.5 8.8h17 M12 15.5v5 M9.5 18l2.5 2.5 2.5-2.5", ""),
+            ColLeft => ("M8 3.5v17 M20.5 12h-5 M18 9.5l-2.5 2.5 2.5 2.5", ""),
+            ColRight => ("M8 3.5v17 M15.5 12h5 M18 9.5l2.5 2.5-2.5 2.5", ""),
             TableHeader => ("M3.5 10.5h17 M9.5 10.5v8", "M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v3.5h-17V7A1.5 1.5 0 0 1 5 5.5z"),
             Sort => ("M8 5v14 M4.5 15.5L8 19l3.5-3.5 M16 19V5 M12.5 8.5L16 5l3.5 3.5", ""),
             SortUp => ("M4 7h5 M4 12h8 M4 17h11 M18.5 19V5 M15.5 8l3-3 3 3", ""),
@@ -307,7 +317,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 69] = [
+    pub const ALL: [Glyph; 73] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Underline, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -318,6 +328,7 @@ impl Glyph {
         Glyph::Download, Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
         Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
         Glyph::TableHeader, Glyph::ChevronRight, Glyph::Attach,
+        Glyph::RowUp, Glyph::RowDown, Glyph::ColLeft, Glyph::ColRight,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.

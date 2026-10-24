@@ -33,7 +33,7 @@ What it holds to:
 And what it leaves out, on purpose:
 
 - **No plugin system.** The core should do what you need.
-- **No databases, relations, formulas or views.** Tables stop at sorting and adding or removing rows and columns.
+- **No databases, relations, formulas or views.** Tables stop at sorting and adding, removing or moving rows and columns.
 - **No account to use the app.** Sync is opt-in, open, end-to-end encrypted and self-hostable, and putting the notes folder in Dropbox, iCloud Drive or Syncthing keeps working.
 - **No caps on notes or blocks.**
 
@@ -42,7 +42,7 @@ And what it leaves out, on purpose:
 - **Plain Markdown on disk.** One file per note in `~/Documents/Carnet` (or a folder you choose); folders in it are folders in the app. Pictures go in `attachments/` as ordinary Markdown images.
 - **A page that reads as one text.** The caret, selection, copy and undo move across paragraphs, lists and table cells as they would through one document. Markdown's marks are never shown: you see the words, styled, and the file keeps the Markdown.
 - **Lists and checklists** that indent and outdent with Tab, continue on Enter and step out on an empty item, with checklist progress ("3 of 7 done") in the line above the title.
-- **Tables** with steady columns, Tab and Enter navigation, rows and columns added and removed, and sorting by a column.
+- **Tables** with steady columns, Tab and Enter navigation, rows and columns added, removed and moved, and sorting by a column.
 - **Edits made in other apps are merged.** A note changed in Obsidian, VS Code or a sync client while it has edits here keeps both sets of edits.
 - **History.** Every version a note has been, with what each one added and took away. Restore any of them, or restore one as a copy.
 - **Pictures** pasted or dropped in, resized, and placed on their own line or beside the text.
@@ -115,6 +115,7 @@ The toolbar's highlighter and text-colour buttons offer ten calm hues. They are 
 | Ctrl+C / Ctrl+X / Ctrl+V | copy and cut (Markdown across blocks); paste (Markdown becomes blocks) |
 | Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z | undo / redo anything: typing, ticks, removed blocks and tables |
 | Alt+↑ / Alt+↓ | move the block (or the selected blocks) |
+| Alt+Shift+↑ / ↓, Alt+Shift+← / → in a table | move the row up or down, the column left or right (the header row stays on top) |
 | Ctrl+Alt+0 … 7 | turn the block into text, heading 1–3, checklist, bullets, numbers or a quote |
 | Ctrl+Alt+8 | drop the paragraph's first letter, or put it back |
 | Ctrl+Alt+T / Ctrl+Alt+- | insert a table / a divider |
@@ -122,7 +123,7 @@ The toolbar's highlighter and text-colour buttons offer ten calm hues. They are 
 | drag in the margin | select whole blocks |
 | right-click on the page | cut, copy, paste, styles, and what the toolbar does for the block |
 
-The toolbar acts on the blocks the caret touches: turn them into another kind, drop a paragraph's first letter, indent them, move them, remove them. A paragraph's lines turn one at a time, as a paragraph per line typed here would: in a note whose lines end in line breaks (as Apple Notes exports them), the caret's line becomes the item or heading and the lines around it stay as they were; select several lines to turn them all, one item each. Inside a table it adds or removes rows and columns, sorts by the current column, or removes the table.
+The toolbar acts on the blocks the caret touches: turn them into another kind, drop a paragraph's first letter, indent them, move them, remove them. A paragraph's lines turn one at a time, as a paragraph per line typed here would: in a note whose lines end in line breaks (as Apple Notes exports them), the caret's line becomes the item or heading and the lines around it stay as they were; select several lines to turn them all, one item each. Inside a table it adds, removes or moves rows and columns, sorts by the current column, or removes the table.
 
 ### Notes and folders
 

@@ -170,6 +170,56 @@ impl Table {
         true
     }
 
+    /// Where row `at` goes moved `by` (−1 up, 1 down), if it can: among
+    /// the plain rows only. The header stays the top row — it is what the
+    /// file writes above the `---` line, put there or taken away by
+    /// [`Table::set_header`], not a row among the others — so a plain row
+    /// never goes above it, nor the header below the first plain row.
+    fn row_to(&self, at: usize, by: isize) -> Option<usize> {
+        let to = at.checked_add_signed(by)?;
+        (by != 0 && at >= self.body() && to >= self.body() && at < self.rows.len() && to < self.rows.len()).then_some(to)
+    }
+
+    /// Whether row `at` can move `by`: not past the table's edge, nor
+    /// past the header.
+    pub fn can_move_row(&self, at: usize, by: isize) -> bool {
+        self.row_to(at, by).is_some()
+    }
+
+    /// Row `at` moved `by` (−1 up, 1 down), its cells and its id going
+    /// with it, so a caret in it stays in its words. True when it moved.
+    pub fn move_row(&mut self, at: usize, by: isize) -> bool {
+        let Some(to) = self.row_to(at, by) else { return false };
+        let row = self.rows.remove(at);
+        self.rows.insert(to, row);
+        true
+    }
+
+    /// Whether column `at` can move `by` (−1 left, 1 right): any column
+    /// can, but not past the table's edge.
+    pub fn can_move_col(&self, at: usize, by: isize) -> bool {
+        at.checked_add_signed(by).is_some_and(|to| by != 0 && at < self.width() && to < self.width())
+    }
+
+    /// Column `at` moved `by` (−1 left, 1 right): its id, its alignment and
+    /// its cell in every row, the header's too, go together. True when it
+    /// moved.
+    pub fn move_col(&mut self, at: usize, by: isize) -> bool {
+        if !self.can_move_col(at, by) {
+            return false;
+        }
+        let to = at.wrapping_add_signed(by);
+        let id = self.cols.remove(at);
+        self.cols.insert(to, id);
+        let align = self.aligns.remove(at);
+        self.aligns.insert(to, align);
+        for row in &mut self.rows {
+            let cell = row.cells.remove(at);
+            row.cells.insert(to, cell);
+        }
+        true
+    }
+
     /// Sorts the body rows (never the header) by column `col`, numbers
     /// numerically, empty cells last. Returns whether anything moved.
     pub fn sort_by(&mut self, col: usize, descending: bool) -> bool {

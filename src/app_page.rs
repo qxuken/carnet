@@ -2087,11 +2087,18 @@ impl Carnet {
             MenuItem::separator(),
         ]);
         if in_table {
+            let [up, down, left, right] = self.table_moves();
             items.extend([
                 item("Add row below", "addrow"),
                 item("Add column right", "addcol"),
                 item("Remove row", "delrow"),
                 item("Remove column", "delcol"),
+                MenuItem::separator(),
+                item("Move row up", "rowup").accel(keys::ROW_UP).enabled(up),
+                item("Move row down", "rowdown").accel(keys::ROW_DOWN).enabled(down),
+                item("Move column left", "colleft").accel(keys::COL_LEFT).enabled(left),
+                item("Move column right", "colright").accel(keys::COL_RIGHT).enabled(right),
+                MenuItem::separator(),
                 item("Header row", "header").checked(self.table_here().is_some_and(|t| t.header)),
                 MenuItem::separator(),
                 item("Remove table", "remove"),
@@ -2216,6 +2223,10 @@ impl Carnet {
             "addcol" => self.on_plain(Msg::AddCol),
             "delrow" => self.on_plain(Msg::DelRow),
             "delcol" => self.on_plain(Msg::DelCol),
+            "rowup" => self.on_plain(Msg::MoveRow { by: -1 }),
+            "rowdown" => self.on_plain(Msg::MoveRow { by: 1 }),
+            "colleft" => self.on_plain(Msg::MoveCol { by: -1 }),
+            "colright" => self.on_plain(Msg::MoveCol { by: 1 }),
             "header" => self.on_plain(Msg::TableHeader),
             "remove" => self.on_plain(Msg::DeleteBlock),
             "table" => self.on_plain(Msg::InsertTable),
@@ -2310,6 +2321,18 @@ impl Carnet {
         let code = if chord || m.alt { keys::chord_code(&k) } else { k.code };
         let doc = self.doc();
         match code {
+            // In a table's cell, Alt+Shift: its row up or down, its column
+            // left or right. Alt alone still moves the whole table.
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                if m.alt && shift && !chord && self.caret.head.slot.cell.is_some() =>
+            {
+                self.on_plain(match code {
+                    KeyCode::Up => Msg::MoveRow { by: -1 },
+                    KeyCode::Down => Msg::MoveRow { by: 1 },
+                    KeyCode::Left => Msg::MoveCol { by: -1 },
+                    _ => Msg::MoveCol { by: 1 },
+                });
+            }
             // The note above or below in the library.
             KeyCode::Up | KeyCode::Down if chord && m.alt => self.step_note(code == KeyCode::Up),
             KeyCode::Up | KeyCode::Down if m.alt => {
@@ -2767,6 +2790,12 @@ impl Carnet {
             Kind::Table(t) => Some(t),
             _ => None,
         }
+    }
+
+    /// Which ways the caret's table row and column can move: up, down,
+    /// left, right ([`page::table_moves`]).
+    pub(super) fn table_moves(&self) -> [bool; 4] {
+        page::table_moves(self.doc(), self.caret)
     }
 
     /// The picture the caret is on, or the one the selection is: its id,

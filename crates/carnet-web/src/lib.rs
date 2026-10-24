@@ -1050,9 +1050,16 @@ impl PageEditor {
     }
 
     /// 0 a row below, 1 a column after, 2 the row out, 3 the column out,
-    /// 4 the header row out, or back.
+    /// 4 the header row out, or back; the row moved 5 up or 6 down, the
+    /// column 7 left or 8 right.
     pub fn table_op(&mut self, op: u8) -> bool {
         self.e.table_op(op)
+    }
+
+    /// Which ways the caret's row and column can move: `[up, down, left,
+    /// right]`.
+    pub fn table_moves(&self) -> Vec<u8> {
+        self.e.table_moves().map(u8::from).to_vec()
     }
 
     /// Whether the caret's table has a header row.
