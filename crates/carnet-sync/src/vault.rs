@@ -612,15 +612,15 @@ pub fn folder_name(typed: &str) -> Result<String, FolderRefusal> {
     Ok(name)
 }
 
-/// The map a file's path is kept in: a document's ([`FILES`]) by a
-/// document's name and not a picture's; anything else the pictures',
-/// where a Carnet from before reads it (and lets go what it can't take).
-/// Which names are documents grew (any file but what runs, where once
-/// only a PDF, a sheet, a recording): a Carnet that knows the fewer reads
-/// one of the others there as written in the wrong map, so as not there,
-/// and neither fetches nor lets it go.
+/// The map a file's path is kept in: a picture's by a picture's name,
+/// where a Carnet from before files reads it (and lets go what it can't
+/// take); any other file's ([`FILES`]). What syncs there grew (any file,
+/// where once only a PDF, a sheet, a recording): a Carnet that knows the
+/// fewer kinds reads one of the others there as written in the wrong map
+/// (its own reading puts it in the pictures'), so as not there, and
+/// neither fetches nor lets it go.
 fn map_of(path: &str) -> &'static str {
-    if carnet_core::doc::is_document_name(path) && !carnet_core::doc::is_picture_name(path) { FILES } else { PICTURES }
+    if carnet_core::doc::is_picture_name(path) { PICTURES } else { FILES }
 }
 
 /// The folder `folder` is in ("" for the top).
@@ -998,19 +998,20 @@ mod tests {
         assert_eq!(v.place(bad_name), Some(place("", "Found")));
     }
 
-    /// A document's path is kept in its own map, where a Carnet from
-    /// before documents doesn't look (it lets go of every path in the
-    /// pictures' it doesn't take for a picture's), and read back with the
-    /// pictures as one; dropped and brought back as a picture is. One
+    /// A file's path but a picture's is kept in its own map, where a
+    /// Carnet from before files doesn't look (it lets go of every path in
+    /// the pictures' it doesn't take for a picture's), and read back with
+    /// the pictures as one; dropped and brought back as a picture is. One
     /// written into the other map than its name's is read as not there.
     #[test]
-    fn documents_are_kept_apart_from_pictures() {
+    fn files_are_kept_apart_from_pictures() {
         let v = NoteDoc::new(1);
         assert!(v.set_file("attachments/a.png", "aa"));
         assert!(v.set_file("attachments/report.pdf", "bb"));
-        // A document with no kind, and source code, as one with a PDF's.
+        // One with no kind, source code and a program, as a PDF.
         assert!(v.set_file("attachments/README", "ff"));
         assert!(v.set_file("attachments/main.rs", "gg"));
+        assert!(v.set_file("attachments/setup.exe", "ii"));
         let raw = |m: &str| match v.loro().get_map(m).get_deep_value() {
             LoroValue::Map(m) => m.keys().cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
             _ => Vec::new(),
@@ -1019,20 +1020,51 @@ mod tests {
             (raw(PICTURES), raw(FILES)),
             (
                 vec!["attachments/a.png".to_string()],
-                vec!["attachments/README".to_string(), "attachments/main.rs".to_string(), "attachments/report.pdf".to_string()]
+                vec![
+                    "attachments/README".to_string(),
+                    "attachments/main.rs".to_string(),
+                    "attachments/report.pdf".to_string(),
+                    "attachments/setup.exe".to_string()
+                ]
             )
         );
-        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/README", "attachments/a.png", "attachments/main.rs", "attachments/report.pdf"]);
+        assert_eq!(
+            v.files().into_keys().collect::<Vec<_>>(),
+            ["attachments/README", "attachments/a.png", "attachments/main.rs", "attachments/report.pdf", "attachments/setup.exe"]
+        );
         assert_eq!(v.drop_file("attachments/report.pdf"), (true, Some("bb".to_string())));
         assert_eq!(v.dropped_files().into_iter().collect::<Vec<_>>(), ["attachments/report.pdf"]);
         assert_eq!(v.dropped_id("attachments/report.pdf").as_deref(), Some("bb"));
-        // Each in the other's map, as no Carnet writes them; a program
-        // in either.
+        // Each in the other's map, as no Carnet writes them.
         v.loro().get_map(PICTURES).insert("attachments/notes.txt", "cc").unwrap();
-        v.loro().get_map(PICTURES).insert("attachments/LICENSE", "hh").unwrap();
+        v.loro().get_map(PICTURES).insert("attachments/run.sh", "hh").unwrap();
         v.loro().get_map(FILES).insert("attachments/b.png", "dd").unwrap();
-        v.loro().get_map(FILES).insert("attachments/run.sh", "ee").unwrap();
         v.loro().commit();
-        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/README", "attachments/a.png", "attachments/main.rs"]);
+        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/README", "attachments/a.png", "attachments/main.rs", "attachments/setup.exe"]);
+    }
+
+    /// What a Carnet that took only some kinds for files, and the rest for
+    /// pictures' (4cbeaaa: a PDF, a sheet, a recording), reads of a vault
+    /// this one wrote: the kinds it knows, and none of the others, so it
+    /// neither fetches nor lets go of a program, a `README`, source code.
+    #[test]
+    fn a_carnet_that_knew_fewer_files_reads_the_others_as_not_there() {
+        let v = NoteDoc::new(1);
+        for (p, id) in [("attachments/a.png", "aa"), ("attachments/report.pdf", "bb"), ("attachments/README", "cc"), ("attachments/setup.exe", "dd"), ("attachments/main.rs", "ee")] {
+            assert!(v.set_file(p, id));
+        }
+        // Its own map_of: a file's map for its few kinds, else the pictures'.
+        let known = ["pdf", "txt", "csv", "rtf", "docx", "xlsx", "pptx", "odt", "ods", "odp", "m4a", "mp3", "wav", "mov", "mp4"];
+        let old_map = |p: &str| {
+            let doc = p.rsplit_once('.').is_some_and(|(_, e)| known.contains(&e.to_ascii_lowercase().as_str()));
+            if doc && !carnet_core::doc::is_picture_name(p) { FILES } else { PICTURES }
+        };
+        let read = |name: &str| match v.loro().get_map(name).get_deep_value() {
+            LoroValue::Map(m) => m.keys().filter(|k| old_map(k) == name).cloned().collect::<std::collections::BTreeSet<_>>(),
+            _ => Default::default(),
+        };
+        let mut seen = read(PICTURES);
+        seen.extend(read(FILES));
+        assert_eq!(seen.into_iter().collect::<Vec<_>>(), ["attachments/a.png", "attachments/report.pdf"]);
     }
 }
