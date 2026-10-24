@@ -2,8 +2,9 @@
   // The viewer: set up once, then the library and a note, side by side on
   // a wide screen and one at a time on a phone. Where it is lives in the
   // address (`#note/<key>`, `#note/<key>/history`, `#settings`), so Back
-  // goes back. Writing in a note is `#note/<key>/edit` (`/new` for one
-  // made just now).
+  // goes back (and a note opens in a tab of its own by its address).
+  // Writing in a note is `#note/<key>/edit` (`/new` for one made just
+  // now). Markdown files dropped on it come in as notes.
   import { onMount, untrack } from 'svelte';
   import { sync } from './lib/sync.svelte';
   import Pair from './screens/Pair.svelte';
@@ -12,7 +13,9 @@
   import History from './screens/History.svelte';
   import Settings from './screens/Settings.svelte';
   import Icon from './lib/Icon.svelte';
+  import OpenAsk from './lib/OpenAsk.svelte';
   import { footer } from './lib/words';
+  import { carriesFiles, isMarkdownName } from './lib/files';
 
   type Route =
     | { kind: 'list' }
@@ -130,6 +133,34 @@
   // Back where there's a page to go back to; else to the list.
   const back = () => (history.length > 1 ? history.back() : go(''));
 
+  /// The folder the library shows (null: every note, or Deleted): where
+  /// Markdown files dropped anywhere but on a folder's row come in.
+  let shownFolder = $state<string | null>(null);
+
+  // Files from outside dropped on the page: Markdown files come in as
+  // notes, into the folder shown, the first opened (a drop on a folder's
+  // row is the library's, the editor's own drop its own). Never the
+  // browser's, which would leave the notes to show the file.
+  function filesOver(e: DragEvent) {
+    if (!carriesFiles(e.dataTransfer?.types) || e.defaultPrevented) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }
+
+  async function filesDropped(e: DragEvent) {
+    if (!carriesFiles(e.dataTransfer?.types)) return;
+    const taken = e.defaultPrevented;
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (taken || sync.phase !== 'ready') return;
+    if (!files.some((f) => isMarkdownName(f.name))) {
+      if (files.length) sync.say('Markdown files dropped here come in as notes. Put pictures and other files in a note with its paperclip.');
+      return;
+    }
+    const key = await sync.importNotes(shownFolder ?? '', files);
+    if (key) go(`note/${key}`);
+  }
+
   /// Removed with notes or files not sent: what they are, said plainly.
   const unsentWords = $derived.by(() => {
     const { notes, files } = sync.unsentCounts;
@@ -224,7 +255,7 @@
   <div class="shell" class:wide class:resizing={dragFrom !== null}>
     {#if wide || route.kind === 'list'}
       <div class="side" style:--side-w={wide ? `${sideW}px` : null}>
-        <Library open={(key) => go(`note/${key}`)} {current} {create} />
+        <Library open={(key) => go(`note/${key}`)} {current} {create} bind:folder={shownFolder} />
         <footer>
           <span class="status" class:ok={status.ok} role="status">
             <Icon name={status.icon} size={14} /> {status.text}
@@ -277,12 +308,15 @@
     {:else if route.kind === 'history'}
       <main><History key={route.key} back={() => go(`note/${current}`)} {wide} /></main>
     {:else if route.kind === 'settings'}
-      <main><Settings back={wide ? null : back} /></main>
+      <main><Settings back={wide ? null : back} open={(key) => { shownFolder = null; go(`note/${key}`); }} /></main>
     {:else if wide}
       <main class="none"><p>Choose a note.</p></main>
     {/if}
   </div>
 {/if}
+
+<svelte:window ondragover={filesOver} ondrop={filesDropped} />
+<OpenAsk />
 
 {#if sync.notice}
   <p class="notice" role="status">

@@ -1511,3 +1511,91 @@ fn many_notes_come_in_with_the_vault_read_a_few_times() {
     let (web, page) = intake(300, 1, Lists::EachBatch);
     assert!(web.vault_reads() <= page.lists + 1, "{} reads for {} lists", web.vault_reads(), page.lists);
 }
+
+/// A file of any kind put in here goes into the attachments folder under
+/// its own name made plain, as the desktop copies one in; its link opens
+/// it from the vault, or from what is on its way there, and the desktop
+/// has it in the vault's map for files. A link to a site, a place in the
+/// note or a file the vault doesn't name is the browser's.
+#[test]
+fn a_file_of_any_kind_goes_in_under_its_own_name_and_its_link_finds_it() {
+    let mut rng = Seeded(31);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let pdf = web.file_free("Trip plan (v2).PDF");
+    assert_eq!(pdf, "attachments/Trip-plan-(v2).pdf");
+    assert_eq!(web.file_free("README"), "attachments/README", "no kind: none");
+    assert_eq!(web.file_free("C:\\Downloads\\setup.exe"), "attachments/setup.exe");
+    let id = web.upload(&pdf, b"%PDF-1.7 a plan".to_vec()).unwrap();
+    assert_eq!(web.file_free("trip plan (v2).pdf"), "attachments/trip-plan-(v2)-2.pdf", "taken while it goes, case aside");
+    // On its way: found from a note in a folder, its escapes read.
+    assert_eq!(web.linked_file("Work", "../attachments/Trip-plan-%28v2%29.pdf").as_deref(), Some(pdf.as_str()));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(desk.docs[vault::ROOM].files().get(&pdf), Some(&id));
+    assert_eq!(web.linked_file("", "attachments/trip-plan-(v2).pdf").as_deref(), Some(pdf.as_str()), "the vault's, case aside");
+    for not in ["https://example.com/a.pdf", "#plan", "../attachments/gone.pdf", "../../outside.pdf", "Other.md"] {
+        assert_eq!(web.linked_file("Work", not), None, "{not}");
+    }
+}
+
+/// A Markdown file dropped on the page is a note in the folder it was
+/// dropped into, a copy under its own name, or the next one free there;
+/// the files dropped with it are linked where they were put, from that
+/// folder, and its history starts with it. One with nothing in it, or too
+/// big to be a note, is refused, and said why.
+#[test]
+fn a_markdown_file_dropped_comes_in_as_a_note() {
+    let mut rng = Seeded(32);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let k = Key::random();
+    desk.docs.insert(k.to_string(), NoteDoc::new(7));
+    desk.docs[&k.to_string()].record("# Plan\n\nThe old one.\n", Origin::Save);
+    desk.docs.entry(vault::ROOM.to_string()).or_insert_with(|| NoteDoc::new(7)).set_place(k, &Place { folder: "Work".into(), name: "Plan".into(), pinned: false, trashed: false });
+    for room in [vault::ROOM.to_string(), k.to_string()] {
+        desk.session.saved(&room, &mut DeskDocs(&mut desk.docs), &mut rng);
+    }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+
+    let sea = web.file_free("sea.png");
+    web.upload(&sea, vec![9, 9, 9]).unwrap();
+    let text = "A walk by the sea.\n\n![The sea](img/sea.png)\n\nAnd [the map](map.pdf), not dropped.\n";
+    let key = web.import_note("Work", "Plan.md", text, &[("sea.png".into(), sea.clone())], &mut rng).unwrap();
+    let card = web.listed(&key).expect("listed");
+    assert_eq!((card.title.as_str(), card.folder.as_str()), ("Plan 2", "Work"), "titled by its file's name, the next one free");
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let k2 = Key::parse(&key).unwrap();
+    let p = desk.docs[vault::ROOM].place(k2).expect("placed");
+    assert_eq!((p.folder.as_str(), p.name.as_str()), ("Work", "Plan 2"));
+    assert_eq!(desk.docs[&key].text(), "A walk by the sea.\n\n![The sea](../attachments/sea.png)\n\nAnd [the map](map.pdf), not dropped.\n");
+    assert_eq!(web.history(&key).first().and_then(|p| p.origin), Some(Origin::Import));
+    // A name that isn't plain is made so; at the top level, no other there.
+    let odd = web.import_note("", "Q3: plans?.markdown", "words\n", &[], &mut rng).unwrap();
+    assert_eq!(web.listed(&odd).unwrap().title, "Q3- plans-");
+    assert_eq!(web.import_note("", "Empty.md", "", &[], &mut rng).unwrap_err(), "there's nothing in it");
+    let big = "x".repeat(carnet_web::notes::IMPORT_MOST as usize + 1);
+    assert_eq!(web.import_note("", "Big.md", &big, &[], &mut rng).unwrap_err(), "it's too big to be a note");
+}
+
+/// The welcome note asked for again: the one nobody has written in, if
+/// there is one, not a second beside it; once it's written in (or in
+/// Deleted), a new one under the next free name, which the desktop has.
+#[test]
+fn the_welcome_note_comes_again_once() {
+    let mut rng = Seeded(33);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let md = carnet_core::welcome::markdown(|s| carnet_core::welcome::label(s.spec(), false));
+    let first = web.add_welcome(&md, &mut rng);
+    assert_eq!(web.listed(&first).unwrap().title, "Welcome to Carnet");
+    assert_eq!(web.add_welcome(&md, &mut rng), first, "untouched: that one");
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(desk.docs[&first].text(), md);
+    let (_, base) = web.source(&first).unwrap();
+    web.edit(&first, &base, &format!("{md}\nMine now.\n"), &mut rng).unwrap();
+    let second = web.add_welcome(&md, &mut rng);
+    assert_ne!(second, first, "written in: a new one");
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    let p = desk.docs[vault::ROOM].place(Key::parse(&second).unwrap()).unwrap();
+    assert_eq!((p.folder.as_str(), p.name.as_str()), ("", "Welcome to Carnet 2"));
+    assert!(web.set_trashed(&second, true, &mut rng));
+    let third = web.add_welcome(&md, &mut rng);
+    assert!(third != first && third != second, "one in Deleted isn't taken out of it");
+}

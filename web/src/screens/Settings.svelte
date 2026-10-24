@@ -2,7 +2,7 @@
   // This browser and the account's devices, as the desktop's Settings →
   // Sync has them: who's in, letting one more in, the recovery words, the
   // passkeys, and leaving. On the server owner's account, invites and the
-  // accounts too.
+  // accounts too. Last of all, the getting-started note, given back.
   import { onDestroy, onMount } from 'svelte';
   import { sync } from '../lib/sync.svelte';
   import { ago, dateWords, left } from '../lib/time';
@@ -11,7 +11,15 @@
   import { inviteSteps, joinedSaid, recoveryShown, waysBack } from '../lib/words';
   import { LINK_OPENS, linkOpen, linkOpenWords, setLinkOpen, type LinkOpen } from '../lib/editor/links';
 
-  let { back }: { back: (() => void) | null } = $props();
+  let { back, open }: { back: (() => void) | null; open: (key: string) => void } = $props();
+
+  /// The getting-started note, as the desktop's Settings gives it back:
+  /// the welcome nobody has written in, or a new one, opened (and these
+  /// settings left for it).
+  function welcome() {
+    const key = sync.addWelcome();
+    if (key) open(key);
+  }
   /// The device whose removal is asked to be confirmed.
   let removing = $state<string | null>(null);
   /// The account whose removal is asked to be confirmed.
@@ -555,6 +563,8 @@
 
     {#if sync.error && errorAt === null}<p class="error" role="alert">{sync.error}</p>{/if}
     <p class="note">Account {sync.account}. Sync is end-to-end encrypted: the server keeps your notes sealed, and never sees a word of them. This browser keeps its keys sealed too.</p>
+    <!-- Last of all, faint but legible: the welcome note again. -->
+    <button class="faint" onclick={welcome}>Add the getting-started note</button>
   </div>
 </article>
 
@@ -613,6 +623,10 @@
   /* An error said by the part it came from, in the row's place. */
   .row.said-here { font-size: 14px; gap: 8px; color: var(--danger); }
   .note { color: var(--faint); font-size: 13px; margin: 18px 4px 0; }
+  /* The desktop's: in the faintest grey that still reads, on a well
+     under the pointer. */
+  .faint { display: block; margin: 14px 0 0; padding: 6px 4px; border: 0; border-radius: var(--radius); background: none; color: var(--faint); font: inherit; font-size: 13px; cursor: pointer; }
+  .faint:hover { background: var(--hover); }
   .row.choose { flex-wrap: wrap; }
   .segmented { display: inline-flex; flex: none; padding: 2px; border-radius: 999px; background: var(--sunken); }
   .segmented button { padding: 6px 12px; border: 0; border-radius: 999px; background: none; color: var(--muted); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }

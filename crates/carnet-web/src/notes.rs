@@ -283,6 +283,10 @@ pub struct Notes {
 /// of another host put to it is).
 pub const UNREACHABLE: &str = "unreachable";
 
+/// The most a Markdown file dropped on the page may be to come in as a
+/// note: the desktop's (`store::IMPORT_MOST`), 8 MB.
+pub const IMPORT_MOST: u64 = 8 << 20;
+
 /// Why files wait when the server's file storage refuses them.
 pub use carnet_sync::session::FILES_TURNED_AWAY as TURNED_AWAY;
 
@@ -1079,15 +1083,127 @@ impl Notes {
     /// A name for a new picture in the attachments folder (`stem.ext`,
     /// numbered past one the vault or an upload has already).
     pub fn picture_free(&self, stem: &str, ext: &str) -> String {
-        let taken = |p: &str| self.file_id(p).is_some() || self.uploads.values().any(|(q, _)| q.iter().any(|q| q == p));
+        self.attachment_free(stem, ext)
+    }
+
+    /// `attachments/stem.ext`, or `stem-2.ext` and on, past a name the
+    /// vault or an upload has already, case aside (the desktop's file
+    /// systems mostly see names so); with no `ext`, `stem`, `stem-2`.
+    fn attachment_free(&self, stem: &str, ext: &str) -> String {
+        let files = self.vault_files();
+        let taken = |p: &str| files.get(p).is_some() || self.uploads.values().any(|(q, _)| q.iter().any(|q| q.to_lowercase() == p.to_lowercase()));
+        let dot = if ext.is_empty() { "" } else { "." };
         let mut n = 1;
         loop {
-            let name = if n == 1 { format!("attachments/{stem}.{ext}") } else { format!("attachments/{stem}-{n}.{ext}") };
+            let name = if n == 1 { format!("attachments/{stem}{dot}{ext}") } else { format!("attachments/{stem}-{n}{dot}{ext}") };
             if !taken(&name) {
                 return name;
             }
             n += 1;
         }
+    }
+
+    /// Where a file put in here, named `name` where it came from, goes in
+    /// the attachments folder, as the desktop copies one in
+    /// (`copy_in_file`): under its own name made plain, its spaces dashes,
+    /// its kind lowercase or none, or the first such name free.
+    pub fn file_free(&self, name: &str) -> String {
+        let name = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if !s.is_empty() && !e.is_empty() && !e.contains(' ') => (s, e.to_lowercase()),
+            _ => (name, String::new()),
+        };
+        self.attachment_free(&name::slug(stem).replace(' ', "-"), &ext)
+    }
+
+    /// The file a link in a note in `folder` leads to (its `href`, as the
+    /// page shows it), as a path from the notes folder: one the vault
+    /// names, or one put in here on its way to it. None for a web address,
+    /// a place in the note, a note, or a file elsewhere: the link is the
+    /// browser's to follow.
+    pub fn linked_file(&self, folder: &str, href: &str) -> Option<String> {
+        if href.starts_with('#') || !crate::relink::is_relative(href) {
+            return None;
+        }
+        let decoded = crate::relink::decode(href.split(['?', '#']).next().unwrap_or(href));
+        let path = doc::resolve_picture(folder, &decoded)?;
+        if let Some(have) = self.vault_files().get(&path) {
+            return Some(have.to_string());
+        }
+        self.uploads.values().flat_map(|(paths, _)| paths).find(|p| p.to_lowercase() == path.to_lowercase()).cloned()
+    }
+
+    /// A name for a note in `folder`: `stem`, or `stem 2` and on, past
+    /// the names its other notes have, case aside, as the desktop finds a
+    /// free file name (`free_path`).
+    fn note_name_free(&self, folder: &str, stem: &str) -> String {
+        let placed = self.placed();
+        let taken: HashSet<String> =
+            placed.notes.iter().filter(|(k, p)| !p.trashed && p.folder == folder && !placed.gone.contains(*k)).map(|(_, p)| p.name.to_lowercase()).collect();
+        (1..).map(|n| if n == 1 { stem.to_string() } else { format!("{stem} {n}") }).find(|n| !taken.contains(&n.to_lowercase())).expect("a free name")
+    }
+
+    /// A note with `text`, put in `folder` under `name` (or the next one
+    /// free there), on every device: the vault first, so the others learn
+    /// where it goes before its words come. Its key.
+    fn place_new(&mut self, folder: &str, name: &str, text: &str, origin: Origin, rng: &mut impl Random) -> String {
+        self.gone_now();
+        let key = Key::random();
+        let room = key.to_string();
+        let d = self.rooms.made();
+        d.record(text, origin);
+        self.rooms.docs.insert(room.clone(), d);
+        let name = self.note_name_free(folder, name);
+        let vault = self.rooms.doc(vault::ROOM);
+        // Its folder gone meanwhile (on another device): made again, as a
+        // note put back into one is.
+        if !folder.is_empty() && !vault.folders().contains(folder) {
+            let _ = vault.make_folder(vault::parent_of(folder), vault::leaf_of(folder));
+        }
+        vault.set_place(key, &Place { folder: folder.to_string(), name, pinned: false, trashed: false });
+        self.session.saved(vault::ROOM, &mut self.rooms, rng);
+        self.session.saved(&room, &mut self.rooms, rng);
+        self.changed.insert(room.clone());
+        room
+    }
+
+    /// A Markdown file dropped on the page (`file`, its name, and its
+    /// words) brought in as a note in `folder`: a copy, under the file's
+    /// name made plain, or the next one free there, its history starting
+    /// with it. Its links to the files dropped with it, `brought` (each
+    /// one's name and the path it was put at), rewritten to find them
+    /// ([`crate::import::brought`]). Its key; or why not, in words.
+    pub fn import_note(&mut self, folder: &str, file: &str, text: &str, brought: &[(String, String)], rng: &mut impl Random) -> Result<String, String> {
+        if text.is_empty() {
+            return Err("there's nothing in it".into());
+        }
+        if text.len() as u64 > IMPORT_MOST {
+            return Err("it's too big to be a note".into());
+        }
+        let file = file.rsplit(['/', '\\']).next().unwrap_or(file);
+        let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
+        let stem = if name::is_plain_name(stem) { stem.to_string() } else { name::slug(stem) };
+        let text = crate::import::brought(text, folder, brought);
+        Ok(self.place_new(folder, &stem, &text, Origin::Import, rng))
+    }
+
+    /// The welcome note asked for again (Settings' "Add the getting-started
+    /// note"), `md` as this browser makes it: the one nobody has written
+    /// in, if there is one (not in Deleted), rather than a second the same
+    /// beside it; else a new one at the top level, under the first free
+    /// name ("Welcome to Carnet 2" beside one written in), sent as any new
+    /// note is. Its key.
+    pub fn add_welcome(&mut self, md: &str, rng: &mut impl Random) -> String {
+        self.gone_now();
+        let placed = self.placed();
+        let untouched = self.rooms.docs.iter().find(|(room, d)| {
+            Key::parse(room).is_some_and(|k| placed.notes.get(&k).is_some_and(|p| !p.trashed) && !placed.gone.contains(&k)) && d.text() == md
+        });
+        if let Some((room, _)) = untouched {
+            return room.clone();
+        }
+        drop(placed);
+        self.place_new("", carnet_core::welcome::TITLE, md, Origin::Save, rng)
     }
 
     /// A file put in here at `path`, to go to the server and then the
