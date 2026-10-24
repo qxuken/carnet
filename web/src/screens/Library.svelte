@@ -9,7 +9,8 @@
   // change goes through the vault (sync.svelte.ts), the rules with it.
   // A folder with folders inside folds them away by its chevron (Alt:
   // every folder inside too), or ← and → on its row; which are folded is
-  // this browser's, kept in localStorage.
+  // this browser's, kept in localStorage. Markdown files dropped on a
+  // folder's row come in as notes there.
   import { tick } from 'svelte';
   import { sync, type FolderGone, type Note } from '../lib/sync.svelte';
   import Icon from '../lib/Icon.svelte';
@@ -40,11 +41,18 @@
     type Drag,
   } from '../lib/folders';
   import { focusNow } from '../lib/focus';
+  import { carriesFiles, isMarkdownName } from '../lib/files';
   import { shortAgo } from '../lib/time';
 
-  let { open, current, create }: { open: (key: string) => void; current: string | null; create: (folder: string | null) => void } = $props();
+  let {
+    open,
+    current,
+    create,
+    // The folder shown (null: every note), the page's to know: where
+    // Markdown files dropped elsewhere come in.
+    folder = $bindable(null),
+  }: { open: (key: string) => void; current: string | null; create: (folder: string | null) => void; folder?: string | null } = $props();
   let query = $state('');
-  let folder = $state<string | null>(null);
   let trash = $state(false);
 
   const shown = $derived.by(() => {
@@ -288,6 +296,14 @@
   }
 
   function dragOver(e: DragEvent, to: string) {
+    // Files from outside: Markdown ones come in as notes there.
+    if (!drag && carriesFiles(e.dataTransfer?.types)) {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      over = to;
+      springOver(to);
+      return;
+    }
     if (!mayDrop(drag, to)) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
@@ -306,6 +322,11 @@
     e.preventDefault();
     const d = drag;
     dragEnd();
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (!d && files.some((f) => isMarkdownName(f.name))) {
+      void importInto(to, files);
+      return;
+    }
     if (!d || !mayDrop(d, to)) return;
     if ('note' in d) {
       const n = sync.notes.find((x) => x.key === d.note);
@@ -317,6 +338,18 @@
     drag = null;
     over = null;
     springOver(null);
+  }
+
+  /// Markdown files let go over a folder's row (All notes': the top),
+  /// brought in as notes there: the library shows that folder, and the
+  /// first opens, as on the desktop.
+  async function importInto(to: string, files: File[]) {
+    const key = await sync.importNotes(to, files);
+    if (!key) return;
+    trash = false;
+    query = '';
+    folder = to || null;
+    open(key);
   }
 </script>
 

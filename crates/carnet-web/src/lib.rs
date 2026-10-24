@@ -3,6 +3,8 @@
 //! and bytes kept. web/ moves them over the WebSocket and into IndexedDB.
 
 pub mod editor;
+pub mod files;
+pub mod import;
 pub mod notes;
 pub mod relink;
 pub mod zip;

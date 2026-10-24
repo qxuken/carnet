@@ -130,6 +130,35 @@ pub const ALL: [(&str, &str); 52] = [
     ("Picture right of the text", FLOAT_RIGHT),
 ];
 
+/// The keys of a shortcut the welcome note names (carnet-core's
+/// `welcome::Shortcut`), from this table: what the note says is what the
+/// app does.
+pub fn welcome_spec(s: carnet_core::welcome::Shortcut) -> &'static str {
+    use carnet_core::welcome::Shortcut as S;
+    match s {
+        S::Bold => BOLD,
+        S::Italic => ITALIC,
+        S::Highlight => HIGHLIGHT,
+        S::Link => LINK,
+        S::ChangeCase => CHANGE_CASE,
+        S::Top => TOP,
+        S::Bottom => BOTTOM,
+        S::MoveUp => MOVE_UP,
+        S::MoveDown => MOVE_DOWN,
+        S::RowUp => ROW_UP,
+        S::RowDown => ROW_DOWN,
+        S::ColLeft => COL_LEFT,
+        S::ColRight => COL_RIGHT,
+        S::Copy => "mod+c",
+        S::Undo => UNDO,
+        S::Paste => PASTE,
+        S::NewNote => NEW_NOTE,
+        S::NewFolder => NEW_FOLDER,
+        S::Search => SEARCH,
+        S::Settings => SETTINGS,
+    }
+}
+
 /// A shortcut as this platform writes it.
 pub fn label(spec: &str) -> String {
     Accel::parse(spec).map_or_else(|| spec.to_string(), |a| a.display())
@@ -178,5 +207,17 @@ mod tests {
         }
         let shown = if cfg!(target_os = "macos") { "\u{2303}\u{21e7}\u{21e5}" } else { "Ctrl+Shift+Tab" };
         assert_eq!(label(CYCLE_PREVIOUS), shown);
+    }
+
+    /// The welcome note the web makes names the desktop's keys, written
+    /// as kui writes them: carnet-core's spelling of each is this table's,
+    /// and its labels are kui's, on this platform.
+    #[test]
+    fn the_welcome_notes_keys_are_the_apps() {
+        use carnet_core::welcome::{self, Shortcut};
+        for s in Shortcut::ALL {
+            assert_eq!(s.spec(), welcome_spec(s), "{s:?}");
+            assert_eq!(welcome::label(s.spec(), cfg!(target_os = "macos")), label(s.spec()), "{s:?}");
+        }
     }
 }
