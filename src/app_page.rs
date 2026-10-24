@@ -666,8 +666,7 @@ impl Carnet {
             numbers.clear();
         }
         // Every block sits in one row that reports where it was laid
-        // out (what a margin drag's `y` is read against) and wears the
-        // selection's wash when it is covered whole.
+        // out (what a margin drag's `y` is read against).
         let row = ui.child_key_indexed(id);
         if let Some(r) = ui.layout_of(row) {
             self.row_rects.push((id, r));
@@ -685,21 +684,19 @@ impl Carnet {
             ui.request_frame_at(self.typed_at + HINT_AFTER);
         }
         let floated = matches!(b.kind, Kind::Image { float, .. } if float != Float::None);
-        let mut wrap = NodeSpec::column()
+        // A block covered whole wears no wash of its own: its words are
+        // chosen as any are, line by line (`line_part`), so a selection
+        // looks the same whatever it covers and whatever its words wear
+        // (a wash the row's width, swapped for the words' own once a
+        // highlight or a colour cut them, made it change as it was
+        // styled). A picture says so with its own ring, a divider round
+        // its ornament.
+        let wrap = NodeSpec::column()
             .width(if floated { Sizing::Fit } else { Sizing::GROW })
             .pad_xy(8.0, 0.0)
             .radius(radius::TIGHT)
             .on_layout(Value::Null);
-        // A picture says it is selected with its own ring, hugging
-        // it: a wash the page's width would mostly cover nothing. A
-        // divider wears its own, round the ornament.
-        if whole && !matches!(b.kind, Kind::Image { .. } | Kind::Divider) {
-            wrap = wrap.bg(t.selection);
-        } else if self.focus_on() {
-            // Eased with focus: no wash is the wash with no alpha.
-            wrap = wrap.bg(t.selection.with_alpha(0.0));
-        }
-        wrap = step_back(wrap, self.focus_on(), cx.focus.is_some_and(|f| f != id));
+        let wrap = step_back(wrap, self.focus_on(), cx.focus.is_some_and(|f| f != id));
         ui.with_indexed(id, wrap, |ui| match &b.kind {
             Kind::Text(text) => {
                 // An empty note says what it can do, once, quietly.
@@ -1744,16 +1741,20 @@ impl Carnet {
         let (drawn_byte, drawn_0) = (self.drawn_byte(slot, byte).saturating_sub(d0), 0);
         let preedit = if here { self.preedit.clone() } else { None };
         // A selection shows only while the page has the keyboard: one
-        // selection in the window at a time. A block covered whole wears
-        // the wash on its row instead.
-        let part = cov
-            .parts
-            .get(&slot)
-            .copied()
-            .filter(|_| self.editing && !cov.whole.contains(&slot.block))
-            .map(|(f, to)| (f.max(lo), to.min(hi)))
-            .filter(|(f, to)| f < to);
+        // selection in the window at a time. A block covered whole has
+        // every word of it chosen, drawn as words chosen in it are, and
+        // shown as its wash was, keyboard or not.
         let whole = cov.whole.contains(&slot.block);
+        let part = if whole {
+            Some((lo, hi)).filter(|(f, to)| f < to)
+        } else {
+            cov.parts
+                .get(&slot)
+                .copied()
+                .filter(|_| self.editing)
+                .map(|(f, to)| (f.max(lo), to.min(hi)))
+                .filter(|(f, to)| f < to)
+        };
         if here {
             self.caret_fresh = fresh;
         }
@@ -1878,16 +1879,12 @@ impl Carnet {
                         letter_own |= !s.marker && s.ink != 0;
                     }
                     // Chosen, words wear the selection's wash over a
-                    // highlighter's, which shows through it the same in
-                    // words chosen in a block as in a block covered whole:
-                    // put in its place, a highlight given across blocks
-                    // showed only on those covered whole.
+                    // highlighter's, which shows through it: put in its
+                    // place, a highlight given across blocks showed only
+                    // on some of them.
                     let chosen = part.is_some_and(|(f, to)| a >= f && b <= to);
-                    if chosen || (whole && wash.is_some()) {
-                        sp = sp.bg(wash.map_or(t.selection, |w| over(t.selection, w)));
-                    }
                     if chosen {
-                        sp = sp.bg_radius(4.0);
+                        sp = sp.bg(wash.map_or(t.selection, |w| over(t.selection, w))).bg_radius(4.0);
                     }
                     spans.push(sp);
                     broken = text[a..b].ends_with('\n');

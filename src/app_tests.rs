@@ -3632,13 +3632,13 @@ fn a_colour_and_a_highlight_go_on_together_from_the_toolbar() {
 /// The welcome note's "Words" and the two paragraphs under it, selected
 /// from the heading's start to the second one's end, are drawn one way
 /// while the highlighter's picker is open, whatever the pointer is on:
-/// each block on the selection's wash. Resting on a swatch shows its name
-/// and changes nothing. One picked goes on all three blocks' words, and
-/// the three stay selected whole, drawn as before; its marks went inside
-/// the selection's ends, which drew the heading and the second paragraph
-/// as words chosen in them, their highlight put out by the selection's
-/// wash, and only the paragraph between as a block. Picked again, it
-/// comes off, and nothing has moved.
+/// their words chosen line by line, as any chosen words are, and no
+/// block on a wash the row's width (which was swapped for the words'
+/// own as soon as a highlight or a colour cut them). Resting on a swatch
+/// shows its name and changes nothing. One picked goes on all three
+/// blocks' words, and the three stay selected whole, drawn as before; its
+/// marks went inside the selection's ends. Picked again, it comes off,
+/// and nothing has moved.
 #[test]
 fn a_selection_across_blocks_is_drawn_one_way_while_a_highlight_is_picked() {
     let (mut app, mut d, dir) = body("tint-across");
@@ -3669,7 +3669,9 @@ fn a_selection_across_blocks_is_drawn_one_way_while_a_highlight_is_picked() {
     let three: Vec<usize> = page::spanned(app.doc(), app.caret).collect();
     let words = |app: &Carnet| three.iter().map(|&i| texts(app)[i].clone()).collect::<Vec<_>>();
     let plain = words(&app);
-    // The washes drawn, and the blocks the selection covers whole.
+    // Any wash a node wears (a block's row wore one, covered whole), and
+    // the blocks the selection covers whole; chosen words wear theirs on
+    // their spans.
     let drawn = |app: &Carnet, d: &Drive| {
         let sel = d.core.theme().selection;
         let washes: Vec<Rect> = d.core.nodes().iter().filter(|n| n.bg == sel && n.rect.w > 0.0).map(|n| n.rect).collect();
@@ -3678,12 +3680,13 @@ fn a_selection_across_blocks_is_drawn_one_way_while_a_highlight_is_picked() {
         (washes, whole)
     };
     let rest = drawn(&app, &d);
-    assert_eq!((rest.0.len(), rest.1.len()), (3, 3), "each block washed, whole: {rest:?}");
+    assert_eq!((rest.0.len(), rest.1.len()), (0, 3), "no block washed, the three whole: {rest:?}");
     let same = |app: &mut Carnet, d: &mut Drive, what: &str| {
         for _ in 0..3 {
             d.advance(0.2);
             d.frame(app);
-        }        assert_eq!(drawn(app, d), rest, "{what}: drawn as before");
+        }
+        assert_eq!(drawn(app, d), rest, "{what}: drawn as before");
     };
     let r = d.core.nodes().iter().find(|n| n.label.as_deref() == Some("t-mark")).map(|n| n.rect).unwrap();
     d.click(&mut app, r.x + r.w / 2.0, r.y + r.h / 2.0);
