@@ -176,6 +176,8 @@ pub enum Msg {
     SetTypewriter { to: u64 },
     /// How links open: `page::LinkOpen::ALL`'s index.
     SetLinkOpen { to: u64 },
+    /// How a wheel's notch scrolls: an index into `settings::Wheel::ALL`.
+    SetWheel { to: u64 },
     /// Shows the library beside the page, or hides it.
     ToggleSidebar,
     /// The library shows the Deleted folder: what is in the trash.
@@ -4049,6 +4051,7 @@ impl Carnet {
             | Msg::SetFocus { .. }
             | Msg::SetTypewriter { .. }
             | Msg::SetLinkOpen { .. }
+            | Msg::SetWheel { .. }
             | Msg::ToggleSidebar
             | Msg::SetSize { .. }
             | Msg::SetDivider { .. }
@@ -4859,6 +4862,12 @@ impl App for Carnet {
     /// The main window's frame, or a note window's as that window's own
     /// (app_window.rs).
     fn view(&mut self, ui: &mut Ui<'_>) {
+        // The wheel as Settings has it, in this window: taken the frame
+        // it's chosen, unless `KUI_WHEEL` asks for another to compare.
+        let feel = self.settings.wheel.feel();
+        if ui.core().wheel_feel() != feel && std::env::var_os("KUI_WHEEL").is_none() {
+            ui.core().set_wheel_feel(feel);
+        }
         if ui.env().window.id == kui_native::WindowId::MAIN {
             return self.window_view(ui);
         }

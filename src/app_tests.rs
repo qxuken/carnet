@@ -9317,6 +9317,31 @@ fn the_date_shown_can_be_when_the_note_was_made() {
     remove_test_dir(dir);
 }
 
+/// The wheel is Carnet's own feel until Settings' Advanced card picks one
+/// of kui's presets, which the window takes the next frame; it's kept in
+/// the file, and a reset of the look leaves it.
+#[test]
+fn the_wheel_is_carnets_until_a_preset_is_picked() {
+    let (store, dir) = temp_store("wheel");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 4000.0).framing();
+    d_frame_twice(&mut app, &mut d);
+    let carnet = kui_native::WheelFeel { line_px: 80.0, response: 0.5, kick: 0.2 };
+    assert_eq!(d.core.wheel_feel(), carnet, "Carnet's own from the first frame");
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    let brisk = d.key_named("Brisk").expect("the preset in Advanced");
+    d.click_key(&mut app, brisk);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.wheel, crate::settings::Wheel::Brisk);
+    assert_eq!(d.core.wheel_feel(), kui_native::WheelFeel::BRISK, "taken at once");
+    assert!(app.settings.to_text().contains("\nwheel = brisk\n"));
+    app.settings.reset_look();
+    assert_eq!(app.settings.wheel, crate::settings::Wheel::Brisk, "not a look");
+    remove_test_dir(dir);
+}
+
 /// Reset puts the Appearance and Writing cards back as they first were,
 /// asked first; the library and the notes folder stay.
 #[test]

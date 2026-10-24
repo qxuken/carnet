@@ -11,7 +11,7 @@ use super::*;
 use carnet_sync::compat::feature;
 use crate::design;
 use crate::look;
-use crate::settings::Divider;
+use crate::settings::{Divider, Wheel};
 
 /// Settings → Sync's field maker: a field by its key, its text, its hint,
 /// and what it holds.
@@ -74,6 +74,7 @@ impl Carnet {
             Msg::SetFocus { to } => s.focus = to == 1,
             Msg::SetTypewriter { to } => s.typewriter = to == 1,
             Msg::SetLinkOpen { to } => s.link_open = page::LinkOpen::ALL[(to as usize).min(page::LinkOpen::ALL.len() - 1)],
+            Msg::SetWheel { to } => s.wheel = Wheel::ALL[(to as usize).min(Wheel::ALL.len() - 1)],
             Msg::SetCheckUpdates { to } => s.check_updates = to == 1,
             Msg::OpenRelease => {
                 if let Some(page) = self.updates.newer().map(crate::update::Release::page) {
@@ -788,6 +789,23 @@ impl Carnet {
             ui.text_in(
                 NodeSpec::row().pad_xy(4.0, 0.0).selectable(),
                 &format!("Settings are kept in {}", file.display()),
+                TextStyle::new(Type::SMALL.size).color(t.muted),
+            );
+        }
+
+        // -- what most never need to change
+        section(ui, l, "Advanced");
+        card(ui, l, "card-advanced", |ui| {
+            setting(ui, l, "Mouse wheel", Some("How far a notch scrolls, and how it glides there"), |ui| {
+                let cur = Wheel::ALL.iter().position(|w| *w == s.wheel).unwrap_or(0);
+                let names = Wheel::ALL.map(Wheel::name);
+                segmented(ui, l, "wheel", &names, cur, |to| Msg::SetWheel { to });
+            });
+        });
+        if std::env::var_os("KUI_WHEEL").is_some() {
+            ui.text_in(
+                NodeSpec::row().pad_xy(4.0, 0.0).selectable(),
+                "KUI_WHEEL is set: it chooses how the wheel scrolls while Carnet runs.",
                 TextStyle::new(Type::SMALL.size).color(t.muted),
             );
         }

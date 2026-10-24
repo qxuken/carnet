@@ -126,6 +126,59 @@ impl Divider {
     }
 }
 
+/// How a mouse wheel's notch scrolls: Carnet's own feel, or one of kui's
+/// presets (`kui_native::WheelFeel`), from slow to fast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wheel {
+    /// 80 px a notch, glided there over a 0.5 s response with a small
+    /// kick: further than kui's and softer.
+    Carnet,
+    Gentle,
+    Standard,
+    Brisk,
+    Swift,
+}
+
+impl Wheel {
+    pub const ALL: [Wheel; 5] = [Wheel::Carnet, Wheel::Gentle, Wheel::Standard, Wheel::Brisk, Wheel::Swift];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Wheel::Carnet => "carnet",
+            Wheel::Gentle => "gentle",
+            Wheel::Standard => "standard",
+            Wheel::Brisk => "brisk",
+            Wheel::Swift => "swift",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|w| w.key() == s)
+    }
+
+    /// What it is called in Settings.
+    pub fn name(self) -> &'static str {
+        match self {
+            Wheel::Carnet => "Carnet",
+            Wheel::Gentle => "Gentle",
+            Wheel::Standard => "Standard",
+            Wheel::Brisk => "Brisk",
+            Wheel::Swift => "Swift",
+        }
+    }
+
+    pub fn feel(self) -> kui_native::WheelFeel {
+        use kui_native::WheelFeel;
+        match self {
+            Wheel::Carnet => WheelFeel { line_px: 80.0, response: 0.5, kick: 0.2 },
+            Wheel::Gentle => WheelFeel::GENTLE,
+            Wheel::Standard => WheelFeel::STANDARD,
+            Wheel::Brisk => WheelFeel::BRISK,
+            Wheel::Swift => WheelFeel::SWIFT,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     /// Light, dark, or as the OS is.
@@ -184,6 +237,8 @@ pub struct Settings {
     /// How a link in a note opens while it's written in: ⌘-click (Ctrl
     /// elsewhere), a click, or a double-click.
     pub link_open: carnet_core::page::LinkOpen,
+    /// How a mouse wheel's notch scrolls, in every window.
+    pub wheel: Wheel,
     /// The library shows beside the page; hidden, the page has the
     /// window.
     pub sidebar: bool,
@@ -229,6 +284,7 @@ impl Default for Settings {
             focus: false,
             typewriter: false,
             link_open: carnet_core::page::LinkOpen::ModClick,
+            wheel: Wheel::Carnet,
             sidebar: true,
             collapsed: BTreeSet::new(),
             check_updates: true,
@@ -318,6 +374,7 @@ impl Settings {
                 "focus" => s.focus = v == "on",
                 "typewriter" => s.typewriter = v == "on",
                 "links" => s.link_open = carnet_core::page::LinkOpen::from_key(v).unwrap_or_default(),
+                "wheel" => s.wheel = Wheel::from_key(v).unwrap_or(Wheel::Carnet),
                 "sidebar" => s.sidebar = v != "hidden",
                 "collapsed" if !v.is_empty() => {
                     s.collapsed.insert(v.to_string());
@@ -336,9 +393,15 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         // The reader's own divider after the rest: its words, and its
-        // picture's name in this folder (or where it was picked).
+        // picture's name in this folder (or where it was picked); then the
+        // wheel.
         let picture = self.divider_picture.as_deref().map(Path::display).map(|p| p.to_string()).unwrap_or_default();
-        format!("{}divider_text = {}\ndivider_picture = {picture}\n", self.keys_text(), self.divider_text)
+        format!(
+            "{}divider_text = {}\ndivider_picture = {picture}\nwheel = {}\n",
+            self.keys_text(),
+            self.divider_text,
+            self.wheel.key()
+        )
     }
 
     /// Where the picture a divider of the reader's own is drawn as is:
@@ -399,11 +462,12 @@ impl Settings {
     /// colours, faces, size, width, the letter and dividers, the window
     /// (solid or translucent, taken at the next start), and the writing
     /// aids. Not the notes folder, the library (its order, dates, width,
-    /// whether it shows), nor the check for updates; and a divider of the
-    /// reader's own, its words or picture, is no longer used but kept, for
-    /// when it is chosen again.
+    /// whether it shows), the wheel (an advanced setting, not a look), nor
+    /// the check for updates; and a divider of the reader's own, its words
+    /// or picture, is no longer used but kept, for when it is chosen again.
     pub fn reset_look(&mut self) {
         *self = Settings {
+            wheel: self.wheel,
             divider_text: std::mem::take(&mut self.divider_text),
             divider_picture: self.divider_picture.take(),
             sort: self.sort,
@@ -484,6 +548,7 @@ mod tests {
             focus: true,
             typewriter: true,
             link_open: carnet_core::page::LinkOpen::DoubleClick,
+            wheel: Wheel::Brisk,
             sidebar: false,
             collapsed: [String::new(), "Work".to_string(), "Work/Old, kept = 2".to_string()].into(),
             check_updates: false,
@@ -498,8 +563,8 @@ mod tests {
         let odd = Settings::parse("size = 400\nwhat\ntheme = purple\n");
         assert_eq!(odd.size, 24);
         assert_eq!(odd.theme, ThemePref::System);
-        let odd = Settings::parse("size = 2\nlibrary_width = 9000\ndivider = wavy\n");
-        assert_eq!((odd.size, odd.library_w, odd.divider), (12, 480, Divider::Dots));
+        let odd = Settings::parse("size = 2\nlibrary_width = 9000\ndivider = wavy\nwheel = jerky\n");
+        assert_eq!((odd.size, odd.library_w, odd.divider, odd.wheel), (12, 480, Divider::Dots, Wheel::Carnet));
         // A file from before the letter's styles, which dropped every
         // note's first letter: read, the old key passed over; three lines,
         // the headings' face, the accent; and a height out of range held in.

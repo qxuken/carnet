@@ -47,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Asked of the system once, as the window opens: the blurred desktop
     // behind it where there is one, and the library drawn over that.
     let backdrop = if settings.translucent { kui_native::Backdrop::Blur } else { kui_native::Backdrop::Opaque };
+    let wheel = settings.wheel.feel();
     // The chosen folder may be on a drive that is not there today: then
     // the default folder opens, and says so, rather than nothing at all.
     let chosen = store::default_dir(settings.dir.as_deref());
@@ -73,10 +74,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .size(1100.0, 740.0)
         .min_size(360.0, 420.0)
         .backdrop(backdrop)
-        // A wheel's notch goes further than kui's 40 px and glides there
-        // longer, with less of a kick at its start: every window's, note
-        // windows' too. `KUI_WHEEL` still overrides it for comparing.
-        .wheel_feel(kui_native::WheelFeel { line_px: 60.0, response: 0.6, kick: 0.3 })
+        // The wheel as Settings has it (Carnet's own feel, further and
+        // softer than kui's, unless a preset is chosen), from the first
+        // frame; every window's, note windows' too. `KUI_WHEEL` still
+        // overrides it for comparing.
+        .wheel_feel(wheel)
         // The title bar's and the taskbar's on Windows, the window
         // manager's on X11; a Mac takes the bundle's `.icns` instead.
         // `assets/icon/render.sh` makes both from the SVG.
