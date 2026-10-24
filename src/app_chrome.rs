@@ -1266,7 +1266,7 @@ impl Carnet {
         let swatch = |ui: &mut Ui<'_>, i: u64, c: u32| {
             let name = crate::design::tint::name(c);
             let (fill, letter) = if ink {
-                (t.hover.with_alpha(0.0), crate::design::tint::ink(c, dark))
+                (t.hover.with_alpha(0.0), crate::design::tint::ink(c, dark, page))
             } else {
                 (crate::design::tint::wash(c, dark, page), t.fg)
             };

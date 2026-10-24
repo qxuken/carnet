@@ -3567,10 +3567,11 @@ fn down_from_the_title_is_the_note() {
 fn a_colour_stays_its_colour_on_a_highlight_in_either_theme() {
     use crate::design::tint::{wash, HUES};
     for dark in [false, true] {
-        let (page, fg) = if dark { (Color::hex(0x1f1b18ff), Color::hex(0xefe6dcff)) } else { (Color::hex(0xfcfaf7ff), Color::hex(0x2f2a27ff)) };
+        let linen = crate::design::Colors::of(crate::design::Palette::Linen, dark);
+        let (page, fg) = (linen.page, linen.ink);
         for ink in &HUES {
             for mark in &HUES {
-                let c = crate::design::tint::ink((ink.ink << 8) | 0xff, dark);
+                let c = crate::design::tint::ink((ink.ink << 8) | 0xff, dark, page);
                 let w = wash(mark.wash, dark, page);
                 assert!(crate::design::contrast(c, w) >= 3.5 || !dark, "{} on {}: readable in the dark", ink.name, mark.name);
                 assert_eq!(super::page_view::words_ink(Some(c), fg, Some(w), page), c, "{} on {} ({})", ink.name, mark.name, if dark { "dark" } else { "light" });
@@ -3579,8 +3580,16 @@ fn a_colour_stays_its_colour_on_a_highlight_in_either_theme() {
     }
     // Black words on a dark page still give way; plain words on a wash
     // read.
-    let page = Color::hex(0x1f1b18ff);
-    assert_ne!(super::page_view::words_ink(Some(Color::hex(0x000000ff)), Color::hex(0xefe6dcff), None, page), Color::hex(0x000000ff));
+    let linen = crate::design::Colors::of(crate::design::Palette::Linen, true);
+    let (page, fg) = (linen.page, linen.ink);
+    let black = crate::design::tint::ink(0x000000ff, true, page);
+    assert_ne!(super::page_view::words_ink(Some(black), fg, None, page), black);
+    // A colour from another app, too deep for the dark, is lightened
+    // until it reads; on paper it is as written.
+    let blue = crate::design::tint::ink(0x1f3a93ff, true, page);
+    assert!(crate::design::contrast(blue, page) >= 4.5, "{blue:?}");
+    assert_eq!(super::page_view::words_ink(Some(blue), fg, None, page), blue);
+    assert_eq!(crate::design::tint::ink(0x1f3a93ff, false, page), Color::hex(0x1f3a93ff));
 }
 
 #[test]
