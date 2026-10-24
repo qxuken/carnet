@@ -73,6 +73,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .size(1100.0, 740.0)
         .min_size(360.0, 420.0)
         .backdrop(backdrop)
+        // A wheel's notch goes further than kui's 40 px and glides there
+        // longer, with less of a kick at its start: every window's, note
+        // windows' too. `KUI_WHEEL` still overrides it for comparing.
+        .wheel_feel(kui_native::WheelFeel { line_px: 60.0, response: 0.6, kick: 0.3 })
         // The title bar's and the taskbar's on Windows, the window
         // manager's on X11; a Mac takes the bundle's `.icns` instead.
         // `assets/icon/render.sh` makes both from the SVG.
