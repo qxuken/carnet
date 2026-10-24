@@ -2605,16 +2605,18 @@ impl Carnet {
         (!shown.is_empty()).then_some((block, shown))
     }
 
-    /// Runs a `/` command on the line it was typed on.
+    /// Runs a `/` command on the line it was typed on: a picture's or a
+    /// file's asks for them, to go in on the line it leaves empty.
     pub(super) fn run_slash(&mut self, i: usize) {
-        let picture = slash::COMMANDS
-            .get(i)
-            .is_some_and(|c| c.action == slash::Action::Picture);
+        let action = slash::COMMANDS.get(i).map(|c| c.action);
         self.focus_page = true;
         self.edit(Step::Other, |d, c| slash::apply(d, c, i));
         self.slash_sel = 0;
-        if picture {
-            self.pick_pictures = true;
+        match action {
+            Some(slash::Action::Picture) => self.pick_pictures = true,
+            // The paperclip's dialog: pictures and files of every kind.
+            Some(slash::Action::File) => self.pick_files = true,
+            _ => {}
         }
     }
 
@@ -2983,9 +2985,10 @@ impl Carnet {
 
     /// Files dropped, pasted or picked: copied in beside the notes, the
     /// pictures put in as pictures and the documents
-    /// ([`carnet_core::doc::is_document_name`]) as links to them, before
-    /// block `at` (the drop line) or at the caret. Anything else — a
-    /// program, a script, a page — is left out, and said so.
+    /// ([`carnet_core::doc::is_document_name`]: any file but one that
+    /// could run) as links to them, before block `at` (the drop line) or
+    /// at the caret. A program, a script, a shortcut — and a folder — is
+    /// left out, and said so.
     pub(super) fn insert_files_at(&mut self, paths: &[std::path::PathBuf], at: Option<usize>) {
         if self.reading() {
             return;
@@ -2993,8 +2996,12 @@ impl Carnet {
         let folder = self.store.notes[self.current].folder.clone();
         let mut srcs = Vec::new();
         let mut links: Vec<(String, String)> = Vec::new();
-        let mut skipped = 0;
+        let (mut skipped, mut folders) = (0, 0);
         for p in paths {
+            if p.is_dir() {
+                folders += 1;
+                continue;
+            }
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
             if !images::is_image(p) && carnet_core::doc::is_document_name(name) {
                 match self.store.import_attachment(&folder, p) {
@@ -3023,12 +3030,18 @@ impl Carnet {
                 Err(e) => self.error = Some(format!("Couldn't copy {}: {e}", p.display())),
             }
         }
+        let mut left = Vec::new();
         if skipped > 0 {
-            self.notify(
-                if skipped == 1 { "Left out a file that isn't a picture or a document".to_string() }
-                else { format!("Left out {skipped} files that aren't pictures or documents") },
-                None,
+            left.push(
+                if skipped == 1 { "a file that could run (a program, a script or a shortcut)".to_string() }
+                else { format!("{skipped} files that could run (programs, scripts or shortcuts)") },
             );
+        }
+        if folders > 0 {
+            left.push(if folders == 1 { "a folder".to_string() } else { format!("{folders} folders") });
+        }
+        if !left.is_empty() {
+            self.notify(format!("Left out {}", left.join(" and ")), None);
         }
         // Dropped between blocks with no picture: the links a line of their
         // own at the drop line. Else at the caret: among its words, or

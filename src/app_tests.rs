@@ -1086,7 +1086,7 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     assert!(texts(&app).iter().any(|t| t == "[notes.txt](attachments/notes.txt)"), "{:?}", texts(&app));
     assert!(dir.join("attachments").join("notes.txt").is_file());
     assert!(!dir.join("attachments").join("run.sh").exists() && !dir.join("attachments").join("run.png").exists());
-    assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("isn't a picture or a document")), "{:?}", app.notice.as_ref().map(|n| &n.text));
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Left out a file that could run (a program, a script or a shortcut)"));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }
@@ -1193,6 +1193,64 @@ fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
     assert_eq!(drawn_text(&app, &d, app.caret.head.slot), "See the Trip plan (v2).pdf plan");
     let (_, _, url) = page::link_at(app.doc(), page::Caret::at(page::Pos { byte: 10, ..app.caret.head })).expect("a link");
     assert_eq!(app.store.linked_file("", &url).as_deref(), Some(dir.join("attachments/Trip-plan-(v2).pdf").as_path()));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// The finding: a `README` and a `.rs` file were refused, as nothing but
+/// a PDF, a sheet or a recording was taken. Any file goes in as a link
+/// now, one with no kind keeping none, a Markdown file picked among them
+/// (dropped, it comes in as a note); only what could run, and a folder,
+/// is left out.
+#[test]
+fn any_file_but_what_runs_is_linked() {
+    let (mut app, mut d, dir) = body("any-file");
+    let outside = std::env::temp_dir().join(format!("carnet-any-file-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(outside.join("src")).unwrap();
+    let files: Vec<std::path::PathBuf> = ["README", "main.rs", "Plan.md", "setup.exe", "Home.lnk"].iter().map(|n| outside.join(n)).collect();
+    for f in &files {
+        std::fs::write(f, b"x").unwrap();
+    }
+    let mut picked = files.clone();
+    picked.push(outside.join("src"));
+    app.insert_files(&picked);
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "[README](attachments/README) [main.rs](attachments/main.rs) [Plan.md](attachments/Plan.md)");
+    for kept in ["README", "main.rs", "Plan.md"] {
+        assert!(dir.join("attachments").join(kept).is_file(), "{kept}");
+    }
+    assert_eq!(std::fs::read_dir(dir.join("attachments")).unwrap().count(), 3, "nothing else");
+    assert!(app.store.notes.iter().all(|n| n.title != "Plan"), "a file, not a note");
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Left out 2 files that could run (programs, scripts or shortcuts) and a folder"));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// `/file` asks for files as the paperclip does, of any kind, and what
+/// comes goes in on the line it was typed on, which it leaves empty.
+#[test]
+fn slash_file_asks_for_files_and_links_them_on_its_line() {
+    let (mut app, mut d, dir) = body("slash-file");
+    type_in(&mut app, &mut d, "Intro");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "/file");
+    d.frame(&mut app);
+    assert!(app.slash_now().is_some_and(|(_, shown)| crate::slash::COMMANDS[shown[0]].name == "File"), "offered first");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app), ["Intro", ""], "the line left empty for the files");
+    d.frame(&mut app);
+    let asked = d.core.take_file_requests();
+    assert_eq!(asked.len(), 1, "one dialog");
+    assert!(asked[0].filters.is_empty(), "any file: {:?}", asked[0].filters);
+    let outside = std::env::temp_dir().join(format!("carnet-slash-file-src-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let pdf = outside.join("Tickets.pdf");
+    std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+    app.insert_files(std::slice::from_ref(&pdf));
+    d.frame(&mut app);
+    assert_eq!(texts(&app), ["Intro", "[Tickets.pdf](attachments/Tickets.pdf)"]);
+    assert!(dir.join("attachments/Tickets.pdf").is_file());
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }

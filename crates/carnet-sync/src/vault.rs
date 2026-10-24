@@ -615,6 +615,10 @@ pub fn folder_name(typed: &str) -> Result<String, FolderRefusal> {
 /// The map a file's path is kept in: a document's ([`FILES`]) by a
 /// document's name and not a picture's; anything else the pictures',
 /// where a Carnet from before reads it (and lets go what it can't take).
+/// Which names are documents grew (any file but what runs, where once
+/// only a PDF, a sheet, a recording): a Carnet that knows the fewer reads
+/// one of the others there as written in the wrong map, so as not there,
+/// and neither fetches nor lets it go.
 fn map_of(path: &str) -> &'static str {
     if carnet_core::doc::is_document_name(path) && !carnet_core::doc::is_picture_name(path) { FILES } else { PICTURES }
 }
@@ -1004,20 +1008,31 @@ mod tests {
         let v = NoteDoc::new(1);
         assert!(v.set_file("attachments/a.png", "aa"));
         assert!(v.set_file("attachments/report.pdf", "bb"));
+        // A document with no kind, and source code, as one with a PDF's.
+        assert!(v.set_file("attachments/README", "ff"));
+        assert!(v.set_file("attachments/main.rs", "gg"));
         let raw = |m: &str| match v.loro().get_map(m).get_deep_value() {
-            LoroValue::Map(m) => m.keys().cloned().collect::<Vec<_>>(),
+            LoroValue::Map(m) => m.keys().cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        assert_eq!((raw(PICTURES), raw(FILES)), (vec!["attachments/a.png".to_string()], vec!["attachments/report.pdf".to_string()]));
-        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/a.png", "attachments/report.pdf"]);
+        assert_eq!(
+            (raw(PICTURES), raw(FILES)),
+            (
+                vec!["attachments/a.png".to_string()],
+                vec!["attachments/README".to_string(), "attachments/main.rs".to_string(), "attachments/report.pdf".to_string()]
+            )
+        );
+        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/README", "attachments/a.png", "attachments/main.rs", "attachments/report.pdf"]);
         assert_eq!(v.drop_file("attachments/report.pdf"), (true, Some("bb".to_string())));
         assert_eq!(v.dropped_files().into_iter().collect::<Vec<_>>(), ["attachments/report.pdf"]);
         assert_eq!(v.dropped_id("attachments/report.pdf").as_deref(), Some("bb"));
-        // Each in the other's map, as no Carnet writes them.
+        // Each in the other's map, as no Carnet writes them; a program
+        // in either.
         v.loro().get_map(PICTURES).insert("attachments/notes.txt", "cc").unwrap();
+        v.loro().get_map(PICTURES).insert("attachments/LICENSE", "hh").unwrap();
         v.loro().get_map(FILES).insert("attachments/b.png", "dd").unwrap();
         v.loro().get_map(FILES).insert("attachments/run.sh", "ee").unwrap();
         v.loro().commit();
-        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/a.png"]);
+        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/README", "attachments/a.png", "attachments/main.rs"]);
     }
 }

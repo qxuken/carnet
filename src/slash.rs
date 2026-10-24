@@ -17,6 +17,8 @@ pub enum Action {
     Code,
     /// Asks for picture files.
     Picture,
+    /// Asks for files of any kind, as the toolbar's paperclip does.
+    File,
 }
 
 pub struct Command {
@@ -29,7 +31,7 @@ pub struct Command {
     pub action: Action,
 }
 
-pub const COMMANDS: [Command; 11] = [
+pub const COMMANDS: [Command; 12] = [
     Command { name: "Heading 1", hint: "#", keys: &["h1", "title", "heading"], glyph: Glyph::H1, action: Action::Turn(TURN_H1) },
     Command { name: "Heading 2", hint: "##", keys: &["h2", "subheading", "heading"], glyph: Glyph::H2, action: Action::Turn(TURN_H2) },
     Command { name: "Heading 3", hint: "###", keys: &["h3", "heading"], glyph: Glyph::H3, action: Action::Turn(TURN_H3) },
@@ -41,6 +43,7 @@ pub const COMMANDS: [Command; 11] = [
     Command { name: "Divider", hint: "---", keys: &["rule", "line", "hr", "separator"], glyph: Glyph::Divider, action: Action::Divider },
     Command { name: "Code block", hint: "```", keys: &["code", "pre", "snippet"], glyph: Glyph::Code, action: Action::Code },
     Command { name: "Picture", hint: "", keys: &["image", "photo", "img", "screenshot"], glyph: Glyph::Picture, action: Action::Picture },
+    Command { name: "File", hint: "", keys: &["attach", "attachment", "document", "pdf"], glyph: Glyph::Attach, action: Action::File },
 ];
 
 /// The word being typed after a `/`, when the caret ends a line of text
@@ -134,7 +137,8 @@ pub fn matches(word: &str) -> Vec<usize> {
 }
 
 /// Makes the `/word` line what command `i` says. True when the note
-/// changed. A picture leaves the line empty for the files to come.
+/// changed. A picture or a file leaves the line empty for the files to
+/// come.
 pub fn apply(doc: &mut Doc, c: &mut Caret, i: usize) -> bool {
     let Some(cmd) = COMMANDS.get(i) else { return false };
     own_line(doc, c);
@@ -162,7 +166,7 @@ pub fn apply(doc: &mut Doc, c: &mut Caret, i: usize) -> bool {
         Action::Code => {
             page::insert_block(doc, c, Kind::Raw("```\n\n```".to_string()));
         }
-        Action::Picture => {}
+        Action::Picture | Action::File => {}
     }
     true
 }
@@ -188,6 +192,9 @@ mod tests {
         assert_eq!(names("head"), ["Heading 1", "Heading 2", "Heading 3"]);
         assert_eq!(names("todo"), ["Checklist"]);
         assert_eq!(names("pic"), ["Picture"]);
+        for w in ["file", "attach", "doc", "pdf"] {
+            assert_eq!(names(w), ["File"], "{w}");
+        }
         assert!(names("zzz").is_empty());
 
         let (d, c) = line("/ta");
