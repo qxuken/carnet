@@ -2419,9 +2419,11 @@ impl Carnet {
         // The devices name who made each version, too.
         self.sync.want_devices = self.settings_open || self.versions.is_some();
         // Invites are used elsewhere: asked afresh each time Settings opens;
-        // the devices too, so who's online is as of now.
+        // the devices too, so who's online is as of now. Both lists stay
+        // shown till the answer: emptied, the Sync card lost its invite
+        // rows for a moment and grew them back, and the page jumped.
         if self.settings_open && !self.sync.want_invites {
-            self.sync.invites = None;
+            self.sync.invites_again();
             self.sync.devices_again();
         }
         self.sync.want_invites = self.settings_open;

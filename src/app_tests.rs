@@ -7341,6 +7341,18 @@ fn the_owner_invites_someone_and_removes_their_account() {
     let code = a.sync.invite.clone().expect("the code shown");
     assert!(drawn(&mut da, &mut a, &code), "the code, big");
     assert!(drawn(&mut da, &mut a, "Not used yet \u{b7} good for 7 more days"));
+    // Settings closed and opened again: the invites are asked afresh, the
+    // last list shown till the answer, so the card keeps its rows and
+    // grows no "Delete the account" for a frame (the page jumped).
+    a.on_plain(Msg::ShowSettings);
+    da.frame(&mut a);
+    a.on_plain(Msg::ShowSettings);
+    for _ in 0..3 {
+        da.frame(&mut a);
+        assert!(a.sync.invites.as_ref().is_some_and(|i| i.owner && i.waiting.len() == 1), "kept while asked again");
+        assert!(drawn(&mut da, &mut a, "Invite someone") && drawn(&mut da, &mut a, "Not used yet \u{b7} good for 7 more days"));
+        assert!(!drawn(&mut da, &mut a, "Delete the account"), "the owner's card, not another account's");
+    }
     // Waiting, its code is words to select, and a Copy beside it.
     let nodes = da.core.nodes();
     let selectable = |key: Key| {
