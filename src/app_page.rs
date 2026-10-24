@@ -433,6 +433,10 @@ impl Carnet {
                     style: style.color(t.fg),
                     wrap: true,
                     placeholder: Some("Untitled".into()),
+                    // Its Tab is the app's, so Ctrl+Tab reaches the root's
+                    // chords rather than walking the ring; plain Tab walks
+                    // on from there (`root_press`).
+                    keep_tab: true,
                     ..Default::default()
                 },
                 Field::Title.on(NodeSpec::row().grow_width().label("Title")),
@@ -1956,6 +1960,8 @@ impl Carnet {
                     // note, the link editor) ends it by leaving the page.
                     match k.code {
                         KeyCode::Escape => self.typing = false,
+                        // Ctrl+Tab goes to another note: not writing.
+                        KeyCode::Tab if k.mods.ctrl => {}
                         KeyCode::Enter | KeyCode::Tab | KeyCode::Backspace | KeyCode::Delete => {
                             self.typing = true;
                             self.typed_at = core.now();
@@ -2311,7 +2317,11 @@ impl Carnet {
         let doc = self.doc();
         match code {
             // The note above or below in the library.
-            KeyCode::Up | KeyCode::Down if chord && m.alt => self.step_note(code == KeyCode::Up),
+            KeyCode::Up | KeyCode::Down if chord && m.alt => self.step_note(code == KeyCode::Up, false),
+            // Ctrl+Tab, ⇧ back: round the notes shown — before Tab's own
+            // work in a cell, a list or a code block, and on a Mac the
+            // real Control (⌘Tab is the system's).
+            KeyCode::Tab if m.ctrl && !m.alt => self.step_note(shift, true),
             KeyCode::Up | KeyCode::Down if m.alt => {
                 let by = if code == KeyCode::Up { -1 } else { 1 };
                 self.edit(Step::Other, |d, c| page::move_blocks(d, *c, by));

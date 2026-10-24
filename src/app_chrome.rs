@@ -867,6 +867,9 @@ impl Carnet {
                         &EditOptions {
                             style: TextStyle::new(Type::UI.size).color(t.fg),
                             placeholder: Some("Search".into()),
+                            // Ctrl+Tab goes round what it found, as from
+                            // the title (`root_press` walks plain Tab on).
+                            keep_tab: true,
                             ..Default::default()
                         },
                         Field::Search.on(NodeSpec::row().grow_width().label("Search notes")),
