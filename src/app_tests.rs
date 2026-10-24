@@ -2375,6 +2375,72 @@ fn marks_are_never_drawn_and_the_caret_moves_by_the_words() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `--` typed is drawn as an em dash, one letter, while the file keeps the
+/// two dashes: the arrows step over it whole, a click on it puts the caret
+/// before or after it, a selection of it copies `--`, and Backspace after
+/// it takes both dashes.
+#[test]
+fn two_dashes_typed_are_drawn_as_an_em_dash() {
+    let (mut app, mut d, dir) = body("em-dash");
+    d.core.set_inspect(true);
+    for ch in "a -- b".chars() {
+        type_in(&mut app, &mut d, &ch.to_string());
+    }
+    let first = app.caret.head.slot;
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "a -- b", "the text keeps both dashes");
+    assert_eq!(drawn_text(&app, &d, first), "a \u{2014} b");
+    app.save_current();
+    let md = std::fs::read_to_string(app.store.notes[app.current].path.clone().unwrap()).unwrap();
+    assert!(md.contains("a -- b") && !md.contains('\u{2014}'), "{md}");
+    // ← and → step over it as one letter.
+    let em = carnet_core::inline::EM_DASH.len();
+    key(&mut app, &mut d, "end");
+    let mut places = vec![drawn_caret(&app)];
+    for _ in 0..5 {
+        key(&mut app, &mut d, "left");
+        places.push(drawn_caret(&app));
+    }
+    assert_eq!(places, [4 + em, 3 + em, 2 + em, 2, 1, 0]);
+    let mut bytes = Vec::new();
+    for _ in 0..5 {
+        key(&mut app, &mut d, "right");
+        bytes.push(app.caret.head.byte);
+    }
+    assert_eq!(bytes, [1, 2, 4, 5, 6], "never between the dashes");
+    // A click on either side of the dash: before it or after it.
+    for (at, byte) in [(2, 2), (2 + em, 4), (3 + em, 5)] {
+        click_drawn(&mut app, &mut d, first, at);
+        assert_eq!((app.caret.head.slot, app.caret.head.byte), (first, byte), "a click at {at}");
+    }
+    let k = *app.slot_keys.get(&first).unwrap();
+    let (a, b) = (d.core.caret_rect(k, 2).unwrap(), d.core.caret_rect(k, 2 + em).unwrap());
+    assert!(b.x > a.x, "the dash is drawn one letter wide: {a:?} {b:?}");
+    for (x, byte) in [(a.x + (b.x - a.x) * 0.25, 2), (a.x + (b.x - a.x) * 0.75, 4)] {
+        d.click(&mut app, x, a.y + a.h / 2.0);
+        d.frame(&mut app);
+        d.frame(&mut app);
+        assert_eq!(app.caret.head.byte, byte, "a click {:.0}% into the dash", (x - a.x) / (b.x - a.x) * 100.0);
+    }
+    // Selected with Shift+→ from before it: a copy keeps the dashes.
+    click_drawn(&mut app, &mut d, first, 2);
+    key_with(&mut app, &mut d, "right", SHIFT);
+    assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (2, 4));
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("--"));
+    // Backspace after it takes both dashes.
+    click_drawn(&mut app, &mut d, first, 2 + em);
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app)[0], "a  b");
+    assert_eq!(drawn_caret(&app), 2);
+    // In code it stays as written.
+    key(&mut app, &mut d, "end");
+    type_in(&mut app, &mut d, " `c--d`");
+    d.frame(&mut app);
+    assert_eq!(drawn_text(&app, &d, first), "a  b c--d");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_style_with_nothing_selected_is_for_what_is_typed_next() {
     let (mut app, mut d, dir) = body("pending");

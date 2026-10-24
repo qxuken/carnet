@@ -86,6 +86,7 @@ On a Mac every shortcut below is the same with ⌘ for Ctrl and ⌥ for Alt; too
 | `# `, `## `, `### ` | heading |
 | `> ` | quote (Enter goes on a line at a time; on an empty last line, out of it) |
 | `---` | divider |
+| `--` among the words | an em dash (—), drawn as one letter: the arrows step over it and Backspace takes both dashes. Only the look changes: the file still says `--`, as a divider's says `---`. Not in code, a link's address or HTML; three dashes or more in a line, an arrow (`-->`) and an escaped dash (`\--`) stay as written. The reader and a copy's formatting show it too |
 | ```` ``` ```` or `/code` | code block |
 | `/table` | 3×3 table |
 | `/` on an empty line | the blocks menu: type to narrow it, ↑ ↓ and Enter (or a click) to choose, Esc to type a plain `/` |

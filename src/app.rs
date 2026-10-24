@@ -1786,7 +1786,8 @@ impl Carnet {
         let block = self.caret.head.slot.block;
         let mut caret = self.caret;
         let changed = f(&mut self.store.notes[self.current].doc, &mut caret);
-        self.caret = caret;
+        // Never between the two dashes of an em dash, whatever the edit.
+        self.caret = page::settle(self.doc(), caret);
         if step != Step::Typing {
             self.writing.moved();
         }
