@@ -3,6 +3,7 @@
 //! and Enter (or a click) makes the line one.
 
 use carnet_core::doc::Kind;
+use carnet_core::inline;
 use crate::icons::Glyph;
 use crate::page::{self, Caret, TURN_BULLET, TURN_H1, TURN_H2, TURN_H3, TURN_NUMBER, TURN_QUOTE, TURN_TODO};
 use carnet_core::doc::Doc;
@@ -43,23 +44,31 @@ pub const COMMANDS: [Command; 11] = [
 ];
 
 /// The word being typed after a `/`, when the caret ends a line of text
-/// or a quote that holds only that — the whole block, or one line of it
-/// (a quote goes on a line at a time): its block and the word.
+/// or a quote that holds only that — the whole block, or one line of it,
+/// a paragraph's made by Shift+Enter as a quote's by Enter: its block and
+/// the word.
 pub fn query(doc: &Doc, c: Caret) -> Option<(u64, String)> {
-    let (b, (start, end)) = query_line(doc, c)?;
+    let (b, (start, end, _)) = query_line(doc, c)?;
     let t = b.text_ref()?;
     Some((b.id, t[start + 1..end].to_lowercase()))
 }
 
-/// The block and the `/word` line of it the caret ends: where it is.
-fn query_line(doc: &Doc, c: Caret) -> Option<(&carnet_core::doc::Block, (usize, usize))> {
+/// The block and the `/word` line of it the caret ends: where the line
+/// starts, where its word ends, and where the line does — past the marks
+/// of a hard break the file gave it (two spaces, a backslash), which are
+/// no words of it.
+fn query_line(doc: &Doc, c: Caret) -> Option<(&carnet_core::doc::Block, (usize, usize, usize))> {
     if !c.is_empty() || c.head.slot.cell.is_some() {
         return None;
     }
     let b = doc.get(c.head.slot.block)?;
     let (Kind::Text(t) | Kind::Quote(t)) = &b.kind else { return None };
     let end = c.head.byte;
-    if end > t.len() || !t.is_char_boundary(end) || !(end == t.len() || t[end..].starts_with('\n')) {
+    if end > t.len() || !t.is_char_boundary(end) {
+        return None;
+    }
+    let line_end = t[end..].find('\n').map_or(t.len(), |n| end + n);
+    if end != line_end && !inline::breaks(t).contains(&(end, line_end)) {
         return None;
     }
     let start = t[..end].rfind('\n').map_or(0, |n| n + 1);
@@ -67,20 +76,20 @@ fn query_line(doc: &Doc, c: Caret) -> Option<(&carnet_core::doc::Block, (usize, 
     if word.chars().any(char::is_whitespace) || word.len() > 24 {
         return None;
     }
-    Some((b, (start, end)))
+    Some((b, (start, end, line_end)))
 }
 
 /// The `/word` line, when its block has more lines than it: made a
 /// block of its own, of its block's kind, the lines before and after
 /// it staying where they were. The caret in it.
 fn own_line(doc: &mut Doc, c: &mut Caret) {
-    let Some((b, (start, end))) = query_line(doc, *c) else { return };
+    let Some((b, (start, end, line_end))) = query_line(doc, *c) else { return };
     let Some(t) = b.text_ref() else { return };
-    if start == 0 && end == t.len() {
+    if start == 0 && line_end == t.len() {
         return;
     }
     let quote = matches!(b.kind, Kind::Quote(_));
-    let (id, before, after) = (b.id, t[..start.saturating_sub(1)].to_string(), t.get(end + 1..).map(str::to_string));
+    let (id, before, after) = (b.id, t[..start.saturating_sub(1)].to_string(), t.get(line_end + 1..).map(str::to_string));
     let kind = |s: String| if quote { Kind::Quote(s) } else { Kind::Text(s) };
     let Some(at) = doc.index_of(id) else { return };
     let line = carnet_core::doc::Block::new(kind(t[start..end].to_string()));
@@ -245,5 +254,35 @@ mod tests {
         assert!(matches!(&d.blocks()[0].kind, Kind::Quote(t) if t == "one"), "{kinds:?}");
         assert!(matches!(&d.blocks()[1].kind, Kind::Raw(r) if r.starts_with("```")), "{kinds:?}");
         assert!(matches!(&d.blocks()[2].kind, Kind::Quote(t) if t == "two"), "{kinds:?}");
+    }
+
+    /// A paragraph's line made by Shift+Enter offers the menu as a
+    /// quote's does, and so does a line ending in the marks of a hard
+    /// break the file gave it, which are no words of the line; one with
+    /// words before the `/` is still words.
+    #[test]
+    fn a_paragraphs_later_line_offers_the_menu() {
+        let text = |t: &str, at: usize| {
+            let d = Doc::new(vec![Block::text(t)]);
+            let slot = Slot::block(d.blocks()[0].id);
+            (d, Caret::at(Pos { slot, byte: at }))
+        };
+        let (d, c) = text("hello\n/h2", 9);
+        assert_eq!(query(&d, c), Some((d.blocks()[0].id, "h2".into())));
+        let (d, c) = text("hello\neither/or", 15);
+        assert_eq!(query(&d, c), None, "mid-sentence, a slash");
+        for (t, at) in [("/h2  \nmore", 3), ("one\n/h2\\\nmore", 7), ("one\n/h2  ", 7)] {
+            let (d, c) = text(t, at);
+            assert_eq!(query(&d, c), Some((d.blocks()[0].id, "h2".into())), "{t:?}");
+        }
+        let (d, c) = text("/h2 a  \nmore", 3);
+        assert_eq!(query(&d, c), None, "words after the caret");
+        // Made a heading: the line alone, its marks gone with it.
+        let (mut d, mut c) = text("one\n/h2  \nmore", 7);
+        assert!(apply(&mut d, &mut c, 1));
+        let kinds: Vec<String> = d.blocks().iter().map(|b| format!("{:?}", b.kind)).collect();
+        assert!(matches!(&d.blocks()[0].kind, Kind::Text(t) if t == "one"), "{kinds:?}");
+        assert!(matches!(&d.blocks()[1].kind, Kind::Heading { level: 2, text } if text.is_empty()), "{kinds:?}");
+        assert!(matches!(&d.blocks()[2].kind, Kind::Text(t) if t == "more"), "{kinds:?}");
     }
 }
