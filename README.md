@@ -133,6 +133,7 @@ The toolbar acts on the blocks the caret touches: turn them into another kind, d
 | Ctrl+N / Ctrl+F / Ctrl+S | new note / search / save now |
 | Ctrl+Shift+N | new folder |
 | Ctrl+Alt+↑ / ↓ | the note above or below in the list |
+| Ctrl+Tab / Ctrl+Shift+Tab | the next or the previous note the list shows (the folder's, or what the search found, or Deleted), round from the last to the first as a browser's tabs go; from anywhere in the window but Settings, a table cell or a list included. On a Mac too it is Control (⌃⇥), since ⌘Tab is the system's |
 | Ctrl+Shift+P / Ctrl+Shift+Backspace | pin the note / move it to Deleted |
 | Ctrl+\\ | show or hide the notes list |
 | Ctrl+. | zen mode: only the note |

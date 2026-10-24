@@ -2580,21 +2580,31 @@ impl Carnet {
         self.writing = writing;
     }
 
-    /// Opens the note above (`up`) or below the open one in the library.
-    fn step_note(&mut self, up: bool) {
-        let Some(pos) = self.order.iter().position(|&i| i == self.current) else {
-            if let Some(&first) = self.order.first() {
-                self.open(first);
-            }
-            return;
+    /// Opens the note above (`up`) or below the open one in the library,
+    /// of the ones it shows as it shows them: the folder's, or a search's
+    /// from every folder, pinned first (`reorder`) — or, while it shows
+    /// what was deleted, the deleted thing above or below, to read. With
+    /// `wrap` (Ctrl+Tab, as a browser's tabs go) the last goes on to the
+    /// first and the first back to the last; without (⌥⌘↓, as ↓ does on
+    /// the cards) an end is where it stops. From a note the list doesn't
+    /// show — new in another folder, or not what is searched for — the
+    /// list's first, or its last going back round.
+    fn step_note(&mut self, up: bool, wrap: bool) {
+        let (len, at) = if self.deleted {
+            (self.trash.len(), self.peek_index())
+        } else {
+            (self.order.len(), self.order.iter().position(|&i| i == self.current))
         };
-        let next = if up { pos.checked_sub(1) } else { Some(pos + 1) };
-        if let Some(&i) = next.and_then(|p| self.order.get(p)) {
-            self.open(i);
-            self.focus_page = true;
-            self.editing = true;
-            self.say = Some(self.store.notes[self.current].display_title().to_string());
+        let Some(to) = step_in(len, at, up, wrap) else { return };
+        if self.deleted {
+            self.open_deleted(to);
+            self.say = self.peek.as_ref().map(|p| p.title.clone());
+            return;
         }
+        self.open(self.order[to]);
+        self.focus_page = true;
+        self.editing = true;
+        self.say = Some(self.store.notes[self.current].display_title().to_string());
     }
 
     /// Moves note `i` into folder `to` ("" for the top level). A note the
@@ -4016,6 +4026,8 @@ impl Carnet {
             self.start_rename(&f);
             return;
         }
+        // Tab walks the ring: from the title and the search too, whose Tab
+        // comes here so that Ctrl+Tab can.
         if k.code == KeyCode::Tab && !(m.ctrl || m.super_key || m.alt) {
             self.step = Some(!m.shift);
             return;
@@ -4070,7 +4082,11 @@ impl Carnet {
     fn chord(&mut self, k: &kui_native::KeyPress) -> bool {
         let (shift, alt) = (k.mods.shift, k.mods.alt);
         match crate::keys::chord_code(k) {
-            KeyCode::Up | KeyCode::Down if alt => self.step_note(crate::keys::chord_code(k) == KeyCode::Up),
+            KeyCode::Up | KeyCode::Down if alt => self.step_note(crate::keys::chord_code(k) == KeyCode::Up, false),
+            // Round the notes shown, as a browser's tabs go: Control on a
+            // Mac too, whose ⌘Tab is the system's. Not from the settings,
+            // which are not among them.
+            KeyCode::Tab if k.mods.ctrl && !alt && !self.settings_open => self.step_note(shift, true),
             KeyCode::Char('n') if shift => self.on_plain(Msg::NewFolder),
             KeyCode::Char('p') if shift => self.pin(self.current),
             // What is chosen in the library, or the open note.
@@ -4496,6 +4512,21 @@ pub fn parent_of(folder: &str) -> &str {
 /// itself, every folder being inside it.
 fn inside(folder: &str) -> String {
     if folder.is_empty() { String::new() } else { format!("{folder}/") }
+}
+
+/// Where a step from row `at` of a list of `len` comes to: the next, or
+/// the one before going `up`, round to the other end with `wrap`; from
+/// outside the list its first, or its last going back round. `None` for
+/// an end without `wrap`, an empty list, or a step round to where it was.
+fn step_in(len: usize, at: Option<usize>, up: bool, wrap: bool) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    let to = match at {
+        None if up && wrap => Some(last),
+        None => Some(0),
+        Some(p) if up => p.checked_sub(1).or(wrap.then_some(last)),
+        Some(p) => (p < last).then_some(p + 1).or(wrap.then_some(0)),
+    };
+    to.filter(|&to| Some(to) != at)
 }
 
 fn reveal_label() -> &'static str {

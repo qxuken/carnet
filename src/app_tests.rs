@@ -10886,3 +10886,172 @@ fn a_tools_hint_fades_with_the_toolbar() {
     assert!(said.as_deref().is_some_and(|s| s.starts_with("Bold")), "{said:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+/// The open note's title.
+fn open_title(app: &Carnet) -> String {
+    app.store.notes[app.current].title.clone()
+}
+
+/// The library's notes, by title, in its order.
+fn shown_titles(app: &Carnet) -> Vec<String> {
+    app.order.iter().map(|&i| app.store.notes[i].title.clone()).collect()
+}
+
+/// Note `title` opened, the caret at the start of its body.
+fn open_named(app: &mut Carnet, d: &mut Drive, title: &str) {
+    let i = app.store.notes.iter().position(|n| n.title == title).unwrap();
+    app.open(i);
+    app.edit_at(page::first(app.doc()));
+    d_frame_twice(app, d);
+}
+
+/// Ctrl+Tab opens the next note the library shows — the folder's only,
+/// pinned first — and goes round from the last to the first; ⇧ goes
+/// back. From the title too, which keeps its words, and where Tab still
+/// walks on. ⌥⌘↓ goes down the same list, and stops at its ends. Not
+/// from the settings.
+#[test]
+fn ctrl_tab_goes_round_the_notes_a_folder_shows() {
+    let (mut app, mut d, dir) = library("ctrl-tab-folder", &[("Work/Alpha", "1"), ("Work/Bravo", "2"), ("Work/Charlie", "3"), ("Loose", "4")]);
+    app.on_settings(Msg::SetSort { to: 1 });
+    let charlie = app.store.notes.iter().position(|n| n.title == "Charlie").unwrap();
+    app.pin(charlie);
+    app.show_folder(Some("Work".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(shown_titles(&app), ["Charlie", "Alpha", "Bravo"]);
+    open_named(&mut app, &mut d, "Charlie");
+    let in_title = |app: &Carnet, d: &Drive| d.core.focus().and_then(|k| app.fields.get(&k)).copied() == Some(Field::Title);
+    app.focus(Field::Title);
+    d_frame_twice(&mut app, &mut d);
+    assert!(in_title(&app, &d));
+    key(&mut app, &mut d, "tab");
+    d.frame(&mut app);
+    assert!(!in_title(&app, &d), "Tab walks on from the title");
+    app.focus(Field::Title);
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    d.frame(&mut app);
+    assert_eq!(open_title(&app), "Alpha");
+    assert_eq!(app.store.notes[charlie].title, "Charlie", "no tab typed in the title");
+    assert!(page_focused(&app, &d), "the keyboard in the note come to");
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Bravo");
+    // Past the last: the first again, and back.
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Charlie");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Bravo");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Charlie");
+    // The arrows stop at the first.
+    key_with(&mut app, &mut d, "up", CTRL_ALT);
+    assert_eq!(open_title(&app), "Charlie");
+    key_with(&mut app, &mut d, "down", CTRL_ALT);
+    assert_eq!(open_title(&app), "Alpha");
+    assert!(app.store.notes.iter().all(|n| !n.markdown().contains('\t')));
+    // The settings are no note of the list's.
+    key_with(&mut app, &mut d, ",", CTRL);
+    d.frame(&mut app);
+    assert!(app.settings_open);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert!(app.settings_open, "the settings stay");
+    assert_eq!(open_title(&app), "Alpha");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+Tab from the search goes round what it found, from every folder,
+/// and the search keeps what was typed in it.
+#[test]
+fn ctrl_tab_goes_round_what_the_search_found() {
+    let (mut app, mut d, dir) = library(
+        "ctrl-tab-search",
+        &[("Alpha", "apple pie"), ("Bravo", "banana"), ("Work/Charlie", "apple cider"), ("Delta", "apple tart")],
+    );
+    app.on_settings(Msg::SetSort { to: 1 });
+    open_named(&mut app, &mut d, "Alpha");
+    let k = *app.fields.iter().find(|(_, f)| **f == Field::Search).unwrap().0;
+    d.focus(&mut app, k);
+    d.text(&mut app, "apple");
+    d.frame(&mut app);
+    assert_eq!(shown_titles(&app), ["Alpha", "Charlie", "Delta"]);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    d.frame(&mut app);
+    assert_eq!(open_title(&app), "Charlie");
+    assert_eq!(app.query, "apple");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some("apple"), "no tab typed in the search");
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Delta");
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Alpha", "round to the first, past what wasn't found");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Delta");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+Tab wins over Tab's own work: from a table's cell, a list's item
+/// or a code block it is the next note, and the note left is as it was —
+/// no cell moved to, nothing indented, no tab typed.
+#[test]
+fn ctrl_tab_from_a_cell_a_list_or_code_changes_only_the_note() {
+    let (mut app, mut d, dir) = library(
+        "ctrl-tab-blocks",
+        &[("Alpha", "| a | b |\n|---|---|\n| c | d |"), ("Bravo", "- one\n- two"), ("Charlie", "```\ncode\n```")],
+    );
+    app.on_settings(Msg::SetSort { to: 1 });
+    let all = |app: &Carnet| -> Vec<String> {
+        ["Alpha", "Bravo", "Charlie"].iter().map(|t| app.store.notes.iter().find(|n| n.title == *t).unwrap().markdown()).collect()
+    };
+    let before = all(&app);
+    open_named(&mut app, &mut d, "Alpha");
+    let Kind::Table(t) = &blocks(&app)[0].kind else { panic!("{:?}", texts(&app)) };
+    let cell = Slot { block: blocks(&app)[0].id, cell: Some((t.rows[1].id, t.cols[0])) };
+    app.edit_at(Pos { slot: cell, byte: 1 });
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Bravo", "from the cell");
+    assert!(page_focused(&app, &d));
+    let two = blocks(&app)[1].id;
+    app.edit_at(Pos { slot: Slot::block(two), byte: 1 });
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Charlie", "from the item");
+    assert!(matches!(&blocks(&app)[0].kind, Kind::Raw(r) if r.starts_with("```")), "{:?}", texts(&app));
+    let code = blocks(&app)[0].id;
+    app.edit_at(Pos { slot: Slot::block(code), byte: 5 });
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Bravo", "back from the code");
+    assert!(blocks(&app).iter().all(|b| !matches!(b.kind, Kind::Item { indent: 1.., .. })), "{:?}", texts(&app));
+    assert_eq!(all(&app), before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// While the library shows what was deleted, Ctrl+Tab goes round that,
+/// each to read in turn; the note open behind stays as it was.
+#[test]
+fn ctrl_tab_in_deleted_goes_round_the_trash() {
+    let (mut app, mut d, dir) = library("ctrl-tab-trash", &[("Alpha", "1"), ("Bravo", "2"), ("Charlie", "3")]);
+    open_named(&mut app, &mut d, "Alpha");
+    for t in ["Bravo", "Charlie"] {
+        let i = app.store.notes.iter().position(|n| n.title == t).unwrap();
+        app.delete_note_at(i);
+    }
+    app.on_plain(Msg::ShowDeleted);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.deleted);
+    assert_eq!(app.trash.len(), 2);
+    let reading = |app: &Carnet| app.peek.as_ref().map(|p| p.path.clone());
+    let trashed = |app: &Carnet, i: usize| Some(app.trash[i].path.clone());
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(reading(&app), trashed(&app, 0));
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(reading(&app), trashed(&app, 1));
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(reading(&app), trashed(&app, 0), "round to the first");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(reading(&app), trashed(&app, 1));
+    assert_eq!(open_title(&app), "Alpha");
+    let _ = std::fs::remove_dir_all(dir);
+}

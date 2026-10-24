@@ -51,6 +51,11 @@ pub const TOP: &str = "mod+up";
 pub const BOTTOM: &str = "mod+down";
 pub const PREVIOUS_NOTE: &str = "mod+alt+up";
 pub const NEXT_NOTE: &str = "mod+alt+down";
+/// The next note shown, round the list as a browser's tabs go: Control
+/// on a Mac too (`ctrl` is Control everywhere, `⌃⇥`), since ⌘Tab is the
+/// system's.
+pub const CYCLE_NEXT: &str = "ctrl+tab";
+pub const CYCLE_PREVIOUS: &str = "ctrl+shift+tab";
 // Notes.
 pub const NEW_NOTE: &str = "mod+n";
 pub const NEW_FOLDER: &str = "mod+shift+n";
@@ -68,13 +73,15 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 49] = [
+pub const ALL: [(&str, &str); 51] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
     ("Rename folder", RENAME_FOLDER),
     ("Search", SEARCH),
     ("Previous note", PREVIOUS_NOTE),
     ("Next note", NEXT_NOTE),
+    ("Next note, round the list", CYCLE_NEXT),
+    ("Previous note, round the list", CYCLE_PREVIOUS),
     ("Pin or unpin", PIN),
     ("Move note to Deleted", TRASH),
     ("Settings", SETTINGS),
@@ -160,5 +167,13 @@ mod tests {
             }
         }
         assert!(hint("Bold", BOLD).ends_with('B'));
+        // Control on every platform, a Mac's too: never ⌘Tab, the system's
+        // app switcher.
+        for spec in [CYCLE_NEXT, CYCLE_PREVIOUS] {
+            let a = Accel::parse(spec).unwrap();
+            assert!(a.code == KeyCode::Tab && a.mods.ctrl && !a.mods.super_key, "{spec}");
+        }
+        let shown = if cfg!(target_os = "macos") { "\u{2303}\u{21e7}\u{21e5}" } else { "Ctrl+Shift+Tab" };
+        assert_eq!(label(CYCLE_PREVIOUS), shown);
     }
 }
