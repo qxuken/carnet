@@ -1753,6 +1753,7 @@ impl Carnet {
             .filter(|_| self.editing && !cov.whole.contains(&slot.block))
             .map(|(f, to)| (f.max(lo), to.min(hi)))
             .filter(|(f, to)| f < to);
+        let whole = cov.whole.contains(&slot.block);
         if here {
             self.caret_fresh = fresh;
         }
@@ -1813,6 +1814,7 @@ impl Carnet {
                         continue;
                     }
                     let mut sp = Span::new(&text[a..b]);
+                    let mut wash = None;
                     if s.marker {
                         // The marks show on the line being written; on the
                         // others they step back further.
@@ -1826,7 +1828,7 @@ impl Carnet {
                         // both; see `words_ink`.
                         let plain = style.color.unwrap_or(t.fg);
                         let own = (s.ink != 0).then(|| crate::design::tint::ink(s.ink, dark, page_bg));
-                        let wash = (s.mark != 0).then(|| {
+                        wash = (s.mark != 0).then(|| {
                             if s.mark == inline::HIGHLIGHT {
                                 crate::design::tint::highlight(dark)
                             } else {
@@ -1875,8 +1877,17 @@ impl Carnet {
                         letter = Some(spans.len());
                         letter_own |= !s.marker && s.ink != 0;
                     }
-                    if part.is_some_and(|(f, to)| a >= f && b <= to) {
-                        sp = sp.bg(t.selection).bg_radius(4.0);
+                    // Chosen, words wear the selection's wash over a
+                    // highlighter's, which shows through it the same in
+                    // words chosen in a block as in a block covered whole:
+                    // put in its place, a highlight given across blocks
+                    // showed only on those covered whole.
+                    let chosen = part.is_some_and(|(f, to)| a >= f && b <= to);
+                    if chosen || (whole && wash.is_some()) {
+                        sp = sp.bg(wash.map_or(t.selection, |w| over(t.selection, w)));
+                    }
+                    if chosen {
+                        sp = sp.bg_radius(4.0);
                     }
                     spans.push(sp);
                     broken = text[a..b].ends_with('\n');
@@ -3613,6 +3624,17 @@ pub(super) fn words_ink(own: Option<Color>, plain: Color, wash: Option<Color>, p
         }
         _ => plain,
     }
+}
+
+/// `top` drawn on `under`, as the one colour the two show: a span has one
+/// background.
+fn over(top: Color, under: Color) -> Color {
+    let a = top.a + under.a * (1.0 - top.a);
+    if a <= 0.0 {
+        return Color::TRANSPARENT;
+    }
+    let mix = |t: f32, u: f32| (t * top.a + u * under.a * (1.0 - top.a)) / a;
+    Color::rgba(mix(top.r, under.r), mix(top.g, under.g), mix(top.b, under.b), a)
 }
 
 /// Focus: a part of the page steps back while another block is written,
