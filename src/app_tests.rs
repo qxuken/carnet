@@ -1008,6 +1008,71 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
+/// Markdown files dropped on the window come in as notes, never into the
+/// note open: on the page, into the folder the library shows, the first
+/// opened and chosen there; on a folder's row, into that folder, which
+/// the library then shows. Dropped with a picture, the picture goes into
+/// the note as ever, and that note stays open. One that can't come in
+/// is said, by name.
+#[test]
+fn markdown_files_dropped_on_the_window_come_in_as_notes() {
+    let (mut app, mut d, dir) = body("drop-md");
+    let outside = std::env::temp_dir().join(format!("carnet-drop-md-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let write = |name: &str, text: &[u8]| {
+        let p = outside.join(name);
+        std::fs::write(&p, text).unwrap();
+        p.display().to_string()
+    };
+    let drop = |app: &mut Carnet, d: &mut Drive, paths: Vec<String>, at: Vec2| {
+        d.input(app, InputEvent::DragFiles { paths: paths.clone(), at });
+        d.frame(app);
+        d.input(app, InputEvent::DropFiles { paths, at });
+        d.frame(app);
+    };
+    let notice = |app: &Carnet| app.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default();
+    let title = |app: &Carnet| app.store.notes[app.current].title.clone();
+    let page = Vec2::new(600.0, 300.0);
+    let trip = write("Trip.md", b"# Trip\n\nTo the sea.\n");
+    drop(&mut app, &mut d, vec![trip.clone(), write("Ideas.markdown", b"Some ideas\n")], page);
+    assert_eq!(title(&app), "Trip", "the first opened");
+    assert!(app.doc().contains("to the sea"));
+    assert!(app.order.contains(&app.current), "and chosen in the library");
+    assert!(dir.join("Trip.md").is_file() && dir.join("Ideas.md").is_file());
+    assert!(outside.join("Trip.md").is_file(), "copied, not moved");
+    assert_eq!(notice(&app), "Imported 2 notes");
+
+    // On a folder's row: into it, and the library shows it.
+    app.store.create_folder("", "Work").unwrap();
+    app.store.create_folder("", "Home").unwrap();
+    app.show_folder(Some("Home".into()));
+    d_frame_twice(&mut app, &mut d);
+    let work = app.folder_rects.iter().find(|(f, _)| f == "Work").map(|(_, r)| r.center()).expect("Work's row");
+    drop(&mut app, &mut d, vec![trip], work);
+    assert_eq!((title(&app), app.store.notes[app.current].folder.as_str()), ("Trip".to_string(), "Work"));
+    assert_eq!(app.folder.as_deref(), Some("Work"));
+    assert!(dir.join("Work/Trip.md").is_file());
+    assert_eq!(notice(&app), "Imported \u{201c}Trip\u{201d} into \u{201c}Work\u{201d}");
+
+    // With a picture, on the page: the picture into the note open, which
+    // stays; the note into the folder shown.
+    let pic = png_file(&outside, "Shell.png").display().to_string();
+    drop(&mut app, &mut d, vec![pic, write("Later.md", b"# Later\n")], page);
+    assert_eq!(title(&app), "Trip");
+    assert_eq!(image_blocks(&app), ["../attachments/Shell.png"]);
+    assert!(dir.join("Work/Later.md").is_file());
+    assert_eq!(notice(&app), "Imported \u{201c}Later\u{201d} into \u{201c}Work\u{201d}");
+
+    // Not text: left out, and said.
+    drop(&mut app, &mut d, vec![write("Bad.md", &[0xff, 0xfe, b'x'])], page);
+    assert_eq!(app.error.as_deref(), Some("Couldn't import \u{201c}Bad.md\u{201d}: it isn't text Carnet can read (not UTF-8)"));
+    assert!(!dir.join("Work/Bad.md").exists());
+    assert_eq!(title(&app), "Trip");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
 /// The toolbar's paperclip asks for any file; what comes back goes in at
 /// the caret: a picture as a picture, a document as a link among the
 /// words, set apart from them by a space.
