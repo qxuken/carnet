@@ -21,6 +21,8 @@
   import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
   import { drawnPicture, picked as pictureHere, textWidth, type Picked } from '../lib/editor/picture';
   import { linkOpening } from '../lib/editor/links';
+  import { opener } from '../lib/open.svelte';
+  import { isMarkdownName } from '../lib/files';
   import { commands, follow as followSlash, hintOf, iconOf, slashHere, slashKeys, type Slash } from '../lib/editor/slash';
   import { LIST_TURNS, toolSet } from '../lib/editor/tools';
 
@@ -492,7 +494,26 @@
         selection: { anchor: fresh ? 0 : text.length },
         extensions: [
           ...page.extensions,
-          linkOpening(pe),
+          // A link to a file the note keeps opens it from the vault, asked
+          // first if it could run, as in the reader; any other in a tab.
+          linkOpening(pe, (u) => {
+            if (!opener.link(folderOf, u)) window.open(u, '_blank', 'noopener,noreferrer');
+          }),
+          // Files dropped on the page, as the desktop takes them: pictures
+          // and other files into the note at the caret (`take`), never
+          // CodeMirror's own, which pasted a file's bytes as words; and
+          // Markdown files left to the window's own, which brings them in
+          // as notes.
+          EditorView.domEventHandlers({
+            drop: (e) => {
+              const files = Array.from(e.dataTransfer?.files ?? []);
+              if (!files.length) return false;
+              const rest = files.filter((f) => !isMarkdownName(f.name));
+              if (rest.length) void take(rest);
+              if (rest.length === files.length) e.preventDefault();
+              return true;
+            },
+          }),
           slashKeys({
             menu: () => slash,
             sel: () => slashSel,

@@ -13,6 +13,15 @@
   import { moveItems, pin } from '../lib/noteMenu';
   import { opener } from '../lib/open.svelte';
 
+  /// A file that isn't a picture, put in a note: kept beside the notes
+  /// and synced (`sync.attach`, which says why one isn't), its `src` as
+  /// the note links it.
+  async function attachFile(folder: string, file: File): Promise<string> {
+    const [kept] = await sync.attach(folder, [file]);
+    if (!kept) throw new Error(`Couldn’t keep ${file.name}`);
+    return kept.src;
+  }
+
   type Props = {
     key: string;
     back: (() => void) | null;
@@ -149,7 +158,7 @@
   {#if editing}
     <div class="note">
       {#await import('./Editor.svelte') then E}
-        <E.default {key} folder={note?.folder ?? ''} {fresh} />
+        <E.default {key} folder={note?.folder ?? ''} {fresh} addFile={attachFile} />
       {:catch}
         <p class="error">The editor couldn’t load. Check the connection and try again.</p>
       {/await}
