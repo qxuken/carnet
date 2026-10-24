@@ -70,34 +70,6 @@
   let sortedHow = $state(0);
   /// The caret's table has a header row.
   let tableHeader = $state(true);
-  /// Colours used lately, newest first (this browser's, as the desktop
-  /// keeps its own).
-  let recent = $state<number[]>(readRecent());
-
-  function readRecent(): number[] {
-    try {
-      const v = JSON.parse(localStorage.getItem('carnet.recentColors') ?? '[]');
-      return Array.isArray(v) ? v.filter((n) => typeof n === 'number').slice(0, 10) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  /// A colour given: first among the recent ones.
-  function used(c: number) {
-    if (c <= HIGHLIGHT) return;
-    recent = [c, ...recent.filter((r) => r !== c)].slice(0, 10);
-    try {
-      localStorage.setItem('carnet.recentColors', JSON.stringify(recent));
-    } catch {
-      // Not kept: a private window, storage refused. Only a convenience.
-    }
-  }
-
-  function tintWith(ink: boolean, c: number) {
-    act((pe) => pe.tint(ink, c));
-    used(c);
-  }
   let chooser: HTMLInputElement | undefined = $state();
   let folderOf = '';
 
@@ -420,24 +392,10 @@
               aria-label={h.name}
               title={h.name}
               style:--swatch={inkTab ? inkCss(c) : washCss(c)}
-              onclick={() => tintWith(inkTab, c)}
+              onclick={() => act((pe) => pe.tint(inkTab, c))}
             >{#if inkTab}A{/if}</button>
           {/each}
         </div>
-        {#if recent.length}
-          <p class="recent">Recent</p>
-          <div class="hues">
-            {#each recent as c (c)}
-              <button
-                class="hue"
-                class:picked={(inkTab ? tint[0] : tint[1]) === c}
-                aria-label={`Recent colour ${c.toString(16).padStart(8, '0').slice(0, 6)}`}
-                style:--swatch={inkTab ? inkCss(c) : washCss(c)}
-                onclick={() => tintWith(inkTab, c)}
-              >{#if inkTab}A{/if}</button>
-            {/each}
-          </div>
-        {/if}
         <div class="row">
           <button class="pill" onclick={() => act((pe) => pe.tint(inkTab, 0))}><Icon name="cross" size={14} /> No colour</button>
           {#if !inkTab}

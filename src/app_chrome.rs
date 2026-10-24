@@ -1246,8 +1246,7 @@ impl Carnet {
 
     /// The colour picker, hanging from its button: the grid Word and
     /// Obsidian's toolbar share — ten theme colours over five lighter and
-    /// darker steps of each, ten standard ones, the reader's recent ones —
-    /// and a way back to none. One picker, two tabs: the words' colour and
+    /// darker steps of each, ten standard ones — and a way back to none. One picker, two tabs: the words' colour and
     /// the highlighter's.
     pub(super) fn tint_picker(&self, ui: &mut Ui<'_>, l: &Look) {
         let Some((ink, at)) = self.tint_open else { return };
@@ -1261,9 +1260,6 @@ impl Carnet {
             st.get(i).map_or(0, |s| if ink { s.ink } else { s.mark })
         };
         let k = ink as u64;
-        let label = |ui: &mut Ui<'_>, s: &str| {
-            ui.text(s, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
-        };
         // A swatch shows what the colour does: an "A" in it, or an "A" on
         // its wash, as the page would draw it.
         let (dark, page) = (l.c.dark, t.bg);
@@ -1359,10 +1355,6 @@ impl Carnet {
                     .map(|h| if ink { (h.ink << 8) | 0xff } else { h.wash })
                     .collect();
                 row(ui, "hues", &hues, 0);
-                if !self.settings.colors.is_empty() {
-                    label(ui, "Recent");
-                    row(ui, "recent", &self.settings.colors, 200);
-                }
                 ui.with(NodeSpec::row().grow_width().gap(6.0).padding(Edges { l: 0.0, r: 0.0, t: 4.0, b: 0.0 }), |ui| {
                     let pill = |ui: &mut Ui<'_>, key: &str, name: &str, color: u32, dot: Option<Color>| {
                         ui.with_keyed(

@@ -2428,7 +2428,7 @@ fn the_colour_picker_colours_the_selection() {
     d.frame(&mut app);
     assert_eq!(texts(&app)[0], "<span style=\"color: #C0553F\">red</span> words");
     assert!(app.tint_open.is_some(), "the picker stays, for the other colour");
-    assert_eq!(app.settings.colors.first(), Some(&0xc0553fff), "and the colour is a recent one");
+    assert!(d.key_named("Recent").is_none(), "and no row of colours given lately");
     key(&mut app, &mut d, "escape");
     assert!(app.tint_open.is_none(), "Esc puts it away");
     assert!(page_focused(&app, &d), "the page keeps the keyboard");
