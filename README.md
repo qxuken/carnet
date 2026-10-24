@@ -132,6 +132,7 @@ The toolbar acts on the blocks the caret touches: turn them into another kind, d
 |---|---|
 | Ctrl+N / Ctrl+F / Ctrl+S | new note / search / save now |
 | Ctrl+Shift+N | new folder |
+| Ctrl+Shift+O | the note in a window of its own, the toolbar and the page alone (or from its menu in the list, or the page's); open in both, what is typed in one is in the other at once. Ctrl+W closes it, and so does moving its note to Deleted |
 | Ctrl+Alt+↑ / ↓ | the note above or below in the list |
 | Ctrl+Tab / Ctrl+Shift+Tab | the next or the previous note the list shows (the folder's, or what the search found, or Deleted), round from the last to the first as a browser's tabs go; from anywhere in the window but Settings, a table cell or a list included. On a Mac too it is Control (⌃⇥), since ⌘Tab is the system's |
 | Ctrl+Shift+P / Ctrl+Shift+Backspace | pin the note / move it to Deleted |

@@ -59,6 +59,8 @@ pub const CYCLE_PREVIOUS: &str = "ctrl+shift+tab";
 // Notes.
 pub const NEW_NOTE: &str = "mod+n";
 pub const NEW_FOLDER: &str = "mod+shift+n";
+/// The open note in a window of its own: the toolbar and the page.
+pub const NEW_WINDOW: &str = "mod+shift+o";
 /// On a folder in the list, or the one shown after a click on it.
 pub const RENAME_FOLDER: &str = "f2";
 pub const SEARCH: &str = "mod+f";
@@ -73,9 +75,10 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 51] = [
+pub const ALL: [(&str, &str); 52] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
+    ("Open the note in a new window", NEW_WINDOW),
     ("Rename folder", RENAME_FOLDER),
     ("Search", SEARCH),
     ("Previous note", PREVIOUS_NOTE),

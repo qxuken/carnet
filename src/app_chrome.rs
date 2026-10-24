@@ -1109,7 +1109,9 @@ impl Carnet {
         // The tools start where the text does, less what the strip's
         // start already holds.
         let side = self.side_shown();
-        let held = if side { 8.0 } else { 8.0_f32.max(self.lights) } + 61.0;
+        // A note's own window has no library to show, nor zen to go into.
+        let own = self.note_window.is_some();
+        let held = if side { 8.0 } else { 8.0_f32.max(self.lights) } + if own { 0.0 } else { 61.0 };
         let pad_l = if narrow { 4.0 } else { (lead - held).max(8.0) };
         let lights = self.lights;
         let menu_open = self.menu_open;
@@ -1141,6 +1143,8 @@ impl Carnet {
                         ("All notes", "Back to the list of notes")
                     };
                     Tool::new("t-back", Icon::Back, name, hint.to_string(), Msg::ShowList).draw(ui, &t);
+                } else if own {
+                    gap(ui, 8.0_f32.max(lights));
                 } else {
                     // The library's own switch, at the strip's start: past
                     // the traffic lights when the library has gone.
@@ -1155,10 +1159,12 @@ impl Carnet {
                     .calm(calm)
                     .draw(ui, &t);
                 }
-                Tool::new("t-zen", Icon::Zen, "Zen mode", keys::hint("Zen mode", keys::ZEN), Msg::ToggleZen)
-                    .toggle(self.zen)
-                    .calm(calm)
-                    .draw(ui, &t);
+                if !own {
+                    Tool::new("t-zen", Icon::Zen, "Zen mode", keys::hint("Zen mode", keys::ZEN), Msg::ToggleZen)
+                        .toggle(self.zen)
+                        .calm(calm)
+                        .draw(ui, &t);
+                }
                 // How many tools fit, in order: the row's width as last
                 // laid out. A tool is 30 with 1 between; groups 10 apart
                 // (+2). When not all fit, room is kept for More.

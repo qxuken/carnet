@@ -2143,9 +2143,14 @@ impl Carnet {
             item("Paste", "paste").accel("mod+v"),
             item("Select all", "all").accel("mod+a"),
             item("Copy note as Markdown", "copy-note"),
-            item("Note history", "history"),
-            MenuItem::separator(),
         ]);
+        // The history and another window are the main window's: a note's
+        // own window is that already, and has no library to list versions.
+        if self.note_window.is_none() {
+            items.push(item("Note history", "history"));
+            items.push(item("Open in new window", "window").accel(keys::NEW_WINDOW).enabled(self.peek.is_none()));
+        }
+        items.push(MenuItem::separator());
         if let Some((_, float, now)) = self.picture_here() {
             items.extend([item("Copy picture", "copy-picture"), item("Copy picture as Markdown", "copy-picture-md"), MenuItem::separator()]);
             // Sizes: shares of the text's width, the one it has now ticked.
@@ -2249,6 +2254,10 @@ impl Carnet {
     pub(super) fn page_action(&mut self, action: &str) {
         if action == "history" {
             self.show_history();
+            return;
+        }
+        if action == "window" {
+            self.open_in_window(self.store.notes[self.current].id);
             return;
         }
         self.focus_page = true;

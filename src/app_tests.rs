@@ -11325,3 +11325,209 @@ fn the_blocks_beside_a_picture_are_beside_it_from_the_first_frame_back() {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+// ------------------------------------------------------------ note windows
+
+/// A note "Plans" with the caret in its body after "draft", and the
+/// welcome note behind it.
+fn plans(name: &str) -> (Carnet, Drive, std::path::PathBuf) {
+    let (mut app, mut d, dir) = fresh(name);
+    d.text(&mut app, "Plans");
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "draft");
+    app.save_current();
+    (app, d, dir)
+}
+
+/// The window the main window's frame just opened, as the runner opens
+/// it: a core of its own in the main window's session, its frames and
+/// events the app's under its window's id.
+fn opened_window(app: &mut Carnet, d: &mut Drive) -> (Drive, kui_native::WindowId) {
+    d.frame(app);
+    let id = d
+        .core
+        .take_window_commands()
+        .into_iter()
+        .find_map(|c| match c {
+            kui_native::WindowCommand::Open { id, .. } => Some(id),
+            _ => None,
+        })
+        .expect("a window opened");
+    let mut core = Core::new_in(d.core.session());
+    core.env.window.id = id;
+    let mut w = Drive::new(core, 820.0, 740.0).framing();
+    w.frame(app);
+    w.frame(app);
+    (w, id)
+}
+
+/// The note window's editor, put by while the main window's is in place.
+fn window_caret(app: &Carnet) -> Caret {
+    app.windows[0].ed.caret
+}
+
+/// Ctrl+Shift+O, or "Open in new window" on a note's card: the note in a
+/// window of its own, named for it, with the toolbar and the page and
+/// nothing of the library's. The library's keys there are the main
+/// window's (a new note opens in it), and the next note is nothing there.
+#[test]
+fn a_note_opens_in_a_window_of_its_own() {
+    let (mut app, mut d, dir) = plans("window-open");
+    let plans = app.store.notes[app.current].id;
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    assert_eq!(app.windows.iter().map(|w| w.note).collect::<Vec<_>>(), [plans]);
+    let (mut w, _) = opened_window(&mut app, &mut d);
+    assert_eq!(w.core.window_title(), Some("Plans"));
+    assert!(w.key_of("t-bold").is_some() && w.key_of("t-trash").is_some(), "the toolbar");
+    assert!(w.key_of("t-sidebar").is_none() && w.key_of("t-zen").is_none(), "nothing of the library's");
+    assert!(w.texts_under("body").iter().any(|t| t == "draft"), "{:?}", w.texts_under("body"));
+    assert!(!w.core.nodes().iter().any(|n| n.text.as_deref() == Some("Welcome to Carnet")), "no list of notes");
+    assert!(w.core.focus().is_some() && w.core.focus() == app.windows[0].ed.page_key, "the page has the keyboard");
+    // Renamed in the main window: the window's title follows.
+    let title = d.key_of("title").unwrap();
+    d.focus(&mut app, title);
+    d.key(&mut app, "end", KeyMods::NONE);
+    d.text(&mut app, " for May");
+    w.frame(&mut app);
+    assert_eq!(w.core.window_title(), Some("Plans for May"));
+    // The next note and Ctrl+Tab are nothing there; Ctrl+N is a new note
+    // in the main window.
+    key_with(&mut app, &mut w, "down", KeyMods { alt: true, ..CTRL });
+    key_with(&mut app, &mut w, "tab", CTRL);
+    w.key(&mut app, "n", CTRL);
+    w.frame(&mut app);
+    assert_eq!(app.windows[0].ed.current, app.store.notes.iter().position(|n| n.id == plans).unwrap());
+    assert_eq!(w.core.window_title(), Some("Plans for May"));
+    assert_ne!(app.store.notes[app.current].id, plans, "the main window has the new note");
+    assert!(app.store.notes[app.current].title.is_empty());
+    assert!(w.warnings().is_empty() && d.warnings().is_empty());
+
+    // From the welcome note's card: a second window, for it.
+    d.frame(&mut app);
+    let row = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Welcome to Carnet")).map(|n| n.rect).expect("its card");
+    d.button_click(&mut app, row.center().x, row.center().y, kui_native::MouseButton::Secondary);
+    d.frame(&mut app);
+    let item = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Open in new window")).map(|n| n.rect.center()).expect("the card's menu");
+    d.click(&mut app, item.x, item.y);
+    let welcome = app.store.notes.iter().find(|n| n.title == "Welcome to Carnet").unwrap().id;
+    assert_eq!(app.windows.iter().map(|w| w.note).collect::<Vec<_>>(), [plans, welcome]);
+    let (w2, _) = opened_window(&mut app, &mut d);
+    assert_eq!(w2.core.window_title(), Some("Welcome to Carnet"));
+    // Asked again: no third window, the one there brought forward.
+    app.open_in_window(welcome);
+    d.frame(&mut app);
+    assert_eq!(app.windows.len(), 2);
+    assert!(d.core.take_window_commands().iter().any(|c| matches!(c, kui_native::WindowCommand::Focus(_))));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The page's menu opens its note in a window too; one open in both is
+/// one note. What is typed in the window is in the main window at once,
+/// and back; each window's caret stays with its words through what the
+/// other typed, and undo in either takes back the last edit to the note.
+#[test]
+fn a_note_open_in_two_windows_is_one_note() {
+    let (mut app, mut d, dir) = plans("window-both");
+    app.page_action("window");
+    let (mut w, _) = opened_window(&mut app, &mut d);
+    // The window's caret is at the note's start, the main window's after
+    // "draft".
+    assert_eq!(window_caret(&app).head.byte, 0);
+    assert_eq!(app.caret.head.byte, 5);
+    type_in(&mut app, &mut w, "First ");
+    assert_eq!(texts(&app)[0], "First draft", "in the main window at once");
+    assert_eq!(app.caret.head.byte, 11, "its caret carried along with \"draft\"");
+    d.frame(&mut app);
+    assert!(d.texts_under("body").iter().any(|t| t == "First draft"));
+    type_in(&mut app, &mut d, "!");
+    assert_eq!(texts(&app)[0], "First draft!");
+    assert_eq!(window_caret(&app).head.byte, 6, "the window's caret where it was, before \"draft\"");
+    w.frame(&mut app);
+    assert!(w.texts_under("body").iter().any(|t| t == "First draft!"));
+    // A selection in the window survives a line taken from under it.
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "second line");
+    key_with(&mut app, &mut w, "end", SHIFT);
+    let c = window_caret(&app);
+    assert_eq!((c.anchor.byte, c.head.byte), (6, 12));
+    key_with(&mut app, &mut d, "a", CTRL);
+    key_with(&mut app, &mut d, "a", CTRL);
+    key(&mut app, &mut d, "backspace");
+    w.frame(&mut app);
+    let c = window_caret(&app);
+    let doc = &app.store.notes[app.current].doc;
+    assert_eq!(page::fix(doc, c), c, "a caret that stands in the note");
+    // Undo in the window takes back the main window's last edit.
+    key_with(&mut app, &mut w, "z", CTRL);
+    assert!(texts(&app).contains(&"second line".to_string()), "{:?}", texts(&app));
+    assert!(w.warnings().is_empty() && d.warnings().is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+W closes the note window it is pressed in, saving what was typed
+/// there, and never the main window; the window can be opened again.
+#[test]
+fn ctrl_w_closes_the_note_window() {
+    let (mut app, mut d, dir) = plans("window-close");
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (mut w, id) = opened_window(&mut app, &mut d);
+    type_in(&mut app, &mut w, "Kept. ");
+    key_with(&mut app, &mut w, "w", CTRL);
+    assert!(app.windows.is_empty());
+    d.frame(&mut app);
+    let closed: Vec<_> = d.core.take_window_commands().into_iter().filter(|c| matches!(c, kui_native::WindowCommand::Close(_))).collect();
+    assert_eq!(closed, [kui_native::WindowCommand::Close(id)], "that window, not the main one");
+    let path = app.store.notes[app.current].path.clone().unwrap();
+    assert!(std::fs::read_to_string(path).unwrap().contains("Kept. draft"), "saved as it closed");
+    // Its close button, or the OS: the same.
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (_w, id) = opened_window(&mut app, &mut d);
+    assert_eq!(app.windows.len(), 1);
+    d.core.window_closed(id);
+    for ev in d.core.take_pending_events() {
+        app.on_event(ev);
+    }
+    assert!(app.windows.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Its note moved to Deleted — from the window's own toolbar, or from the
+/// main window — the window closes, and the main window says so with its
+/// Undo. A change another app makes to the note draws it again.
+#[test]
+fn trashing_its_note_closes_the_window() {
+    let (mut app, mut d, dir) = plans("window-trash");
+    let plans = app.store.notes[app.current].id;
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (mut w, id) = opened_window(&mut app, &mut d);
+    // Changed in another app: the window is drawn again, and shows it.
+    let path = app.store.notes[app.current].path.clone().unwrap();
+    std::fs::write(&path, "# Plans\n\nredrafted\n").unwrap();
+    app.rescan();
+    d.frame(&mut app);
+    assert!(d.core.take_window_commands().contains(&kui_native::WindowCommand::Redraw(id)));
+    w.frame(&mut app);
+    assert!(w.texts_under("body").iter().any(|t| t == "redrafted"), "{:?}", w.texts_under("body"));
+    let trash = w.key_of("t-trash").unwrap();
+    w.click_key(&mut app, trash);
+    assert!(app.windows.is_empty());
+    assert!(!app.store.notes.iter().any(|n| n.id == plans));
+    let notice = app.notice.as_ref().expect("said in the main window");
+    assert!(notice.text.contains("Plans") && notice.undo.is_some(), "{}", notice.text);
+    d.frame(&mut app);
+    assert!(d.core.take_window_commands().contains(&kui_native::WindowCommand::Close(id)));
+    // Undo brings it back; opened again and moved to Deleted from the
+    // main window, its window closes too.
+    app.notice_undo();
+    let i = app.store.notes.iter().position(|n| n.title == "Plans").expect("back");
+    app.open(i);
+    d.frame(&mut app);
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (_w, _) = opened_window(&mut app, &mut d);
+    assert_eq!(app.windows.len(), 1);
+    let trash = d.key_of("t-trash").unwrap();
+    d.click_key(&mut app, trash);
+    assert!(app.windows.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
