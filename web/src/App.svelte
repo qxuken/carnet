@@ -4,7 +4,8 @@
   // address (`#note/<key>`, `#note/<key>/history`, `#settings`), so Back
   // goes back (and a note opens in a tab of its own by its address).
   // Writing in a note is `#note/<key>/edit` (`/new` for one made just
-  // now). Markdown files dropped on it come in as notes.
+  // now). Markdown files dropped on it come in as notes. Ctrl+Alt+↑ and ↓
+  // (⌘⌥) go to the note above or below in the library.
   import { onMount, untrack } from 'svelte';
   import { sync } from './lib/sync.svelte';
   import Pair from './screens/Pair.svelte';
@@ -16,6 +17,8 @@
   import OpenAsk from './lib/OpenAsk.svelte';
   import { footer } from './lib/words';
   import { carriesFiles, isMarkdownName } from './lib/files';
+  import { stepKey, stepNote } from './lib/order';
+  import { apple } from './lib/editor/links';
 
   type Route =
     | { kind: 'list' }
@@ -42,6 +45,7 @@
     mq.onchange = () => (wide = mq.matches);
     route = read();
     addEventListener('hashchange', () => (route = read()));
+    addEventListener('keydown', stepKeys, true);
   });
 
   // The library's width on a wide screen: its edge dragged (or moved
@@ -132,6 +136,26 @@
   }
   // Back where there's a page to go back to; else to the list.
   const back = () => (history.length > 1 ? history.back() : go(''));
+
+  /// The notes the library shows, by key, in its order (Library's
+  /// `order`): kept while a phone shows a note in its place.
+  let order = $state<string[]>([]);
+
+  /// Ctrl+Alt+↑ and ↓ (⌘⌥ on a Mac): the note above or below in the
+  /// library, as on the desktop, from the page, a table's cell, the
+  /// library or its search, stopping at the list's ends (order.ts). Caught
+  /// on its way down, before the editor's own (CodeMirror's caret added
+  /// above, a block or a table's row moved): it types and moves nothing.
+  /// Writing, the next opens to be written in too. Not from Settings or a
+  /// note's history, which are not among the notes.
+  function stepKeys(e: KeyboardEvent) {
+    const way = e.isComposing ? null : stepKey(e, apple());
+    if (!way || sync.phase !== 'ready' || sync.removed || (route.kind !== 'note' && route.kind !== 'list')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const to = stepNote(order, current, way === 'up');
+    if (to) go(`note/${to}${route.kind === 'note' && route.editing ? '/edit' : ''}`);
+  }
 
   /// The folder the library shows (null: every note, or Deleted): where
   /// Markdown files dropped anywhere but on a folder's row come in.
@@ -255,7 +279,7 @@
   <div class="shell" class:wide class:resizing={dragFrom !== null}>
     {#if wide || route.kind === 'list'}
       <div class="side" style:--side-w={wide ? `${sideW}px` : null}>
-        <Library open={(key) => go(`note/${key}`)} {current} {create} bind:folder={shownFolder} />
+        <Library open={(key) => go(`note/${key}`)} {current} {create} bind:folder={shownFolder} bind:order />
         <footer>
           <span class="status" class:ok={status.ok} role="status">
             <Icon name={status.icon} size={14} /> {status.text}

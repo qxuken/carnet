@@ -1,5 +1,6 @@
 <script lang="ts">
-  // The notes: a folder (or all), searched, pinned first, newest next.
+  // The notes: a folder (or all), searched, pinned first, newest next
+  // (order.ts), the order the page steps along with Ctrl+Alt+↑ and ↓.
   //
   // Folders as the desktop has them: made (New folder, at the top, or
   // inside one from its menu), renamed, nested by a drag onto another
@@ -41,6 +42,7 @@
     type Drag,
   } from '../lib/folders';
   import { focusNow } from '../lib/focus';
+  import { shownNotes } from '../lib/order';
   import { carriesFiles, isMarkdownName } from '../lib/files';
   import { shortAgo } from '../lib/time';
 
@@ -51,21 +53,17 @@
     // The folder shown (null: every note), the page's to know: where
     // Markdown files dropped elsewhere come in.
     folder = $bindable(null),
-  }: { open: (key: string) => void; current: string | null; create: (folder: string | null) => void; folder?: string | null } = $props();
+    // The notes shown, by key, in the order drawn (order.ts `shownNotes`):
+    // the page's, for the next and previous note.
+    order = $bindable([]),
+  }: { open: (key: string) => void; current: string | null; create: (folder: string | null) => void; folder?: string | null; order?: string[] } = $props();
   let query = $state('');
   let trash = $state(false);
 
-  const shown = $derived.by(() => {
-    const hits = query.trim() ? sync.search(query.trim()) : null;
-    const list = sync.notes.filter(
-      (n: Note) =>
-        n.trashed === trash &&
-        (hits ? hits.has(n.key) : true) &&
-        // A folder's own notes, as the desktop lists them; its subfolders'
-        // are theirs.
-        (hits || folder === null || n.folder === folder),
-    );
-    return list.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.modified - a.modified);
+  const shown = $derived(shownNotes<Note>(sync.notes, query.trim() ? sync.search(query.trim()) : null, folder, trash));
+  // The order drawn, the page's to step along (Ctrl+Alt+↑ and ↓).
+  $effect(() => {
+    order = shown.map((n) => n.key);
   });
   // Only the rows in sight (and a few either side) are in the page: ten
   // thousand notes are ten thousand rows otherwise. Rows are one height.

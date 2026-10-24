@@ -34,12 +34,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(path, design::tokens_json())?;
         return Ok(());
     }
-    // `carnet --icons <dir>`: every icon as an SVG, for the reference.
+    // `carnet --icons <dir>`: every icon as an SVG, for the reference, and
+    // each divider's ornament (`ornament-dots.svg`), which the web draws
+    // its dividers from.
     if let Some(i) = args.iter().position(|a| a == "--icons") {
         let dir = std::path::PathBuf::from(args.get(i + 1).map_or("icons", String::as_str));
         std::fs::create_dir_all(&dir)?;
         for g in icons::Glyph::ALL {
             std::fs::write(dir.join(format!("{}.svg", g.slug())), g.svg("#2f2a27"))?;
+        }
+        for d in settings::Divider::ALL.into_iter().filter(|d| !matches!(d, settings::Divider::Text | settings::Divider::Picture)) {
+            std::fs::write(dir.join(format!("ornament-{}.svg", d.key())), icons::ornament_svg(d, "#2f2a27"))?;
         }
         return Ok(());
     }

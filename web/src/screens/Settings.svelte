@@ -3,13 +3,29 @@
   // Sync has them: who's in, letting one more in, the recovery words, the
   // passkeys, and leaving. On the server owner's account, invites and the
   // accounts too. Last of all, the getting-started note, given back.
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { sync } from '../lib/sync.svelte';
   import { ago, dateWords, left } from '../lib/time';
   import Icon from '../lib/Icon.svelte';
   import { pair_link, password_fault, qr_svg } from '../wasm/carnet_web.js';
   import { inviteSteps, joinedSaid, recoveryShown, waysBack } from '../lib/words';
   import { LINK_OPENS, linkOpen, linkOpenWords, setLinkOpen, type LinkOpen } from '../lib/editor/links';
+  import {
+    DIVIDERS,
+    DIVIDER_NAMES,
+    FALLBACK,
+    TEXT_MOST,
+    divider,
+    dividerPicture,
+    dividerText,
+    ornament,
+    pictureFrom,
+    setDivider,
+    setDividerPicture,
+    setDividerText,
+    svgSize,
+    type Divider,
+  } from '../lib/divider';
 
   let { back, open }: { back: (() => void) | null; open: (key: string) => void } = $props();
 
@@ -50,6 +66,63 @@
     setLinkOpen(h);
     opensWith = h;
   };
+
+  /// How dividers are drawn (divider.ts), kept here, and the reader's own
+  /// words and picture, kept whichever is chosen.
+  let dividerWay = $state<Divider>(divider());
+  let ownWords = $state(dividerText());
+  let ownPicture = $state(dividerPicture());
+  /// What became of a picture picked, said under its button until the next.
+  let pictureSaid = $state<string | null>(null);
+  let picker: HTMLInputElement | undefined = $state();
+  let wordsField: HTMLInputElement | undefined = $state();
+
+  /// A way chosen, as the desktop's tiles choose: a picture of the
+  /// reader's own with none kept yet is asked for first, and chosen once
+  /// it is; words of their own with none typed, the keyboard where they go.
+  async function chooseDivider(d: Divider) {
+    if (d === 'picture' && !ownPicture) {
+      picker?.click();
+      return;
+    }
+    setDivider(d);
+    dividerWay = d;
+    if (d === 'text' && !ownWords.trim()) {
+      await tick();
+      wordsField?.focus();
+    }
+  }
+
+  function typeWords(e: Event) {
+    setDividerText((e.currentTarget as HTMLInputElement).value);
+    ownWords = dividerText();
+  }
+
+  /// A picture picked: kept as small as a divider can use, and chosen.
+  /// One the browser can't read leaves dividers as they were.
+  async function pickPicture(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    pictureSaid = null;
+    try {
+      const p = await pictureFrom(file);
+      if (!setDividerPicture(p)) pictureSaid = 'Too big for this browser to keep: dividers show it until this page is closed.';
+      ownPicture = p;
+      dividerWay = 'picture';
+    } catch {
+      pictureSaid = `${file.name} can’t be shown as a picture here: dividers stay as they were.`;
+    }
+  }
+
+  /// An ornament's tile: as on the page, or smaller where it wouldn't fit.
+  function ornamentTile(d: Divider) {
+    const svg = ornament(d);
+    const { w, h } = svgSize(svg) ?? { w: 24, h: 4 };
+    const k = Math.min(1, 56 / w);
+    return { svg, w: w * k, h: h * k };
+  }
 
   /// The name selected as the field opens: typing replaces it.
   const selected = (input: HTMLInputElement) => input.select();
@@ -501,6 +574,51 @@
           {/each}
         </div>
       </div>
+      <!-- Each way drawn as a divider would be, the chosen one ringed, as
+           the desktop's tiles are: the reader's own words, or a word
+           saying what it is; their picture, small, or a picture's glyph. -->
+      <div class="row choose rule">
+        <Icon name="divider" size={20} />
+        <div class="text">
+          <b id="dividers">Dividers</b>
+          <span>How a divider looks on the page</span>
+        </div>
+        <div class="tiles" role="radiogroup" aria-labelledby="dividers">
+          {#each DIVIDERS as d (d)}
+            <button role="radio" class="tile" class:on={dividerWay === d} aria-checked={dividerWay === d} aria-label={DIVIDER_NAMES[d]} title={DIVIDER_NAMES[d]} onclick={() => chooseDivider(d)}>
+              {#if d === 'text'}
+                <span class="tile-words" class:none={!ownWords.trim()}>{ownWords.trim() || 'Text'}</span>
+              {:else if d === 'picture'}
+                {#if ownPicture}<img src={ownPicture.src} alt="" />{:else}<Icon name="picture" size={18} />{/if}
+              {:else}
+                {@const o = ornamentTile(d)}
+                <span class="ornament" style:width="{o.w}px" style:height="{o.h}px">{@html o.svg}</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+      </div>
+      <!-- A divider of the reader's own: where its words are typed, or its
+           picture picked again. -->
+      {#if dividerWay === 'text'}
+        <label class="row own">
+          <span>Words</span>
+          <input bind:this={wordsField} value={ownWords} oninput={typeWords} maxlength={TEXT_MOST} placeholder="~ ✦ ~" aria-label="A divider’s words" />
+        </label>
+        {#if !ownWords.trim()}
+          <p class="row quiet own-said">Until there are words, dividers are {DIVIDER_NAMES[FALLBACK].toLowerCase()}.</p>
+        {/if}
+      {:else if dividerWay === 'picture'}
+        <div class="row own">
+          <span>Picture</span>
+          <button class="pill" onclick={() => picker?.click()}>Choose…</button>
+        </div>
+      {/if}
+      {#if pictureSaid}
+        <p class="row said-here own-said" role="alert"><Icon name="warning" size={16} /> {pictureSaid}</p>
+      {/if}
+      <!-- Pictures of any kind the browser draws, an SVG drawing too. -->
+      <input bind:this={picker} type="file" accept="image/*,.svg" hidden aria-hidden="true" onchange={pickPicture} />
     </section>
 
     <h2>This browser</h2>
@@ -632,7 +750,28 @@
   .segmented button { padding: 6px 12px; border: 0; border-radius: 999px; background: none; color: var(--muted); font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; }
   .segmented button.on { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px #0000001a; }
   .segmented button:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 0; }
+  /* The dividers' tiles, under the row's words, as the desktop's: each
+     72 × 40 on the page's colour, the chosen one ringed in the accent. */
+  .tiles { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 100%; padding-left: 32px; }
+  .tile {
+    display: inline-flex; align-items: center; justify-content: center; width: 72px; height: 40px; padding: 0 6px; box-sizing: border-box;
+    border: 2px solid var(--border); border-radius: var(--radius); background: var(--page); color: var(--muted); cursor: pointer;
+  }
+  .tile:hover { border-color: var(--border-strong); }
+  .tile.on { border-color: var(--accent-ink); color: var(--accent-ink); }
+  .tile:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .tile .ornament { display: inline-flex; flex: none; }
+  .tile .ornament :global(svg) { display: block; width: 100%; height: 100%; }
+  .tile img { display: block; max-width: 60px; max-height: 26px; }
+  .tile-words { max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  .tile-words.none { color: var(--faint); }
+  .row.own { padding-top: 0; padding-left: 48px; font-size: 14px; }
+  .row.own input { width: 200px; min-width: 0; padding: 7px 12px; border: 0; border-radius: var(--radius); background: var(--sunken); color: var(--ink); font: inherit; outline: none; }
+  .row.own input:focus { box-shadow: 0 0 0 2px var(--accent-soft); }
+  .row.own-said { padding-top: 0; padding-left: 48px; }
   @media (max-width: 480px) {
     .confirm, .code, .words, .invite { padding-left: 16px; }
+    .tiles { padding-left: 0; }
+    .row.own, .row.own-said { padding-left: 16px; }
   }
 </style>
