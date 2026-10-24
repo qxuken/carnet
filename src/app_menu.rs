@@ -154,7 +154,9 @@ impl Carnet {
             "Window",
             vec![act("Minimize", "minimize").accel("mod+m"), act("Zoom", "zoom")],
         );
-        MenuBar::new(vec![app, file, edit, format, view, window]).on_menu(Msg::Chose)
+        // Last, where a Mac app's help is: the welcome note again.
+        let help = BarMenu::new("Help", vec![act("Getting Started Note", "welcome")]);
+        MenuBar::new(vec![app, file, edit, format, view, window, help]).on_menu(Msg::Chose)
     }
 
     /// A row of the bar the app runs itself chosen. (A row that is its key
@@ -177,6 +179,7 @@ impl Carnet {
             "focus" => self.on_settings(Msg::SetFocus { to: u64::from(!self.settings.focus) }),
             "typewriter" => self.on_settings(Msg::SetTypewriter { to: u64::from(!self.settings.typewriter) }),
             "fade-tools" => self.on_settings(Msg::SetToolbar { to: u64::from(!self.settings.fade_tools) }),
+            "welcome" => self.add_welcome(),
             _ => {}
         }
     }

@@ -311,6 +311,8 @@ pub enum Msg {
     ResetDir,
     /// Shows the notes folder in the file manager.
     ShowDir,
+    /// The welcome note again, opened: Settings' last line.
+    AddWelcome,
     /// Runs `slash::COMMANDS[index]` on the `/word` line.
     Slash { index: u64 },
     /// A picture pressed and maybe dragged to another place.
@@ -1819,6 +1821,26 @@ impl Carnet {
         self.query.clear();
         self.reorder();
         self.focus(Field::Title);
+    }
+
+    /// The welcome note again, from Settings or the Mac's Help menu: the
+    /// store's untouched one, or a fresh one at the top level, opened, and
+    /// its card chosen in the library, every note shown so it is there.
+    pub(super) fn add_welcome(&mut self) {
+        match self.store.add_welcome() {
+            Ok(i) => {
+                let id = self.store.notes[i].id;
+                self.close_history();
+                self.deleted = false;
+                self.close_peek();
+                self.query.clear();
+                self.folder = None;
+                self.reorder();
+                let i = self.store.notes.iter().position(|n| n.id == id).unwrap_or(i);
+                self.open(i);
+            }
+            Err(e) => self.error = Some(format!("Couldn't add the welcome note: {e}")),
+        }
     }
 
     /// Moves note `i` to the trash. Deleting the open note opens the one
@@ -3331,6 +3353,7 @@ impl Carnet {
             Msg::RootKey | Msg::Page | Msg::PageDrag | Msg::SettingsTitle => {}
             Msg::OpenNote { note } => self.open(note as usize),
             Msg::NewNote => self.new_note(),
+            Msg::AddWelcome => self.add_welcome(),
             Msg::ToggleZen => {
                 self.zen = !self.zen;
                 self.focus_page = true;
