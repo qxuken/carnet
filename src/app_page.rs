@@ -2709,7 +2709,7 @@ impl Carnet {
                             .selected(on)
                             .label(cmd.name),
                         |ui| {
-                            icons::icon(ui, cmd.glyph, if on { t.fg } else { t.muted }, 18.0, false);
+                            icons::icon(ui, slash::GLYPHS[i], if on { t.fg } else { t.muted }, 18.0, false);
                             ui.text_in(
                                 NodeSpec::row().grow_width().min_width(0.0),
                                 cmd.name,

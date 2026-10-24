@@ -341,6 +341,21 @@ export function place(ctx: TableContext) {
   sel.setBaseAndExtent(an, ao, hn, ho);
 }
 
+/// What an arrow with Alt held does in a cell, as on the desktop: with
+/// Shift, the row up or down (`PageEditor.table_op` 5, 6); with ⌘ (Ctrl)
+/// and Shift too, the column left or right (7, 8), Alt+Shift+← and → alone
+/// still selecting by word; with Alt alone, ↑ and ↓ move the whole table
+/// as any block (-1 up, -2 down). `null` for any other key.
+export function tableKey(e: { key: string; altKey: boolean; shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }): number | null {
+  if (!e.altKey) return null;
+  const mod = e.ctrlKey || e.metaKey;
+  const vertical = e.key === 'ArrowUp' || e.key === 'ArrowDown';
+  if (vertical && e.shiftKey && !mod) return e.key === 'ArrowUp' ? 5 : 6;
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.shiftKey && mod) return e.key === 'ArrowLeft' ? 7 : 8;
+  if (vertical && !e.shiftKey && !mod) return e.key === 'ArrowUp' ? -1 : -2;
+  return null;
+}
+
 function bind(wrap: Wrap) {
   const widget = () => wrap.widget;
 
@@ -472,7 +487,9 @@ function bind(wrap: Wrap) {
       return;
     }
     let f: (() => boolean) | null = null;
-    if (e.key === 'Tab') f = () => pe.tab(e.shiftKey);
+    const op = tableKey(e);
+    if (op !== null) f = () => (op < 0 ? pe.move_blocks(op === -1 ? -1 : 1) : pe.table_op(op));
+    else if (e.key === 'Tab') f = () => pe.tab(e.shiftKey);
     else if (mod && !e.altKey && styleOfKey(k, e.shiftKey) !== null) f = () => pe.style(styleOfKey(k, e.shiftKey)!);
     else if (mod && e.shiftKey && k === 'h') f = () => pe.tint(false, 1);
     else if (mod && !e.shiftKey && k === 'z') f = () => pe.undo();

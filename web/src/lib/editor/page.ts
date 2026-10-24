@@ -721,6 +721,12 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
       { key: 'Alt-Delete', run: run(() => pe.delete(true)) },
       { key: 'Tab', run: run(() => pe.tab(false)) },
       { key: 'Shift-Tab', run: run(() => pe.tab(true)) },
+      // The desktop's: the caret's blocks up or down past their neighbour
+      // (in place of CodeMirror's own line moves, which would move a line
+      // of words, not a block), and a to-do ticked.
+      { key: 'Alt-ArrowUp', shift: run(() => pe.move_blocks(-1)), run: run(() => pe.move_blocks(-1)) },
+      { key: 'Alt-ArrowDown', shift: run(() => pe.move_blocks(1)), run: run(() => pe.move_blocks(1)) },
+      { key: 'Mod-Enter', run: run(() => pe.tick()) },
       ...STYLES.map((s) => ({ key: s.key, run: run(() => pe.style(s.which)) })),
       { key: 'Shift-Mod-h', run: run(() => pe.tint(false, HIGHLIGHT)) },
       { key: 'Mod-z', run: run(() => pe.undo()) },
