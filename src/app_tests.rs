@@ -9114,6 +9114,46 @@ fn a_hard_line_break_is_one_break_on_the_page() {
     }
 }
 
+/// The finding: Shift+Enter made no new line until a letter was typed on
+/// it, the caret staying at the end of the line above. The line is there
+/// at once, the caret at its start; `/` on it offers the blocks, and the
+/// one chosen takes that line alone. Saved before anything is typed on
+/// it, the break reads back as it was.
+#[test]
+fn shift_enter_opens_its_line_at_once() {
+    let (mut app, mut d, dir) = body("shift-enter");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "hello");
+    let slot = app.caret.head.slot;
+    let first = app.rect_at(&d.core, slot, 0).unwrap();
+    key_with(&mut app, &mut d, "enter", SHIFT);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!((page::text(app.doc(), slot), app.caret.head.byte), ("hello\n", 6));
+    let r = app.rect_at(&d.core, slot, 6).unwrap();
+    assert!(r.y >= first.y + first.h - 0.5 && (r.x - first.x).abs() < 0.5, "on a line of its own, at its start: {r:?} under {first:?}");
+    app.save_current();
+    let path = app.store.notes[app.current].path.clone().unwrap();
+    let md = std::fs::read_to_string(&path).unwrap();
+    let (_, back) = carnet_core::doc::from_markdown(&md);
+    assert_eq!(back.blocks()[0].text_ref(), Some("hello\n"), "{md:?}");
+
+    type_in(&mut app, &mut d, "/");
+    d.frame(&mut app);
+    assert!(app.slash_now().is_some(), "{:?}", texts(&app));
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("Heading 1")), "the menu shows");
+    type_in(&mut app, &mut d, "h2");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app)[0], "hello");
+    assert!(matches!(&blocks(&app)[1].kind, Kind::Heading { level: 2, text } if text.is_empty()), "{:?}", texts(&app));
+    // Mid-sentence it is a slash.
+    type_in(&mut app, &mut d, "either/or");
+    d.frame(&mut app);
+    assert!(app.slash_now().is_none());
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A picture that's the user's own file, beside the note: drawn faint with
 /// a mark, and selected, a bar that says so. Moved into Carnet, it's in
 /// the attachments folder and the note shows it there; the notice's Undo

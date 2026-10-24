@@ -1701,6 +1701,8 @@ impl Carnet {
                 cuts.retain(|&c| lo <= c && c <= hi);
                 cuts.sort_unstable();
                 cuts.dedup();
+                // Whether the words drawn end in a line break.
+                let mut broken = false;
                 for w in cuts.windows(2) {
                     let (a, b) = (w[0], w[1]);
                     if preedit.is_some() && a == byte {
@@ -1781,9 +1783,19 @@ impl Carnet {
                         sp = sp.bg(t.selection).bg_radius(4.0);
                     }
                     spans.push(sp);
+                    broken = text[a..b].ends_with('\n');
                 }
                 if preedit.is_some() && byte == hi {
                     spans.push(Span::new(preedit.as_deref().unwrap_or("")).underline());
+                    broken = false;
+                }
+                if broken {
+                    // Shift+Enter at the end: the line it opens is there
+                    // before anything is typed on it, the caret at its
+                    // start. The layout gives a break that ends the text no
+                    // line after it, and put the caret back at the end of
+                    // the line above until a letter came.
+                    spans.push(Span::new("\u{200B}"));
                 }
                 if spans.is_empty() {
                     // Nothing but marks: still a line's height.
