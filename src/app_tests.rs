@@ -9326,7 +9326,7 @@ fn the_wheel_is_carnets_until_a_preset_is_picked() {
     let mut app = Carnet::new(store);
     let mut d = Drive::new(Core::new(), 1100.0, 4000.0).framing();
     d_frame_twice(&mut app, &mut d);
-    let carnet = kui_native::WheelFeel { line_px: 80.0, response: 0.5, kick: 0.2 };
+    let carnet = kui_native::WheelFeel { line_px: 60.0, response: 0.5, kick: 0.2 };
     assert_eq!(d.core.wheel_feel(), carnet, "Carnet's own from the first frame");
     app.settings_open = true;
     d.core.set_inspect(true);

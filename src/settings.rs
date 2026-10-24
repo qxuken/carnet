@@ -130,7 +130,7 @@ impl Divider {
 /// presets (`kui_native::WheelFeel`), from slow to fast.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wheel {
-    /// 80 px a notch, glided there over a 0.5 s response with a small
+    /// 60 px a notch, glided there over a 0.5 s response with a small
     /// kick: further than kui's and softer.
     Carnet,
     Gentle,
@@ -170,7 +170,7 @@ impl Wheel {
     pub fn feel(self) -> kui_native::WheelFeel {
         use kui_native::WheelFeel;
         match self {
-            Wheel::Carnet => WheelFeel { line_px: 80.0, response: 0.5, kick: 0.2 },
+            Wheel::Carnet => WheelFeel { line_px: 60.0, response: 0.5, kick: 0.2 },
             Wheel::Gentle => WheelFeel::GENTLE,
             Wheel::Standard => WheelFeel::STANDARD,
             Wheel::Brisk => WheelFeel::BRISK,
