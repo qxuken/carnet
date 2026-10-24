@@ -4168,9 +4168,11 @@ fn left_and_right_fold_unfold_and_walk_the_tree() {
     assert_eq!(folded(&app), ["A"]);
     assert_eq!(rows_drawn(&app), ["A", "B"]);
     assert_eq!(focused_row(&app, &d), Some(folder("A")), "the keyboard stays on it");
-    // Folded, at the top: ← goes nowhere.
+    // Folded, at the top: ← goes up to All notes, → back down to A.
     key(&mut app, &mut d, "left");
-    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    assert_eq!((focused_row(&app, &d), app.folder.as_deref()), (Some(FolderRow::All), None));
+    key(&mut app, &mut d, "right");
+    assert_eq!((focused_row(&app, &d), app.folder.as_deref()), (Some(folder("A")), Some("A")));
     key(&mut app, &mut d, "right");
     assert!(folded(&app).is_empty());
     assert_eq!(focused_row(&app, &d), Some(folder("A")));
@@ -4203,6 +4205,54 @@ fn left_and_right_fold_unfold_and_walk_the_tree() {
     d.frame(&mut app);
     key(&mut app, &mut d, "right");
     assert_eq!(folded(&app), ["A/Sub"]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// All notes has a chevron once there is a folder, every folder being
+/// inside it: a click folds them all away, the folder shown giving way to
+/// All notes, and back; Deleted stays. Its name sits a level out from the
+/// folders'. ← and → on its row do the same, and → then goes in.
+#[test]
+fn all_notes_folds_every_folder_away_and_back() {
+    let (mut app, mut d, dir) = on_folder_row("fold-all", &["A", "A/Sub", "B"]);
+    // Something deleted, for a Deleted row: the welcome note (an empty
+    // one is not kept).
+    let welcome = app.store.notes.iter().position(|n| !n.markdown().trim().is_empty()).unwrap();
+    app.delete_note_at(welcome);
+    app.show_folder(Some("A/Sub".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert!(chevron(&mut d, &mut app, "").is_some(), "All notes' chevron");
+    assert_eq!(heard_open(&mut d, "All notes"), Some(true));
+    let name_x = |d: &Drive, f: &str| d.core.nodes().iter().find(|n| n.text.as_deref() == Some(f)).map(|n| n.rect.x).unwrap();
+    assert_eq!(name_x(&d, "A") - name_x(&d, "All notes"), 14.0, "the folders a level in");
+    assert_eq!(name_x(&d, "Deleted"), name_x(&d, "All notes"), "Deleted level with All notes");
+    click_chevron(&mut app, &mut d, "", KeyMods::NONE);
+    assert_eq!(folded(&app), [""]);
+    assert!(rows_drawn(&app).is_empty(), "{:?}", rows_drawn(&app));
+    assert_eq!(app.folder, None, "the folder shown was inside: All notes shown");
+    assert!(app.folder_rows.iter().any(|(_, r)| *r == FolderRow::Deleted), "Deleted is not inside it");
+    assert_eq!(heard_open(&mut d, "All notes"), Some(false));
+    click_chevron(&mut app, &mut d, "", KeyMods::NONE);
+    assert!(folded(&app).is_empty());
+    assert_eq!(rows_drawn(&app), ["A", "A/Sub", "B"]);
+    // From the keyboard: ← folds, → unfolds, → again goes to the first
+    // folder.
+    focus_row(&mut app, &mut d, FolderRow::All);
+    key(&mut app, &mut d, "left");
+    assert_eq!((folded(&app), rows_drawn(&app).len()), (vec![""], 0));
+    assert_eq!(focused_row(&app, &d), Some(FolderRow::All), "the keyboard stays on it");
+    key(&mut app, &mut d, "right");
+    assert!(folded(&app).is_empty());
+    key(&mut app, &mut d, "right");
+    assert_eq!(focused_row(&app, &d), Some(folder("A")));
+    // A new folder at the top, All notes folded: unfolded for its field.
+    focus_row(&mut app, &mut d, FolderRow::All);
+    key(&mut app, &mut d, "left");
+    app.name_folder("");
+    d_frame_twice(&mut app, &mut d);
+    assert!(folded(&app).is_empty(), "{:?}", folded(&app));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -2614,11 +2614,9 @@ impl Carnet {
     fn name_folder(&mut self, parent: &str) {
         self.finish_naming(true, false);
         // Its field goes under its parent's row: that row, and the field
-        // under it, in sight.
-        if !parent.is_empty() {
-            self.unfold_to(parent);
-            self.fold(parent, true, false);
-        }
+        // under it, in sight (All notes unfolded, for one at the top).
+        self.unfold_to(parent);
+        self.fold(parent, true, false);
         self.namings += 1;
         self.naming = Some(Naming { parent: parent.to_string(), name: String::new(), nth: self.namings, key: None, rename: None });
         self.focus(Field::Folder);
@@ -2725,17 +2723,18 @@ impl Carnet {
         self.reorder();
     }
 
-    /// Whether folder `f` has folders inside it.
+    /// Whether folder `f` has folders inside it ("": the notes folder, any
+    /// folder at all).
     pub(super) fn has_subfolders(&self, f: &str) -> bool {
-        let under = format!("{f}/");
+        let under = inside(f);
         self.store.folders.iter().any(|g| g.starts_with(&under))
     }
 
     /// Whether folder `f`'s row is out of sight: a folder it is inside is
-    /// folded.
+    /// folded, All notes among them.
     pub(super) fn folder_hidden(&self, f: &str) -> bool {
         let c = &self.settings.collapsed;
-        !c.is_empty() && f.match_indices('/').any(|(i, _)| c.contains(&f[..i]))
+        !c.is_empty() && (c.contains("") || f.match_indices('/').any(|(i, _)| c.contains(&f[..i])))
     }
 
     /// The folders as the library lists them now: those folded away left
@@ -2745,11 +2744,12 @@ impl Carnet {
     }
 
     /// Folds folder `f` — its subfolders hidden — or unfolds it (`open`);
-    /// with `deep`, every folder inside it the same. A folder shown that
-    /// folding hides gives way to `f`: the folder shown is never out of
-    /// sight. Kept in this device's settings.
+    /// with `deep`, every folder inside it the same. "" is All notes,
+    /// every folder inside it. A folder shown that folding hides gives way
+    /// to `f`: the folder shown is never out of sight. Kept in this
+    /// device's settings.
     pub(super) fn fold(&mut self, f: &str, open: bool, deep: bool) {
-        let under = format!("{f}/");
+        let under = inside(f);
         let mut these = vec![f.to_string()];
         if deep {
             these.extend(self.store.folders.iter().filter(|g| g.starts_with(&under)).cloned());
@@ -2764,11 +2764,16 @@ impl Carnet {
             };
         }
         if !open && !self.deleted && self.folder.as_deref().is_some_and(|s| s.starts_with(&under)) {
-            self.show_folder(Some(f.to_string()));
+            self.show_folder((!f.is_empty()).then(|| f.to_string()));
         }
         if changed {
             self.save_folds();
         }
+    }
+
+    /// The folder a chevron's `index` names: `ALL`, All notes ("").
+    fn fold_target(&self, index: u64) -> Option<String> {
+        if index == ALL { Some(String::new()) } else { self.store.folders.get(index as usize).cloned() }
     }
 
     /// A folder's chevron: folded, it unfolds; unfolded, it folds — with
@@ -2778,10 +2783,11 @@ impl Carnet {
         self.fold(f, open, deep);
     }
 
-    /// The folders `f` is inside unfolded, so its row is in sight.
+    /// The folders `f` is inside unfolded, All notes first, so its row is
+    /// in sight.
     pub(super) fn unfold_to(&mut self, f: &str) {
         let c = &mut self.settings.collapsed;
-        let mut changed = false;
+        let mut changed = !f.is_empty() && c.remove("");
         for (i, _) in f.match_indices('/') {
             changed |= c.remove(&f[..i]);
         }
@@ -2867,30 +2873,35 @@ impl Carnet {
         // → unfolds a folder (⌥: and every folder inside it), or, open
         // already, goes to the first inside it; ← folds it, or, folded or
         // with nothing to fold, goes to the folder it is in — as a tree's
-        // rows do in Finder.
+        // rows do in Finder. All notes is the folder every other is in.
+        let tree = match row {
+            FolderRow::Folder(f) => Some(f.clone()),
+            FolderRow::All => Some(String::new()),
+            FolderRow::Deleted => None,
+        };
         if !(m.shift || m.ctrl || m.super_key)
             && matches!(k.code, KeyCode::Left | KeyCode::Right)
-            && let FolderRow::Folder(f) = row
+            && let Some(f) = tree
         {
-            let f = f.clone();
             let folded = self.settings.collapsed.contains(&f);
             let parent = self.has_subfolders(&f);
             match k.code {
                 KeyCode::Right if parent && (folded || m.alt) => self.fold(&f, true, m.alt),
                 KeyCode::Right if parent => {
-                    let under = format!("{f}/");
+                    let under = inside(&f);
                     if let Some(first) = self.store.folders.iter().find(|g| g.starts_with(&under)).cloned() {
                         self.go_to_row(FolderRow::Folder(first));
                     }
                 }
                 KeyCode::Left if parent && (!folded || m.alt) => self.fold(&f, false, m.alt),
                 KeyCode::Left if f.contains('/') => self.go_to_row(FolderRow::Folder(parent_of(&f).to_string())),
+                KeyCode::Left if !f.is_empty() => self.go_to_row(FolderRow::All),
                 _ => {}
             }
             // The keyboard stays on the row (a folded one's subfolder that
             // had it is gone from sight).
             if self.focus_row.is_none() {
-                self.focus_row = Some(FolderRow::Folder(f));
+                self.focus_row = Some(if f.is_empty() { FolderRow::All } else { FolderRow::Folder(f) });
             }
             return true;
         }
@@ -3250,7 +3261,7 @@ impl Carnet {
                 }
             }
             Msg::FoldFolder { index } => {
-                if let Some(f) = self.store.folders.get(index as usize).cloned() {
+                if let Some(f) = self.fold_target(index) {
                     self.toggle_fold(&f, core.modifiers().alt);
                 }
             }
@@ -3703,7 +3714,7 @@ impl Carnet {
             }
             Msg::Slash { index } => self.run_slash(index as usize),
             Msg::FoldFolder { index } => {
-                if let Some(f) = self.store.folders.get(index as usize).cloned() {
+                if let Some(f) = self.fold_target(index) {
                     self.toggle_fold(&f, false);
                 }
             }
@@ -4352,6 +4363,12 @@ pub fn folder_name(folder: &str) -> &str {
 /// The folder `folder` is in: "" for one at the top level.
 pub fn parent_of(folder: &str) -> &str {
     carnet_sync::vault::parent_of(folder)
+}
+
+/// What every path inside `folder` starts with: "" for the notes folder
+/// itself, every folder being inside it.
+fn inside(folder: &str) -> String {
+    if folder.is_empty() { String::new() } else { format!("{folder}/") }
 }
 
 fn reveal_label() -> &'static str {
