@@ -7956,18 +7956,177 @@ fn the_page_follows_the_text_size_down_to_12px() {
     let (item12, rule12) = (row(&app, 0), row(&app, 1));
     assert!(rule12.h < rule16.h * 0.85, "the divider's room shrinks: {} → {}", rule16.h, rule12.h);
     assert!(item12.h < item16.h * 0.85, "and a list item's: {} → {}", item16.h, item12.h);
-    // Each way of drawing a divider, and a dropped first letter, draw.
+    // Each way of drawing a divider, and a dropped first letter, draw:
+    // words of your own not typed yet as the dots; a picture of your own,
+    // none picked, asked for and not chosen until it is.
     app.page_action("initial");
     for to in 0..crate::settings::Divider::ALL.len() as u64 {
         app.on_settings(Msg::SetDivider { to });
         d_frame_twice(&mut app, &mut d);
         assert!(row(&app, 1).h > 10.0);
     }
-    assert_eq!(app.settings.divider, crate::settings::Divider::Wave);
+    assert_eq!(app.settings.divider, crate::settings::Divider::Text);
     assert!(blocks(&app)[2].initial);
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+use super::page_view::DividerLook;
+
+/// A note with a divider between two paragraphs, its settings kept in a
+/// folder of their own (where a divider's picture is copied to).
+fn divided(name: &str) -> (Carnet, Drive, std::path::PathBuf, std::path::PathBuf) {
+    let (mut app, mut d, dir) = body(name);
+    let config = dir.with_extension("config");
+    let _ = std::fs::remove_dir_all(&config);
+    app.settings.file = Some(config.join("settings.txt"));
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "above");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "---");
+    type_in(&mut app, &mut d, "below");
+    assert!(matches!(blocks(&app)[1].kind, Kind::Divider));
+    (app, d, dir, config)
+}
+
+/// A settings file from when there were nine ways to draw a divider:
+/// one of the four gone opens as the nearest still offered, and the page
+/// draws it, the note's `---` as it was.
+#[test]
+fn a_settings_file_naming_a_divider_gone_still_opens() {
+    use crate::settings::Divider;
+    let (store, dir) = temp_store("divider-old");
+    let old = Settings::parse("theme = light\ndivider = flourish\nsize = 18\n");
+    assert_eq!((old.divider, old.size), (Divider::Wave, 18));
+    let mut app = Carnet::with_settings(store, old);
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    app.new_note();
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "---");
+    type_in(&mut app, &mut d, "after");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(Divider::Wave));
+    for (word, now) in [("stars", Divider::Dots), ("asterism", Divider::Dots), ("fleuron", Divider::Lozenge)] {
+        app.settings = Settings::parse(&format!("divider = {word}\n"));
+        d_frame_twice(&mut app, &mut d);
+        assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(now), "{word}");
+    }
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Words of your own for dividers: chosen in Settings, typed in the field
+/// that opens under the choices (the keyboard already in it), written to
+/// the settings file as they are typed and read back at the next start;
+/// drawn where the note's divider is, the note still saying `---`.
+#[test]
+fn a_dividers_own_words_are_typed_in_settings_and_kept_in_the_file() {
+    use crate::settings::Divider;
+    let (mut app, mut d, dir, config) = divided("divider-words");
+    app.on_settings(Msg::ShowSettings);
+    d_frame_twice(&mut app, &mut d);
+    // The choices in the list's order, the words' among them.
+    let at = Divider::ALL.iter().position(|d| *d == Divider::Text).unwrap();
+    let tile = |d: &mut Drive| {
+        let list = d.key_of("dividers").expect("the dividers' choices");
+        d.core.nodes().iter().filter(|n| n.parent == Some(list)).nth(at).map(|n| n.key).expect("the words' choice")
+    };
+    for _ in 0..20 {
+        let k = tile(&mut d);
+        if d.rect_of(k).is_some_and(|r| r.y > 60.0 && r.y < 500.0) {
+            break;
+        }
+        d.wheel(&mut app, 700.0, 400.0, 0.0, -120.0);
+        d.frame(&mut app);
+    }
+    let k = tile(&mut d);
+    d.click_key(&mut app, k);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.divider, Divider::Text);
+    let focused = d.core.focus().and_then(|k| app.fields.get(&k)).copied();
+    assert_eq!(focused, Some(Field::DividerText), "the keyboard where the words go");
+    d.text(&mut app, "~ \u{2726} ~");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.divider_text, "~ \u{2726} ~");
+    let text = std::fs::read_to_string(config.join("settings.txt")).unwrap();
+    assert!(text.contains("\ndivider = text\n") && text.contains("\ndivider_text = ~ \u{2726} ~\n"), "{text}");
+    // Back on the page: the words where the divider is.
+    app.on_settings(Msg::ShowSettings);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Words("~ \u{2726} ~".into()));
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("~ \u{2726} ~")), "drawn on the page");
+    assert!(app.note().markdown().contains("\n---\n"), "the file says ---");
+    // The next start: read back.
+    let back = Settings { file: Some(config.join("settings.txt")), ..Settings::parse(&text) };
+    assert_eq!((back.divider, back.divider_text.as_str()), (Divider::Text, "~ \u{2726} ~"));
+    // Emptied: the dots again, the choice kept.
+    app.set_divider_text("");
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(Divider::Dots));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
+}
+
+/// A picture of your own for dividers: asked for when chosen with none
+/// picked, copied beside the settings file once picked, so the one picked
+/// can go; drawn a line tall, its shape kept, never wider than the text.
+/// Another picked, the last copy goes. The copy gone too, by the next
+/// start: drawn as the dots, and Settings says why.
+#[test]
+fn a_dividers_picture_is_kept_beside_the_settings_and_falls_back_when_gone() {
+    use crate::settings::Divider;
+    let (mut app, mut d, dir, config) = divided("divider-picture");
+    let at = Divider::ALL.iter().position(|d| *d == Divider::Picture).unwrap() as u64;
+    app.on_settings(Msg::SetDivider { to: at });
+    assert!(app.pick_divider_picture, "a picture asked for");
+    assert_eq!(app.settings.divider, Divider::Dots, "not chosen until there is one");
+    d.frame(&mut app);
+    assert!(!app.pick_divider_picture);
+    // A wide one, 400 × 40, from somewhere else.
+    let picked = dir.with_extension("picked.png");
+    std::fs::write(&picked, crate::images::encode_png(400, 40, &vec![200; 400 * 40 * 4]).unwrap()).unwrap();
+    app.set_divider_picture(&picked);
+    assert_eq!(app.settings.divider, Divider::Picture);
+    let kept = app.settings.divider_picture_file().expect("kept");
+    assert!(kept.starts_with(&config) && kept.exists(), "{kept:?}");
+    std::fs::remove_file(&picked).unwrap();
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    assert!(matches!(app.divider_look(1.0, 600.0), DividerLook::Picture(Some(_), w, h) if (w, h) == (280.0, 28.0)), "{:?}", app.divider_look(1.0, 600.0));
+    assert!(matches!(app.divider_look(1.0, 100.0), DividerLook::Picture(Some(_), w, h) if (w, h) == (100.0, 10.0)), "narrowed to the room");
+    assert!(matches!(app.divider_look(1.5, 600.0), DividerLook::Picture(Some(_), _, 42.0)), "with the text's size");
+    // Another: the first copy goes.
+    let second = dir.with_extension("second.png");
+    std::fs::write(&second, crate::images::encode_png(20, 20, &[90; 20 * 20 * 4]).unwrap()).unwrap();
+    app.set_divider_picture(&second);
+    let kept2 = app.settings.divider_picture_file().unwrap();
+    assert!(kept2 != kept && kept2.exists() && !kept.exists());
+    assert!(second.exists(), "the reader's own picture stays where it was");
+    // Its copy gone; the next start.
+    std::fs::remove_file(&kept2).unwrap();
+    let text = std::fs::read_to_string(config.join("settings.txt")).unwrap();
+    let store = Store::open(dir.clone()).unwrap();
+    let mut app = Carnet::with_settings(store, Settings { file: Some(config.join("settings.txt")), ..Settings::parse(&text) });
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    app.settings_open = true;
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.divider, Divider::Picture, "still chosen");
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(Divider::Dots));
+    let said = d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with("The picture isn't shown (not found)")));
+    assert!(said, "Settings says why");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_file(second);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
 }
 
 #[test]

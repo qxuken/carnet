@@ -296,6 +296,8 @@ pub enum Msg {
     SetSize { by: i64 },
     /// How dividers are drawn: `settings::Divider::ALL[to]`.
     SetDivider { to: u64 },
+    /// Asks for a picture to draw dividers as.
+    PickDividerPicture,
     /// How tall the dropped letter is: `to + 2` lines.
     SetInitialLines { to: u64 },
     /// The dropped letter's ink: 0 the accent's, 1 the text's.
@@ -360,6 +362,8 @@ pub enum Msg {
     PickedPictures,
     /// The paperclip's dialog's answer: pictures and documents.
     PickedFiles,
+    /// The answer of the dialog for a divider's picture.
+    PickedDividerPicture,
 }
 
 /// `Msg::SelectFolder`'s every note, and `Msg::SetFont`'s default face:
@@ -440,6 +444,8 @@ pub enum Field {
     /// Settings → Sync: the account's password being set.
     PasswordEmail,
     PasswordNew,
+    /// Settings → Dividers: the words a divider is drawn as.
+    DividerText,
 }
 
 impl Field {
@@ -776,6 +782,8 @@ pub struct Carnet {
     pick_pictures: bool,
     /// Ask for pictures and documents on the next frame (the paperclip).
     pick_files: bool,
+    /// Ask for a picture to draw dividers as on the next frame.
+    pick_divider_picture: bool,
     /// Files being dragged over the window, until they drop or leave.
     file_drag: Option<FileDrag>,
     /// Where dropped pictures would go: before this block (the page's
@@ -1149,6 +1157,7 @@ impl Carnet {
             slash_off: None,
             pick_pictures: false,
             pick_files: false,
+            pick_divider_picture: false,
             file_drag: None,
             drop_index: None,
             card_rects: Vec::new(),
@@ -3744,7 +3753,8 @@ impl Carnet {
             | Msg::FilesOver
             | Msg::PickedDir
             | Msg::PickedPictures
-            | Msg::PickedFiles => {}
+            | Msg::PickedFiles
+            | Msg::PickedDividerPicture => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {
                     self.pending_menu = Some((k, at, MenuFor::Tools));
@@ -3779,6 +3789,7 @@ impl Carnet {
             | Msg::ToggleSidebar
             | Msg::SetSize { .. }
             | Msg::SetDivider { .. }
+            | Msg::PickDividerPicture
             | Msg::SetInitialLines { .. }
             | Msg::SetInitialColor { .. }
             | Msg::FontMenu { .. }
@@ -4183,6 +4194,7 @@ impl Carnet {
                     *password = text;
                 }
             }
+            Field::DividerText => self.set_divider_text(&text),
         }
     }
 
@@ -4228,6 +4240,8 @@ impl Carnet {
                 }
             }
             Field::Font => self.apply_typed_font(),
+            // The words are kept as they are typed: Enter is done with them.
+            Field::DividerText => self.blur = true,
         }
     }
 
@@ -4583,6 +4597,14 @@ impl App for Carnet {
                     .tag(Msg::PickedFiles),
             );
         }
+        if std::mem::take(&mut self.pick_divider_picture) {
+            ui.request_files(
+                kui_native::FileDialog::open()
+                    .title("Choose a picture for dividers")
+                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                    .tag(Msg::PickedDividerPicture),
+            );
+        }
         // Asked on every frame the answer is outstanding: the core queues
         // one ask at a time.
         if self.paste_pending {
@@ -4793,6 +4815,11 @@ impl App for Carnet {
                 let files: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
                 self.insert_files(&files);
             }
+            (Msg::PickedDividerPicture, Event::Files(paths)) => {
+                if let Some(p) = paths.first() {
+                    self.set_divider_picture(std::path::Path::new(p));
+                }
+            }
             (Msg::FilesOver, Event::Drop(d)) => self.files_over(d),
             (Msg::WindowFocus, Event::Window(w)) => self.window_focus(w.phase == WindowPhase::Focused, core),
             // A modal put away (Esc, or a press outside it): the link
@@ -4815,7 +4842,8 @@ impl App for Carnet {
                 | Msg::FilesOver
                 | Msg::PickedDir
                 | Msg::PickedPictures
-                | Msg::PickedFiles,
+                | Msg::PickedFiles
+                | Msg::PickedDividerPicture,
                 _,
             ) => {}
             (msg, event) => self.on_msg(msg, event, ev.key, core),
