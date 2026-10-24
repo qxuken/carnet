@@ -173,9 +173,6 @@ pub struct Settings {
     /// each; "" is the notes folder itself, All notes with every folder
     /// folded away, written `folders = folded`.
     pub collapsed: BTreeSet<String>,
-    /// Colours given lately, newest first (0xRRGGBBAA): the picker's
-    /// recent row.
-    pub colors: Vec<u32>,
     /// Once a day, GitHub asked whether a newer Carnet is out
     /// (src/update.rs).
     pub check_updates: bool,
@@ -213,7 +210,6 @@ impl Default for Settings {
             link_open: carnet_core::page::LinkOpen::ModClick,
             sidebar: true,
             collapsed: BTreeSet::new(),
-            colors: Vec::new(),
             check_updates: true,
             told_update: String::new(),
             dir: None,
@@ -306,9 +302,6 @@ impl Settings {
                 "folders" if v == "folded" => {
                     s.collapsed.insert(String::new());
                 }
-                "colors" => {
-                    s.colors = v.split(',').filter_map(carnet_core::inline::parse_color).take(10).collect();
-                }
                 "check_updates" => s.check_updates = v != "off",
                 "told_update" => s.told_update = v.to_string(),
                 "dir" if !v.is_empty() => s.dir = Some(PathBuf::from(v)),
@@ -341,7 +334,7 @@ impl Settings {
             .map(|f| if f.is_empty() { "folders = folded\n".to_string() } else { format!("collapsed = {f}\n") })
             .collect();
         format!(
-            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\ncode_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nlinks = {}\nsidebar = {}\n{collapsed}colors = {}\ncheck_updates = {}\ntold_update = {}\ndir = {dir}\n",
+            "# Carnet settings\ntheme = {theme}\npalette = {}\ndensity = {}\nfont = {}\nheading_font = {}\ncode_font = {}\nsize = {}\nwidth = {width}\nsort = {sort}\ndates = {}\ndivider = {}\ninitial_lines = {}\ninitial_font = {}\ninitial_color = {}\nlibrary_width = {}\nwindow = {}\ntoolbar = {}\nfocus = {}\ntypewriter = {}\nlinks = {}\nsidebar = {}\n{collapsed}check_updates = {}\ntold_update = {}\ndir = {dir}\n",
             self.palette.key(),
             self.density.key(),
             self.font,
@@ -360,7 +353,6 @@ impl Settings {
             if self.typewriter { "on" } else { "off" },
             self.link_open.key(),
             if self.sidebar { "shown" } else { "hidden" },
-            self.colors.iter().map(|&c| carnet_core::inline::css_color(c)).collect::<Vec<_>>().join(","),
             if self.check_updates { "on" } else { "off" },
             self.told_update,
         )
@@ -370,8 +362,7 @@ impl Settings {
     /// colours, faces, size, width, the letter and dividers, the window
     /// (solid or translucent, taken at the next start), and the writing
     /// aids. Not the notes folder, the library (its order, dates, width,
-    /// whether it shows), the colours given lately, nor the check for
-    /// updates.
+    /// whether it shows), nor the check for updates.
     pub fn reset_look(&mut self) {
         *self = Settings {
             sort: self.sort,
@@ -379,7 +370,6 @@ impl Settings {
             library_w: self.library_w,
             sidebar: self.sidebar,
             collapsed: std::mem::take(&mut self.collapsed),
-            colors: std::mem::take(&mut self.colors),
             check_updates: self.check_updates,
             told_update: std::mem::take(&mut self.told_update),
             dir: self.dir.take(),
@@ -453,7 +443,6 @@ mod tests {
             link_open: carnet_core::page::LinkOpen::DoubleClick,
             sidebar: false,
             collapsed: [String::new(), "Work".to_string(), "Work/Old, kept = 2".to_string()].into(),
-            colors: vec![0xc0504dff, 0x12345680],
             check_updates: false,
             told_update: "0.1.2".into(),
             dir: Some(PathBuf::from("D:\\My notes")),
@@ -474,6 +463,11 @@ mod tests {
         let old = Settings::parse("initial = large\n");
         assert_eq!(old, Settings::default());
         assert!(!old.to_text().contains("initial ="));
+        // And one from when the picker kept the colours given lately: the
+        // line passed over, and not written back.
+        let old = Settings::parse("colors = #c0504d,#12345680\n");
+        assert_eq!(old, Settings::default());
+        assert!(!old.to_text().contains("colors ="));
         assert_eq!(Settings::parse("initial_lines = 9\n").initial_lines, 4);
         assert_eq!(Settings::parse("initial_lines = 1\n").initial_lines, 2);
         // How links open: by its word; one not known, ⌘-click.
@@ -502,7 +496,7 @@ mod tests {
     fn a_reset_puts_back_the_look_and_keeps_the_rest() {
         let mut s = Settings::parse(
             "theme = dark\npalette = sage\nfont = Georgia\ncode_font = Menlo\nsize = 20\nwidth = wide\ninitial_lines = 4\nfocus = on\n\
-             window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncollapsed = Work\ncolors = #c0504d\ndir = /notes\n",
+             window = solid\nsort = title\ndates = created\nlibrary_width = 300\nsidebar = hidden\ncollapsed = Work\ndir = /notes\n",
         );
         s.file = Some(PathBuf::from("/c/settings.txt"));
         assert!(!s.look_is_default());
@@ -515,7 +509,6 @@ mod tests {
         assert_eq!(s.translucent, d.translucent, "the window as at first");
         assert_eq!((s.sort, s.dates_created, s.library_w, s.sidebar), (Sort::Title, true, 300, false));
         assert!(s.collapsed.contains("Work"), "the folders folded stay folded");
-        assert_eq!(s.colors, vec![0xc0504dff]);
         assert_eq!(s.dir.as_deref(), Some(Path::new("/notes")));
         assert_eq!(s.file.as_deref(), Some(Path::new("/c/settings.txt")));
     }

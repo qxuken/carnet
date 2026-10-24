@@ -3685,16 +3685,6 @@ impl Carnet {
                 } else {
                     self.edit(Step::Other, |d, c| page::tint(d, c, ink, color));
                 }
-                // The picker's "recent" row: the newest first, ten at most.
-                if color > carnet_core::inline::HIGHLIGHT {
-                    let recent = &mut self.settings.colors;
-                    recent.retain(|&c| c != color);
-                    recent.insert(0, color);
-                    recent.truncate(10);
-                    if let Err(e) = self.settings.save() {
-                        self.error = Some(format!("Couldn't save the settings: {e}"));
-                    }
-                }
             }
             Msg::TintMenu { ink } => {
                 let ink = ink == 1;

@@ -60,7 +60,11 @@ impl Palette {
         Self::ALL.into_iter().find(|p| p.key() == s)
     }
 
-    /// The five colours everything else is derived from.
+    /// The five colours everything else is derived from. By night the page
+    /// is a soft grey leaning to the palette's hue, not black: the library
+    /// a step under it and a card a step over, near enough to read as one
+    /// surface; the text a little short of white; the accent paler and
+    /// greyer than by day, so it sits on the dark rather than glowing.
     pub fn seeds(self, dark: bool) -> Seeds {
         let s = |page, side, card, ink, accent| Seeds {
             page: rgb(page),
@@ -71,15 +75,15 @@ impl Palette {
         };
         match (self, dark) {
             (Palette::Linen, false) => s(0xfcfaf7, 0xf5f1ec, 0xffffff, 0x2f2a27, 0xc27c68),
-            (Palette::Linen, true) => s(0x1f1b18, 0x171412, 0x2c2622, 0xefe6dc, 0xd9a08c),
+            (Palette::Linen, true) => s(0x221e1b, 0x1b1816, 0x2c2825, 0xebe3d9, 0xcc9f8e),
             (Palette::Sage, false) => s(0xf8f9f5, 0xeff2ea, 0xffffff, 0x27302a, 0x6f9a7a),
-            (Palette::Sage, true) => s(0x1a1e1b, 0x141815, 0x252b26, 0xe5ebe3, 0x9cc3a5),
+            (Palette::Sage, true) => s(0x1d201e, 0x171a18, 0x282c29, 0xe3e8e1, 0x9abba2),
             (Palette::Harbor, false) => s(0xf7f9fb, 0xedf1f5, 0xffffff, 0x232f3d, 0x5b7fae),
-            (Palette::Harbor, true) => s(0x171b21, 0x111419, 0x222833, 0xe3e9f1, 0x8eaedb),
+            (Palette::Harbor, true) => s(0x1b1e24, 0x15181d, 0x262a32, 0xe1e6ed, 0x95aed0),
             (Palette::Blossom, false) => s(0xfdf8f9, 0xf7eef0, 0xffffff, 0x3a2a30, 0xc9718c),
-            (Palette::Blossom, true) => s(0x201a1c, 0x181314, 0x2d2427, 0xf1e4e8, 0xe09ab0),
+            (Palette::Blossom, true) => s(0x231e20, 0x1c1819, 0x2e282a, 0xede3e6, 0xd39cad),
             (Palette::Graphite, false) => s(0xfafafa, 0xf1f1f0, 0xffffff, 0x1f1f1f, 0x555555),
-            (Palette::Graphite, true) => s(0x18181a, 0x121213, 0x242426, 0xececec, 0xb0b0b0),
+            (Palette::Graphite, true) => s(0x1c1c1d, 0x161617, 0x282829, 0xe8e8e7, 0xb0b0b0),
         }
     }
 }
@@ -350,7 +354,7 @@ pub mod tint {
         hue("Brown", 0x9a6f4f, 0xefdcc8, 0xd0a27c, 0x4b3828),
         hue("Red", 0xc0553f, 0xf8cfc4, 0xf0907a, 0x5c2d26),
         hue("Orange", 0xc4762f, 0xf9dbb6, 0xf0a866, 0x5c3d20),
-        hue("Yellow", 0xa98a1c, 0xf8eba6, 0xe3c45e, 0x57491b),
+        hue("Yellow", 0xa98a1c, 0xf8eba6, 0xe3c45e, 0x52461c),
         hue("Green", 0x5f8f4a, 0xd8eac0, 0x9cc884, 0x30462a),
         hue("Teal", 0x3a8c86, 0xc4e8e1, 0x72c7bd, 0x1f4642),
         hue("Blue", 0x5279b3, 0xcddcf3, 0x94b5ec, 0x263856),
@@ -370,20 +374,32 @@ pub mod tint {
         hue_of(c).map_or_else(|| carnet_core::inline::css_color(c), |h| h.name.to_string())
     }
 
-    /// Words' colour `c` (0xRRGGBBAA, as the file has it) as the page
-    /// shows it: one of the hues in this theme's colour, any other as
-    /// written.
-    pub fn ink(c: u32, dark: bool) -> Color {
+    /// Words' colour `c` (0xRRGGBBAA, as the file has it) as `page` shows
+    /// it: one of the hues in this theme's colour; any other as written on
+    /// paper and, in the dark, lightened until it reads on the page at
+    /// 4.5:1, so a deep blue from another app is a blue to read and not a
+    /// shadow. One dark enough to all but vanish is left as it is, for the
+    /// page to draw in the text's own colour (`VANISHES`).
+    pub fn ink(c: u32, dark: bool, page: Color) -> Color {
         match hue_of(c) {
             Some(h) if dark => rgb(h.ink_dark),
+            _ if dark => {
+                let c = Color::hex(c);
+                if super::contrast(c, page) < VANISHES { c } else { super::nearest(c, Color::WHITE, &[page], 4.5) }
+            }
             _ => Color::hex(c),
         }
     }
 
-    /// The highlighter `==…==` is: a yellow wash, pale on paper and dim
-    /// in the dark.
+    /// Under this contrast with what is behind them, words of a colour of
+    /// their own all but vanish (black in the dark, white on paper), and
+    /// are drawn in the text's colour instead.
+    pub const VANISHES: f32 = 1.6;
+
+    /// The highlighter `==…==` is: a yellow wash, pale on paper and, in the
+    /// dark, a dim olive gold the text reads on at 7:1.
     pub fn highlight(dark: bool) -> Color {
-        rgb(if dark { 0x5a4d17 } else { 0xfcefa1 })
+        rgb(if dark { 0x4e4520 } else { 0xfcefa1 })
     }
 
     /// A highlighter's wash (0xRRGGBBAA, as the file has it) as the page
@@ -653,6 +669,33 @@ mod tests {
                 at("danger", c.danger, c.page, 4.5);
                 // Faint stays fainter than muted: two steps, not one.
                 assert!(contrast(c.faint, c.page) < contrast(c.muted, c.page));
+            }
+        }
+    }
+
+    /// In the dark, on every palette, the hues keep what they promise:
+    /// their words 7:1 on the page and 4.5:1 on the library and a card,
+    /// the text 7:1 on every wash and on the highlighter, and any hue's
+    /// words 3.5:1 on any wash.
+    #[test]
+    fn the_hues_read_in_the_dark() {
+        for p in Palette::ALL {
+            let c = Colors::of(p, true);
+            let at = |what: String, fg: Color, bg: Color, min: f32| {
+                let r = contrast(fg, bg);
+                assert!(r >= min, "{}: {what} {r:.2} < {min}", p.name());
+            };
+            at("the text on the highlighter".into(), c.ink, tint::highlight(true), 7.0);
+            for h in &tint::HUES {
+                let ink = tint::ink((h.ink << 8) | 0xff, true, c.page);
+                let wash = tint::wash(h.wash, true, c.page);
+                at(format!("{} on the page", h.name), ink, c.page, 7.0);
+                at(format!("{} on the library", h.name), ink, c.side, 4.5);
+                at(format!("{} on a card", h.name), ink, c.card, 4.5);
+                at(format!("the text on {}", h.name), c.ink, wash, 7.0);
+                for w in &tint::HUES {
+                    at(format!("{} on {}", h.name, w.name), ink, tint::wash(w.wash, true, c.page), 3.5);
+                }
             }
         }
     }

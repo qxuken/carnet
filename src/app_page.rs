@@ -346,7 +346,7 @@ impl Carnet {
                     came,
                     TextStyle::new(small).color(t.fg).nowrap(),
                 );
-                ui.text(went, TextStyle::new(small).color(crate::design::tint::ink(REMOVED, dark)).strikethrough().nowrap());
+                ui.text(went, TextStyle::new(small).color(crate::design::tint::ink(REMOVED, dark, t.bg)).strikethrough().nowrap());
             });
         }
         let action = |ui: &mut Ui<'_>, key: &str, label: &str, msg: Msg, tip: &str| {
@@ -1727,7 +1727,7 @@ impl Carnet {
                         // Colour: the words' own and a highlighter's wash,
                         // both; see `words_ink`.
                         let plain = style.color.unwrap_or(t.fg);
-                        let own = (s.ink != 0).then(|| crate::design::tint::ink(s.ink, dark));
+                        let own = (s.ink != 0).then(|| crate::design::tint::ink(s.ink, dark, page_bg));
                         let wash = (s.mark != 0).then(|| {
                             if s.mark == inline::HIGHLIGHT {
                                 crate::design::tint::highlight(dark)
@@ -3460,7 +3460,7 @@ fn drop_lines(most: u32, lines: u32) -> Option<u32> {
 pub(super) fn words_ink(own: Option<Color>, plain: Color, wash: Option<Color>, page: Color) -> Color {
     use crate::design::contrast;
     let behind = wash.unwrap_or(page);
-    if let Some(c) = own.filter(|&c| contrast(c, behind) >= 1.6) {
+    if let Some(c) = own.filter(|&c| contrast(c, behind) >= crate::design::tint::VANISHES) {
         return c;
     }
     match wash {
