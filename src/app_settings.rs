@@ -34,7 +34,6 @@ impl Carnet {
         match msg {
             Msg::ShowSettings => {
                 self.settings_open = !self.settings_open;
-                self.wait_line = Default::default();
                 self.font_pick = None;
                 self.list_view = false;
                 return;
@@ -252,11 +251,14 @@ impl Carnet {
         }
     }
 
-    /// A picture picked for dividers, and chosen. Copied into the
-    /// settings' folder, so the one picked can be moved or thrown away,
-    /// under a name of its own each time (a new picture under the last
-    /// one's name would be drawn from what is held of the last); the copy
-    /// it replaces goes. With no folder (in tests), kept where it is.
+    /// A picture picked for dividers, and chosen. Kept in the settings'
+    /// folder, so the one picked can be moved or thrown away: as a PNG no
+    /// bigger than a divider can use ([`DIVIDER_PICTURE_MOST`]), its
+    /// transparency kept, so a photo doesn't take a second to decode and a
+    /// frame to upload the first time a divider shows. Under a name of its
+    /// own each time (a new picture under the last one's name would be
+    /// drawn from what is held of the last); the copy it replaces goes.
+    /// With no folder (in tests), kept where it is.
     pub(super) fn set_divider_picture(&mut self, from: &Path) {
         let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         if !images::is_image(from) {
@@ -265,13 +267,9 @@ impl Carnet {
         }
         let kept = match self.settings.dir() {
             Some(dir) => {
-                let ext = from.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
-                let mut stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis());
-                while dir.join(format!("divider-{stamp}.{ext}")).exists() {
-                    stamp += 1;
-                }
-                let own = PathBuf::from(format!("divider-{stamp}.{ext}"));
-                if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(from, dir.join(&own))) {
+                let own = free_divider_name(&dir);
+                let (w, h) = DIVIDER_PICTURE_MOST;
+                if let Err(e) = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|_| images::shrink_to_png(from, &dir.join(&own), w, h)) {
                     self.error = Some(format!("Couldn't keep {name} for dividers: {e}"));
                     return;
                 }
@@ -287,6 +285,25 @@ impl Carnet {
         self.settings.divider_picture = Some(kept);
         self.settings.divider = Divider::Picture;
         self.save_settings();
+    }
+
+    /// A divider's picture kept whole by a Carnet before they were made
+    /// small, a camera's photo, say: made small once, as it opens, the
+    /// whole one let go. One of the reader's own, kept by its path, is
+    /// left as it is; so is one that can't be read, which Settings names.
+    pub(super) fn shrink_divider_picture(&mut self) {
+        let (Some(dir), Some(old)) = (self.settings.dir(), self.settings.divider_picture.clone().filter(|p| p.is_relative())) else { return };
+        let (most_w, most_h) = DIVIDER_PICTURE_MOST;
+        let small = |(w, h): (u32, u32)| w <= most_w && h <= most_h;
+        if image::image_dimensions(dir.join(&old)).map_or(true, small) {
+            return;
+        }
+        let own = free_divider_name(&dir);
+        if images::shrink_to_png(&dir.join(&old), &dir.join(&own), most_w, most_h).is_ok() {
+            let _ = std::fs::remove_file(dir.join(&old));
+            self.settings.divider_picture = Some(own);
+            self.save_settings();
+        }
     }
 
     /// Enter in the font list's search: the first match; the built-in
@@ -2318,6 +2335,21 @@ pub(super) fn over_limit(kept: u64, limit: u64) -> Option<String> {
         return None;
     };
     Some(format!("{what}: new files stay on this device until there's room. Notes still sync."))
+}
+
+/// The most a divider's picture is kept as, in pixels: as wide as the
+/// widest page's words on a screen of twice the density, and four times
+/// the tallest a divider is drawn (28 px at 16 px text, 42 px at 24).
+pub(super) const DIVIDER_PICTURE_MOST: (u32, u32) = (1800, 168);
+
+/// A name for a divider's picture in the settings' folder that nothing
+/// has: when it was made, a PNG.
+fn free_divider_name(dir: &Path) -> PathBuf {
+    let mut stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+    while dir.join(format!("divider-{stamp}.png")).exists() {
+        stamp += 1;
+    }
+    PathBuf::from(format!("divider-{stamp}.png"))
 }
 
 /// How long something waits to be sent before the line says so: a wait

@@ -7297,6 +7297,58 @@ fn two_apps_sync_through_a_server() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// Changes waiting since before Settings opened are said from its first
+/// frame: the line isn't held back a moment again on each open, which
+/// added a row to the Sync card a moment in and moved the page under it.
+#[test]
+fn a_wait_already_long_is_said_as_settings_opens() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-wait-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, a: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(a) {
+            assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
+            d.frame(a);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (mut a, mut d, dir) = fresh("wait-said");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut d, &|x| x.sync.status == crate::sync::Status::Online && x.sync.caught_up());
+    // The server gone: a change made now waits.
+    let _ = stop.send(());
+    let _ = rt.block_on(served);
+    until("offline", &mut a, &mut d, &|x| matches!(x.sync.status, crate::sync::Status::Offline(_)));
+    let i = a.current;
+    a.store.notes[i].doc.push(Block::text("written while the server is away"));
+    a.store.notes[i].touch();
+    a.store.save(i, true).unwrap();
+    until("waiting", &mut a, &mut d, &|x| x.sync.waiting() > 0);
+    for _ in 0..4 {
+        d.advance(0.5);
+        d.frame(&mut a);
+    }
+    a.on_plain(Msg::ShowSettings);
+    d.frame(&mut a);
+    let line = crate::app::settings_view::waiting_words(a.sync.waiting(), a.sync.files_waiting());
+    assert!(drawn(&mut d, &mut a, &line), "said from the first frame: {line}");
+    drop(a);
+    remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// The server's owner invites someone from Settings: the code shown, the
 /// invite waiting; they make an account with it, which isn't the owner's;
 /// the owner sees it, and removes it (asked twice), and their app is told.
@@ -8640,6 +8692,42 @@ fn a_dividers_picture_is_kept_beside_the_settings_and_falls_back_when_gone() {
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_file(second);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
+}
+
+/// A divider's picture is kept no bigger than a divider can use, as a PNG
+/// with its transparency: a big one picked is made small, its shape kept;
+/// and a whole one an older Carnet kept is made small as the app opens,
+/// the whole one let go.
+#[test]
+fn a_dividers_picture_is_kept_small_and_clear() {
+    use crate::settings::Divider;
+    let (mut app, _d, dir, config) = divided("divider-small");
+    // 4000 × 600, its left half see-through.
+    let (w, h) = (4000u32, 600u32);
+    let rgba: Vec<u8> = (0..w * h).flat_map(|i| if i % w < w / 2 { [0, 0, 0, 0] } else { [200, 80, 40, 255] }).collect();
+    let picked = dir.with_extension("big.png");
+    std::fs::write(&picked, crate::images::encode_png(w, h, &rgba).unwrap()).unwrap();
+    app.set_divider_picture(&picked);
+    assert_eq!(app.settings.divider, Divider::Picture);
+    let kept = app.settings.divider_picture_file().expect("kept");
+    assert_eq!(kept.extension().and_then(|e| e.to_str()), Some("png"));
+    let small = image::open(&kept).unwrap().to_rgba8();
+    assert_eq!((small.width(), small.height()), (1120, 168), "within 1800 × 168, its shape kept");
+    assert_eq!(small.get_pixel(10, 84).0[3], 0, "still see-through on the left");
+    assert_eq!(small.get_pixel(1100, 84).0[3], 255);
+    // An older Carnet's whole copy, beside the settings: made small as
+    // the app opens.
+    let whole = config.join("divider-1.png");
+    std::fs::write(&whole, crate::images::encode_png(w, h, &rgba).unwrap()).unwrap();
+    let settings = Settings { file: Some(config.join("settings.txt")), divider: Divider::Picture, divider_picture: Some("divider-1.png".into()), ..Settings::default() };
+    let app = Carnet::with_settings(Store::open(dir.clone()).unwrap(), settings);
+    let now = app.settings.divider_picture_file().unwrap();
+    assert!(now != whole && !whole.exists(), "the whole one let go");
+    assert_eq!(image::image_dimensions(&now).unwrap(), (1120, 168));
+    assert!(std::fs::read_to_string(config.join("settings.txt")).unwrap().contains(&format!("divider_picture = {}", now.file_name().unwrap().to_string_lossy())));
+    let _ = std::fs::remove_file(picked);
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(config);
 }

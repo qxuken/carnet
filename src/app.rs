@@ -1451,6 +1451,7 @@ impl Carnet {
         app.current = app.order.first().copied().unwrap_or(0);
         app.caret = Caret::at(page::first(app.doc()));
         app.gather_pictures();
+        app.shrink_divider_picture();
         // The notes open all the same; their history waits for an update.
         if app.error.is_none() {
             app.error = app.store.replica_refused.clone();
@@ -4871,6 +4872,22 @@ impl App for Carnet {
             ui.core().set_wheel_feel(feel);
         }
         if ui.env().window.id == kui_native::WindowId::MAIN {
+            // Sync's waiting line keeps time while Settings is shut too, so
+            // a wait that began before it opened is said from its first
+            // frame: held back a moment on each open, the line came in a
+            // moment late, a row more, and the page moved under it.
+            if !self.settings_open {
+                let waiting = (self.sync.waiting(), self.sync.files_waiting());
+                self.wait_line.said(ui.now(), waiting != (0, 0));
+            }
+            // Dividers drawn as a picture: it's asked for from the first
+            // frame, decoded while the reader is still at the top, and held,
+            // not first read when a divider scrolls into view.
+            if self.settings.divider == crate::settings::Divider::Picture
+                && let Some(p) = self.settings.divider_picture_file()
+            {
+                self.images.get(&p);
+            }
             return self.window_view(ui);
         }
         let name = ui.window_name();

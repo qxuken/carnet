@@ -517,6 +517,21 @@ fn fit(d: Decoded) -> Decoded {
     }
 }
 
+/// A picture written again at `to` as a PNG no wider than `most_w` and no
+/// taller than `most_h`, its shape and its transparency kept: a divider's
+/// picture is drawn a few lines tall, and a camera's photo kept whole for
+/// it took a second to decode and a frame to upload. Its size, as written.
+pub fn shrink_to_png(from: &Path, to: &Path, most_w: u32, most_h: u32) -> Result<(u32, u32), String> {
+    let d = decode(from)?;
+    let img = image::RgbaImage::from_raw(d.w, d.h, d.rgba).ok_or_else(|| "no pixels".to_string())?;
+    let img = image::DynamicImage::ImageRgba8(img);
+    let img = if img.width() > most_w || img.height() > most_h { img.thumbnail(most_w, most_h) } else { img };
+    let rgba = img.to_rgba8();
+    let png = encode_png(rgba.width(), rgba.height(), rgba.as_raw())?;
+    std::fs::write(to, png).map_err(|e| e.to_string())?;
+    Ok((rgba.width(), rgba.height()))
+}
+
 /// RGBA as a PNG file's bytes.
 pub fn encode_png(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = std::io::Cursor::new(Vec::new());
