@@ -828,6 +828,13 @@ pub struct Carnet {
     /// Each floated picture's row as last drawn: where the blocks beside
     /// it end, and how many frames running that changed.
     float_ends: HashMap<u64, (usize, u8)>,
+    /// Each block's row by the block's id: the key it was last drawn
+    /// under, and where it was last laid out. What the blocks beside a
+    /// picture are measured by — read from the last frame's layout by the
+    /// key the row had there, beside a picture or not, and kept across
+    /// notes, so a note opened again has its pictures' rows from the
+    /// first frame as they were left.
+    row_seen: HashMap<u64, (Key, Option<Rect>)>,
     /// A note's card or a folder's row being carried to a folder.
     row_drag: Option<RowDrag>,
     /// The library's edge being dragged: where the drag began and the
@@ -1179,6 +1186,7 @@ impl Carnet {
             float_count: 0,
             float_room: 0.0,
             float_ends: HashMap::new(),
+            row_seen: HashMap::new(),
             row_drag: None,
             library_from: None,
             edge_hover: None,

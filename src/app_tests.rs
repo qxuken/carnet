@@ -11190,3 +11190,72 @@ fn ctrl_tab_in_deleted_goes_round_the_trash() {
     assert_eq!(open_title(&app), "Alpha");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The finding: a note with a picture at its left edge and a list and
+/// code beside it, opened again from another note's card, drew the
+/// picture at once and the blocks beside it below it, out of sight, until
+/// something else drew the page a second or so later. Beside it from the
+/// first frame back, at either edge, the picture still in hand or read
+/// from its file again; and opened the first time, beside it within the
+/// frames the page asks for.
+#[test]
+fn the_blocks_beside_a_picture_are_beside_it_from_the_first_frame_back() {
+    for (edge, fresh) in [("left", false), ("right", false), ("left", true), ("right", true)] {
+        let note = format!(
+            "## Sign in\n\n- open it\n\n![shot|{edge}|300](attachments/shot.png)\n\n- the address\n\n```\nhttps://vault.example\n```\n\n\
+             - the login\n\n```\nme\n```\n\n- the password\n\n```\nsecret\n```\n\n## After\n\n- one\n- two"
+        );
+        let (mut app, mut d, dir) = library(&format!("beside-back-{edge}-{fresh}"), &[("Vault", &note), ("Other", "words")]);
+        let rgba: Vec<u8> = (0..400 * 300).flat_map(|_| [94u8, 124, 164, 255]).collect();
+        let png = crate::images::encode_png(400, 300, &rgba).unwrap();
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        std::fs::write(dir.join("attachments").join("shot.png"), png).unwrap();
+        app.store.index_files();
+        app.images.retry_failed();
+        let case = format!("{edge}{}", if fresh { ", read again" } else { "" });
+        // The picture, and the blocks after it at its side, from its top.
+        let beside = |d: &Drive, when: &str| {
+            let nodes = d.core.nodes();
+            let pic = nodes.iter().find(|n| n.label.as_deref() == Some("pictures")).map(|n| n.rect);
+            let pic = pic.unwrap_or_else(|| panic!("{case}, {when}: no picture"));
+            assert!(pic.h > 200.0, "{case}, {when}: the picture drawn, {pic:?}");
+            for words in ["the address", "https://vault.example", "the login"] {
+                let r = nodes.iter().find(|n| n.text.as_deref() == Some(words)).map(|n| n.rect);
+                let r = r.unwrap_or_else(|| panic!("{case}, {when}: {words:?} not drawn"));
+                let side = if edge == "left" { r.x >= pic.x + pic.w } else { r.x + r.w <= pic.x };
+                assert!(side && r.y < pic.y + pic.h, "{case}, {when}: {words:?} at {r:?}, not beside the picture at {pic:?}");
+            }
+            let first = nodes.iter().find(|n| n.text.as_deref() == Some("the address")).unwrap().rect;
+            assert!(first.y < pic.y + 40.0, "{case}, {when}: the first at the picture's top, {first:?} by {pic:?}");
+        };
+        // Opened the first time: only the frames the app asks for.
+        let i = app.store.notes.iter().position(|n| n.title == "Vault").unwrap();
+        app.open(i);
+        d.frame(&mut app);
+        for _ in 0..12 {
+            if !d.core.owed().requested {
+                break;
+            }
+            d.advance(0.02);
+            d.frame(&mut app);
+        }
+        beside(&d, "opened");
+        open_named(&mut app, &mut d, "Other");
+        for _ in 0..4 {
+            d.frame(&mut app);
+        }
+        if fresh {
+            // Let go while away: read from its file again on the way back.
+            app.images = Default::default();
+        }
+        // Its card pressed again.
+        let i = app.store.notes.iter().position(|n| n.title == "Vault").unwrap();
+        app.open(i);
+        for when in ["the first frame back", "the second", "the third"] {
+            d.advance(0.02);
+            d.frame(&mut app);
+            beside(&d, when);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
