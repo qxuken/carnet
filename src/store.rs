@@ -910,11 +910,12 @@ impl Store {
         Ok(relative(&self.folder_dir(folder), &path))
     }
 
-    /// Copies a picture from elsewhere into the attachments folder, under
-    /// its own name (or the first free one). Returns its `src`, as
-    /// `save_attachment` does.
+    /// Copies a picture or a document from elsewhere into the attachments
+    /// folder, under its own name (or the first free one), its kind kept,
+    /// or none ([`copy_in_file`](Self::copy_in_file)). Returns its `src`,
+    /// as `save_attachment` does.
     pub fn import_attachment(&self, folder: &str, from: &Path) -> io::Result<String> {
-        let to = self.copy_in(from, false)?;
+        let to = self.copy_in_file(from)?;
         Ok(relative(&self.folder_dir(folder), &to))
     }
 
@@ -2393,17 +2394,19 @@ impl Store {
 
     /// `text`, a note's from the folder `from`, with the files its links
     /// and Obsidian embeds name by a path from there — pictures and
-    /// documents, nothing else — copied into the attachments folder, and
-    /// the links rewritten to find them from `to` (an embed by its path
-    /// from the notes folder). The same file named twice is copied once.
+    /// documents, nothing that could run, and no other note — copied into
+    /// the attachments folder, and the links rewritten to find them from
+    /// `to` (an embed by its path from the notes folder). The same file
+    /// named twice is copied once.
     fn bring_linked(&mut self, text: &str, from: &Path, to: &Path) -> String {
         let mut copied: HashMap<String, PathBuf> = HashMap::new();
         // Where a target leads, if to a file worth bringing: brought (or
-        // where it is, when the notes folder has it already).
+        // where it is, when the notes folder has it already). A link to
+        // another note stays one: that note comes in on its own, or not.
         let mut bring = |t: &str| -> Option<PathBuf> {
             let p = from.join(decode_src(t));
             let name = file_name(&p);
-            if !is_relative(t) || on_network(&p) || !p.is_file() || !(doc::is_picture_name(&name) || doc::is_document_name(&name)) {
+            if !is_relative(t) || on_network(&p) || !p.is_file() || is_markdown(&p) || !(doc::is_picture_name(&name) || doc::is_document_name(&name)) {
                 return None;
             }
             if within(&self.dir, &p) {
@@ -2413,7 +2416,7 @@ impl Store {
             if let Some(done) = copied.get(&k) {
                 return Some(done.clone());
             }
-            let done = self.copy_in(&p, false).ok()?;
+            let done = self.copy_in_file(&p).ok()?;
             copied.insert(k, done.clone());
             Some(done)
         };

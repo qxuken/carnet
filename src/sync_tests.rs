@@ -1367,9 +1367,10 @@ fn a_vault_naming_places_outside_the_notes_folder_writes_nothing_there() {
 }
 
 /// A file another device names in `attachments/` that isn't a picture or
-/// a document by its name (a program, a script, an app, a page) is never
-/// written here, whatever its bytes, and isn't sent from here either —
-/// in either of the vault's maps. A picture or a document that comes is
+/// a document by its name (a program, a script, an app, a shortcut) is
+/// never written here, whatever its bytes, and isn't sent from here
+/// either — in either of the vault's maps. A document with no kind, or a
+/// page, comes as a PDF does. A picture or a document that comes is
 /// marked as from elsewhere, as a download is (macOS's quarantine,
 /// Windows' Mark of the Web); one made here isn't.
 #[test]
@@ -1395,14 +1396,20 @@ fn only_pictures_and_documents_come_by_sync() {
     assert!(!two.sides[1].dir.join("attachments/fix.sh").exists());
     let id = crate::files::hex(&two.sides[0].session.blob_id(&photo));
 
-    // The picture's id under names that would run, written as no Carnet
-    // writes them, in the pictures' map and the documents'.
+    // The picture's id under names that would run (one as Windows reads
+    // it, its dot at the end no part of it), written as no Carnet writes
+    // them, in the pictures' map and the documents'; and under two that
+    // are documents, a name with no kind and a page.
     let raw = loro::LoroDoc::new();
     raw.set_peer_id(0xbad).unwrap();
-    let bad = ["attachments/run.command", "attachments/Tool.app", "attachments/fix.sh", "attachments/setup.exe", "attachments/readme", "attachments/page.html"];
+    let bad = [
+        "attachments/run.command", "attachments/Tool.app", "attachments/fix.sh", "attachments/setup.exe", "attachments/run.exe.",
+        "attachments/run.exe", "attachments/Home.lnk",
+    ];
+    let good = ["attachments/readme", "attachments/page.html"];
     for map in ["pictures", "files"] {
         let m = raw.get_map(map);
-        for p in bad {
+        for p in bad.iter().chain(&good).filter(|p| **p != "attachments/run.exe") {
             m.insert(p, id.as_str()).unwrap();
         }
     }
@@ -1421,6 +1428,9 @@ fn only_pictures_and_documents_come_by_sync() {
     let b = &two.sides[1];
     for p in bad {
         assert!(!b.dir.join(p).exists(), "{p} written");
+    }
+    for p in good {
+        assert_eq!(std::fs::read(b.dir.join(p)).ok().as_deref(), Some(&photo[..]), "{p} comes");
     }
     let got = b.dir.join(&src);
     assert_eq!(std::fs::read(&got).ok(), Some(photo), "the picture itself comes");

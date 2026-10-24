@@ -33,15 +33,18 @@
 //! may drop it); the files stay where they are, the user's.
 //!
 //! Only pictures and documents sync ([`syncs`]): a file of `attachments/`
-//! by a picture's name, as an import names one, or a document's (a PDF,
-//! a sheet, a recording: the kinds that open in an app of their own and
-//! never run). Another device (or one that isn't what it seems) can't put
-//! a program, a script or a page in the notes folder by naming it in the
-//! vault. Documents are named in a map of the vault's own (vault.rs), as
-//! a Carnet from before them would let them go in the pictures'. And what
-//! comes is marked as from elsewhere ([`quarantine`]), as a download is:
-//! on macOS the Finder asks before opening it, on Windows Office opens
-//! it in Protected View.
+//! by a picture's name, as an import names one, or a document's (any
+//! file but one that runs, installs or leads elsewhere as it opens: a
+//! program, an installer, a script, a shortcut). Another device (or one
+//! that isn't what it seems) can't put one of those in the notes folder
+//! by naming it in the vault. Documents are named in a map of the
+//! vault's own (vault.rs), as a Carnet from before them would let them go
+//! in the pictures'; one that knew fewer kinds of document reads the
+//! others as not there, and leaves them be. And what comes is marked as
+//! from elsewhere ([`quarantine`]), as a download is: on macOS the Finder
+//! asks before opening it, on Windows Office opens it in Protected View.
+//! It's written as a plain file: nothing comes that a system would run
+//! for its mode (a `README` that is a program, on a Mac or Linux).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -57,8 +60,8 @@ use crate::store::{Store, is_owned};
 /// Whether a path from the notes folder is one sync puts up or brings
 /// down: Carnet's ([`is_owned`]), and a picture by its name, of the kinds
 /// an import takes ([`carnet_core::doc::is_picture_name`]), or a document
-/// a note links to, of the kinds that open in an app of their own and
-/// never run ([`carnet_core::doc::is_document_name`]).
+/// a note links to: any file but one that runs, installs or leads
+/// elsewhere as it opens ([`carnet_core::doc::is_document_name`]).
 pub fn syncs(rel: &str) -> bool {
     is_owned(rel) && (carnet_core::doc::is_picture_name(rel) || carnet_core::doc::is_document_name(rel))
 }
