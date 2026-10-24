@@ -1,4 +1,4 @@
-//! Signed links to a picture (docs/SYNC.md §6): what lets a device `GET`
+//! Signed links to a file (docs/SYNC.md §6): what lets a device `GET`
 //! or `PUT` one sealed blob over HTTP, for a few minutes, with no session
 //! and nothing stored. The socket, logged in, is what asks for one.
 //!
@@ -6,13 +6,13 @@
 //! algorithm leaves nothing to negotiate or confuse. A link is, in hex:
 //!
 //! ```text
-//! version (1) · put (1) · expires (8) · bytes (8) · picture id (32) · account (1..64)
+//! version (1) · put (1) · expires (8) · bytes (8) · file id (32) · account (1..64)
 //! · HMAC-SHA256 of all that, under the server's key (32)
 //! ```
 //!
 //! The key is made on the first start (`data/links.key`) and never leaves
-//! the server. A link names one account's one picture, one way, of so
-//! many bytes, until a time: lost, it opens that picture's sealed bytes for
+//! the server. A link names one account's one file, one way, of so
+//! many bytes, until a time: lost, it opens that file's sealed bytes for
 //! minutes, no more (and they open only with the account's keys).
 
 use std::path::Path;
@@ -24,7 +24,7 @@ use sha2::Sha256;
 pub const LIFETIME: u64 = 5 * 60;
 
 /// How long a put by a link may go on once it has begun: on this server,
-/// a picture's request has as long (`server::BLOB_TIMEOUT`), so a put
+/// a file's request has as long (`server::BLOB_TIMEOUT`), so a put
 /// begun as its link runs out is over [`LIFETIME`] and this after the
 /// link was given, at the latest. Until then, what it may put still
 /// counts against its account's room (`blobs::Worker`).
@@ -40,7 +40,7 @@ pub struct Grant {
     pub id: [u8; 32],
     pub put: bool,
     /// What a put must send, exactly (the length the device said when it
-    /// offered the picture); for a get, 0.
+    /// offered the file); for a get, 0.
     pub max: u64,
     pub expires: u64,
 }

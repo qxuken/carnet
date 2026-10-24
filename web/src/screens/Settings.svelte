@@ -98,14 +98,14 @@
   const space = $derived.by(() => {
     const u = sync.usage;
     if (!u) return null;
-    const kept = size(u.notes + u.pictures);
+    const kept = size(u.notes + u.files);
     let line = u.limit === null ? `${kept} kept on the server` : `${kept} of ${size(u.limit)} used`;
     if (u.plan) {
       line += ` · ${u.plan}`;
       const until = u.until ? dateWords(u.until) : null;
       if (until) line += `, until ${until}`;
     }
-    const used = u.notes + u.pictures;
+    const used = u.notes + u.files;
     const over = u.limit === null ? '' : used > u.limit ? `Over this plan’s ${size(u.limit)}` : used === u.limit ? `Reached this plan’s ${size(u.limit)}` : '';
     return { line, writable: u.writable, over };
   });
@@ -185,9 +185,9 @@
     {#if sync.readOnly || (space && !space.writable)}
       <p class="row danger"><Icon name="warning" size={16} /> Read only for now: what’s written here stays here, and syncs once the account can write again.</p>
     {:else if space?.over}
-      <!-- The server takes no new picture at or over the limit; notes'
+      <!-- The server takes no new file at or over the limit; notes'
            text it always takes. -->
-      <p class="row warn"><Icon name="warning" size={16} /> {space.over}: new pictures stay on this device until there’s room. Notes still sync.</p>
+      <p class="row warn"><Icon name="warning" size={16} /> {space.over}: new files stay on this device until there’s room. Notes still sync.</p>
     {/if}
     <h2>Devices</h2>
     <section>
@@ -464,7 +464,7 @@
             </div>
             {#if removingAccount === a.id}
               <div class="confirm">
-                <p>Everything it keeps on this server goes: its notes there, its pictures, its devices’ way in. What’s on their devices stays.</p>
+                <p>Everything it keeps on this server goes: its notes there, its files, its devices’ way in. What’s on their devices stays.</p>
                 <div class="buttons">
                   <button class="pill" onclick={() => (removingAccount = null)}>Cancel</button>
                   <button class="pill danger" disabled={!online} onclick={from('accounts', () => { sync.removeAccount(a.id); removingAccount = null; })}>Yes, remove</button>
@@ -540,7 +540,7 @@
         </div>
         {#if deletingAccount}
           <div class="confirm">
-            <p>Every note and picture the server keeps goes, for good, and every device leaves the account. What’s on your computers stays there, as files.</p>
+            <p>Every note and file the server keeps goes, for good, and every device leaves the account. What’s on your computers stays there, in the notes folder.</p>
             <div class="buttons">
               <button class="pill" onclick={() => (deletingAccount = false)}>Cancel</button>
               <button class="pill danger" disabled={!online} onclick={from('account', () => sync.deleteAccount())}>Yes, delete the account</button>

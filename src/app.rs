@@ -1255,16 +1255,16 @@ impl Carnet {
         self.notify(format!("Moved {what} to the attachments folder"), None);
     }
 
-    /// The sweep (store_owned.rs): the pictures of Carnet's no note has
-    /// shown for a week go to the trash, and other devices let go of
+    /// The sweep (store_owned.rs): the files of Carnet's no note has
+    /// shown or linked to for a week go to the trash, and other devices let go of
     /// theirs. Quietly: nothing shown went.
-    fn sweep_pictures(&mut self) {
+    fn sweep_files(&mut self) {
         let Some(busy) = self.sync.sweep_may_run() else {
             self.next_sweep = Instant::now() + SWEEP_LATER;
             return;
         };
         self.next_sweep = Instant::now() + SWEEP_EVERY;
-        if let Ok(swept) = self.store.sweep_pictures(&busy, SystemTime::now())
+        if let Ok(swept) = self.store.sweep_files(&busy, SystemTime::now())
             && !swept.is_empty()
         {
             self.sync.poke();
@@ -2243,7 +2243,7 @@ impl Carnet {
                 _ => {}
             }
         }
-        if remote.iter().any(|r| matches!(r, store::Remote::Pictures)) {
+        if remote.iter().any(|r| matches!(r, store::Remote::Files)) {
             self.store.index_files();
             self.images.retry_failed();
         }
@@ -4511,7 +4511,7 @@ impl App for Carnet {
         }
         // The pictures no note shows, now and then.
         if Instant::now() >= self.next_sweep {
-            self.sweep_pictures();
+            self.sweep_files();
         }
         due.push(self.next_sweep.saturating_duration_since(Instant::now()));
         // Sync's turn after what happened: the notes' places and pictures

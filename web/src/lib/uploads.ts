@@ -1,7 +1,7 @@
-// The pictures put in here and not yet on the server, as kept across a
+// The files put in here and not yet on the server, as kept across a
 // reload: `[path, id]`s. Every change is made in the order it was asked,
-// one after another, so the server's word that a picture is in (asked
-// the moment it comes) is never kept before the picture was, nor lost
+// one after another, so the server's word that a file is in (asked
+// the moment it comes) is never kept before the file was, nor lost
 // between a read and a write of another change (uploads.test.ts).
 
 export type Entry = [path: string, id: string];
@@ -34,7 +34,7 @@ export class Uploads {
     return this.change(() => null);
   }
 
-  /// The id of the picture on its way to `path`, if one is: the last put
+  /// The id of the file on its way to `path`, if one is: the last put
   /// in there. What this browser shows there until the vault names it,
   /// from the copy kept here (after a reload, offline, say).
   async going(path: string): Promise<string | undefined> {
@@ -43,18 +43,18 @@ export class Uploads {
     return undefined;
   }
 
-  /// A picture put in at `path`: kept as on its way. Asked before it's
+  /// A file put in at `path`: kept as on its way. Asked before it's
   /// sent, so its "sent" comes after.
   add(path: string, id: string): Promise<Entry[]> {
     return this.change((list) => (list.some(([p, i]) => p === path && i === id) ? null : [...list, [path, id]]));
   }
 
-  /// The server has the picture `id`: on its way no more, at any path.
+  /// The server has the file `id`: on its way no more, at any path.
   sent(id: string): Promise<Entry[]> {
     return this.change((list) => (list.some(([, i]) => i === id) ? list.filter(([, i]) => i !== id) : null));
   }
 
-  /// Opened again (a reload): each picture handed to `upload` with its
+  /// Opened again (a reload): each file handed to `upload` with its
   /// bytes (`upload` says the id it goes as), and kept on the list only
   /// if it's on its way after all: `going()` names it. One whose bytes
   /// aren't kept here any more, or that the vault has already (sent

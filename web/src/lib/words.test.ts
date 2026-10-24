@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { footer, inviteSteps, joinedSaid, offlineStatus, recoveryShown, linkAction, linkedCode, numbered, overflow, serverSays, serverWords, shownPage, waysBack } from './words';
 
-const base = { status: 'Up to date', changes: 0, pictures: 0, waitShown: false, allSent: false, readOnly: false };
+const base = { status: 'Up to date', changes: 0, files: 0, waitShown: false, allSent: false, readOnly: false };
 
 describe('footer', () => {
   it('says offline and what waits as the online line does', () => {
     expect(footer({ ...base, status: 'Offline', changes: 1, waitShown: true }).text).toBe('Offline · Waiting to send 1 change');
     expect(footer({ ...base, changes: 1, waitShown: true }).text).toBe('Waiting to send 1 change');
-    expect(footer({ ...base, status: 'Offline', changes: 2, pictures: 1, waitShown: true }).text).toBe('Offline · Waiting to send 2 changes and 1 picture');
+    expect(footer({ ...base, status: 'Offline', changes: 2, files: 1, waitShown: true }).text).toBe('Offline · Waiting to send 2 changes and 1 file');
   });
   // The finding: gone offline, the line said "Up to date" until there
   // was something to send. Offline is said at once, with its icon,
@@ -25,14 +25,14 @@ describe('footer', () => {
     expect(footer({ ...base, allSent: true })).toEqual({ ok: true, text: 'All sent', icon: 'check' });
     expect(footer({ ...base, readOnly: true, changes: 1, waitShown: true }).text).toBe('Read only for now: 1 change waiting');
   });
-  it('says why pictures wait, when they cannot go from here', () => {
-    const held = "The server's picture storage can't be reached from here, so new pictures stay on this device for now.";
-    expect(footer({ ...base, pictures: 1, waitShown: true, held })).toEqual({ ok: false, text: 'Waiting to send 1 picture', icon: 'clock', why: held });
+  it('says why files wait, when they cannot go from here', () => {
+    const held = "The server's file storage can't be reached from here, so new files stay on this device for now.";
+    expect(footer({ ...base, files: 1, waitShown: true, held })).toEqual({ ok: false, text: 'Waiting to send 1 file', icon: 'clock', why: held });
     // Said at once: it's no passing wait.
-    expect(footer({ ...base, pictures: 1, held }).why).toBe(held);
+    expect(footer({ ...base, files: 1, held }).why).toBe(held);
     // None waiting: nothing to say.
     expect(footer({ ...base, held }).why).toBeUndefined();
-    expect(footer({ ...base, pictures: 1, waitShown: true }).why).toBeUndefined();
+    expect(footer({ ...base, files: 1, waitShown: true }).why).toBeUndefined();
   });
 });
 

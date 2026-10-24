@@ -1021,8 +1021,8 @@ impl Carnet {
     fn unshown_why(&self, entry: Option<&images::Entry>, file: Option<&std::path::Path>, theirs: bool, src: &str, wiki: bool) -> (Glyph, &'static str) {
         match entry {
             // Carnet's own, not here yet: sync is bringing it from the
-            // server (pictures.rs). Missing only once it's given up on.
-            Some(images::Entry::Failed(e)) if e == "not found" && !theirs && file.is_some_and(|f| self.sync.picture_coming(&self.store, f)) => {
+            // server (files.rs). Missing only once it's given up on.
+            Some(images::Entry::Failed(e)) if e == "not found" && !theirs && file.is_some_and(|f| self.sync.file_coming(&self.store, f)) => {
                 (Glyph::Cloud, DOWNLOADING)
             }
             // The user's own picture, not here: with sync on, it's on the

@@ -22,8 +22,8 @@ function kept(start: Entry[] = []) {
 }
 
 describe('Uploads', () => {
-  it('keeps a picture said sent at once as sent, not waiting', async () => {
-    // A fast server: its "sent" comes while the picture is still being
+  it('keeps a file said sent at once as sent, not waiting', async () => {
+    // A fast server: its "sent" comes while the file is still being
     // kept here. Asked in that order, the list ends empty.
     const k = kept();
     const up = new Uploads(k.keep);
@@ -41,7 +41,7 @@ describe('Uploads', () => {
       ['attachments/a.png', 'a'],
       ['attachments/c.png', 'c'],
     ]);
-    // The same picture at two names: both go once it's sent.
+    // The same file at two names: both go once it's sent.
     await Promise.all([up.add('attachments/d.png', 'd'), up.add('attachments/d-2.png', 'd'), up.add('attachments/d.png', 'd')]);
     expect(await up.sent('d')).toEqual([
       ['attachments/a.png', 'a'],
@@ -66,7 +66,7 @@ describe('Uploads', () => {
       (path, _bytes) => {
         handed.push(path);
         // The vault names `in` already: nothing to send. `big` is over
-        // what a picture may be.
+        // what a file may be.
         const id = { 'attachments/in.png': 'in', 'attachments/waits.png': 'w' }[path];
         if (id === 'w') going.push(id);
         return id;
@@ -82,7 +82,7 @@ describe('Uploads', () => {
   // in said it "hasn't reached the server yet" instead of showing its own
   // copy. The vault doesn't name it until it's on the server; this list
   // does, by the id its kept bytes go by.
-  it('names the picture on its way to a path, the last put in there', async () => {
+  it('names the file on its way to a path, the last put in there', async () => {
     const k = kept([
       ['attachments/a.png', 'a1'],
       ['attachments/b.png', 'b'],

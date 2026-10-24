@@ -1255,7 +1255,7 @@ impl<'a> Pictures<'a> {
 
 /// Every picture in a line of words, as [`inline_picture`] reads them,
 /// one after another: a line that only looks like one counts (in code,
-/// say), as for [`picture_paths`].
+/// say), as for [`file_paths`].
 pub fn inline_pictures(text: &str) -> Vec<CellPicture> {
     let mut out = Vec::new();
     let mut pictures = Pictures::new(text);
@@ -1422,7 +1422,7 @@ pub fn find_picture(folder: &str, src: &str, wiki: bool, files: &Files) -> Optio
 /// counts too: a file kept by mistake costs little, one lost is gone.
 /// `files` is where an Obsidian embed's picture is looked for
 /// ([`find_picture`]).
-pub fn picture_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
+pub fn file_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
     let mut out = document_paths(folder, md, files);
     for line in md.lines() {
         match image_line(line) {
@@ -2011,7 +2011,7 @@ mod tests {
         let files = Files::new(["attachments/talk.m4a"]);
         let found: Vec<String> = document_paths("Trips", md, &files).into_iter().collect();
         assert_eq!(found, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/talk.m4a"]);
-        let all: Vec<String> = picture_paths("Trips", md, &files).into_iter().collect();
+        let all: Vec<String> = file_paths("Trips", md, &files).into_iter().collect();
         assert_eq!(all, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/p.png", "attachments/talk.m4a"]);
         assert_eq!(percent_decoded("a%20b%2"), "a b%2");
     }
@@ -2489,7 +2489,7 @@ Second line of the same paragraph.
     /// whichever folder it is in; web addresses and paths out are none.
     #[test]
     fn a_notes_pictures_are_found_from_its_folder() {
-        use super::{picture_paths, resolve_picture};
+        use super::{file_paths, resolve_picture};
         assert_eq!(resolve_picture("", "attachments/a.png").as_deref(), Some("attachments/a.png"));
         assert_eq!(resolve_picture("Trips/Lisbon", "../../attachments/a%20b.png").as_deref(), Some("attachments/a b.png"));
         assert_eq!(resolve_picture("", "../x.png"), None, "out of the notes folder");
@@ -2502,7 +2502,7 @@ Second line of the same paragraph.
             assert_eq!(resolve_picture("", src), None, "{src:?}");
         }
         let md = "# Trip\n\n![](../attachments/a.png)\n\nText ![not](inline.png) here\n![w|right|300](<../attachments/b c.png>)\n![](https://e.com/x.png)\n";
-        let found: Vec<String> = picture_paths("Trips", md, &Files::default()).into_iter().collect();
+        let found: Vec<String> = file_paths("Trips", md, &Files::default()).into_iter().collect();
         assert_eq!(found, ["attachments/a.png", "attachments/b c.png"]);
     }
 
@@ -2573,7 +2573,7 @@ Second line of the same paragraph.
         // The pictures a note shows: those in its cells too, not a
         // paragraph's among its words.
         let md = "| a | b |\n| --- | --- |\n| ![](../attachments/a.png) | ![[b.png]] ![](<../attachments/c d.png>) |\n\nText ![not](inline.png) here\n";
-        let found: Vec<String> = picture_paths("Trips", md, &Files::new(["attachments/b.png"])).into_iter().collect();
+        let found: Vec<String> = file_paths("Trips", md, &Files::new(["attachments/b.png"])).into_iter().collect();
         assert_eq!(found, ["attachments/a.png", "attachments/b.png", "attachments/c d.png"]);
         // A cell's pictures given new sources, the rest as it was; code
         // holds none.
@@ -2589,7 +2589,7 @@ Second line of the same paragraph.
     /// the shortest path next.
     #[test]
     fn an_embeds_picture_is_found_as_obsidian_finds_it() {
-        use super::{find_picture, picture_paths};
+        use super::{find_picture, file_paths};
         let files = Files::new(["Trips/here.png", "attachments/a.png", "Old/deep/a.png", "Old/b.png", "Older/x/b.png", "Trips/Lisbon/c.png", "Photo.PNG"]);
         let find = |folder: &str, src: &str| find_picture(folder, src, true, &files);
         assert_eq!(find("Trips", "here.png").as_deref(), Some("Trips/here.png"), "beside the note");
@@ -2603,7 +2603,7 @@ Second line of the same paragraph.
         // A Markdown link is where its path says, whatever is elsewhere.
         assert_eq!(find_picture("Trips", "a.png", false, &files).as_deref(), Some("Trips/a.png"));
         let md = "![[a.png]]\n![](here.png)\n![[Lisbon/c.png|200]]\n![[Other note]]\n";
-        let found: Vec<String> = picture_paths("Trips", md, &files).into_iter().collect();
+        let found: Vec<String> = file_paths("Trips", md, &files).into_iter().collect();
         assert_eq!(found, ["Trips/Lisbon/c.png", "Trips/here.png", "attachments/a.png"]);
     }
 
@@ -2630,7 +2630,7 @@ Second line of the same paragraph.
             // it, and the cell's own words.
             let t0 = std::time::Instant::now();
             let _ = parse_blocks(&md);
-            let _ = picture_paths("", &md, &Files::default());
+            let _ = file_paths("", &md, &Files::default());
             let _ = crate::export::viewer(&md, |s, _| crate::export::Picture::Url(s.into()));
             let _ = inline::cell_pictures(cell);
             let _cell = inline::cell_text(true);

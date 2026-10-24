@@ -1,37 +1,37 @@
-//! Pictures (docs/SYNC.md §4, §6). Their bytes go over HTTP, to and from a
+//! Files (docs/SYNC.md §4, §6). Their bytes go over HTTP, to and from a
 //! short-lived signed link (`links.rs`); the socket says only which, and
 //! when one is kept. The hub decides who may (a socket logged in, its
 //! account) and hands the rest here as a [`Job`]: the [`Worker`], on a
-//! thread of its own, answers with links, and checks a picture put is
-//! there before it's said to be kept. Where the pictures are is behind
+//! thread of its own, answers with links, and checks a file put is
+//! there before it's said to be kept. Where the files are is behind
 //! [`Blobs`]: files beside the databases for a server of one's own
 //! ([`FileBlobs`], its links to this server's `/v1/blobs/…`), object
 //! storage for a hosted one (its links pre-signed there), the same to a
 //! device either way.
 //!
 //! A link to put says how many bytes, exactly: the device says how long
-//! each picture is sealed when it offers it, and a put of any other length
+//! each file is sealed when it offers it, and a put of any other length
 //! is refused (by this server, or by the bucket, whose link is signed with
 //! the length). For an account with a limit, a link given and not yet
-//! used counts against the room left, at that length, until the picture
+//! used counts against the room left, at that length, until the file
 //! is kept or no put by the link can still be going on (its time, then
 //! as long as a put may take: [`PUT_TAKES`]): an offer of many
-//! pictures, or many offers, can't get more links than there's room for,
-//! but one picture may still take the account over (docs/SYNC.md §11).
+//! files, or many offers, can't get more links than there's room for,
+//! but one file may still take the account over (docs/SYNC.md §11).
 //!
-//! A picture no note shows any more is dropped by a device's word
+//! A file no note shows any more is dropped by a device's word
 //! (`BlobDrop`): marked, and gone [`KEEP`] later, unless a device offers,
 //! asks for or puts it meanwhile. The server can't read the notes to
 //! know; the wait is for the device that still has a use for it.
 //!
-//! An account removed has its removal recorded where its pictures are
-//! ([`Blobs::forget`]: `gone/<account>`), then its pictures go. A put by
+//! An account removed has its removal recorded where its files are
+//! ([`Blobs::forget`]: `gone/<account>`), then its files go. A put by
 //! a link given before (a bucket's can't be taken back) lands after, so
-//! the hourly sweep takes the pictures of accounts recorded so, and no
-//! others: pictures of an account the store doesn't know, and whose
+//! the hourly sweep takes the files of accounts recorded so, and no
+//! others: files of an account the store doesn't know, and whose
 //! removal isn't recorded, are kept. The store alone can't say an account
 //! is no more: one restored from an older backup, or a new one, doesn't
-//! know the accounts made since, and their pictures would all go.
+//! know the accounts made since, and their files would all go.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -49,28 +49,28 @@ use crate::hub::{ConnId, KEEP, Out};
 use crate::links::{Grant, LIFETIME, PUT_TAKES, Signer};
 use crate::quota::{FULL, Limit, READ_ONLY};
 
-/// The most a sealed picture may be: the largest picture, sealed.
+/// The most a sealed file may be: the largest file, sealed.
 pub const MAX: u64 = (MAX_BLOB + 64) as u64;
 
 /// The most links to put an account with a limit may have out at once,
-/// not yet used: past it, a picture offered gets no answer, and the
+/// not yet used: past it, a file offered gets no answer, and the
 /// device offers it again later (docs/SYNC.md §6).
 pub const PENDING: usize = 1024;
 
-/// What a device is told of a picture it offered without saying how long
-/// it is, or past what a picture may be.
-pub const UNSIZED: &str = "A picture was offered without its size, or bigger than a picture may be, so it wasn't taken: update Carnet to send it";
+/// What a device is told of a file it offered without saying how long
+/// it is, or past what a file may be.
+pub const UNSIZED: &str = "A file was offered without its size, or bigger than a file may be, so it wasn't taken: update Carnet to send it";
 
-/// Picture work the hub has allowed, for the worker to do.
+/// File work the hub has allowed, for the worker to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Job {
     /// Which of `ids` are kept (`BlobStored`), and where to put the rest
     /// (`BlobLink`), each of the length `sizes` says for it: while the
-    /// account may write, and has `room` left for pictures (`None`: no
+    /// account may write, and has `room` left for files (`None`: no
     /// limit), links out not yet used counted in.
     Offer { conn: ConnId, account: Vec<u8>, ids: Vec<[u8; 32]>, sizes: Vec<u64>, room: Option<u64>, writable: bool },
     /// What the account keeps: its `notes`' bytes, as the hub has them,
-    /// and its pictures' (`UsageIs`).
+    /// and its files' (`UsageIs`).
     Usage { conn: ConnId, account: Vec<u8>, notes: u64, limit: Limit },
     /// Where to fetch each of `ids` (`BlobLink`), or that it isn't kept
     /// (`BlobNone`).
@@ -78,11 +78,11 @@ pub enum Job {
     /// No note shows `ids` any more: each marked, to go [`KEEP`] from
     /// now (`BlobDropped`).
     Drop { conn: ConnId, account: Vec<u8>, ids: Vec<[u8; 32]> },
-    /// An account removed: its pictures go.
+    /// An account removed: its files go.
     Gone { account: Vec<u8> },
 }
 
-/// Where pictures are kept: by account and id, sealed.
+/// Where files are kept: by account and id, sealed.
 pub trait Blobs: Send {
     /// Its size, if kept.
     fn size(&mut self, account: &[u8], id: &[u8; 32]) -> Option<u64>;
@@ -90,7 +90,7 @@ pub trait Blobs: Send {
     /// or (`None`) to `GET` it, good until `expires`.
     fn link(&mut self, account: &[u8], id: &[u8; 32], put: Option<u64>, expires: u64) -> String;
     /// The account was removed: that recorded ([`Blobs::removed`]), and
-    /// its pictures go.
+    /// its files go.
     fn forget(&mut self, account: &[u8]);
     /// Marked to go, as of `now`, if kept and not marked already.
     fn mark(&mut self, account: &[u8], id: &[u8; 32], now: u64);
@@ -98,24 +98,24 @@ pub trait Blobs: Send {
     fn unmark(&mut self, account: &[u8], id: &[u8; 32]);
     /// Those marked before `before` gone: how many.
     fn sweep(&mut self, before: u64) -> u64;
-    /// Every picture the account keeps: its id, and its size.
+    /// Every file the account keeps: its id, and its size.
     fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)>;
-    /// The bytes the account's pictures take.
+    /// The bytes the account's files take.
     fn usage(&mut self, account: &[u8]) -> u64 {
         self.held(account).iter().map(|(_, n)| n).sum()
     }
     /// Where its links point, if not this server: the origin the web app
-    /// fetches pictures from, which its CSP allows (docs/SYNC.md §8).
+    /// fetches files from, which its CSP allows (docs/SYNC.md §8).
     fn origin(&self) -> Option<String> {
         None
     }
-    /// Every account with pictures here, whether it's still an account
+    /// Every account with files here, whether it's still an account
     /// or not: what [`Worker::sweep_unowned`] asks the store about.
     fn owners(&mut self) -> Vec<Vec<u8>> {
         Vec::new()
     }
     /// Every account whose removal was recorded here ([`Blobs::forget`]):
-    /// the only ones whose pictures the sweep takes without a device's
+    /// the only ones whose files the sweep takes without a device's
     /// word. None if it can't be read: nothing goes for a failure.
     fn removed(&mut self) -> HashSet<Vec<u8>> {
         HashSet::new()
@@ -163,7 +163,7 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// Pictures as files: `data/blobs/<account>/<id>`, each written whole
+/// Files on disk: `data/blobs/<account>/<id>`, each written whole
 /// (into `data/spool` first, then moved in), never changed after.
 #[derive(Clone, Debug)]
 pub struct BlobFiles {
@@ -194,7 +194,7 @@ impl BlobFiles {
     }
 
     /// The account's removal recorded, as of `now`, on the disk when this
-    /// returns: before its pictures go, so a crash between leaves the
+    /// returns: before its files go, so a crash between leaves the
     /// sweep to finish.
     pub fn record_removal(&self, account: &[u8], now: u64) -> io::Result<()> {
         let dir = self.root.join("gone");
@@ -213,7 +213,7 @@ impl BlobFiles {
         fs::read_dir(self.root.join("gone")).into_iter().flatten().flatten().filter_map(|e| unhex(&e.file_name().to_string_lossy()).filter(|a| !a.is_empty())).collect()
     }
 
-    /// Beside a picture marked to go: when it was, in seconds since 1970.
+    /// Beside a file marked to go: when it was, in seconds since 1970.
     fn mark_path(&self, account: &[u8], id: &[u8; 32]) -> PathBuf {
         self.root.join(hex(account)).join(format!("{}.drop", hex(id)))
     }
@@ -232,7 +232,7 @@ impl BlobFiles {
         let _ = fs::remove_file(self.mark_path(account, id));
     }
 
-    /// Every picture marked before `before`, gone: how many.
+    /// Every file marked before `before`, gone: how many.
     pub fn sweep(&self, before: u64) -> u64 {
         let mut gone = 0;
         for account in fs::read_dir(&self.root).into_iter().flatten().flatten() {
@@ -250,7 +250,7 @@ impl BlobFiles {
         gone
     }
 
-    /// `sealed` kept as `id`, unless it is already (a picture never
+    /// `sealed` kept as `id`, unless it is already (a file never
     /// changes under its id). True if it wasn't.
     pub fn keep(&self, account: &[u8], id: &[u8; 32], sealed: &[u8]) -> io::Result<bool> {
         use std::io::Write;
@@ -291,7 +291,7 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// A server's own pictures: files, and links to its own `/v1/blobs/…`.
+/// A server's own files: on disk, and links to its own `/v1/blobs/…`.
 pub struct FileBlobs {
     pub files: BlobFiles,
     origin: String,
@@ -317,7 +317,7 @@ impl Blobs for FileBlobs {
     fn forget(&mut self, account: &[u8]) {
         // Not recorded, not deleted: the sweep would never finish it.
         if let Err(e) = self.files.record_removal(account, unix_now()) {
-            eprintln!("carnet-server: pictures: recording an account's removal: {e}");
+            eprintln!("carnet-server: files: recording an account's removal: {e}");
             return;
         }
         let _ = fs::remove_dir_all(self.files.root.join(hex(account)));
@@ -362,7 +362,7 @@ impl Blobs for FileBlobs {
     }
 }
 
-/// Pictures in memory, and links that are only names, as an object
+/// Files in memory, and links that are only names, as an object
 /// store's on a public host would read ([`MEMORY_LINKS`]; a device follows
 /// no other kind): the tests', whose harnesses do the transfers with
 /// [`MemoryBlobs::serve`].
@@ -468,17 +468,17 @@ impl Blobs for MemoryBlobs {
 }
 
 /// What [`Worker::sweep_unowned`] found: how many accounts the store
-/// doesn't have hold pictures here, removed ones' gone, the rest kept.
+/// doesn't have hold files here, removed ones' gone, the rest kept.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Unowned {
-    /// Removed (recorded so): their pictures gone.
+    /// Removed (recorded so): their files gone.
     pub gone: usize,
     /// Never known to the store, or not any more, removal not recorded:
-    /// their pictures kept.
+    /// their files kept.
     pub kept: usize,
 }
 
-/// Accounts with pictures here that the store doesn't have, and whose
+/// Accounts with files here that the store doesn't have, and whose
 /// removal isn't recorded here: what a server refuses to start beside
 /// with no account of its own (`server::Start`), its records likely not
 /// put back. `has` is the store's word on each.
@@ -504,7 +504,7 @@ pub struct Counts {
     pub swept: AtomicU64,
 }
 
-/// An account's links to put out, by picture: its length, and when no
+/// An account's links to put out, by file: its length, and when no
 /// put by its link can still be going on (its link's time, and
 /// [`PUT_TAKES`] after: a put begun as the link runs out may go on as
 /// long).
@@ -514,8 +514,8 @@ pub struct Worker<B: Blobs> {
     pub blobs: B,
     pub counts: Arc<Counts>,
     /// Links to put given to accounts with a limit, not yet seen used: by
-    /// account, each picture's length and until when a put by its link
-    /// may go on. Counted against the room left until the picture is kept,
+    /// account, each file's length and until when a put by its link
+    /// may go on. Counted against the room left until the file is kept,
     /// or no put by the link can be going on: a link run out with puts
     /// begun before still coming frees no room for another round of them.
     pending: HashMap<Vec<u8>, Pending>,
@@ -543,7 +543,7 @@ impl<B: Blobs> Worker<B> {
         match job {
             Job::Offer { conn, account, ids, sizes, room, writable } => {
                 // With a limit, what's kept is listed once (it's counted
-                // anyway); without, each picture is asked after.
+                // anyway); without, each file is asked after.
                 let held: Option<HashMap<[u8; 32], u64>> = room.map(|_| self.blobs.held(&account).into_iter().collect());
                 let pending = self.pending.entry(account.clone()).or_default();
                 pending.retain(|id, (_, until)| *until > now && !held.as_ref().is_some_and(|h| h.contains_key(id)));
@@ -559,7 +559,7 @@ impl<B: Blobs> Worker<B> {
                         out(send(conn, Carnet::BlobStored { id }));
                         continue;
                     }
-                    // New pictures wait while the account can't write, or
+                    // New files wait while the account can't write, or
                     // is full, links out counted in: one may take it over,
                     // never two. One offered again has its link counted
                     // once.
@@ -621,10 +621,10 @@ impl<B: Blobs> Worker<B> {
                 out(send(conn, Carnet::BlobDropped { ids }));
             }
             Job::Usage { conn, account, notes, limit } => {
-                let pictures = self.blobs.usage(&account);
+                let files = self.blobs.usage(&account);
                 out(send(conn, Carnet::UsageIs {
                     notes,
-                    pictures,
+                    files,
                     limit: limit.bytes.unwrap_or(0),
                     writable: limit.writable,
                     plan: limit.plan,
@@ -638,7 +638,7 @@ impl<B: Blobs> Worker<B> {
         }
     }
 
-    /// Pictures marked to go more than [`KEEP`] before `now`, gone; links
+    /// Files marked to go more than [`KEEP`] before `now`, gone; links
     /// out whose puts can't be going on any more, forgotten.
     pub fn sweep(&mut self, now: u64) -> u64 {
         for p in self.pending.values_mut() {
@@ -650,10 +650,10 @@ impl<B: Blobs> Worker<B> {
         n
     }
 
-    /// Pictures of accounts removed, gone: a put by a link given before
+    /// Files of accounts removed, gone: a put by a link given before
     /// its account was deleted, or one the deletion missed. `unknown`
-    /// says which of the accounts with pictures here the store doesn't
-    /// have now (asked after the pictures are listed, so an account made
+    /// says which of the accounts with files here the store doesn't
+    /// have now (asked after the files are listed, so an account made
     /// meanwhile isn't among them); of those, only the ones whose removal
     /// is recorded here go ([`Blobs::removed`]). The rest are kept: the
     /// store may be older than they are (restored from a backup), or new.
@@ -675,7 +675,7 @@ impl<B: Blobs> Worker<B> {
         Unowned { gone: gone.len(), kept: kept.len() }
     }
 
-    /// `outs` with the picture work in them done: what the hub sent and
+    /// `outs` with the file work in them done: what the hub sent and
     /// what the worker did, in order, for a driver that runs both on one
     /// thread (a test's) to send on.
     pub fn done(&mut self, outs: Vec<Out>) -> Vec<Out> {
@@ -720,7 +720,7 @@ mod tests {
     }
 
     /// Offered: kept, or a link to put it; put there, kept. Asked for: a
-    /// link, or none. An account removed takes its pictures.
+    /// link, or none. An account removed takes its files.
     #[test]
     fn links_to_put_and_to_fetch_and_kept_only_once_there() {
         let mut w = Worker::memory();
@@ -745,10 +745,10 @@ mod tests {
         assert_eq!(w.counts.links.load(Ordering::Relaxed), 2, "one to put, one to fetch");
     }
 
-    /// An offer of thousands of pictures, or many offers, gets no more
+    /// An offer of thousands of files, or many offers, gets no more
     /// links than there's room for: each link out counts at the length
-    /// the device said, until its picture is kept or it runs out. One
-    /// picture may take the account over, never two; one offered again
+    /// the device said, until its file is kept or it runs out. One
+    /// file may take the account over, never two; one offered again
     /// is counted once; one without its size gets none.
     #[test]
     fn links_out_count_against_the_room_left() {
@@ -770,7 +770,7 @@ mod tests {
         };
         let t = 1_000_000;
 
-        // 5,000 pictures of 1,000 bytes, 10,000 left: ten links, and the
+        // 5,000 files of 1,000 bytes, 10,000 left: ten links, and the
         // rest refused, said once.
         let said = at(&mut w, offer((0..5000).map(id).collect(), 1000, 10_000), t);
         assert_eq!((links(&said), full(&said)), (10, 1));
@@ -782,7 +782,7 @@ mod tests {
         let said = at(&mut w, offer(vec![id(3)], 1000, 10_000), t + 2);
         assert_eq!(links(&said), 1);
         assert_eq!(w.pending(&acct), (10, 10_000));
-        // Put: kept, its link no longer counted, the picture is; still full.
+        // Put: kept, its link no longer counted, the file is; still full.
         let Some(Carnet::BlobLink { url, .. }) = said.into_iter().next() else { panic!() };
         w.blobs.serve(&Transfer::Put { id: id(3), url, sealed: vec![1; 1000] }).unwrap();
         let said = at(&mut w, offer(vec![id(3), id(6000)], 1000, 10_000), t + 3);
@@ -796,11 +796,11 @@ mod tests {
         assert_eq!(w.sweep(t + 10 * (LIFETIME + PUT_TAKES)), 0);
         assert_eq!(w.pending(&acct), (0, 0), "forgotten once past");
 
-        // One picture may take it over, never two.
+        // One file may take it over, never two.
         let mut w = Worker::memory();
         let said = at(&mut w, offer(vec![id(1), id(2)], 50_000, 10_000), t);
         assert_eq!((links(&said), full(&said)), (1, 1));
-        // Without a size, or past what a picture may be: no link.
+        // Without a size, or past what a file may be: no link.
         let said = at(&mut w, Job::Offer { conn: 1, account: acct.clone(), ids: vec![id(8), id(9)], sizes: vec![MAX + 1], room: None, writable: true }, t);
         assert_eq!(said, [Carnet::Refused { reason: UNSIZED.into() }]);
         // Only so many links out at once, however much room.
@@ -884,11 +884,11 @@ mod tests {
         let _ = fs::remove_dir_all(&data);
     }
 
-    /// Of the accounts with pictures the store doesn't have, only those
+    /// Of the accounts with files the store doesn't have, only those
     /// removed here lose them; the others are kept, and are what a store
     /// with no account refuses to start beside.
     #[test]
-    fn the_sweep_takes_only_removed_accounts_pictures() {
+    fn the_sweep_takes_only_removed_accounts_files() {
         let mut w = Worker::memory();
         for a in [&b"here"[..], b"removed", b"stranger"] {
             w.blobs.put(a, &[1; 32], b"sealed");

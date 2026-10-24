@@ -25,19 +25,19 @@ struct Side {
     /// Where the notes go not yet looked at here: what changed in them is
     /// sent, their places wait.
     layout_held: bool,
-    pictures: crate::pictures::Pictures,
+    files: crate::files::FileSync,
     /// The invites the server last listed as waiting, by hash.
     invites: Option<Vec<[u8; 32]>>,
 }
 
 struct Two {
     hub: Hub<Memory>,
-    /// The picture worker, as the server runs one beside the hub.
+    /// The file worker, as the server runs one beside the hub.
     worker: carnet_server::blobs::Worker<carnet_server::blobs::MemoryBlobs>,
     sides: Vec<Side>,
     /// The devices' clock, in seconds since 1970.
     now: u64,
-    /// What the picture storage answers every send with, when it refuses
+    /// What the file storage answers every send with, when it refuses
     /// them (`HTTP 403`); and how many sends were tried.
     refuse: Option<String>,
     puts: usize,
@@ -57,7 +57,7 @@ impl Two {
 
     /// Two devices of a new account (a vault key of its own), each with
     /// the notes folder given, as earlier runs left it (its replica and
-    /// pictures index too), or a new one.
+    /// files index too), or a new one.
     fn with_folders(name: &str, dirs: [Option<PathBuf>; 2]) -> Self {
         let mut hub = Hub::new(ORIGIN, Memory::default());
         hub.store_mut().add_account(ACCOUNT, true).unwrap();
@@ -73,7 +73,7 @@ impl Two {
                 let dir = dir.unwrap_or_else(|| temp(&format!("{name}-{i}")));
                 let store = Store::open(dir.clone()).unwrap();
                 Side {
-                    pictures: crate::pictures::Pictures::open(store.replica_dir().as_deref()),
+                    files: crate::files::FileSync::open(store.replica_dir().as_deref()),
                     store,
                     session: Session::new(id, 0),
                     conn: i as ConnId + 1,
@@ -106,20 +106,20 @@ impl Two {
             side.session.receive(&bytes, replica, &mut OsRandom);
             for e in side.session.take_events() {
                 if matches!(e, Event::BlobWanted(_) | Event::BlobStored(_) | Event::BlobGot(..) | Event::BlobFailed(_)) {
-                    side.pictures.event(&e, &mut side.store, &mut side.session, &mut OsRandom).unwrap();
+                    side.files.event(&e, &mut side.store, &mut side.session, &mut OsRandom).unwrap();
                     continue;
                 }
-                // As the app does: pictures held back, offered again once
+                // As the app does: files held back, offered again once
                 // there's room.
                 if let Event::Refused(why) = &e
                     && (why == carnet_sync::session::FULL || why == carnet_sync::session::READ_ONLY)
                 {
-                    side.pictures.held_back();
+                    side.files.held_back();
                 }
                 if let Event::Usage(u) = &e
                     && u.has_room()
                 {
-                    side.pictures.retry();
+                    side.files.retry();
                 }
                 // As the app does: the codes of invites no longer waiting
                 // forgotten in the vault.
@@ -155,12 +155,12 @@ impl Two {
                     s.store.reconcile(s.session.has_joined(vault::ROOM)).unwrap();
                 }
                 if s.session.has_joined(vault::ROOM) && !s.layout_held {
-                    s.pictures.tick(&mut s.store, &mut s.session);
+                    s.files.tick(&mut s.store, &mut s.session);
                 }
                 s.vault_in = false;
                 let keys = s.store.take_changed();
                 let shown = s.store.shown_by(&keys);
-                s.pictures.want_back(&s.store, &mut s.session, &shown);
+                s.files.want_back(&s.store, &mut s.session, &shown);
                 for key in keys {
                     let replica = s.store.replica.as_mut().unwrap();
                     s.session.saved(&key.to_string(), replica, &mut OsRandom);
@@ -169,14 +169,14 @@ impl Two {
                     let replica = s.store.replica.as_mut().unwrap();
                     s.session.saved(vault::ROOM, replica, &mut OsRandom);
                 }
-                // Deleted forever, and pictures out of use: told.
+                // Deleted forever, and files out of use: told.
                 let gone = s.store.take_forgotten();
                 for key in &gone.keys {
                     s.session.remove_room(&key.to_string());
                 }
-                let ids: Vec<_> = gone.pictures.iter().map(|h| unhex(h)).collect();
+                let ids: Vec<_> = gone.files.iter().map(|h| unhex(h)).collect();
                 s.session.drop_blobs(&ids);
-                // Pictures' HTTP, done as the server's links would have it.
+                // Files' HTTP, done as the server's links would have it.
                 for t in s.session.take_transfers() {
                     moved = true;
                     let put = matches!(t, carnet_sync::session::Transfer::Put { .. });
@@ -185,11 +185,11 @@ impl Two {
                         Some(answer) if put => Err(answer.clone()),
                         _ => self.worker.blobs.serve(&t),
                     };
-                    // As the app does: the pictures hear first.
-                    s.pictures.transferred(t.id(), put, &result);
+                    // As the app does: the files hear first.
+                    s.files.transferred(t.id(), put, &result);
                     s.session.transferred(t.id(), put, result);
                     for e in s.session.take_events() {
-                        s.pictures.event(&e, &mut s.store, &mut s.session, &mut OsRandom).unwrap();
+                        s.files.event(&e, &mut s.store, &mut s.session, &mut OsRandom).unwrap();
                     }
                 }
                 let (conn, out) = (s.conn, s.session.take_out());
@@ -683,7 +683,7 @@ fn pictures_follow_their_notes() {
     let id = two.sides[0].session.blob_id(&photo);
     let kept = two.worker.blobs.get(ACCOUNT, &id).expect("kept");
     assert!(!kept.windows(64).any(|w| w == &photo[..64]));
-    assert!(two.sides[1].pictures_arrived());
+    assert!(two.sides[1].files_arrived());
 }
 
 /// A picture offered while the account is full is held back by the
@@ -715,14 +715,14 @@ fn a_picture_held_back_while_full_goes_once_there_is_room() {
     for _ in 0..4 {
         two.pump();
     }
-    let p = &two.sides[0].pictures;
+    let p = &two.sides[0].files;
     assert!(p.is_holding(), "held back");
     assert!(!p.busy(), "not waited on");
     assert!(p.busy_paths().contains(&src), "but kept from the sweep");
     assert!(!two.sides[1].dir.join(&src).exists());
     // More pumps (ticks) send nothing more while full.
     two.pump();
-    assert!(two.sides[0].pictures.is_holding());
+    assert!(two.sides[0].files.is_holding());
 
     *plan.0.lock().unwrap() = Limit { bytes: Some(1 << 30), writable: true, plan: "Family".into(), until: 0 };
     let outs = two.hub.limit_changed(ACCOUNT);
@@ -730,11 +730,11 @@ fn a_picture_held_back_while_full_goes_once_there_is_room() {
     for _ in 0..4 {
         two.pump();
     }
-    assert!(!two.sides[0].pictures.is_holding());
+    assert!(!two.sides[0].files.is_holding());
     assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok().as_deref(), Some(photo.as_slice()), "on the other device");
 }
 
-/// The server's picture storage turns a picture away (an HTTP 4xx): it
+/// The server's file storage turns a picture away (an HTTP 4xx): it
 /// waits, Settings says why in the web's words, and it's tried again
 /// after 15 s, then 30, and so on, not at every tick. A failure that
 /// passes (503) waits as long, and says nothing. Once the storage takes
@@ -755,20 +755,20 @@ fn a_picture_the_storage_turns_away_waits_says_why_and_is_tried_less_often() {
     for _ in 0..4 {
         two.pump();
     }
-    let p = &two.sides[0].pictures;
+    let p = &two.sides[0].files;
     assert_eq!(two.puts, 1, "sent once");
     assert_eq!((p.waiting(), p.held_why(), p.put_wait()), (1, None, Duration::from_secs(15)), "busy for a while: waits, quietly");
 
     // Turned away: said, and the wait doubles.
     two.refuse = Some("HTTP 403".into());
-    two.sides[0].pictures.wait_over();
+    two.sides[0].files.wait_over();
     for _ in 0..4 {
         two.pump();
     }
-    let p = &two.sides[0].pictures;
+    let p = &two.sides[0].files;
     assert_eq!(two.puts, 2);
-    assert_eq!(p.held_why(), Some(crate::pictures::TURNED_AWAY));
-    assert_eq!(p.held_why(), Some("The server's picture storage turned new pictures away, so they stay on this device for now."));
+    assert_eq!(p.held_why(), Some(crate::files::TURNED_AWAY));
+    assert_eq!(p.held_why(), Some("The server's file storage turned new files away, so they stay on this device for now."));
     assert_eq!((p.waiting(), p.put_wait()), (1, Duration::from_secs(30)));
     assert!(p.busy_paths().contains(&src), "kept from the sweep");
     // Ticks meanwhile send nothing.
@@ -778,19 +778,19 @@ fn a_picture_the_storage_turns_away_waits_says_why_and_is_tried_less_often() {
     assert_eq!(two.puts, 2, "not tried at every tick");
     // Up to five minutes, no more.
     for _ in 0..6 {
-        two.sides[0].pictures.wait_over();
+        two.sides[0].files.wait_over();
         two.pump();
     }
-    assert_eq!(two.sides[0].pictures.put_wait(), Duration::from_secs(5 * 60));
+    assert_eq!(two.sides[0].files.put_wait(), Duration::from_secs(5 * 60));
     assert!(!two.sides[1].dir.join(&src).exists());
 
     // Taken: it goes, and nothing's said; the next failure waits 15 s.
     two.refuse = None;
-    two.sides[0].pictures.wait_over();
+    two.sides[0].files.wait_over();
     for _ in 0..4 {
         two.pump();
     }
-    let p = &two.sides[0].pictures;
+    let p = &two.sides[0].files;
     assert_eq!((p.waiting(), p.held_why(), p.put_wait()), (0, None, Duration::ZERO));
     assert_eq!(std::fs::read(two.sides[1].dir.join(&src)).ok().as_deref(), Some(photo.as_slice()), "on the other device");
 
@@ -807,9 +807,9 @@ fn a_picture_the_storage_turns_away_waits_says_why_and_is_tried_less_often() {
     for _ in 0..4 {
         two.pump();
     }
-    assert_eq!(two.sides[0].pictures.held_why(), Some(crate::pictures::TURNED_AWAY));
-    two.sides[0].pictures.retry();
-    assert_eq!(two.sides[0].pictures.held_why(), None, "a new login");
+    assert_eq!(two.sides[0].files.held_why(), Some(crate::files::TURNED_AWAY));
+    two.sides[0].files.retry();
+    assert_eq!(two.sides[0].files.held_why(), None, "a new login");
 }
 
 /// A picture beside its note is the user's: it stays on its device, not
@@ -834,7 +834,7 @@ fn a_picture_beside_its_note_stays_until_moved_into_carnet() {
         two.pump();
     }
     for side in 0..2 {
-        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().pictures();
+        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().files();
         assert!(vault.is_empty(), "not in {side}'s vault: {vault:?}");
     }
     assert!(!two.sides[1].dir.join("Home/hill.jpg").exists());
@@ -848,9 +848,9 @@ fn a_picture_beside_its_note_stays_until_moved_into_carnet() {
     for _ in 0..4 {
         two.pump();
     }
-    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&hill));
+    let id = crate::files::hex(&two.sides[0].session.blob_id(&hill));
     for side in 0..2 {
-        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().pictures();
+        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().files();
         assert_eq!(vault.get("attachments/hill.jpg"), Some(&id), "in {side}'s vault");
     }
     assert_eq!(std::fs::read(two.sides[1].dir.join("attachments/hill.jpg")).ok(), Some(hill.clone()));
@@ -859,21 +859,21 @@ fn a_picture_beside_its_note_stays_until_moved_into_carnet() {
     // As an earlier Carnet left it: a picture beside a note, named.
     let b = &mut two.sides[1];
     std::fs::write(b.dir.join("Home/old.jpg"), b"old").unwrap();
-    assert!(b.store.set_picture("Home/old.jpg", &id));
+    assert!(b.store.set_file("Home/old.jpg", &id));
     for _ in 0..4 {
         two.pump();
     }
     assert!(!two.sides[0].dir.join("Home/old.jpg").exists(), "never fetched: it isn't Carnet's");
     // The next run lets it go.
     let a = &mut two.sides[0];
-    a.pictures = crate::pictures::Pictures::open(a.store.replica_dir().as_deref());
+    a.files = crate::files::FileSync::open(a.store.replica_dir().as_deref());
     for _ in 0..4 {
         two.pump();
     }
     for side in 0..2 {
         let r = two.sides[side].store.replica.as_ref().unwrap();
-        assert!(!r.vault().pictures().contains_key("Home/old.jpg"), "let go in {side}'s vault");
-        assert!(r.vault().pictures().contains_key("attachments/hill.jpg"));
+        assert!(!r.vault().files().contains_key("Home/old.jpg"), "let go in {side}'s vault");
+        assert!(r.vault().files().contains_key("attachments/hill.jpg"));
     }
     assert!(two.sides[1].dir.join("Home/old.jpg").exists(), "the file stays");
 }
@@ -895,15 +895,15 @@ fn a_picture_no_note_shows_is_swept_everywhere_and_comes_back_when_shown() {
     let t0 = std::time::SystemTime::now();
     let none = std::collections::BTreeSet::new();
     let a = &mut two.sides[0];
-    assert!(a.store.sweep_pictures(&none, t0).unwrap().is_empty());
-    assert_eq!(a.store.sweep_pictures(&none, t0 + crate::store::SWEEP_GRACE + std::time::Duration::from_secs(60)).unwrap(), vec![src.clone()]);
+    assert!(a.store.sweep_files(&none, t0).unwrap().is_empty());
+    assert_eq!(a.store.sweep_files(&none, t0 + crate::store::SWEEP_GRACE + std::time::Duration::from_secs(60)).unwrap(), vec![src.clone()]);
     for _ in 0..4 {
         two.pump();
     }
     assert!(!two.sides[0].dir.join(&src).exists() && two.sides[0].dir.join(".trash").join(&src).exists());
     assert!(!two.sides[1].dir.join(&src).exists(), "the other device let go of it");
     for side in 0..2 {
-        assert!(two.sides[side].store.replica.as_ref().unwrap().vault().dropped_pictures().contains(&src));
+        assert!(two.sides[side].store.replica.as_ref().unwrap().vault().dropped_files().contains(&src));
     }
 
     // Shown again: back, and named again.
@@ -967,16 +967,16 @@ fn pictures_go_to_a_new_account_too() {
         assert_ne!(id, old, "ids are the account's");
         assert!(second.worker.blobs.get(ACCOUNT, &id).is_some(), "{path} on the new account's server");
         for side in 0..2 {
-            let vault = second.sides[side].store.replica.as_ref().unwrap().vault().pictures();
-            assert_eq!(vault.get(path), Some(&crate::pictures::hex(&id)), "{path} named by its new id in {side}'s vault");
+            let vault = second.sides[side].store.replica.as_ref().unwrap().vault().files();
+            assert_eq!(vault.get(path), Some(&crate::files::hex(&id)), "{path} named by its new id in {side}'s vault");
         }
         assert_eq!(std::fs::read(second.sides[1].dir.join(path)).ok().as_ref(), Some(bytes), "{path} on the new device");
     }
 }
 
 impl Side {
-    fn pictures_arrived(&mut self) -> bool {
-        std::mem::take(&mut self.pictures.arrived)
+    fn files_arrived(&mut self) -> bool {
+        std::mem::take(&mut self.files.arrived)
     }
 }
 
@@ -1034,7 +1034,7 @@ fn a_note_deleted_forever_goes_everywhere_and_its_pictures_with_it() {
         assert!(s.store.replica.as_ref().unwrap().entry(key).is_none(), "{side} forgot it, history and all");
         assert!(!s.dir.join(&only_src).exists(), "its own picture gone from {side}");
         assert!(s.dir.join(&shared_src).exists(), "the shared one stays on {side}");
-        assert!(s.store.replica.as_ref().unwrap().vault().dropped_pictures().contains(&only_src));
+        assert!(s.store.replica.as_ref().unwrap().vault().dropped_files().contains(&only_src));
         assert!(two.note(side, "Album").is_some());
     }
     assert!(two.hub.store().is_removed(ACCOUNT, &key.to_string()));
@@ -1066,9 +1066,9 @@ fn a_picture_under_two_names_stays_while_one_is_shown() {
     for _ in 0..4 {
         two.pump();
     }
-    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&photo));
+    let id = crate::files::hex(&two.sides[0].session.blob_id(&photo));
     for p in [&first, &second] {
-        assert_eq!(two.sides[1].store.replica.as_ref().unwrap().vault().pictures().get(p), Some(&id));
+        assert_eq!(two.sides[1].store.replica.as_ref().unwrap().vault().files().get(p), Some(&id));
         assert!(two.sides[1].dir.join(p).exists(), "{p} on the other device");
     }
 
@@ -1083,8 +1083,8 @@ fn a_picture_under_two_names_stays_while_one_is_shown() {
     for side in 0..2 {
         let s = &two.sides[side];
         let vault = s.store.replica.as_ref().unwrap().vault();
-        assert!(vault.dropped_pictures().contains(&first), "{side}");
-        assert_eq!(vault.pictures().get(&second), Some(&id), "{side}");
+        assert!(vault.dropped_files().contains(&first), "{side}");
+        assert_eq!(vault.files().get(&second), Some(&id), "{side}");
         assert!(!s.dir.join(&first).exists() && s.dir.join(&second).exists(), "{side}");
     }
     assert!(!two.worker.blobs.is_marked(ACCOUNT, &unhex(&id)), "still shown: kept");
@@ -1134,7 +1134,7 @@ fn a_picture_an_old_version_shows_stays_and_a_dropped_one_comes_back() {
     // Dropped anyway (as a picture typed into a note a letter at a time
     // could be): a note showing it again fetches it back.
     let a = &mut two.sides[0].store;
-    let (_, unused) = a.replica.as_ref().unwrap().vault().drop_picture(&src);
+    let (_, unused) = a.replica.as_ref().unwrap().vault().drop_file(&src);
     assert!(unused.is_some());
     std::fs::remove_file(two.sides[0].dir.join(&src)).unwrap();
     let a = &mut two.sides[0].store;
@@ -1147,7 +1147,7 @@ fn a_picture_an_old_version_shows_stays_and_a_dropped_one_comes_back() {
     }
     let s = &two.sides[0];
     assert_eq!(std::fs::read(s.dir.join(&src)).ok().as_deref(), Some(photo.as_slice()), "back, byte for byte");
-    assert_eq!(s.store.replica.as_ref().unwrap().vault().pictures().get(&src), Some(&crate::pictures::hex(&id)), "named again");
+    assert_eq!(s.store.replica.as_ref().unwrap().vault().files().get(&src), Some(&crate::files::hex(&id)), "named again");
 }
 
 impl Two {
@@ -1310,7 +1310,7 @@ fn a_vault_naming_places_outside_the_notes_folder_writes_nothing_there() {
     for _ in 0..4 {
         two.pump();
     }
-    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&photo));
+    let id = crate::files::hex(&two.sides[0].session.blob_id(&photo));
 
     // Written as no Carnet writes them: straight into the vault's maps.
     let abs = base.join("abs").to_string_lossy().into_owned();
@@ -1354,7 +1354,7 @@ fn a_vault_naming_places_outside_the_notes_folder_writes_nothing_there() {
         assert_eq!(b.store.notes[i].path.as_deref(), Some(b.dir.join(format!("{title}.md")).as_path()), "at the top, named for its title");
     }
     assert!(b.store.folders.is_empty(), "{:?}", b.store.folders);
-    assert_eq!(b.store.replica.as_ref().unwrap().vault().pictures().into_keys().collect::<Vec<_>>(), std::slice::from_ref(&src));
+    assert_eq!(b.store.replica.as_ref().unwrap().vault().files().into_keys().collect::<Vec<_>>(), std::slice::from_ref(&src));
     assert_eq!(std::fs::read(b.dir.join(&src)).ok(), Some(photo), "the picture's own path is fetched");
     let mut outside: Vec<String> = std::fs::read_dir(&base).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     outside.sort();
@@ -1393,7 +1393,7 @@ fn only_pictures_and_documents_come_by_sync() {
     let txt = two.sides[1].dir.join("attachments/notes.txt");
     assert_eq!(std::fs::read(&txt).ok().as_deref(), Some(&b"plain words"[..]), "the document comes");
     assert!(!two.sides[1].dir.join("attachments/fix.sh").exists());
-    let id = crate::pictures::hex(&two.sides[0].session.blob_id(&photo));
+    let id = crate::files::hex(&two.sides[0].session.blob_id(&photo));
 
     // The picture's id under names that would run, written as no Carnet
     // writes them, in the pictures' map and the documents'.

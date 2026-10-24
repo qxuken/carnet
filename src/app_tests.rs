@@ -6096,7 +6096,7 @@ fn settings_sync_draws_a_servers_impossible_times() {
     devices.push(DeviceInfo { id: vec![9; 16], name: Some("Old phone".into()), seen: far, you: false, online: false });
     a.sync.devices = Some(devices);
     a.sync.passkeys = vec![PasskeyInfo { id: [7; 32], name: Some("A far passkey".into()), credential: vec![1], made: far }];
-    a.sync.usage = Some(Usage { notes: far, pictures: far, limit: Some(far), writable: true, plan: "Forever".into(), until: Some(far) });
+    a.sync.usage = Some(Usage { notes: far, files: far, limit: Some(far), writable: true, plan: "Forever".into(), until: Some(far) });
     a.sync.invites = Some(crate::sync::Invites {
         owner: true,
         waiting: vec![InviteRow { hash: [3; 32], until: far }],
@@ -6262,7 +6262,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
             std::thread::sleep(Duration::from_millis(5));
         }
     };
-    let named = |x: &Carnet| x.store.replica.as_ref().is_some_and(|r| r.vault().pictures().keys().any(|p| p.starts_with("attachments/")));
+    let named = |x: &Carnet| x.store.replica.as_ref().is_some_and(|r| r.vault().files().keys().any(|p| p.starts_with("attachments/")));
     let (mut a, mut da, dir_a) = fresh("held-a");
     a.sync_server = origin.clone();
     a.sync_code = invite.text();
@@ -6279,7 +6279,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(!named(&a), "not sent while full");
-    assert_eq!(a.sync.pictures_waiting(), 1, "counted as waiting, not up to date");
+    assert_eq!(a.sync.files_waiting(), 1, "counted as waiting, not up to date");
 
     let hub = handle.lock().unwrap().clone().unwrap();
     let account = rt.block_on(async move { hub.run(|hub, _| hub.store().account_list()[0].0.clone()).await.unwrap() });
@@ -6291,7 +6291,7 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     until("sent, once there's room", &mut a, &mut da, &named);
     assert!(t0.elapsed() < Duration::from_secs(10));
     assert_eq!(a.sync.error, None, "full, taken back");
-    until("nothing waiting", &mut a, &mut da, &|x| x.sync.pictures_waiting() == 0);
+    until("nothing waiting", &mut a, &mut da, &|x| x.sync.files_waiting() == 0);
 
     let _ = stop.send(());
     rt.block_on(served).unwrap().unwrap();
@@ -6659,9 +6659,9 @@ fn two_apps_sync_through_a_server() {
     assert!(laptop.online && list.iter().all(|d| d.online));
     assert!(drawn(&mut da, &mut a, &format!("Online now \u{b7} {}", short(&laptop.id))));
     // Over a (tiny) plan's limit: said plainly, and what it means.
-    a.sync.usage = Some(carnet_sync::session::Usage { notes: 700, pictures: 41, limit: Some(42), writable: true, plan: "Tiny".into(), until: None });
+    a.sync.usage = Some(carnet_sync::session::Usage { notes: 700, files: 41, limit: Some(42), writable: true, plan: "Tiny".into(), until: None });
     assert!(drawn(&mut da, &mut a, "741 bytes of 42 bytes used \u{b7} Tiny"));
-    assert!(drawn(&mut da, &mut a, "Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
+    assert!(drawn(&mut da, &mut a, "Over this plan's 42 bytes: new files stay on this device until there's room. Notes still sync."));
     // An invite waiting, its code in the vault, so on the laptop too.
     a.on_plain(Msg::SyncInvite);
     let waiting = carnet_sync::invite::InviteCode::parse(&a.sync.invite.clone().expect("an invite")).unwrap();
@@ -7230,18 +7230,18 @@ fn deleting_a_folder_with_only_other_files_moves_it_to_the_trash() {
 }
 
 /// Settings → Sync's lines of the account: at or over a plan's limit, what
-/// that means (the server takes no new picture, and every note's text);
-/// changes and pictures waiting, counted.
+/// that means (the server takes no new file, and every note's text);
+/// changes and files waiting, counted.
 #[test]
 fn over_a_plans_limit_and_changes_waiting_are_said_plainly() {
     use super::settings_view::{over_limit, waiting_words};
     assert_eq!(over_limit(41, 42), None);
-    assert_eq!(over_limit(741, 42).as_deref(), Some("Over this plan's 42 bytes: new pictures stay on this device until there's room. Notes still sync."));
-    assert_eq!(over_limit(2_000_000, 2_000_000).as_deref(), Some("Reached this plan's 2.0 MB: new pictures stay on this device until there's room. Notes still sync."));
+    assert_eq!(over_limit(741, 42).as_deref(), Some("Over this plan's 42 bytes: new files stay on this device until there's room. Notes still sync."));
+    assert_eq!(over_limit(2_000_000, 2_000_000).as_deref(), Some("Reached this plan's 2.0 MB: new files stay on this device until there's room. Notes still sync."));
     assert_eq!(waiting_words(1, 0), "Waiting to send 1 change");
     assert_eq!(waiting_words(3, 0), "Waiting to send 3 changes");
-    assert_eq!(waiting_words(0, 1), "Waiting to send 1 picture");
-    assert_eq!(waiting_words(2, 1), "Waiting to send 2 changes and 1 picture");
+    assert_eq!(waiting_words(0, 1), "Waiting to send 1 file");
+    assert_eq!(waiting_words(2, 1), "Waiting to send 2 changes and 1 file");
 }
 
 /// A notice is one line. One too long for the room beside the note's meta
@@ -7549,7 +7549,7 @@ fn a_picture_on_its_way_by_sync_says_so_then_shows() {
     type_in(&mut a, &mut da, "The boats");
     a.save_current();
     until("A's picture on the server", &mut [(&mut a, &mut da)], &|x| {
-        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty()) && x[0].0.sync.pictures_waiting() == 0
+        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty()) && x[0].0.sync.files_waiting() == 0
     });
     a.on_plain(Msg::SyncPair);
     until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
@@ -7561,7 +7561,7 @@ fn a_picture_on_its_way_by_sync_says_so_then_shows() {
     b.sync_code = a.sync.code.clone().unwrap();
     b.on_plain(Msg::SyncStart);
     until("B has the note, its picture asked for", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
-        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().pictures().is_empty())
+        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty())
     });
     let i = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
     b.open(i);

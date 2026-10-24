@@ -72,7 +72,7 @@ pub struct Net {
     pub next: ConnId,
     pub meddle: Option<(ConnId, Meddle)>,
     pub denied: Vec<(ConnId, String)>,
-    /// The picture worker, as the server runs one beside the hub.
+    /// The file worker, as the server runs one beside the hub.
     pub worker: Worker<MemoryBlobs>,
 }
 
@@ -127,7 +127,7 @@ impl Net {
         }
     }
 
-    /// Everything delivered, both ways, in order; pictures' HTTP done as
+    /// Everything delivered, both ways, in order; files' HTTP done as
     /// the server's links would have it.
     pub fn pump(&mut self) {
         for _ in 0..10_000 {
@@ -381,7 +381,7 @@ pub fn empty(s3: &carnet_server::s3::S3Blobs, config: &carnet_server::s3::S3Conf
     s3.delete_all(&keys).unwrap();
 }
 
-/// A picture worker on memory, as the server runs one beside the hub.
+/// A file worker on memory, as the server runs one beside the hub.
 pub fn worker() -> Worker<MemoryBlobs> {
     Worker::memory()
 }

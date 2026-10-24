@@ -1,7 +1,7 @@
 //! TLS on the server's own listener (tls.rs), as behind Cloudflare with
 //! an Origin certificate and Authenticated Origin Pulls: CAs of the test's
 //! own making stand in for Cloudflare's. A device with the client
-//! certificate makes its account, logs in and puts and fetches a picture,
+//! certificate makes its account, logs in and puts and fetches a file,
 //! all over TLS; a client without one, or with one another CA signed, or
 //! speaking plain HTTP, gets nothing. Without a client CA, TLS alone.
 
@@ -184,7 +184,7 @@ async fn settle(session: &mut Session, ws: &mut Socket) -> Vec<Event> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn over_tls_with_a_client_certificate_a_device_logs_in_and_puts_a_picture() {
+async fn over_tls_with_a_client_certificate_a_device_logs_in_and_puts_a_file() {
     use carnet_sync::wire::{self, Carnet, Frame};
     let data = temp("tls");
     let certs = Certs::make(&data);
@@ -223,7 +223,7 @@ async fn over_tls_with_a_client_certificate_a_device_logs_in_and_puts_a_picture(
     let said = settle(&mut session, &mut ws).await;
     assert!(said.contains(&Event::LoggedIn), "{said:?}");
 
-    // A picture, put and fetched by its links, over TLS.
+    // A file, put and fetched by its links, over TLS.
     let pic: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
     let id = session.blob_id(&pic);
     session.offer_blobs(vec![(id, pic.len())]);

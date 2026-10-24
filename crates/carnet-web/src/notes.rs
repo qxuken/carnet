@@ -144,7 +144,7 @@ pub enum Said {
     /// the account's devices, but those from before Carnet kept them there)
     /// and every account.
     Invites { owner: bool, waiting: Vec<(InviteRow, Option<String>)>, accounts: Vec<AccountRow> },
-    /// A picture put in here is on the server, and in the vault: its id.
+    /// A file put in here is on the server, and in the vault: its id.
     Uploaded(String),
     /// What the account keeps on the server, and may, as asked.
     Usage(carnet_sync::session::Usage),
@@ -236,9 +236,9 @@ pub struct Notes {
     /// How many times that was read: what taking notes in costs, which
     /// stays a few reads however many come (tests/viewer.rs).
     vault_reads: Cell<usize>,
-    /// Pictures come, by id: the page shows them.
-    pub pictures: Vec<([u8; 32], Vec<u8>)>,
-    /// Pictures asked for that didn't come (the server hasn't one, or it
+    /// Files come, by id: the page shows them.
+    pub files: Vec<([u8; 32], Vec<u8>)>,
+    /// Files asked for that didn't come (the server hasn't one, or it
     /// didn't open, or the fetch failed): the page says so, and asks
     /// again when the notes change.
     pub missing: Vec<[u8; 32]>,
@@ -256,42 +256,42 @@ pub struct Notes {
     /// in. Such a note reaches the vault (and the other devices) with its
     /// first words; left blank, it's dropped.
     fresh: HashMap<String, String>,
-    /// Pictures put in here and not yet on the server, by id: every path
-    /// each goes at (`attachments/…`; the same picture put in twice is
+    /// Files put in here and not yet on the server, by id: every path
+    /// each goes at (`attachments/…`; the same file put in twice is
     /// sent once and named at both) and its bytes. Offered once logged
     /// in, sent if the server lacks it, then put in the vault, so no
-    /// device asks for a picture the server hasn't got.
+    /// device asks for a file the server hasn't got.
     uploads: HashMap<BlobId, (Vec<String>, Vec<u8>)>,
     /// Of those, the ones offered, the server's word awaited, and the
     /// ones it wanted, being sent: not offered again meanwhile. One the
     /// server held back (the account full, or read only) is neither.
     offered: HashSet<BlobId>,
     sending: HashSet<BlobId>,
-    /// Dropped pictures shown again, asked for by the id they had: the
+    /// Dropped files shown again, asked for by the id they had: the
     /// paths each is named at again when it comes.
     reviving: HashMap<BlobId, Vec<String>>,
-    /// Why the pictures put in here wait, when it's something trying
-    /// again won't mend by itself (the server's picture storage out of
+    /// Why the files put in here wait, when it's something trying
+    /// again won't mend by itself (the server's file storage out of
     /// reach, or turning them away): for the page to say. They're tried
     /// again all the same; forgotten once one goes, or at a new login.
     held: Option<&'static str>,
 }
 
 /// What a put that got no answer at all is said as ([`Notes::transferred`]),
-/// by a page that knows the server itself is reachable: the picture
+/// by a page that knows the server itself is reachable: the file
 /// storage is out of this browser's reach (as one that doesn't let pages
 /// of another host put to it is).
 pub const UNREACHABLE: &str = "unreachable";
 
-/// Why pictures wait when the server's picture storage refuses them.
-pub use carnet_sync::session::PICTURES_TURNED_AWAY as TURNED_AWAY;
+/// Why files wait when the server's file storage refuses them.
+pub use carnet_sync::session::FILES_TURNED_AWAY as TURNED_AWAY;
 
 /// Why a put that failed (`error`, as [`Notes::transferred`] has it)
 /// won't go however often it's tried, in words; none for a failure that
 /// passes (offline, a timeout, the storage busy or down a while).
 fn lasting(error: &str) -> Option<&'static str> {
     if error == UNREACHABLE {
-        return Some(carnet_sync::session::PICTURES_UNREACHABLE);
+        return Some(carnet_sync::session::FILES_UNREACHABLE);
     }
     let code: u16 = error.strip_prefix("HTTP ")?.trim().parse().ok()?;
     ((400..500).contains(&code) && code != 408 && code != 429).then_some(TURNED_AWAY)
@@ -330,9 +330,10 @@ impl Notes {
             ring: me.ring.clone(),
             name: name.to_string(),
         };
-        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: BTreeSet::new(), vault_moved: false, layout: RefCell::new(None), vault_reads: Cell::new(0), pictures: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), reviving: HashMap::new(), held: None };
-        // Deleted forever, and pictures dropped, the server hasn't said
-        // done: said again once in.
+        let mut notes = Notes { session: Session::new(id, cursor), me, rooms, changed: BTreeSet::new(), vault_moved: false, layout: RefCell::new(None), vault_reads: Cell::new(0), files: Vec::new(), missing: Vec::new(), errors: Vec::new(), said: Vec::new(), summaries: RefCell::new(HashMap::new()), kept: RefCell::new(kept), fresh: HashMap::new(), uploads: HashMap::new(), offered: HashSet::new(), sending: HashSet::new(), reviving: HashMap::new(), held: None };
+        // Deleted forever, and files dropped, the server hasn't said
+        // done: said again once in (`picture <id>`, as kept since only
+        // pictures synced).
         for line in forgotten.lines() {
             match line.split_once(' ') {
                 Some(("room", room)) => notes.session.remove_room(room),
@@ -397,7 +398,7 @@ impl Notes {
         self.take_events(rng);
     }
 
-    /// Pictures to put or fetch over HTTP, by the links the server gave.
+    /// Files to put or fetch over HTTP, by the links the server gave.
     pub fn take_transfers(&mut self) -> Vec<Transfer> {
         self.session.take_transfers()
     }
@@ -428,12 +429,12 @@ impl Notes {
                     let vault = self.rooms.doc(vault::ROOM);
                     let mut changed = false;
                     for p in paths {
-                        changed |= vault.set_picture(&p, &hex(&id));
+                        changed |= vault.set_file(&p, &hex(&id));
                     }
                     if changed {
                         self.session.saved(vault::ROOM, &mut self.rooms, rng);
                     }
-                    self.pictures.push((id, bytes));
+                    self.files.push((id, bytes));
                 }
                 Event::Rekeyed(_) => {
                     self.me.ring = self.session.ring().clone();
@@ -468,7 +469,7 @@ impl Notes {
                     self.said.push(Said::Invites { owner, waiting, accounts });
                 }
                 Event::Denied(why) => self.errors.push(format!("The server turned this browser away: {why}")),
-                // Pictures held back: no word comes for each, so none is
+                // Files held back: no word comes for each, so none is
                 // awaited; offered again once there's room. Read only,
                 // the page says so already.
                 Event::Refused(why) if why == carnet_sync::session::READ_ONLY => self.offered.clear(),
@@ -478,14 +479,14 @@ impl Notes {
                     }
                     self.errors.push(carnet_sync::session::refusal_words(&why));
                 }
-                // Why the pictures wait: said with them, not as an error.
-                Event::Failed(why) if why == carnet_sync::session::PICTURES_UNREACHABLE => {
-                    self.held = Some(carnet_sync::session::PICTURES_UNREACHABLE);
+                // Why the files wait: said with them, not as an error.
+                Event::Failed(why) if why == carnet_sync::session::FILES_UNREACHABLE => {
+                    self.held = Some(carnet_sync::session::FILES_UNREACHABLE);
                 }
                 // This browser's own words: as they are.
                 Event::Failed(why) => self.errors.push(why),
                 Event::Usage(u) => {
-                    // Room again (a plan raised): pictures held back go.
+                    // Room again (a plan raised): files held back go.
                     if u.has_room() {
                         self.offer_again();
                     }
@@ -530,7 +531,7 @@ impl Notes {
                         let vault = self.rooms.doc(vault::ROOM);
                         let (mut changed, mut unused) = (false, Vec::<BlobId>::new());
                         for path in &paths {
-                            let (c, u) = vault.put_picture(path, &hex(&id));
+                            let (c, u) = vault.put_file(path, &hex(&id));
                             changed |= c;
                             unused.extend(u.and_then(|u| unhex(&u)).and_then(|b| BlobId::try_from(b).ok()));
                         }
@@ -732,7 +733,7 @@ impl Notes {
     /// `md`, a version of the note at `key`, as the page shows it.
     fn draw(&self, key: &str, md: &str) -> String {
         let folder = self.place(key).map(|p| p.folder).unwrap_or_default();
-        let files = self.picture_files();
+        let files = self.vault_files();
         carnet_core::export::viewer(md, |src, wiki| match find(&folder, src, wiki, &files) {
             Some(path) => Picture::Fetch(path),
             // In the note itself: as it is.
@@ -746,16 +747,16 @@ impl Notes {
         })
     }
 
-    /// The pictures the vault names: what an Obsidian embed's picture
-    /// (`![[photo.png]]`) is looked for among.
-    fn picture_files(&self) -> doc::Files {
-        doc::Files::new(self.rooms.docs.get(vault::ROOM).map(|v| v.pictures().into_keys().collect::<Vec<_>>()).unwrap_or_default())
+    /// The files the vault names, pictures and documents: what an
+    /// Obsidian embed's picture (`![[photo.png]]`) is looked for among.
+    fn vault_files(&self) -> doc::Files {
+        doc::Files::new(self.rooms.docs.get(vault::ROOM).map(|v| v.files().into_keys().collect::<Vec<_>>()).unwrap_or_default())
     }
 
     /// Where a picture is, as a path from the notes folder, for a note in
     /// `folder` ([`find`]).
     pub fn picture_path(&self, folder: &str, src: &str, wiki: bool) -> Option<String> {
-        find(folder, src, wiki, &self.picture_files())
+        find(folder, src, wiki, &self.vault_files())
     }
 
     /// The note's `n`th checkbox ticked or unticked: a one-character edit,
@@ -879,31 +880,31 @@ impl Notes {
         }
     }
 
-    /// The pictures the notes show, as paths from the notes folder, those
-    /// in Deleted too.
-    fn pictures_in_use(&self) -> std::collections::BTreeSet<String> {
+    /// The files the notes show or link to, as paths from the notes
+    /// folder, those in Deleted too.
+    fn files_in_use(&self) -> std::collections::BTreeSet<String> {
         let mut used = std::collections::BTreeSet::new();
-        let files = self.picture_files();
+        let files = self.vault_files();
         for (room, d) in &self.rooms.docs {
             if Key::parse(room).is_none() {
                 continue;
             }
             let folder = self.place(room).map(|p| p.folder).unwrap_or_default();
-            used.extend(doc::picture_paths(&folder, &d.text(), &files));
+            used.extend(doc::file_paths(&folder, &d.text(), &files));
         }
         used
     }
 
-    /// Of `paths`, the pictures some version of a note here shows: one
-    /// restored would show them again. Only notes whose history may hold
-    /// the picture's name are read version by version.
+    /// Of `paths`, the files some version of a note here shows or links
+    /// to: one restored would again. Only notes whose history may hold
+    /// the file's name are read version by version.
     fn shown_in_history(&self, paths: &std::collections::BTreeSet<String>) -> std::collections::BTreeSet<String> {
         let mut shown = std::collections::BTreeSet::new();
         if paths.is_empty() {
             return shown;
         }
         let names: Vec<&str> = paths.iter().map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
-        let files = self.picture_files();
+        let files = self.vault_files();
         for (room, d) in &self.rooms.docs {
             if Key::parse(room).is_none() {
                 continue;
@@ -915,7 +916,7 @@ impl Notes {
             let folder = self.place(room).map(|p| p.folder).unwrap_or_default();
             for r in d.history() {
                 if let Ok(text) = d.text_at(&r.version) {
-                    shown.extend(doc::picture_paths(&folder, &text, &files).into_iter().filter(|p| paths.contains(p)));
+                    shown.extend(doc::file_paths(&folder, &text, &files).into_iter().filter(|p| paths.contains(p)));
                 }
             }
         }
@@ -923,19 +924,19 @@ impl Notes {
     }
 
     /// A note in Deleted, deleted forever: its history, here and on every
-    /// device, and its room on the server. The pictures it showed, in any
-    /// version, that no other note shows now are dropped, for the server
-    /// to drop. False for a note not in Deleted.
+    /// device, and its room on the server. The files it showed or linked
+    /// to, in any version, that no other note does now are dropped, for
+    /// the server to drop. False for a note not in Deleted.
     pub fn delete_forever(&mut self, key: &str, rng: &mut impl Random) -> bool {
         let Some(k) = Key::parse(key) else { return false };
         let Some(place) = self.place(key).filter(|p| p.trashed) else { return false };
         let mut shown = std::collections::BTreeSet::new();
-        let files = self.picture_files();
+        let files = self.vault_files();
         if let Some(d) = self.rooms.docs.get(key) {
-            shown.extend(doc::picture_paths(&place.folder, &d.text(), &files));
+            shown.extend(doc::file_paths(&place.folder, &d.text(), &files));
             for r in d.history() {
                 if let Ok(old) = d.text_at(&r.version) {
-                    shown.extend(doc::picture_paths(&place.folder, &old, &files));
+                    shown.extend(doc::file_paths(&place.folder, &old, &files));
                 }
             }
         }
@@ -944,14 +945,14 @@ impl Notes {
         self.summaries.borrow_mut().remove(key);
         self.kept.borrow_mut().remove(key);
         self.session.remove_room(key);
-        let mut used = self.pictures_in_use();
+        let mut used = self.files_in_use();
         let rest: std::collections::BTreeSet<String> = shown.difference(&used).cloned().collect();
         used.extend(self.shown_in_history(&rest));
         let vault = self.rooms.doc(vault::ROOM);
-        let held = vault.pictures();
+        let held = vault.files();
         let mut unused = Vec::new();
         for p in shown.difference(&used).filter(|p| held.contains_key(*p)) {
-            if let (_, Some(id)) = vault.drop_picture(p)
+            if let (_, Some(id)) = vault.drop_file(p)
                 && let Some(id) = unhex(&id).and_then(|b| <[u8; 32]>::try_from(b).ok())
             {
                 unused.push(id);
@@ -1064,7 +1065,7 @@ impl Notes {
     /// pictures' paths written from where it is, sent after its place, so
     /// the other devices learn where it goes before its words come.
     fn relink(&mut self, moved: &[(Key, String)], rng: &mut impl Random) {
-        let files = self.picture_files();
+        let files = self.vault_files();
         for (key, from) in moved {
             let room = key.to_string();
             let (Some(to), Some(d)) = (self.place(&room).map(|p| p.folder), self.rooms.docs.get(&room)) else { continue };
@@ -1078,7 +1079,7 @@ impl Notes {
     /// A name for a new picture in the attachments folder (`stem.ext`,
     /// numbered past one the vault or an upload has already).
     pub fn picture_free(&self, stem: &str, ext: &str) -> String {
-        let taken = |p: &str| self.picture_id(p).is_some() || self.uploads.values().any(|(q, _)| q.iter().any(|q| q == p));
+        let taken = |p: &str| self.file_id(p).is_some() || self.uploads.values().any(|(q, _)| q.iter().any(|q| q == p));
         let mut n = 1;
         loop {
             let name = if n == 1 { format!("attachments/{stem}.{ext}") } else { format!("attachments/{stem}-{n}.{ext}") };
@@ -1089,7 +1090,7 @@ impl Notes {
         }
     }
 
-    /// A picture put in here at `path`, to go to the server and then the
+    /// A file put in here at `path`, to go to the server and then the
     /// vault: its id, in hex. Nothing to do for one the vault has there
     /// already. `None` for one too big to send.
     pub fn upload(&mut self, path: &str, bytes: Vec<u8>) -> Option<String> {
@@ -1098,7 +1099,7 @@ impl Notes {
         }
         let id = self.session.blob_id(&bytes);
         let hexed = hex(&id);
-        // Put in again at a path another picture was on its way to: that
+        // Put in again at a path another file was on its way to: that
         // one goes there no more.
         for (other, (paths, _)) in &mut self.uploads {
             if *other != id {
@@ -1106,10 +1107,10 @@ impl Notes {
             }
         }
         self.uploads.retain(|_, (paths, _)| !paths.is_empty());
-        if self.picture_id(path).as_deref() == Some(hexed.as_str()) {
+        if self.file_id(path).as_deref() == Some(hexed.as_str()) {
             return Some(hexed);
         }
-        // The same picture put in under another name too: sent once,
+        // The same file put in under another name too: sent once,
         // named at each.
         let (paths, _) = self.uploads.entry(id).or_insert_with(|| (Vec::new(), bytes));
         if !paths.iter().any(|p| p == path) {
@@ -1119,32 +1120,32 @@ impl Notes {
         Some(hexed)
     }
 
-    /// How many pictures put in here the server hasn't got yet.
-    pub fn pictures_waiting(&self) -> usize {
+    /// How many files put in here the server hasn't got yet.
+    pub fn files_waiting(&self) -> usize {
         self.uploads.len()
     }
 
-    /// The pictures put in here the server hasn't got yet, by id in hex:
+    /// The files put in here the server hasn't got yet, by id in hex:
     /// what the page's own list of them keeps.
     pub fn uploading(&self) -> Vec<String> {
         self.uploads.keys().map(|id| hex(id)).collect()
     }
 
-    /// Why the pictures waiting wait, if it's something that won't mend
+    /// Why the files waiting wait, if it's something that won't mend
     /// by itself: words to show. None while none waits.
-    pub fn pictures_held(&self) -> Option<&'static str> {
+    pub fn files_held(&self) -> Option<&'static str> {
         self.held.filter(|_| !self.uploads.is_empty())
     }
 
-    /// The pictures waiting, offered again: a while after one didn't go.
+    /// The files waiting, offered again: a while after one didn't go.
     /// Those offered and not answered too (a link not followed is never
     /// answered).
-    pub fn retry_pictures(&mut self) {
+    pub fn retry_files(&mut self) {
         self.offered.clear();
         self.offer_again();
     }
 
-    /// Every picture put in here and not on the server, but those being
+    /// Every file put in here and not on the server, but those being
     /// sent, offered (again): logged in, or the server has room again
     /// for the ones it held back (the account full, or read only).
     fn offer_again(&mut self) {
@@ -1159,17 +1160,17 @@ impl Notes {
         self.session.offer_blobs(ids);
     }
 
-    /// The id, in hex, of the picture at `path` (from the notes folder).
-    pub fn picture_id(&self, path: &str) -> Option<String> {
-        self.rooms.docs.get(vault::ROOM)?.pictures().get(path).cloned()
+    /// The id, in hex, of the file at `path` (from the notes folder).
+    pub fn file_id(&self, path: &str) -> Option<String> {
+        self.rooms.docs.get(vault::ROOM)?.files().get(path).cloned()
     }
 
     /// The picture at `path` (from the notes folder) asked for; it comes
-    /// in [`Notes::pictures`]. Its id, in hex, or `None` if the vault
+    /// in [`Notes::files`]. Its id, in hex, or `None` if the vault
     /// doesn't have it. One dropped since (a version brought back shows
     /// it) is asked for by the id it had, and named again when it comes.
     pub fn get_picture(&mut self, path: &str) -> Option<String> {
-        let id = match self.picture_id(path) {
+        let id = match self.file_id(path) {
             Some(id) => id,
             None => {
                 let id = self.rooms.docs.get(vault::ROOM)?.dropped_id(path)?;
@@ -1183,9 +1184,9 @@ impl Notes {
         Some(id)
     }
 
-    /// Every picture the vault names, by id in hex: what is worth keeping.
-    pub fn picture_ids(&self) -> Vec<String> {
-        self.rooms.docs.get(vault::ROOM).map(|v| v.pictures().into_values().collect()).unwrap_or_default()
+    /// Every file the vault names, by id in hex: what is worth keeping.
+    pub fn file_ids(&self) -> Vec<String> {
+        self.rooms.docs.get(vault::ROOM).map(|v| v.files().into_values().collect()).unwrap_or_default()
     }
 
     /// Asks for the account's devices: they come as [`Said::Devices`].

@@ -1,6 +1,6 @@
-//! Notes deleted forever and pictures dropped (docs/SYNC.md §4, §6): a
+//! Notes deleted forever and files dropped (docs/SYNC.md §4, §6): a
 //! room removed is gone from the server at once and never taken again,
-//! whoever had it; a picture dropped is kept 30 days more, for a device
+//! whoever had it; a file dropped is kept 30 days more, for a device
 //! that still wants it. On memory and on SQLite alike.
 
 mod common;
@@ -86,10 +86,10 @@ fn a_room_removed_offline_is_removed_on_the_next_login() {
     }
 }
 
-/// A picture dropped stays 30 days, then goes; offered, asked for or put
+/// A file dropped stays 30 days, then goes; offered, asked for or put
 /// meanwhile, it's wanted, and stays.
 #[test]
-fn a_picture_dropped_goes_after_a_while_unless_wanted() {
+fn a_file_dropped_goes_after_a_while_unless_wanted() {
     let mut net = Net::new(72, stores().remove(0));
     let vault = VaultKey::generate(&mut net.rng);
     let a = net.first_device(&vault);

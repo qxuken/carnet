@@ -130,12 +130,12 @@
   // Back where there's a page to go back to; else to the list.
   const back = () => (history.length > 1 ? history.back() : go(''));
 
-  /// Removed with notes or pictures not sent: what they are, said plainly.
+  /// Removed with notes or files not sent: what they are, said plainly.
   const unsentWords = $derived.by(() => {
-    const { notes, pictures } = sync.unsentCounts;
+    const { notes, files } = sync.unsentCounts;
     const count = (n: number, one: string) => (n === 1 ? `1 ${one}` : `${n} ${one}s`);
-    const what = [notes ? count(notes, 'note') : '', pictures ? count(pictures, 'picture') : ''].filter(Boolean).join(' and ');
-    const one = notes + pictures === 1;
+    const what = [notes ? count(notes, 'note') : '', files ? count(files, 'file') : ''].filter(Boolean).join(' and ');
+    const one = notes + files === 1;
     return `${what} here ${one ? 'wasn’t' : 'weren’t'} sent before it was. Download ${one ? 'it' : 'them'} before this browser forgets ${one ? 'it' : 'them'}.`;
   });
 
@@ -150,7 +150,7 @@
   let waitTimer: ReturnType<typeof setTimeout> | undefined;
   let sentTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => {
-    const waiting = sync.waiting + sync.picturesWaiting > 0;
+    const waiting = sync.waiting + sync.filesWaiting > 0;
     untrack(() => {
       if (waiting) {
         if (waitShown || waitTimer !== undefined) return;
@@ -177,12 +177,12 @@
     footer({
       status: sync.status,
       changes: sync.waiting,
-      pictures: sync.picturesWaiting,
+      files: sync.filesWaiting,
       waitShown,
       allSent,
       // Read only: said here (and in Settings), not again as an error.
       readOnly: sync.readOnly || (sync.usage !== null && !sync.usage.writable),
-      held: sync.picturesHeld,
+      held: sync.filesHeld,
     }),
   );
 

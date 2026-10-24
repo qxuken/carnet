@@ -1,16 +1,16 @@
 //! `carnet-server migrate`: what a server keeps in its data folder (the
-//! SQLite files, the pictures beside them) copied to Postgres and to an
+//! SQLite files, the files beside them) copied to Postgres and to an
 //! S3 bucket, for a server that runs on those from then on (docs/SYNC.md
 //! §6, §11; the README's runbook).
 //!
 //! - **Only with the server stopped.** The files are locked while they're
 //!   read; one a server has open is refused, not waited for. (The
-//!   pictures can go first, while it runs: below.)
+//!   files can go first, while it runs: below.)
 //! - **The source is never written.** Nothing in the folder is changed or
 //!   deleted: going back is starting the old server on it again.
 //! - **Again, and it goes on.** Each account is copied whole in one
 //!   transaction, or not at all; one already the same on the other side is
-//!   skipped, one that differs is copied again. A picture is skipped when
+//!   skipped, one that differs is copied again. A file is skipped when
 //!   the bucket has it, the same size and MD5. A run that stopped half way
 //!   is finished by the next.
 //! - **Never over a server's work.** Once a server has run on the database
@@ -18,26 +18,26 @@
 //!   folder doesn't, and nothing is copied over them.
 //! - **Checked.** After copying, every account is read back from both
 //!   sides and compared row by row (and by SHA-256 over its rows), the
-//!   invites likewise, and every picture by size and MD5 (the ETag S3
+//!   invites likewise, and every file by size and MD5 (the ETag S3
 //!   gives a plain put). Any difference fails the run.
 //!
-//! **Pictures first, while the server runs** (`pictures_first`,
-//! `--pictures-first`): pictures are most of the bytes, and each is kept
+//! **Files first, while the server runs** (`files_first`,
+//! `--files-first`): files are most of the bytes, and each is kept
 //! under its id whole and never changed, so they can be copied before
 //! the stop, and the stopped run after has only the records and the
-//! pictures since to copy (it skips the rest, the same size and MD5).
+//! files since to copy (it skips the rest, the same size and MD5).
 //!
 //! - **No lock, nothing written.** The folder is read as it is beside the
 //!   server running on it. Only a file named as an id is taken: a
-//!   picture is written in `spool/`, synced, and moved in under its id
+//!   file is written in `spool/`, synced, and moved in under its id
 //!   (`blobs.rs`), so one so named is whole. One still coming in isn't
 //!   among them; the stopped run copies it.
 //! - **Whose, by the folder.** `blobs/<account>/<id>` names its account,
 //!   so SQLite isn't opened at all. Opening it read only beside the
 //!   server would still write (a reader's place in the WAL's `-shm`), and
-//!   tell nothing more: a running server has no pictures left in its
+//!   tell nothing more: a running server has no files left in its
 //!   databases (its start moves them out into files).
-//! - **Gone meanwhile is fine.** A picture marked to go, or swept, or of
+//! - **Gone meanwhile is fine.** A file marked to go, or swept, or of
 //!   an account removed, may be copied anyway: the stopped run takes from
 //!   the bucket what the folder no longer has, and copies the marks.
 //! - **Never over a server's work**, as above: a bucket (or database,
@@ -45,7 +45,7 @@
 //!
 //! The keys stay files in the data folder: `opaque.key` (the server's
 //! OPAQUE key, which every password depends on) and `links.key` (for the
-//! folder's own picture links, unused with a bucket). A database dump
+//! folder's own file links, unused with a bucket). A database dump
 //! holds no secret; the folder does.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,7 +56,7 @@ use std::path::Path;
 use crate::postgres::Postgres;
 use crate::rows::Counts;
 #[cfg(feature = "s3")]
-use crate::s3::{Object, Picture, S3Blobs, S3Config};
+use crate::s3::{AccountFile, Object, S3Blobs, S3Config};
 use crate::sqlite::Locked;
 use crate::storage::Failed;
 
@@ -67,14 +67,14 @@ pub struct Plan {
     pub from: PathBuf,
     /// The records to this database.
     pub postgres: Option<String>,
-    /// The pictures to this bucket.
+    /// The files to this bucket.
     #[cfg(feature = "s3")]
     pub s3: Option<S3Config>,
     /// Only compare what's there; copy nothing.
     pub verify_only: bool,
-    /// Only the pictures, with the server still running: no lock, no
+    /// Only the files, with the server still running: no lock, no
     /// records, no check (the stopped run after does those).
-    pub pictures_first: bool,
+    pub files_first: bool,
 }
 
 /// What a run did, and found.
@@ -88,15 +88,15 @@ pub struct Done {
     /// Accounts the database had and the folder doesn't: gone from it.
     pub dropped: u64,
     pub invites: u64,
-    /// Pictures in the folder (and their bytes), those put this time, the
+    /// Files in the folder (and their bytes), those put this time, the
     /// same already, and marks to go.
-    pub pictures: u64,
-    pub picture_bytes: u64,
+    pub files: u64,
+    pub file_bytes: u64,
     pub put: u64,
     pub put_bytes: u64,
-    pub pictures_skipped: u64,
+    pub files_skipped: u64,
     pub marks: u64,
-    /// Pictures with no account in the folder: left where they are.
+    /// Files with no account in the folder: left where they are.
     pub strays: u64,
     /// Every account's SHA-256 over its rows, as both sides have them.
     pub sums: BTreeMap<Vec<u8>, [u8; 32]>,
@@ -129,8 +129,8 @@ pub fn run(plan: &Plan, say: &mut (dyn FnMut(&str) + Send)) -> Result<Done, Fail
     if plan.postgres.is_none() && !to_s3 {
         return Err(Failed("nothing to migrate to: give a database (--to-postgres), a bucket (--to-s3), or both".into()));
     }
-    if plan.pictures_first {
-        return pictures_first(plan, say);
+    if plan.files_first {
+        return files_first(plan, say);
     }
     let src = Locked::open(&plan.from)?;
     say(&format!("{}: locked for the run (no server can start on it meanwhile); read, never written", plan.from.display()));
@@ -148,7 +148,7 @@ pub fn run(plan: &Plan, say: &mut (dyn FnMut(&str) + Send)) -> Result<Done, Fail
     #[cfg(feature = "s3")]
     if let Some(config) = &plan.s3 {
         let s3 = bucket(config, plan.verify_only)?;
-        pictures(&src, &s3, &plan.from, &accounts, plan.verify_only, say, &mut done)?;
+        files(&src, &s3, &plan.from, &accounts, plan.verify_only, say, &mut done)?;
     }
     Ok(done)
 }
@@ -218,7 +218,7 @@ fn records(src: &Locked, pg: &Postgres, accounts: &[Vec<u8>], verify_only: bool,
     Ok(())
 }
 
-/// A picture in the folder: where its bytes are, or the bytes themselves
+/// A file in the folder: where its bytes are, or the bytes themselves
 /// (one still kept in an account's database).
 #[cfg(feature = "s3")]
 enum Source {
@@ -236,26 +236,26 @@ impl Source {
     }
 }
 
-/// What the bucket should hold: the folder's pictures, and when those
+/// What the bucket should hold: the folder's files, and when those
 /// marked to go were.
 #[cfg(feature = "s3")]
 struct Folder {
-    pictures: BTreeMap<Picture, Source>,
-    marks: BTreeMap<Picture, u64>,
+    files: BTreeMap<AccountFile, Source>,
+    marks: BTreeMap<AccountFile, u64>,
 }
 
-/// Where each picture's file is, or its mark's.
+/// Where each file is on disk, or its mark.
 #[cfg(feature = "s3")]
-type Files = BTreeMap<Picture, PathBuf>;
+type Files = BTreeMap<AccountFile, PathBuf>;
 
-/// The picture files under `data/blobs`, and the marks beside them, by
+/// The files under `data/blobs`, and the marks beside them, by
 /// whose they are: `<account>/<id>` and `<account>/<id>.drop`. Only names
-/// that are an id: a picture is moved in under its id whole, so one so
+/// that are an id: a file is moved in under its id whole, so one so
 /// named is finished. A folder gone while it's read (an account removed
 /// meanwhile) has nothing in it.
 #[cfg(feature = "s3")]
 fn walk(data: &Path) -> Result<(Files, Files), Failed> {
-    let (mut pictures, mut marks) = (BTreeMap::new(), BTreeMap::new());
+    let (mut files, mut marks) = (BTreeMap::new(), BTreeMap::new());
     for dir in std::fs::read_dir(data.join("blobs")).into_iter().flatten().flatten() {
         let Some(account) = dir.file_name().to_str().and_then(unhex) else { continue };
         let entries = match std::fs::read_dir(dir.path()) {
@@ -270,39 +270,39 @@ fn walk(data: &Path) -> Result<(Files, Files), Failed> {
                 None => (name.as_str(), false),
             };
             let Some(id) = unhex(id).and_then(|i| <[u8; 32]>::try_from(i).ok()) else { continue };
-            let into = if mark { &mut marks } else { &mut pictures };
+            let into = if mark { &mut marks } else { &mut files };
             into.insert((account.clone(), id), e.path());
         }
     }
-    Ok((pictures, marks))
+    Ok((files, marks))
 }
 
-/// The folder's pictures and their marks, by account. Pictures of no
+/// The folder's files and their marks, by account. Files of no
 /// account the folder has are counted, and left.
 #[cfg(feature = "s3")]
 fn folder(src: &Locked, data: &Path, accounts: &[Vec<u8>], done: &mut Done) -> Result<Folder, Failed> {
-    let mut pictures = BTreeMap::new();
+    let mut files = BTreeMap::new();
     for a in accounts {
         for (id, bytes) in src.kept_blobs(a)? {
-            pictures.insert((a.clone(), id), Source::Kept(bytes));
+            files.insert((a.clone(), id), Source::Kept(bytes));
         }
     }
     let known: BTreeSet<&Vec<u8>> = accounts.iter().collect();
-    let (files, marked) = walk(data)?;
-    for (p, path) in files {
+    let (on_disk, marked) = walk(data)?;
+    for (p, path) in on_disk {
         if known.contains(&p.0) {
-            pictures.insert(p, Source::File(path));
+            files.insert(p, Source::File(path));
         } else {
             done.strays += 1;
         }
     }
-    // A mark with no picture (swept, half way) marks nothing.
+    // A mark with no file (swept, half way) marks nothing.
     let marks = marked
         .into_iter()
-        .filter(|(p, _)| pictures.contains_key(p))
+        .filter(|(p, _)| files.contains_key(p))
         .map(|(p, path)| (p, std::fs::read_to_string(path).ok().and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0)))
         .collect();
-    Ok(Folder { pictures, marks })
+    Ok(Folder { files, marks })
 }
 
 /// The bucket's ETag is a plain put's: the bytes' MD5.
@@ -318,10 +318,10 @@ fn same(there: Option<&Object>, (len, md5): &(u64, String)) -> bool {
     there.is_some_and(|o| o.size == *len && (!is_md5(&o.etag) || o.etag == *md5))
 }
 
-/// Every picture the bucket's folder has, every account's, by key.
+/// Every file the bucket's folder has, every account's, by key.
 #[cfg(feature = "s3")]
 fn in_bucket(s3: &S3Blobs) -> Result<BTreeMap<String, Object>, Failed> {
-    Ok(s3.all_pictures().map_err(Failed)?.into_iter().map(|(_, o)| (o.key.clone(), o)).collect())
+    Ok(s3.all_files().map_err(Failed)?.into_iter().map(|(_, o)| (o.key.clone(), o)).collect())
 }
 
 /// The bucket, there, its keys good, and not a server's.
@@ -335,18 +335,18 @@ fn bucket(config: &S3Config, verify_only: bool) -> Result<S3Blobs, Failed> {
     Ok(s3)
 }
 
-/// The pictures put before the stop, the server running: each finished
+/// The files put before the stop, the server running: each finished
 /// file the bucket lacks, read as it is. Nothing locked or written,
 /// nothing taken from the bucket, nothing checked: the stopped run after
 /// does those.
 #[cfg(feature = "s3")]
-fn pictures_first(plan: &Plan, say: &mut dyn FnMut(&str)) -> Result<Done, Failed> {
+fn files_first(plan: &Plan, say: &mut dyn FnMut(&str)) -> Result<Done, Failed> {
     use crate::s3::md5_hex;
     let Some(config) = &plan.s3 else {
-        return Err(Failed("--pictures-first copies the pictures: give a bucket (--to-s3)".into()));
+        return Err(Failed("--files-first copies the files: give a bucket (--to-s3)".into()));
     };
     if plan.verify_only {
-        return Err(Failed("--pictures-first copies, --verify-only only checks: one or the other".into()));
+        return Err(Failed("--files-first copies, --verify-only only checks: one or the other".into()));
     }
     if let Some(url) = &plan.postgres
         && Postgres::target(url)?.served()?
@@ -354,7 +354,7 @@ fn pictures_first(plan: &Plan, say: &mut dyn FnMut(&str)) -> Result<Done, Failed
         return Err(Failed(SERVED_DB.into()));
     }
     let s3 = bucket(config, false)?;
-    say(&format!("{}: pictures read as they are, beside the server running on it; not locked, never written", plan.from.display()));
+    say(&format!("{}: files read as they are, beside the server running on it; not locked, never written", plan.from.display()));
     let mut done = Done::default();
     let there = in_bucket(&s3)?;
     let (files, _) = walk(&plan.from)?;
@@ -371,68 +371,68 @@ fn pictures_first(plan: &Plan, say: &mut dyn FnMut(&str)) -> Result<Done, Failed
         };
         let key = s3.key(a, id);
         let sum = (bytes.len() as u64, md5_hex(&bytes));
-        done.pictures += 1;
-        done.picture_bytes += sum.0;
+        done.files += 1;
+        done.file_bytes += sum.0;
         if same(there.get(&key), &sum) {
-            done.pictures_skipped += 1;
+            done.files_skipped += 1;
             continue;
         }
         s3.put(&key, &bytes).map_err(Failed)?;
         done.put += 1;
         done.put_bytes += sum.0;
         if done.put.is_multiple_of(100) {
-            say(&format!("pictures: {}/{total} looked at, {} put", i + 1, done.put));
+            say(&format!("files: {}/{total} looked at, {} put", i + 1, done.put));
         }
     }
     let meanwhile = if gone > 0 { format!("; {gone} gone from the folder while it was read") } else { String::new() };
     say(&format!(
-        "pictures first: {} in the folder ({} bytes), {} put now ({} bytes), {} there already{meanwhile}. Next: stop the server, then migrate",
-        done.pictures, done.picture_bytes, done.put, done.put_bytes, done.pictures_skipped
+        "files first: {} in the folder ({} bytes), {} put now ({} bytes), {} there already{meanwhile}. Next: stop the server, then migrate",
+        done.files, done.file_bytes, done.put, done.put_bytes, done.files_skipped
     ));
     Ok(done)
 }
 
 #[cfg(not(feature = "s3"))]
-fn pictures_first(_: &Plan, _: &mut dyn FnMut(&str)) -> Result<Done, Failed> {
-    Err(Failed("--pictures-first: this carnet-server was built without S3 (cargo build --features s3)".into()))
+fn files_first(_: &Plan, _: &mut dyn FnMut(&str)) -> Result<Done, Failed> {
+    Err(Failed("--files-first: this carnet-server was built without S3 (cargo build --features s3)".into()))
 }
 
-/// Every picture, and every mark, put where the bucket lacks it; what
+/// Every file, and every mark, put where the bucket lacks it; what
 /// the bucket has past the folder's, gone; then each compared.
 #[cfg(feature = "s3")]
-fn pictures(src: &Locked, s3: &S3Blobs, data: &Path, accounts: &[Vec<u8>], verify_only: bool, say: &mut dyn FnMut(&str), done: &mut Done) -> Result<(), Failed> {
+fn files(src: &Locked, s3: &S3Blobs, data: &Path, accounts: &[Vec<u8>], verify_only: bool, say: &mut dyn FnMut(&str), done: &mut Done) -> Result<(), Failed> {
     use crate::s3::md5_hex;
-    let Folder { pictures, marks } = folder(src, data, accounts, done)?;
-    // Each picture's size and MD5, read once.
+    let Folder { files, marks } = folder(src, data, accounts, done)?;
+    // Each file's size and MD5, read once.
     let mut sums: BTreeMap<String, (u64, String)> = BTreeMap::new();
     if !verify_only {
         // Every account's, so what isn't the folder's is found too.
         let there = in_bucket(s3)?;
-        let total = pictures.len();
-        for (i, ((a, id), source)) in pictures.iter().enumerate() {
+        let total = files.len();
+        for (i, ((a, id), source)) in files.iter().enumerate() {
             let key = s3.key(a, id);
             let bytes = source.read()?;
             let sum = (bytes.len() as u64, md5_hex(&bytes));
             let same = same(there.get(&key), &sum);
             sums.insert(key.clone(), sum);
             if same {
-                done.pictures_skipped += 1;
+                done.files_skipped += 1;
                 continue;
             }
             s3.put(&key, &bytes).map_err(Failed)?;
             done.put += 1;
             done.put_bytes += bytes.len() as u64;
             if done.put.is_multiple_of(100) {
-                say(&format!("pictures: {}/{total} looked at, {} put", i + 1, done.put));
+                say(&format!("files: {}/{total} looked at, {} put", i + 1, done.put));
             }
         }
-        // What the bucket has past the folder's: a picture swept since a
-        // run before (or since the pictures went first), one of an account
+        // What the bucket has past the folder's: a file swept since a
+        // run before (or since the files went first), one of an account
         // removed, a mark taken back.
-        let wanted: BTreeSet<String> = pictures.keys().map(|(a, id)| s3.key(a, id)).collect();
+        let wanted: BTreeSet<String> = files.keys().map(|(a, id)| s3.key(a, id)).collect();
         let extra: Vec<String> = there.keys().filter(|k| !wanted.contains(*k)).cloned().collect();
         s3.delete_all(&extra).map_err(Failed)?;
-        let theirs: BTreeMap<Picture, u64> = s3.marks().map_err(Failed)?.into_iter().collect();
+        let theirs: BTreeMap<AccountFile, u64> = s3.marks().map_err(Failed)?.into_iter().collect();
         for ((a, id), at) in &marks {
             if theirs.get(&(a.clone(), *id)) != Some(at) {
                 s3.put_mark(a, id, *at).map_err(Failed)?;
@@ -443,11 +443,11 @@ fn pictures(src: &Locked, s3: &S3Blobs, data: &Path, accounts: &[Vec<u8>], verif
         }
     }
 
-    // Checked: each picture there, its size and MD5; the marks the same.
+    // Checked: each file there, its size and MD5; the marks the same.
     let there = in_bucket(s3)?;
     let mut wrong = Vec::new();
     let mut unsure = 0u64;
-    for ((a, id), source) in &pictures {
+    for ((a, id), source) in &files {
         let key = s3.key(a, id);
         let (len, md5) = match sums.remove(&key) {
             Some(sum) => sum,
@@ -462,14 +462,14 @@ fn pictures(src: &Locked, s3: &S3Blobs, data: &Path, accounts: &[Vec<u8>], verif
             Some(o) if is_md5(&o.etag) && o.etag != md5 => wrong.push(format!("{key}: its MD5 differs")),
             Some(o) => unsure += u64::from(!is_md5(&o.etag)),
         }
-        done.pictures += 1;
-        done.picture_bytes += len;
+        done.files += 1;
+        done.file_bytes += len;
     }
-    let wanted: BTreeSet<String> = pictures.keys().map(|(a, id)| s3.key(a, id)).collect();
+    let wanted: BTreeSet<String> = files.keys().map(|(a, id)| s3.key(a, id)).collect();
     for key in there.keys().filter(|k| !wanted.contains(*k)) {
         wrong.push(format!("{key}: in the bucket, not in the folder"));
     }
-    let theirs: BTreeMap<Picture, u64> = s3.marks().map_err(Failed)?.into_iter().collect();
+    let theirs: BTreeMap<AccountFile, u64> = s3.marks().map_err(Failed)?.into_iter().collect();
     if theirs != marks {
         wrong.push(format!("marks to go: {} in the folder, {} in the bucket, not the same", marks.len(), theirs.len()));
     }
@@ -482,11 +482,11 @@ fn pictures(src: &Locked, s3: &S3Blobs, data: &Path, accounts: &[Vec<u8>], verif
     }
     let how = if unsure > 0 { format!(" ({unsure} by size only: the bucket's ETag isn't their MD5)") } else { String::new() };
     say(&format!(
-        "pictures checked: {} ({} bytes) the same in the folder and the bucket, by size and MD5{how}; {} marked to go",
-        done.pictures, done.picture_bytes, done.marks
+        "files checked: {} ({} bytes) the same in the folder and the bucket, by size and MD5{how}; {} marked to go",
+        done.files, done.file_bytes, done.marks
     ));
     if done.strays > 0 {
-        say(&format!("{} pictures of no account in the folder were left as they are", done.strays));
+        say(&format!("{} files of no account in the folder were left as they are", done.strays));
     }
     Ok(())
 }

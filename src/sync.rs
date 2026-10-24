@@ -35,7 +35,7 @@ use carnet_sync::session::{self, DeviceInfo, Event, Identity, PasskeyInfo, Sessi
 use carnet_sync::vault;
 use carnet_sync::wire::{AccountRow, InviteRow, LogRow, RoomRow};
 
-use crate::pictures::Pictures;
+use crate::files::FileSync;
 use crate::store::{Forgotten, Remote, Store};
 
 /// Where a device's keys are kept.
@@ -383,8 +383,8 @@ const LAYOUT_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 const INSPECT_QUIET: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub struct Sync {
-    /// Pictures asked for are held here, not fetched, while this is on (a
-    /// test of what a picture on its way looks like); fetched once it's
+    /// Files asked for are held here, not fetched, while this is on (a
+    /// test of what a file on its way looks like); fetched once it's
     /// off again.
     #[cfg(test)]
     pub hold_fetches: bool,
@@ -479,7 +479,7 @@ pub struct Sync {
     usage_moves: u64,
     /// The session's moves as last seen, and when they last grew.
     last_moves: (u64, std::time::Instant),
-    /// Something happened since the notes' places and the pictures were
+    /// Something happened since the notes' places and the files were
     /// last compared with the vault: they are to be again, soon, though
     /// nothing else wakes the app ([`Sync::due`]).
     layout_due: bool,
@@ -491,15 +491,15 @@ pub struct Sync {
     pub welcome_dropped: bool,
     /// When the notes' places were last compared with the vault's.
     last_layout: std::time::Instant,
-    /// Pictures between devices: made when sync first runs here.
-    pictures: Option<Pictures>,
+    /// Files between devices: made when sync first runs here.
+    files: Option<FileSync>,
     /// Things gone the server is still to be told of: made when sync
     /// first runs here.
     pending: Option<Pending>,
     /// What this device is called, in the others' lists: asked of the
     /// system when first needed, or set.
     name: Option<String>,
-    /// Pictures' HTTP, to and from the links the server gives: started
+    /// Files' HTTP, to and from the links the server gives: started
     /// with the socket.
     http: Option<Http>,
     saved_cursor: u64,
@@ -565,7 +565,7 @@ impl Sync {
             last_origin: None,
             welcome_dropped: false,
             last_layout: std::time::Instant::now(),
-            pictures: None,
+            files: None,
             pending: None,
             http: None,
             saved_cursor: 0,
@@ -923,7 +923,7 @@ impl Sync {
     }
 
     /// The notes folder may have changed outside sync's sight (another
-    /// app, looked at again): the places and pictures are compared with
+    /// app, looked at again): the places and files are compared with
     /// the vault soon.
     /// Settings opened: the devices it lists, who's online among them, and
     /// what the account keeps, asked for again, the list shown meanwhile.
@@ -946,34 +946,34 @@ impl Sync {
         }
     }
 
-    /// How many pictures put in here the server hasn't got yet.
-    pub fn pictures_waiting(&self) -> usize {
-        self.pictures.as_ref().map_or(0, Pictures::waiting)
+    /// How many files put in here the server hasn't got yet.
+    pub fn files_waiting(&self) -> usize {
+        self.files.as_ref().map_or(0, FileSync::waiting)
     }
 
-    /// Whether the picture at `path` (a file in the notes folder, not
+    /// Whether the file at `path` (a file in the notes folder, not
     /// there) is on its way here by sync: Carnet's own, with sync on, and
-    /// either the account's pictures not known yet (its vault not come),
+    /// either the account's files not known yet (its vault not come),
     /// or named in it and asked for, not given up on. Drawn as coming,
     /// not as missing.
-    pub fn picture_coming(&self, store: &Store, path: &Path) -> bool {
+    pub fn file_coming(&self, store: &Store, path: &Path) -> bool {
         let Phase::On { session, .. } = &self.phase else { return false };
         let Ok(rel) = path.strip_prefix(&store.dir) else { return false };
         let rel: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
         let rel = rel.join("/");
-        if !crate::pictures::syncs(&rel) {
+        if !crate::files::syncs(&rel) {
             return false;
         }
         if !session.has_joined(vault::ROOM) {
             return true;
         }
-        self.pictures.as_ref().is_some_and(|p| p.coming(&rel))
+        self.files.as_ref().is_some_and(|p| p.coming(&rel))
     }
 
     /// Why they wait, when trying again won't mend it: the server's
-    /// picture storage turned them away.
-    pub fn pictures_held(&self) -> Option<&'static str> {
-        self.pictures.as_ref().and_then(Pictures::held_why)
+    /// file storage turned them away.
+    pub fn files_held(&self) -> Option<&'static str> {
+        self.files.as_ref().and_then(FileSync::held_why)
     }
 
     /// Logged in, and all the server holds of every note has come: the
@@ -995,14 +995,14 @@ impl Sync {
         matches!(&self.phase, Phase::On { session, .. } if session.is_idle())
     }
 
-    /// Whether the sweep of pictures no note shows may run now, and the
-    /// pictures it must leave (being sent, or wanted back): with sync off,
+    /// Whether the sweep of files no note shows may run now, and the
+    /// files it must leave (being sent, or wanted back): with sync off,
     /// at any time; with it on, once this device has caught up with the
-    /// account and no picture is on its way, up or down. `None`: later.
+    /// account and no file is on its way, up or down. `None`: later.
     pub fn sweep_may_run(&self) -> Option<std::collections::BTreeSet<String>> {
         match &self.phase {
             Phase::Off => Some(Default::default()),
-            Phase::On { session, .. } if session.is_idle() && session.has_joined(vault::ROOM) => match &self.pictures {
+            Phase::On { session, .. } if session.is_idle() && session.has_joined(vault::ROOM) => match &self.files {
                 Some(p) if p.busy() => None,
                 Some(p) => Some(p.busy_paths()),
                 None => Some(Default::default()),
@@ -1012,7 +1012,7 @@ impl Sync {
     }
 
     /// How long until sync wants a turn though nothing wakes the app: the
-    /// notes' places and pictures compared with the vault after what
+    /// notes' places and files compared with the vault after what
     /// happened (a first login, a save, something come), and the notes
     /// on the server asked again once the account is quiet. `None`: only
     /// when woken.
@@ -1200,7 +1200,7 @@ impl Sync {
                 };
                 // What's written here names this device in the history.
                 replica.set_author(Some(&config.device));
-                // Anything at all happening: the places and pictures are
+                // Anything at all happening: the places and files are
                 // compared with the vault again soon ([`Sync::due`]).
                 let mut busy = false;
                 if let Some(l) = link.as_ref() {
@@ -1228,7 +1228,7 @@ impl Sync {
                         }
                     }
                 }
-                // Pictures put or fetched over HTTP: how each went.
+                // Files put or fetched over HTTP: how each went.
                 if self.http.is_none() {
                     // The app's wake, whenever it's known.
                     let wake = self.wake_later.clone();
@@ -1242,7 +1242,7 @@ impl Sync {
                 if let Some(http) = &self.http {
                     for d in http.poll() {
                         busy = true;
-                        if let Some(p) = self.pictures.as_mut() {
+                        if let Some(p) = self.files.as_mut() {
                             p.transferred(d.id, d.put, &d.result);
                         }
                         session.transferred(d.id, d.put, d.result);
@@ -1259,7 +1259,7 @@ impl Sync {
                         Event::LoggedIn => {
                             // A new session: what was offered and not
                             // answered, or held back, is offered again.
-                            if let Some(p) = self.pictures.as_mut() {
+                            if let Some(p) = self.files.as_mut() {
                                 p.retry();
                             }
                             self.status = Status::Online;
@@ -1312,16 +1312,16 @@ impl Sync {
                             }
                             self.devices = None;
                         }
-                        // Pictures held back: offered again once there's
+                        // Files held back: offered again once there's
                         // room. Read only, the card says so already.
                         Event::Refused(why) if why == session::READ_ONLY => {
-                            if let Some(p) = self.pictures.as_mut() {
+                            if let Some(p) = self.files.as_mut() {
                                 p.held_back();
                             }
                         }
                         Event::Refused(why) => {
                             if why == session::FULL
-                                && let Some(p) = self.pictures.as_mut()
+                                && let Some(p) = self.files.as_mut()
                             {
                                 p.held_back();
                             }
@@ -1373,10 +1373,10 @@ impl Sync {
                         // The session asks for the list again itself.
                         Event::PasskeySet => {}
                         Event::Usage(u) => {
-                            // Room again (a plan raised, pictures deleted):
-                            // the pictures held back go now, and "full" goes.
+                            // Room again (a plan raised, files deleted):
+                            // the files held back go now, and "full" goes.
                             if u.has_room() {
-                                if let Some(p) = self.pictures.as_mut() {
+                                if let Some(p) = self.files.as_mut() {
                                     p.retry();
                                 }
                                 if self.error.as_deref() == Some(session::FULL) {
@@ -1408,7 +1408,7 @@ impl Sync {
                         }
                         Event::BlobsDropped(ids) => {
                             if let Some(p) = self.pending.as_mut() {
-                                p.done_pictures(&ids);
+                                p.done_files(&ids);
                             }
                         }
                         e @ (Event::BlobWanted(_) | Event::BlobStored(_) | Event::BlobGot(..) | Event::BlobFailed(_)) => blobs.push(e),
@@ -1487,12 +1487,12 @@ impl Sync {
                 // device moved one, else every second or so for moves here.
                 // Nothing of this device's is written before the account's
                 // vault has come, or it would overwrite where they are there.
-                // Pictures: what the session said of them, then (with the
+                // Files: what the session said of them, then (with the
                 // layout) new ones offered and missing ones asked for.
-                let pictures = self.pictures.get_or_insert_with(|| Pictures::open(store.replica_dir().as_deref()));
+                let files = self.files.get_or_insert_with(|| FileSync::open(store.replica_dir().as_deref()));
                 for e in &blobs {
-                    if let Err(err) = pictures.event(e, store, session, &mut OsRandom) {
-                        self.error = Some(format!("Couldn't write a picture from another device: {err}"));
+                    if let Err(err) = files.event(e, store, session, &mut OsRandom) {
+                        self.error = Some(format!("Couldn't write a file from another device: {err}"));
                     }
                 }
                 if vault_in || !changed.is_empty() || self.last_layout.elapsed() >= LAYOUT_EVERY {
@@ -1504,28 +1504,28 @@ impl Sync {
                         Err(e) => self.error = Some(format!("Couldn't move a note as another device did: {e}")),
                     }
                     if session.has_joined(vault::ROOM) {
-                        pictures.tick(store, session);
+                        files.tick(store, session);
                     }
                 }
-                if std::mem::take(&mut pictures.arrived) {
-                    changed.push(Remote::Pictures);
+                if std::mem::take(&mut files.arrived) {
+                    changed.push(Remote::Files);
                 }
-                // Deleted forever, here or by another device, and pictures
+                // Deleted forever, here or by another device, and files
                 // put out of use: kept until the server says done, and told.
                 let pending = self.pending.get_or_insert_with(|| Pending::open(store.replica_dir().as_deref()));
                 pending.add(store.take_forgotten());
                 for room in &pending.rooms {
                     session.remove_room(room);
                 }
-                let ids: Vec<BlobId> = pending.pictures.iter().filter_map(|h| unhex32(h)).collect();
+                let ids: Vec<BlobId> = pending.files.iter().filter_map(|h| unhex32(h)).collect();
                 session.drop_blobs(&ids);
                 let keys = store.take_changed();
                 self.layout_due |= !keys.is_empty();
-                // A note saved (or a version restored) showing a picture
+                // A note saved (or a version restored) showing a file
                 // dropped since: fetched back while the server keeps it.
-                if !keys.is_empty() && store.replica.as_ref().is_some_and(|r| !r.vault().dropped_pictures().is_empty()) {
+                if !keys.is_empty() && store.replica.as_ref().is_some_and(|r| !r.vault().dropped_files().is_empty()) {
                     let shown = store.shown_by(&keys);
-                    pictures.want_back(store, session, &shown);
+                    files.want_back(store, session, &shown);
                 }
                 let replica = store.replica.as_mut().expect("checked");
                 for key in keys {
@@ -1536,7 +1536,7 @@ impl Sync {
                     session.saved(vault::ROOM, replica, &mut OsRandom);
                 }
                 flush(session, link.as_ref());
-                // Pictures to put or fetch: over HTTP, by their links.
+                // Files to put or fetch: over HTTP, by their links.
                 if let Some(http) = &self.http {
                     let peer = link.as_ref().and_then(Link::peer);
                     #[allow(unused_mut)]
@@ -1760,7 +1760,7 @@ mod tests {
 }
 
 /// Things gone that the server is still to be told of (docs/SYNC.md §4):
-/// the rooms of notes deleted forever, and pictures no note shows. Kept
+/// the rooms of notes deleted forever, and files no note shows. Kept
 /// beside the replica (`forgotten.txt`) until the server says done, so a
 /// quit, or a deletion made offline, doesn't leave them there for good.
 #[derive(Default)]
@@ -1768,7 +1768,7 @@ struct Pending {
     file: Option<PathBuf>,
     rooms: std::collections::BTreeSet<String>,
     /// Blob ids, hex.
-    pictures: std::collections::BTreeSet<String>,
+    files: std::collections::BTreeSet<String>,
 }
 
 impl Pending {
@@ -1781,7 +1781,7 @@ impl Pending {
                     p.rooms.insert(r.to_string());
                 }
                 Some(("picture", id)) => {
-                    p.pictures.insert(id.to_string());
+                    p.files.insert(id.to_string());
                 }
                 _ => {}
             }
@@ -1791,7 +1791,7 @@ impl Pending {
 
     fn keep(&self) {
         let Some(file) = &self.file else { return };
-        let text: String = self.rooms.iter().map(|r| format!("room {r}\n")).chain(self.pictures.iter().map(|p| format!("picture {p}\n"))).collect();
+        let text: String = self.rooms.iter().map(|r| format!("room {r}\n")).chain(self.files.iter().map(|p| format!("picture {p}\n"))).collect();
         let tmp = file.with_extension("tmp");
         if std::fs::write(&tmp, text).is_ok() {
             let _ = std::fs::rename(&tmp, file);
@@ -1803,7 +1803,7 @@ impl Pending {
             return;
         }
         self.rooms.extend(f.keys.iter().map(Key::to_string));
-        self.pictures.extend(f.pictures);
+        self.files.extend(f.files);
         self.keep();
     }
 
@@ -1813,12 +1813,12 @@ impl Pending {
         }
     }
 
-    fn done_pictures(&mut self, ids: &[BlobId]) {
-        let before = self.pictures.len();
+    fn done_files(&mut self, ids: &[BlobId]) {
+        let before = self.files.len();
         for id in ids {
-            self.pictures.remove(&hex(id));
+            self.files.remove(&hex(id));
         }
-        if self.pictures.len() != before {
+        if self.files.len() != before {
             self.keep();
         }
     }

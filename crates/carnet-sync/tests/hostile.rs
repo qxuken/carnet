@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use carnet_sync::compat::{self, Greeting};
 use carnet_sync::crypto::{DeviceKey, OsRandom, Ring, VaultKey};
 use carnet_sync::elo::{self, Header};
-use carnet_sync::session::{Docs, Event, Identity, MAX_NEW_ROOMS, PICTURES_UNREACHABLE, Session, TOO_MANY_NEW};
+use carnet_sync::session::{Docs, Event, Identity, MAX_NEW_ROOMS, FILES_UNREACHABLE, Session, TOO_MANY_NEW};
 use carnet_sync::vault;
 use carnet_sync::wire::{self, Carnet, CrdtType, Frame, Permission};
 use carnet_sync::{Key, NoteDoc, Origin};
@@ -50,9 +50,9 @@ fn logged_in_as(notes: &mut Notes, ring: Ring) -> Session {
     s
 }
 
-/// A link to put a picture at that isn't followed (on a host of this
+/// A link to put a file at that isn't followed (on a host of this
 /// network other than the server's, or plain http from an https server):
-/// nothing is put there, and why the picture waits is said, once a login.
+/// nothing is put there, and why the file waits is said, once a login.
 #[test]
 fn a_picture_store_out_of_reach_is_said_once_a_login() {
     let mut notes = Notes(BTreeMap::new());
@@ -60,7 +60,7 @@ fn a_picture_store_out_of_reach_is_said_once_a_login() {
     let link = |id: u8, url: &str| wire::encode(&Frame::Carnet(Carnet::BlobLink { id: [id; 32], put: true, url: url.into(), expires: 0 }));
     s.receive(&link(1, "https://10.0.0.5:9000/bucket/x"), &mut notes, &mut OsRandom);
     s.receive(&link(2, "http://pictures.example/bucket/y"), &mut notes, &mut OsRandom);
-    assert_eq!(s.take_events(), [Event::Failed(PICTURES_UNREACHABLE.into())]);
+    assert_eq!(s.take_events(), [Event::Failed(FILES_UNREACHABLE.into())]);
     assert!(s.take_transfers().is_empty());
     // A link that is followed says nothing of it.
     s.receive(&link(3, "https://pictures.example/bucket/z"), &mut notes, &mut OsRandom);
@@ -73,7 +73,7 @@ fn a_picture_store_out_of_reach_is_said_once_a_login() {
     s.receive(&wire::encode(&Frame::Carnet(Carnet::Welcome { seq: 0 })), &mut notes, &mut OsRandom);
     s.take_events();
     s.receive(&link(1, "https://10.0.0.5:9000/bucket/x"), &mut notes, &mut OsRandom);
-    assert_eq!(s.take_events(), [Event::Failed(PICTURES_UNREACHABLE.into())]);
+    assert_eq!(s.take_events(), [Event::Failed(FILES_UNREACHABLE.into())]);
 }
 
 fn changed(rooms: Vec<(String, u64)>) -> Vec<u8> {
@@ -274,7 +274,7 @@ fn a_plan_is_the_servers_words_made_fit_to_show() {
     let mut notes = Notes(BTreeMap::new());
     let mut s = logged_in(&mut notes);
     let plan = "Free\u{202e}\u{2066}\u{200b}\nplan\u{e0041}".to_string();
-    let usage = Carnet::UsageIs { notes: 1, pictures: 2, limit: 0, writable: true, plan, until: 0 };
+    let usage = Carnet::UsageIs { notes: 1, files: 2, limit: 0, writable: true, plan, until: 0 };
     s.receive(&wire::encode(&Frame::Carnet(usage)), &mut notes, &mut OsRandom);
     let plan = s.take_events().into_iter().find_map(|e| match e {
         Event::Usage(u) => Some(u.plan),

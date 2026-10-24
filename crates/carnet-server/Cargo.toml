@@ -18,7 +18,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time", "fs", "io-util"] }
 serde = { version = "1", features = ["derive"] }
-# Signed links to pictures (links.rs): HMAC-SHA256, the versions the
+# Signed links to files (links.rs): HMAC-SHA256, the versions the
 # key derivation in carnet-sync already pulls in.
 hmac = "0.13"
 sha2 = "0.11"
@@ -34,7 +34,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # (`server::serve_app`): a client that sends one slowly is let go.
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-# A picture served by its link as a file is (ranges and all): ServeFile,
+# A file served by its link as one on disk is (ranges and all): ServeFile,
 # called as a service.
 tower = { version = "0.5", default-features = false, features = ["util"] }
 # A database server for the records (postgres.rs), off by default: the
@@ -45,7 +45,7 @@ postgres = { version = "0.19", optional = true }
 tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 webpki-roots = { version = "0.26", optional = true }
-# Pictures in an S3-compatible bucket (s3.rs), off by default: links
+# Files in an S3-compatible bucket (s3.rs), off by default: links
 # signed here (rusty-s3, no I/O of its own), the few calls the server
 # makes itself over ureq, MD5 for what S3 checks a put by.
 rusty-s3 = { version = "0.10", optional = true }

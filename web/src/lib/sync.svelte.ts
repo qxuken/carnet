@@ -46,12 +46,12 @@ export type Invites = { owner: boolean; waiting: Invite[]; accounts: Account[] }
 
 /// What the account keeps on the server (sealed bytes), and may: `limit`
 /// null on a server of one's own; `until` null for no end.
-export type Usage = { notes: number; pictures: number; limit: number | null; writable: boolean; plan: string; until: number | null };
+export type Usage = { notes: number; files: number; limit: number | null; writable: boolean; plan: string; until: number | null };
 
 /// `by`: "here", a device's id, or null for a version that didn't say.
 export type Past = { version: string; time: number; what: string; by: string | null; added: number; removed: number };
 
-/// A picture to put or fetch, by its link: `body` a put's sealed bytes.
+/// A file to put or fetch, by its link: `body` a put's sealed bytes.
 type Transfer = { id: string; url: string; put: boolean; body?: Uint8Array<ArrayBuffer> };
 
 type Said =
@@ -84,7 +84,9 @@ const PENDING = 'pending:';
 const KEEP_EDITS = 250;
 /// How long typing pauses before the notes are listed again.
 const TYPING_PAUSE = 1000;
-const PICTURE = 'picture:';
+/// A file's sealed bytes, kept here: this, then its id (`picture:`, as
+/// kept since only pictures synced).
+const FILE = 'picture:';
 /// Said on `window` when the notes change: pictures.ts asks again for
 /// those not found.
 export const NOTES_CHANGED = 'carnet-notes-changed';
@@ -92,20 +94,20 @@ export const NOTES_CHANGED = 'carnet-notes-changed';
 /// hasn't got; any other failure is one the vault doesn't name
 /// (pictures.ts says which).
 export const NOT_ON_SERVER = 'not on the server';
-/// What the server says of pictures offered while the account is full
+/// What the server says of files offered while the account is full
 /// (`carnet_sync::session::FULL`): taken back once there's room.
-const FULL = 'This account is full, so new pictures stay on this device for now. Delete some, or move to a bigger plan.';
+const FULL = 'This account is full, so new files stay on this device for now. Delete some, or move to a bigger plan.';
 /// A pairing or invite link opened in a browser that's in an account.
 const ALREADY_IN = 'This browser is already in an account, so the link wasn’t used.';
-/// Whether the server takes a new picture now (`Usage::has_room`).
-const hasRoom = (u: Usage) => u.writable && (u.limit === null || u.notes + u.pictures < u.limit);
-/// Pictures put in here and not yet on the server: `[path, id]`s, sealed
+/// Whether the server takes a new file now (`Usage::has_room`).
+const hasRoom = (u: Usage) => u.writable && (u.limit === null || u.notes + u.files < u.limit);
+/// Files put in here and not yet on the server: `[path, id]`s, sealed
 /// like the rest (`Uploads`).
 const UPLOADS = 'uploads';
-/// How long a picture that didn't go waits before it's tried again, at
-/// first; then twice as long each time, up to `PICTURE_RETRY_MOST`.
-const PICTURE_RETRY = 15_000;
-const PICTURE_RETRY_MOST = 300_000;
+/// How long a file that didn't go waits before it's tried again, at
+/// first; then twice as long each time, up to `FILE_RETRY_MOST`.
+const FILE_RETRY = 15_000;
+const FILE_RETRY_MOST = 300_000;
 /// The notes the server may not have as they are here (`Vault::unsent`),
 /// sealed: kept so a reload still knows, before the server says.
 const UNSENT = 'unsent';
@@ -149,13 +151,13 @@ class Sync {
   /// Changes (a note's, or the library's) the server isn't known to keep
   /// yet: offline, read only, or on their way.
   waiting = $state(0);
-  /// Pictures put in here the server hasn't got yet: on their way, or
+  /// Files put in here the server hasn't got yet: on their way, or
   /// held back (the account full, or read only).
-  picturesWaiting = $state(0);
+  filesWaiting = $state(0);
   /// Why they wait, when it's something that won't mend by itself (the
-  /// server's picture storage out of reach from here), in words; they're
+  /// server's file storage out of reach from here), in words; they're
   /// tried again all the same.
-  picturesHeld = $state<string | null>(null);
+  filesHeld = $state<string | null>(null);
   error = $state<string | null>(null);
   joining = $state(false);
   // Replaced whole, never changed in place: raw, so ten thousand notes
@@ -216,12 +218,12 @@ class Sync {
   /// A pairing code from the link this page was opened by (a QR code),
   /// for the pair screen to use.
   linked = $state<string | null>(null);
-  /// Removed from the account, as the server says, with notes or pictures
+  /// Removed from the account, as the server says, with notes or files
   /// here it may not have: why, for the page to say, until this browser
   /// is forgotten. Nothing is wiped on the server's word alone.
   removed = $state<string | null>(null);
-  /// Then: how many notes, and pictures, weren't sent.
-  unsentCounts = $state<{ notes: number; pictures: number }>({ notes: 0, pictures: 0 });
+  /// Then: how many notes, and files, weren't sent.
+  unsentCounts = $state<{ notes: number; files: number }>({ notes: 0, files: 0 });
 
   private vault: Vault | null = null;
   private join: Join | null = null;
@@ -253,7 +255,7 @@ class Sync {
   private signingInWith: Uint8Array<ArrayBuffer> | null = null;
   /// The notes the server may not have, as last kept (`UNSENT`).
   private unsent: string[] = [];
-  /// The pictures on their way, as kept across a reload.
+  /// The files on their way, as kept across a reload.
   private uploads = new Uploads({ read: () => readUploads(), write: (list) => setUploads(list) });
   /// Words typed and not yet kept with the rest: kept apart at once, so a
   /// reload loses none (pending.ts). The editor says what it types.
@@ -261,9 +263,9 @@ class Sync {
     put: (key, e) => sealed.put(PENDING + key, new TextEncoder().encode(JSON.stringify(e))),
     del: (key) => db.delMany([PENDING + key]),
   });
-  /// Pictures that didn't go, tried again: when, and the wait.
-  private pictureTimer: ReturnType<typeof setTimeout> | undefined;
-  private pictureWait = PICTURE_RETRY;
+  /// Files that didn't go, tried again: when, and the wait.
+  private fileTimer: ReturnType<typeof setTimeout> | undefined;
+  private fileWait = FILE_RETRY;
 
   async start() {
     try {
@@ -385,14 +387,14 @@ class Sync {
     await db.delMany(names);
   }
 
-  /// Pictures put in here before a reload and not yet sent: sent again.
+  /// Files put in here before a reload and not yet sent: sent again.
   /// Those not on their way after all (sent before the reload, its word
   /// lost) are forgotten from the list.
   private async resumeUploads() {
     const v = this.vault;
     if (!v) return;
     await this.uploads.resume(
-      (id) => (id ? sealed.get(PICTURE + id) : Promise.resolve(null)),
+      (id) => (id ? sealed.get(FILE + id) : Promise.resolve(null)),
       (path, bytes) => (this.vault === v ? v.upload(path, bytes) : undefined),
       () => (this.vault === v ? v.uploading() : []),
     );
@@ -411,7 +413,7 @@ class Sync {
     // in can come at once, and is kept after this.
     const kept = this.vault.uploading().includes(id) ? this.uploads.add(path, id) : null;
     this.flush();
-    await sealed.put(PICTURE + id, bytes);
+    await sealed.put(FILE + id, bytes);
     await kept;
     this.pictures.add(path, new Blob([bytes], { type }));
     const depth = folder ? folder.split('/').length : 0;
@@ -462,8 +464,8 @@ class Sync {
     // After every edit and every frame: what the server isn't known to
     // keep yet.
     this.waiting = this.vault?.waiting() ?? 0;
-    this.picturesWaiting = this.vault?.pictures_waiting() ?? 0;
-    this.picturesHeld = this.vault?.pictures_held() ?? null;
+    this.filesWaiting = this.vault?.files_waiting() ?? 0;
+    this.filesHeld = this.vault?.files_held() ?? null;
     // What the server may not have, kept as it changes: after a reload,
     // before the server has said what it keeps, this is what knows.
     if (this.vault && !this.removed) {
@@ -523,8 +525,8 @@ class Sync {
     this.status = ready ? 'Up to date' : 'Connecting…';
   }
 
-  /// What a frame, or a picture's transfer, left to do: frames sent, notes
-  /// drawn again, what was said, pictures come, transfers begun.
+  /// What a frame, or a file's transfer, left to do: frames sent, notes
+  /// drawn again, what was said, files come, transfers begun.
   private after(v: Vault) {
     this.flush();
     if (v.has_changed()) this.lists.ask();
@@ -538,10 +540,10 @@ class Sync {
     this.recovery = v.recovery() ?? null;
     const features = ['passkeys', 'account-delete', 'passwords'].filter((f) => v.server_has(f));
     if (features.join() !== this.features.join()) this.features = features;
-    for (const [id, data] of v.take_pictures() as [string, Uint8Array<ArrayBuffer>][]) {
-      // Kept for offline: a picture's id names its bytes, so a kept copy
+    for (const [id, data] of v.take_files() as [string, Uint8Array<ArrayBuffer>][]) {
+      // Kept for offline: a file's id names its bytes, so a kept copy
       // never goes stale.
-      void sealed.put(PICTURE + id, data);
+      void sealed.put(FILE + id, data);
       for (const w of this.wanted.get(id) ?? []) {
         w.done(this.pictures.add(w.path, new Blob([data])));
       }
@@ -554,29 +556,29 @@ class Sync {
       this.wanted.delete(id);
     }
     for (const t of v.take_transfers() as Transfer[]) void this.transfer(t);
-    // Pictures that can't go from here (a link to the storage not
+    // Files that can't go from here (a link to the storage not
     // followed): tried again a while on, in case that's mended.
-    if (this.picturesHeld) this.retryPictures();
+    if (this.filesHeld) this.retryFiles();
   }
 
-  /// The pictures waiting, offered again a while on: the wait doubles
+  /// The files waiting, offered again a while on: the wait doubles
   /// each time, until one goes.
-  private retryPictures() {
-    if (this.pictureTimer !== undefined) return;
-    this.pictureTimer = setTimeout(() => {
-      this.pictureTimer = undefined;
+  private retryFiles() {
+    if (this.fileTimer !== undefined) return;
+    this.fileTimer = setTimeout(() => {
+      this.fileTimer = undefined;
       const v = this.vault;
       // Removed meanwhile: nothing goes now.
-      if (!v || this.removed || !v.pictures_waiting()) return;
-      v.retry_pictures();
+      if (!v || this.removed || !v.files_waiting()) return;
+      v.retry_files();
       this.after(v);
-    }, this.pictureWait);
-    this.pictureWait = Math.min(this.pictureWait * 2, PICTURE_RETRY_MOST);
+    }, this.fileWait);
+    this.fileWait = Math.min(this.fileWait * 2, FILE_RETRY_MOST);
   }
 
-  /// A picture put or fetched over HTTP, by the short-lived link the
+  /// A file put or fetched over HTTP, by the short-lived link the
   /// server gave (its sealed bytes only: they open only here). A fetch
-  /// is read as it comes, and stopped past what a picture may be.
+  /// is read as it comes, and stopped past what a file may be.
   private async transfer(t: Transfer) {
     let bytes: Uint8Array | undefined;
     let error: string | undefined;
@@ -588,7 +590,7 @@ class Sync {
       else if (!t.put) bytes = await capped(res, max_sealed());
     } catch (e) {
       // A put that got no answer at all while the server's socket is up:
-      // the picture storage is out of this browser's reach (one that
+      // the file storage is out of this browser's reach (one that
       // doesn't let pages of another host put to it, say). Said, as
       // offline isn't.
       const up = this.ws?.readyState === WebSocket.OPEN && navigator.onLine;
@@ -598,7 +600,7 @@ class Sync {
     if (!v) return;
     v.transferred(t.id, t.put, bytes, error);
     // Tried again a while on, quietly unless it's said why.
-    if (t.put && error !== undefined) this.retryPictures();
+    if (t.put && error !== undefined) this.retryFiles();
     this.after(v);
   }
 
@@ -606,7 +608,7 @@ class Sync {
     if ('devices' in s) this.devices = s.devices;
     else if ('usage' in s) {
       this.usage = s.usage;
-      // Room again (a plan raised): the pictures held back are on their
+      // Room again (a plan raised): the files held back are on their
       // way (notes.rs), and "full" goes.
       const u = s.usage;
       if (hasRoom(u) && this.error === FULL) this.error = null;
@@ -655,7 +657,7 @@ class Sync {
       if (this.wantDevices) this.listDevices();
     } else if ('uploaded' in s) {
       void this.uploads.sent(s.uploaded);
-      this.pictureWait = PICTURE_RETRY;
+      this.fileWait = FILE_RETRY;
     } else if ('outdated' in s) {
       // Too old, this app or the server: nothing syncs until one is
       // updated. Or soon too old: it goes on, and Settings says so.
@@ -686,16 +688,16 @@ class Sync {
     this.prune();
   }
 
-  /// Pictures kept here that no note shows any more, dropped, a while
-  /// after the notes last changed.
+  /// Files kept here that no note shows or links to any more, dropped,
+  /// a while after the notes last changed.
   private prune() {
     clearTimeout(this.pruneTimer);
     this.pruneTimer = setTimeout(async () => {
       if (!this.vault) return;
-      const named = new Set(this.vault.picture_ids());
+      const named = new Set(this.vault.file_ids());
       // Not yet in the vault, still kept: those on their way.
       for (const [, id] of await this.uploads.list()) named.add(id);
-      const gone = (await db.keys()).filter((k) => k.startsWith(PICTURE) && !named.has(k.slice(PICTURE.length)));
+      const gone = (await db.keys()).filter((k) => k.startsWith(FILE) && !named.has(k.slice(FILE.length)));
       if (gone.length) await db.delMany(gone);
     }, 10_000);
   }
@@ -896,9 +898,9 @@ class Sync {
   picture(path: string): Promise<string> {
     const have = this.pictures.get(path);
     if (have) return Promise.resolve(have);
-    const id = this.vault?.picture_id(path);
+    const id = this.vault?.file_id(path);
     if (!id) return this.ownPicture(path);
-    return sealed.get(PICTURE + id).then(
+    return sealed.get(FILE + id).then(
       (kept) =>
         new Promise((done, fail) => {
           if (kept) {
@@ -917,7 +919,7 @@ class Sync {
   /// reload, say), shown from the copy kept here.
   private async ownPicture(path: string): Promise<string> {
     const id = await this.uploads.going(path);
-    const kept = id ? await sealed.get(PICTURE + id) : null;
+    const kept = id ? await sealed.get(FILE + id) : null;
     if (!kept) throw new Error('not in the vault');
     return this.pictures.add(path, new Blob([kept]));
   }
@@ -1087,7 +1089,7 @@ class Sync {
   }
 
   /// A note in Deleted, deleted forever: its history too, on every device,
-  /// and the pictures only it showed.
+  /// and the files only it showed or linked to.
   deleteForever(key: string): boolean {
     if (!this.vault?.delete_forever(key)) return false;
     this.flush();
@@ -1221,8 +1223,8 @@ class Sync {
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
     clearTimeout(this.pruneTimer);
-    clearTimeout(this.pictureTimer);
-    this.pictureTimer = undefined;
+    clearTimeout(this.fileTimer);
+    this.fileTimer = undefined;
     this.dropVault();
     this.error = why;
     this.phase = 'loading';
@@ -1267,26 +1269,26 @@ class Sync {
   /// Removed from the account, as the server says (`Denied`, which it
   /// sends before any login, so it could say it of anyone): with nothing
   /// here it may not have, everything kept here goes ([`leave`]). With
-  /// notes or pictures not sent, nothing is wiped on its word alone: the
+  /// notes or files not sent, nothing is wiped on its word alone: the
   /// page says so, offers them to download, then forgets this browser
   /// when asked ([`forgetRemoved`]).
   private async turnedAway(why: string, deleting: boolean) {
     const v = this.vault;
     if (deleting || !v) return this.leave(why);
-    // The pictures not sent are those the vault still has on their way:
+    // The files not sent are those the vault still has on their way:
     // the list kept here may name some it said sent.
     const notes = v.unsent(this.unsent);
-    if (!notes.length && !v.pictures_waiting()) return this.leave(why);
+    if (!notes.length && !v.files_waiting()) return this.leave(why);
     const ws = this.ws;
     this.ws = null;
     ws?.close();
     this.unsent = notes;
     await this.keepNow();
-    this.unsentCounts = { notes: v.unsent_notes_count(notes), pictures: v.pictures_waiting() };
+    this.unsentCounts = { notes: v.unsent_notes_count(notes), files: v.files_waiting() };
     this.removed = why;
   }
 
-  /// The notes and pictures not sent, as one ZIP file, downloaded.
+  /// The notes and files not sent, as one ZIP file, downloaded.
   async downloadUnsent() {
     const v = this.vault;
     if (!v) return;
@@ -1294,7 +1296,7 @@ class Sync {
     const files: Uint8Array[] = [];
     const going = new Set(v.uploading());
     for (const [path, id] of (await this.uploads.list()).filter(([, id]) => going.has(id))) {
-      const bytes = await sealed.get(PICTURE + id);
+      const bytes = await sealed.get(FILE + id);
       if (bytes) {
         paths.push(path);
         files.push(bytes);
@@ -1341,9 +1343,9 @@ class Sync {
     clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
     clearTimeout(this.pruneTimer);
-    clearTimeout(this.pictureTimer);
-    this.pictureTimer = undefined;
-    this.pictureWait = PICTURE_RETRY;
+    clearTimeout(this.fileTimer);
+    this.fileTimer = undefined;
+    this.fileWait = FILE_RETRY;
     this.dropVault();
     this.dropJoin();
     try {
@@ -1360,9 +1362,9 @@ class Sync {
     }
     this.unsent = [];
     this.removed = null;
-    this.unsentCounts = { notes: 0, pictures: 0 };
-    this.picturesWaiting = 0;
-    this.picturesHeld = null;
+    this.unsentCounts = { notes: 0, files: 0 };
+    this.filesWaiting = 0;
+    this.filesHeld = null;
     this.pictures.clear();
     this.notes = [];
     this.folders = [];
@@ -1395,7 +1397,7 @@ function readList(kept: Uint8Array | null): string[] {
   }
 }
 
-/// The pictures put in here and not yet on the server (`UPLOADS`). Kept
+/// The files put in here and not yet on the server (`UPLOADS`). Kept
 /// unsealed by an earlier Carnet: read once, and sealed.
 async function readUploads(): Promise<Entry[]> {
   const kept = await sealed.get(UPLOADS);
@@ -1421,7 +1423,7 @@ async function capped(res: Response, most: number): Promise<Uint8Array> {
   const said = Number(res.headers.get('Content-Length'));
   if (said > most) {
     void res.body?.cancel();
-    throw new Error('an answer past what a picture may be');
+    throw new Error('an answer past what a file may be');
   }
   if (!res.body) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
@@ -1433,7 +1435,7 @@ async function capped(res: Response, most: number): Promise<Uint8Array> {
     got += value.length;
     if (got > most) {
       void reader.cancel();
-      throw new Error('an answer past what a picture may be');
+      throw new Error('an answer past what a file may be');
     }
     parts.push(value);
   }

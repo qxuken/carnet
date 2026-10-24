@@ -1,22 +1,22 @@
-//! Pictures in an S3-compatible bucket (docs/SYNC.md §6, §11): AWS S3,
+//! Files in an S3-compatible bucket (docs/SYNC.md §6, §11): AWS S3,
 //! Cloudflare R2, Hetzner's, MinIO and the like. The `s3` feature builds
-//! it. A device puts and fetches a picture straight to and from the
+//! it. A device puts and fetches a file straight to and from the
 //! bucket, by a link pre-signed here: the bytes never pass through the
 //! server. The server's own calls (is it there, how big, mark, sweep) are
-//! few and small, made from the picture worker's thread, one at a time.
+//! few and small, made from the file worker's thread, one at a time.
 //!
 //! ```text
-//! <prefix><account>/<id>        a picture, sealed (account and id in hex)
-//! <prefix>drop/<account>/<id>   a picture no note shows: when it was said, in seconds
-//! <prefix>gone/<account>        an account removed: when, in seconds (put before its pictures go)
+//! <prefix><account>/<id>        a file, sealed (account and id in hex)
+//! <prefix>drop/<account>/<id>   a file no note shows: when it was said, in seconds
+//! <prefix>gone/<account>        an account removed: when, in seconds (put before its files go)
 //! <prefix>served                a server has run on this bucket (`migrate` won't copy over it)
 //! ```
 //!
 //! **A put's size.** A pre-signed `PUT` can't say "at most so many bytes",
-//! only an exact length: the device says how long each picture is sealed
+//! only an exact length: the device says how long each file is sealed
 //! when it offers it, and its link is signed with that `Content-Length`,
 //! so the bucket refuses a put of any other length. The link is for one
-//! picture, one account, five minutes, so a picture is never put past
+//! file, one account, five minutes, so a file is never put past
 //! what it was offered as, nor past [`MAX`]. (One put from before links
 //! were signed so, past [`MAX`], is caught on the way back: [`Blobs::size`]
 //! and [`Blobs::held`] find it too big, delete it, and it's never said
@@ -29,14 +29,14 @@
 //! serve as one to whoever opens its link. (A fetch's link asks for that
 //! type back besides, whatever was put.)
 //!
-//! **A put again.** Within its five minutes a link may put its picture
+//! **A put again.** Within its five minutes a link may put its file
 //! again, over the first. That's harmless, so it isn't stopped (a
 //! conditional put, `If-None-Match`, would need every device to send the
 //! header and every bucket's CORS to let it through): only the account's
 //! own device was given the link, it can't put more bytes than it said,
-//! and a picture that isn't the one its id names doesn't open on any
-//! device (`open_blob`), as with any picture the account's device puts.
-//! Nor is a sweep needed for pictures put and never named in a note: each
+//! and a file that isn't the one its id names doesn't open on any
+//! device (`open_blob`), as with any file the account's device puts.
+//! Nor is a sweep needed for files put and never named in a note: each
 //! is counted against its account, and goes when a device drops it (§4).
 //! A link can't be taken back, though: one given before its account was
 //! deleted may still put, within its five minutes. So the hourly sweep
@@ -120,13 +120,13 @@ fn base64(b: &[u8]) -> String {
     out
 }
 
-/// A picture's MD5, in hex: what S3 says as a plain put's ETag.
+/// A file's MD5, in hex: what S3 says as a plain put's ETag.
 pub fn md5_hex(b: &[u8]) -> String {
     hex(&Md5::digest(b))
 }
 
-/// A picture by whose it is: the account, the id.
-pub type Picture = (Vec<u8>, [u8; 32]);
+/// A file by whose it is: the account, the id.
+pub type AccountFile = (Vec<u8>, [u8; 32]);
 
 /// What an object is, as S3 says: its size, and its ETag unquoted.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,7 +182,7 @@ impl S3Blobs {
         Ok(S3Blobs { bucket, creds: Credentials::new(config.key.clone(), config.secret.clone()), prefix, agent })
     }
 
-    /// Where `account`'s picture `id` is.
+    /// Where `account`'s file `id` is.
     pub fn key(&self, account: &[u8], id: &[u8; 32]) -> String {
         format!("{}{}/{}", self.prefix, hex(account), hex(id))
     }
@@ -343,15 +343,15 @@ impl S3Blobs {
         Ok(self.head(&format!("{}served", self.prefix))?.is_some())
     }
 
-    /// The account's pictures: each id, its size and ETag.
-    pub fn pictures(&self, account: &[u8]) -> Result<Vec<([u8; 32], Object)>, String> {
+    /// The account's files: each id, its size and ETag.
+    pub fn files(&self, account: &[u8]) -> Result<Vec<([u8; 32], Object)>, String> {
         let prefix = format!("{}{}/", self.prefix, hex(account));
         Ok(self.list(&prefix)?.into_iter().filter_map(|o| Some((<[u8; 32]>::try_from(unhex(o.key.strip_prefix(&prefix)?)?).ok()?, o))).collect())
     }
 
-    /// Every picture in the bucket (its folder): account, id, and what
+    /// Every file in the bucket (its folder): account, id, and what
     /// S3 says of it. Marks and the like aren't among them.
-    pub fn all_pictures(&self) -> Result<Vec<(Picture, Object)>, String> {
+    pub fn all_files(&self) -> Result<Vec<(AccountFile, Object)>, String> {
         Ok(self
             .list(&self.prefix)?
             .into_iter()
@@ -363,8 +363,8 @@ impl S3Blobs {
             .collect())
     }
 
-    /// Pictures marked to go: account, id, and when.
-    pub fn marks(&self) -> Result<Vec<(Picture, u64)>, String> {
+    /// Files marked to go: account, id, and when.
+    pub fn marks(&self) -> Result<Vec<(AccountFile, u64)>, String> {
         let prefix = format!("{}drop/", self.prefix);
         let mut out = Vec::new();
         for o in self.list(&prefix)? {
@@ -401,7 +401,7 @@ impl S3Blobs {
     }
 
     fn said<T>(r: Result<T, String>) -> Option<T> {
-        r.map_err(|e| eprintln!("carnet-server: pictures: {e}")).ok()
+        r.map_err(|e| eprintln!("carnet-server: files: {e}")).ok()
     }
 }
 
@@ -414,7 +414,7 @@ impl Blobs for S3Blobs {
         let key = self.key(account, id);
         let o = Self::said(self.head(&key))??;
         if o.size > MAX {
-            // Put past what a picture may be: not one.
+            // Put past what a file may be: not one.
             let _ = Self::said(self.delete(&key));
             return None;
         }
@@ -484,9 +484,9 @@ impl Blobs for S3Blobs {
     }
 
     fn held(&mut self, account: &[u8]) -> Vec<([u8; 32], u64)> {
-        let all = Self::said(self.pictures(account)).unwrap_or_default();
+        let all = Self::said(self.files(account)).unwrap_or_default();
         let (fit, over): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, o)| o.size <= MAX);
-        // Put past what a picture may be: not one.
+        // Put past what a file may be: not one.
         if !over.is_empty() {
             let _ = Self::said(self.delete_all(&over.into_iter().map(|(_, o)| o.key).collect::<Vec<_>>()));
         }
@@ -498,7 +498,7 @@ impl Blobs for S3Blobs {
 mod tests {
     use super::*;
 
-    /// Where the web app fetches pictures from: the bucket's origin, its
+    /// Where the web app fetches files from: the bucket's origin, its
     /// own host when it's the host's first name.
     #[test]
     fn the_origin_is_where_links_point() {
@@ -510,7 +510,7 @@ mod tests {
         assert_eq!(at("https://s3.example/pics", true).as_deref(), Some("https://pics.s3.example"));
     }
 
-    /// A link to put is signed with the picture's length and type: the
+    /// A link to put is signed with the file's length and type: the
     /// bucket checks the `Content-Length` and `Content-Type` sent against
     /// them, and refuses another. A link to fetch isn't.
     #[test]

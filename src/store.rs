@@ -245,7 +245,7 @@ pub struct Store {
     /// Notes made here from another device's text before the vault said
     /// where they go: not this device's to place.
     from_remote: HashSet<Key>,
-    /// Deleted forever, here or elsewhere, and pictures put out of use:
+    /// Deleted forever, here or elsewhere, and files put out of use:
     /// what sync has to tell the server.
     forgotten: Forgotten,
     /// Notes reloaded with another device's change, by note id: their
@@ -258,17 +258,17 @@ pub struct Store {
 }
 
 /// What sync has to tell the server of things gone (docs/SYNC.md §4): the
-/// notes deleted forever, whose rooms go, and the pictures no note shows
+/// notes deleted forever, whose rooms go, and the files no note shows
 /// any more (their blob ids, hex), which it may drop.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Forgotten {
     pub keys: Vec<Key>,
-    pub pictures: Vec<String>,
+    pub files: Vec<String>,
 }
 
 impl Forgotten {
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty() && self.pictures.is_empty()
+        self.keys.is_empty() && self.files.is_empty()
     }
 }
 
@@ -286,9 +286,9 @@ pub enum Remote {
     /// Notes moved, renamed, pinned, trashed or put back, or folders made
     /// or gone, as another device did: the list is to be shown again.
     Layout,
-    /// Pictures came from another device: ones shown as missing are to be
+    /// Files came from another device: ones shown as missing are to be
     /// tried again.
-    Pictures,
+    Files,
 }
 
 /// `CARNET_DIR`, else `~/Documents/Carnet`.
@@ -1424,18 +1424,18 @@ impl Store {
         Ok(())
     }
 
-    /// The vault says `path` holds the picture `id` (pictures.rs). True if
-    /// that changed; then it is kept, and sent. The picture it held before,
+    /// The vault says `path` holds the file `id` (files.rs). True if
+    /// that changed; then it is kept, and sent. The file it held before,
     /// if nothing else holds it now, the server may drop.
-    pub fn set_picture(&mut self, path: &str, id: &str) -> bool {
+    pub fn set_file(&mut self, path: &str, id: &str) -> bool {
         let Some(r) = self.replica.as_ref() else { return false };
-        let (changed, unused) = r.vault().put_picture(path, id);
+        let (changed, unused) = r.vault().put_file(path, id);
         if !changed {
             return false;
         }
         let _ = r.persist_vault();
         self.vault_changed = true;
-        self.forgotten.pictures.extend(unused);
+        self.forgotten.files.extend(unused);
         true
     }
 
@@ -1489,16 +1489,16 @@ impl Store {
         std::mem::take(&mut self.forgotten)
     }
 
-    /// The pictures the notes show, as paths from the notes folder: every
+    /// The files the notes show or link to, as paths from the notes folder: every
     /// note's, those in the trash too (put back, they show them again).
-    pub fn pictures_in_use(&self) -> BTreeSet<String> {
+    pub fn files_in_use(&self) -> BTreeSet<String> {
         let mut used = BTreeSet::new();
         for n in &self.notes {
-            used.extend(doc::picture_paths(&n.folder, &n.markdown(), &self.files));
+            used.extend(doc::file_paths(&n.folder, &n.markdown(), &self.files));
         }
         for (_, rel, folder) in self.in_trash() {
             let Ok(text) = fs::read_to_string(self.dir.join(&rel)) else { continue };
-            used.extend(doc::picture_paths(&folder, &text, &self.files));
+            used.extend(doc::file_paths(&folder, &text, &self.files));
         }
         used
     }
@@ -1512,12 +1512,12 @@ impl Store {
         titles
     }
 
-    /// The pictures the notes with these keys show now.
+    /// The files the notes with these keys show or link to now.
     pub fn shown_by(&self, keys: &[Key]) -> BTreeSet<String> {
         self.notes
             .iter()
             .filter(|n| n.key.is_some_and(|k| keys.contains(&k)))
-            .flat_map(|n| doc::picture_paths(&n.folder, &n.markdown(), &self.files))
+            .flat_map(|n| doc::file_paths(&n.folder, &n.markdown(), &self.files))
             .collect()
     }
 
@@ -1530,7 +1530,7 @@ impl Store {
     /// Deletes `t` (a note, or a folder of them) from the trash forever,
     /// on every device: its file, its history, its place in the vault
     /// (marked gone), and its room on the server, through sync. The
-    /// pictures it showed, in any version, that no other note shows now
+    /// files it showed, in any version, that no other note shows now
     /// (one in the trash counts) go too: from the attachments folder, and
     /// dropped in the vault for the server to drop.
     pub fn delete_forever(&mut self, t: &Trashed) -> io::Result<()> {
@@ -1554,11 +1554,11 @@ impl Store {
                     _ => t.folder.clone(),
                 }
             });
-            shown.extend(doc::picture_paths(&folder, &fs::read_to_string(path).unwrap_or_default(), &self.files));
+            shown.extend(doc::file_paths(&folder, &fs::read_to_string(path).unwrap_or_default(), &self.files));
             if let (Some(key), Some(r)) = (key, self.replica.as_mut()) {
                 for rev in r.history(key) {
                     if let Ok(text) = r.text_at(key, &rev.version) {
-                        shown.extend(doc::picture_paths(&folder, &text, &self.files));
+                        shown.extend(doc::file_paths(&folder, &text, &self.files));
                     }
                 }
                 keys.push(key);
@@ -1578,7 +1578,7 @@ impl Store {
             }
         }
         self.forgotten.keys.extend(keys);
-        self.drop_pictures(&shown);
+        self.drop_files(&shown);
         if let Some(r) = &self.replica {
             r.persist_vault()?;
             self.vault_changed = true;
@@ -1586,9 +1586,9 @@ impl Store {
         Ok(())
     }
 
-    /// Of `paths`, the pictures some version of a note still here shows:
+    /// Of `paths`, the files some version of a note still here shows:
     /// one restored would show them again. Only notes whose history may
-    /// hold the picture's name are read version by version.
+    /// hold the file's name are read version by version.
     fn shown_in_history(&mut self, paths: &BTreeSet<String>) -> BTreeSet<String> {
         let mut shown = BTreeSet::new();
         let files = self.files.clone();
@@ -1604,7 +1604,7 @@ impl Store {
             let folder = r.vault().place(key).map(|p| p.folder).unwrap_or_default();
             for rev in r.history(key) {
                 if let Ok(text) = r.text_at(key, &rev.version) {
-                    for p in doc::picture_paths(&folder, &text, &files) {
+                    for p in doc::file_paths(&folder, &text, &files) {
                         if let Some(q) = paths.iter().find(|q| q.eq_ignore_ascii_case(&p)) {
                             shown.insert(q.clone());
                         }
@@ -1615,21 +1615,21 @@ impl Store {
         shown
     }
 
-    /// Of the pictures at `paths`, Carnet's (in the attachments folder)
+    /// Of the files at `paths`, Carnet's (in the attachments folder)
     /// that no note shows now, nor any version of one: their files gone,
     /// and dropped in the vault. The user's own are never touched.
-    fn drop_pictures(&mut self, paths: &BTreeSet<String>) {
+    fn drop_files(&mut self, paths: &BTreeSet<String>) {
         let paths: BTreeSet<String> = paths.iter().filter(|p| is_owned(p)).cloned().collect();
         let paths = &paths;
-        let mut used = self.pictures_in_use();
+        let mut used = self.files_in_use();
         let rest: BTreeSet<String> = paths.difference(&used).cloned().collect();
         used.extend(self.shown_in_history(&rest));
         for p in paths.difference(&used) {
             if let Some(r) = &self.replica
-                && r.vault().pictures().contains_key(p)
+                && r.vault().files().contains_key(p)
             {
-                let (_, unused) = r.vault().drop_picture(p);
-                self.forgotten.pictures.extend(unused);
+                let (_, unused) = r.vault().drop_file(p);
+                self.forgotten.files.extend(unused);
             }
             if let Ok(file) = self.inside(self.dir.join(p)) {
                 let _ = fs::remove_file(&file);
@@ -3972,7 +3972,7 @@ mod tests {
         fs::write(dir.join("Sky.md"), "# Sky\n\n![[sun.png|the sun]]\n").unwrap();
         s.rescan();
         assert_eq!(s.picture_folders, ["Vault/Attachments"]);
-        let shown = s.pictures_in_use();
+        let shown = s.files_in_use();
         assert!(["Vault/Attachments/photo.png", "Vault/Attachments/beach.png", "Elsewhere/sun.png"].iter().all(|p| shown.contains(*p)), "{shown:?}");
         assert_eq!(s.picture_file("Vault", "photo.png", true), Some(at.join("photo.png")));
 

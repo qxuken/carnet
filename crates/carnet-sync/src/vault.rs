@@ -12,7 +12,7 @@
 //!
 //! A note deleted forever is marked gone (`<key>/gone`), never unmarked:
 //! whatever else another device wrote of it meanwhile, it is gone, and
-//! each device forgets it. A picture no note shows any more is dropped:
+//! each device forgets it. A file no note shows any more is dropped:
 //! its path kept, holding `-<id>` where its blob's id was. The id stays so
 //! that a note brought back showing it (an old version restored) can fetch
 //! it again while the server still keeps it.
@@ -44,6 +44,8 @@ pub const ROOM: &str = "vault";
 
 const NOTES: &str = "notes";
 const FOLDERS: &str = "folders";
+/// The pictures' paths. Named so in every vault there is: what a file is
+/// called changed, this key can't (a device would read no file at all).
 const PICTURES: &str = "pictures";
 /// The documents a note links to (a PDF, a recording), kept as pictures
 /// are but in a map of their own: a Carnet from before them reads only
@@ -217,7 +219,7 @@ impl NoteDoc {
 
     /// The pictures' map and the documents' as one: each path in the map
     /// its name puts it in ([`map_of`]), so a path is never in both.
-    fn picture_map(&self) -> BTreeMap<String, String> {
+    fn file_map(&self) -> BTreeMap<String, String> {
         let read = |name: &str| match self.loro().get_map(name).get_deep_value() {
             LoroValue::Map(m) => m
                 .iter()
@@ -233,37 +235,37 @@ impl NoteDoc {
         all
     }
 
-    /// The pictures: each path in the notes folder (`attachments/…`) and
+    /// The files: each path in the notes folder (`attachments/…`) and
     /// the id of its blob, in hex.
-    pub fn pictures(&self) -> BTreeMap<String, String> {
-        let mut all = self.picture_map();
+    pub fn files(&self) -> BTreeMap<String, String> {
+        let mut all = self.file_map();
         all.retain(|_, id| live(id));
         all
     }
 
-    /// The paths of pictures dropped: no note showed them any more.
-    pub fn dropped_pictures(&self) -> BTreeSet<String> {
-        self.picture_map().into_iter().filter(|(_, id)| !live(id)).map(|(p, _)| p).collect()
+    /// The paths of files dropped: no note showed them any more.
+    pub fn dropped_files(&self) -> BTreeSet<String> {
+        self.file_map().into_iter().filter(|(_, id)| !live(id)).map(|(p, _)| p).collect()
     }
 
-    /// The id a dropped picture had, if it's known: what fetches it back.
+    /// The id a dropped file had, if it's known: what fetches it back.
     pub fn dropped_id(&self, path: &str) -> Option<String> {
-        self.picture_map().get(path).and_then(|id| id.strip_prefix('-')).filter(|id| !id.is_empty()).map(str::to_string)
+        self.file_map().get(path).and_then(|id| id.strip_prefix('-')).filter(|id| !id.is_empty()).map(str::to_string)
     }
 
-    /// A picture at `path`, its blob `id` (hex). True if that changed.
-    pub fn set_picture(&self, path: &str, id: &str) -> bool {
-        self.put_picture(path, id).0
+    /// A file at `path`, its blob `id` (hex). True if that changed.
+    pub fn set_file(&self, path: &str, id: &str) -> bool {
+        self.put_file(path, id).0
     }
 
-    /// [`set_picture`](NoteDoc::set_picture), and the blob it put out of
+    /// [`set_file`](NoteDoc::set_file), and the blob it put out of
     /// use: the one `path` held before, if no other path holds it now. That
     /// one the server may drop (docs/SYNC.md §6).
-    pub fn put_picture(&self, path: &str, id: &str) -> (bool, Option<String>) {
+    pub fn put_file(&self, path: &str, id: &str) -> (bool, Option<String>) {
         if !is_plain_path(path) {
             return (false, None);
         }
-        let all = self.picture_map();
+        let all = self.file_map();
         let old = all.get(path).filter(|o| live(o) && o.as_str() != id).cloned();
         if all.get(path).map(String::as_str) == Some(id) {
             return (false, None);
@@ -274,11 +276,11 @@ impl NoteDoc {
         (true, unused)
     }
 
-    /// The picture at `path` dropped, its id kept beside (see
-    /// [`put_picture`](NoteDoc::put_picture) for what comes back).
-    pub fn drop_picture(&self, path: &str) -> (bool, Option<String>) {
-        match self.picture_map().get(path).filter(|id| live(id)).cloned() {
-            Some(id) => self.put_picture(path, &format!("-{id}")),
+    /// The file at `path` dropped, its id kept beside (see
+    /// [`put_file`](NoteDoc::put_file) for what comes back).
+    pub fn drop_file(&self, path: &str) -> (bool, Option<String>) {
+        match self.file_map().get(path).filter(|id| live(id)).cloned() {
+            Some(id) => self.put_file(path, &format!("-{id}")),
             None => (false, None),
         }
     }
@@ -484,11 +486,11 @@ impl NoteDoc {
     }
 
     /// Whether `folder` has nothing in it or under it: no note (one in
-    /// Deleted is the trash's), no picture the vault names. Only such a
+    /// Deleted is the trash's), no file the vault names. Only such a
     /// one is just deleted; any other goes to Deleted, whole.
     pub fn folder_is_bare(&self, folder: &str) -> bool {
         let layout = self.layout();
-        !layout.notes.values().any(|p| !p.trashed && is_inside(&p.folder, folder)) && !self.pictures().keys().any(|p| is_inside(parent_of(p), folder))
+        !layout.notes.values().any(|p| !p.trashed && is_inside(&p.folder, folder)) && !self.files().keys().any(|p| is_inside(parent_of(p), folder))
     }
 
     /// `folder` and each folder inside it gone, and the notes in them to
@@ -552,9 +554,9 @@ impl NoteDoc {
     }
 }
 
-/// The folder pictures are kept in, at the top of the notes folder: no
+/// The folder files are kept in, at the top of the notes folder: no
 /// folder of notes may be called so, at any depth (made, it would be read
-/// as one of pictures, its notes not listed).
+/// as one of files, its notes not listed).
 pub const ATTACHMENTS: &str = "attachments";
 
 /// Why a folder wasn't made, renamed or moved, in the desktop's words.
@@ -566,8 +568,8 @@ pub enum FolderRefusal {
     Gone,
     /// A folder of that name (this one) is there already.
     Taken(String),
-    /// The name pictures' folder has ([`ATTACHMENTS`]).
-    ForPictures,
+    /// The name files' folder has ([`ATTACHMENTS`]).
+    ForAttachments,
 }
 
 impl std::fmt::Display for FolderRefusal {
@@ -576,7 +578,7 @@ impl std::fmt::Display for FolderRefusal {
             FolderRefusal::IntoItself => f.write_str("a folder can't go inside itself"),
             FolderRefusal::Gone => f.write_str("that folder isn't there any more"),
             FolderRefusal::Taken(name) => write!(f, "there is a folder called \u{201c}{name}\u{201d} there already"),
-            FolderRefusal::ForPictures => f.write_str("that name is kept for pictures; choose another"),
+            FolderRefusal::ForAttachments => f.write_str("that name is kept for the notes' attachments; choose another"),
         }
     }
 }
@@ -600,12 +602,12 @@ pub struct TrashedFolder {
 }
 
 /// A folder's name as typed, as it is kept: one plain name, made so as a
-/// title is ([`slug`](carnet_core::name::slug)). The pictures' folder's
+/// title is ([`slug`](carnet_core::name::slug)). The files' folder's
 /// name is refused.
 pub fn folder_name(typed: &str) -> Result<String, FolderRefusal> {
     let name = carnet_core::name::slug(typed);
     if name.eq_ignore_ascii_case(ATTACHMENTS) {
-        return Err(FolderRefusal::ForPictures);
+        return Err(FolderRefusal::ForAttachments);
     }
     Ok(name)
 }
@@ -667,7 +669,7 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// A picture's value in the map that names one shown: not dropped.
+/// A file's value in the map that names one shown: not dropped.
 fn live(id: &str) -> bool {
     !id.is_empty() && !id.starts_with('-')
 }
@@ -770,7 +772,7 @@ mod tests {
         assert_eq!(v.make_folder("", "Work"), Ok("Work".into()));
         assert_eq!(v.make_folder("Work", "Q4: plans"), Ok("Work/Q4- plans".into()), "a plain name, as a title's");
         assert_eq!(v.make_folder("", "work"), Ok("Work".into()), "case aside, the one there");
-        assert_eq!(v.make_folder("Work", "Attachments"), Err(FolderRefusal::ForPictures));
+        assert_eq!(v.make_folder("Work", "Attachments"), Err(FolderRefusal::ForAttachments));
         assert_eq!(v.make_folder("Deep/Er", "X"), Ok("Deep/Er/X".into()), "the folders above it too");
         assert_eq!(folders(&v), ["Deep", "Deep/Er", "Deep/Er/X", "Work", "Work/Q4- plans"]);
 
@@ -842,29 +844,29 @@ mod tests {
         assert_eq!(v.place(plan), Some(place("Job", "Plan")));
         assert!(v.folders().contains("Job/Sub"));
         // A picture beside notes, as an older desktop kept them: not bare.
-        v.put_picture("Deep/Er/X/a.png", "aa");
+        v.put_file("Deep/Er/X/a.png", "aa");
         assert!(!v.folder_is_bare("Deep"));
     }
 
-    /// A picture put over another, or dropped: the one it held comes back
+    /// A file put over another, or dropped: the one it held comes back
     /// if nothing else holds it, for the server to drop.
     #[test]
     fn a_picture_put_out_of_use_is_said() {
         let v = NoteDoc::new(1);
-        assert_eq!(v.put_picture("attachments/a.png", "aa"), (true, None));
-        assert_eq!(v.put_picture("attachments/b.png", "aa"), (true, None));
-        assert_eq!(v.put_picture("attachments/a.png", "aa"), (false, None), "the same: nothing");
-        assert_eq!(v.put_picture("attachments/a.png", "cc"), (true, None), "aa still at b");
-        assert_eq!(v.put_picture("attachments/b.png", "dd"), (true, Some("aa".into())));
-        assert_eq!(v.drop_picture("attachments/a.png"), (true, Some("cc".into())));
-        assert_eq!(v.drop_picture("attachments/a.png"), (false, None));
-        assert_eq!(v.pictures().into_iter().collect::<Vec<_>>(), [("attachments/b.png".to_string(), "dd".to_string())]);
-        assert_eq!(v.dropped_pictures().into_iter().collect::<Vec<_>>(), ["attachments/a.png"]);
+        assert_eq!(v.put_file("attachments/a.png", "aa"), (true, None));
+        assert_eq!(v.put_file("attachments/b.png", "aa"), (true, None));
+        assert_eq!(v.put_file("attachments/a.png", "aa"), (false, None), "the same: nothing");
+        assert_eq!(v.put_file("attachments/a.png", "cc"), (true, None), "aa still at b");
+        assert_eq!(v.put_file("attachments/b.png", "dd"), (true, Some("aa".into())));
+        assert_eq!(v.drop_file("attachments/a.png"), (true, Some("cc".into())));
+        assert_eq!(v.drop_file("attachments/a.png"), (false, None));
+        assert_eq!(v.files().into_iter().collect::<Vec<_>>(), [("attachments/b.png".to_string(), "dd".to_string())]);
+        assert_eq!(v.dropped_files().into_iter().collect::<Vec<_>>(), ["attachments/a.png"]);
         assert_eq!(v.dropped_id("attachments/a.png").as_deref(), Some("cc"), "its id kept, to fetch it back");
-        assert_eq!(v.drop_picture("attachments/nowhere.png"), (false, None), "nothing there: nothing to drop");
+        assert_eq!(v.drop_file("attachments/nowhere.png"), (false, None), "nothing there: nothing to drop");
         // Put back: there again.
-        v.set_picture("attachments/a.png", "cc");
-        assert!(v.dropped_pictures().is_empty());
+        v.set_file("attachments/a.png", "cc");
+        assert!(v.dropped_files().is_empty());
     }
 
     /// An invite made on one device is known, code and all, on another;
@@ -953,7 +955,7 @@ mod tests {
         assert!(b.forget_all_invites().is_empty());
     }
 
-    /// A place, a folder or a picture's path another device wrote that
+    /// A place, a folder or a file's path another device wrote that
     /// reaches out of the notes folder (or names a drive, a share, a
     /// device) is read as not there; nor is one written here.
     #[test]
@@ -983,9 +985,9 @@ mod tests {
         assert_eq!(v.layout().notes.keys().collect::<Vec<_>>(), [&good]);
         assert_eq!((v.place(bad_folder), v.place(bad_name)), (None, None));
         assert_eq!(v.folders().into_iter().collect::<Vec<_>>(), ["Work"]);
-        assert_eq!(v.pictures().into_keys().collect::<Vec<_>>(), ["attachments/a.png"]);
-        assert!(v.dropped_pictures().is_empty() && v.dropped_id("attachments/../gone.png").is_none());
-        assert!(!v.set_folder("../x", true) && !v.set_picture("/x.png", "cc"));
+        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/a.png"]);
+        assert!(v.dropped_files().is_empty() && v.dropped_id("attachments/../gone.png").is_none());
+        assert!(!v.set_folder("../x", true) && !v.set_file("/x.png", "cc"));
         // A bad place is put right as any is written over: by a device
         // writing its own.
         assert!(v.set_place(bad_name, &place("", "Found")));
@@ -1000,22 +1002,22 @@ mod tests {
     #[test]
     fn documents_are_kept_apart_from_pictures() {
         let v = NoteDoc::new(1);
-        assert!(v.set_picture("attachments/a.png", "aa"));
-        assert!(v.set_picture("attachments/report.pdf", "bb"));
+        assert!(v.set_file("attachments/a.png", "aa"));
+        assert!(v.set_file("attachments/report.pdf", "bb"));
         let raw = |m: &str| match v.loro().get_map(m).get_deep_value() {
             LoroValue::Map(m) => m.keys().cloned().collect::<Vec<_>>(),
             _ => Vec::new(),
         };
         assert_eq!((raw(PICTURES), raw(FILES)), (vec!["attachments/a.png".to_string()], vec!["attachments/report.pdf".to_string()]));
-        assert_eq!(v.pictures().into_keys().collect::<Vec<_>>(), ["attachments/a.png", "attachments/report.pdf"]);
-        assert_eq!(v.drop_picture("attachments/report.pdf"), (true, Some("bb".to_string())));
-        assert_eq!(v.dropped_pictures().into_iter().collect::<Vec<_>>(), ["attachments/report.pdf"]);
+        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/a.png", "attachments/report.pdf"]);
+        assert_eq!(v.drop_file("attachments/report.pdf"), (true, Some("bb".to_string())));
+        assert_eq!(v.dropped_files().into_iter().collect::<Vec<_>>(), ["attachments/report.pdf"]);
         assert_eq!(v.dropped_id("attachments/report.pdf").as_deref(), Some("bb"));
         // Each in the other's map, as no Carnet writes them.
         v.loro().get_map(PICTURES).insert("attachments/notes.txt", "cc").unwrap();
         v.loro().get_map(FILES).insert("attachments/b.png", "dd").unwrap();
         v.loro().get_map(FILES).insert("attachments/run.sh", "ee").unwrap();
         v.loro().commit();
-        assert_eq!(v.pictures().into_keys().collect::<Vec<_>>(), ["attachments/a.png"]);
+        assert_eq!(v.files().into_keys().collect::<Vec<_>>(), ["attachments/a.png"]);
     }
 }

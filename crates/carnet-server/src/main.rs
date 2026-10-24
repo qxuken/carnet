@@ -4,11 +4,11 @@
 //! ```text
 //! carnet-server [--data DIR] [--listen ADDR] [--origin URL] [--web DIR] [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
 //!               [--tls-cert FILE --tls-key FILE [--tls-client-ca FILE]] [--passwords] [--compact-after N] [--postgres URL] [--s3 URL [--s3-region R] [--s3-virtual-host]]
-//!               [--keep-untracked-pictures]
+//!               [--keep-untracked-files]
 //! carnet-server invite [--data DIR] [--postgres URL]
 //! carnet-server backup DIR [--data DIR]
 //! carnet-server health [--listen ADDR | --metrics ADDR]
-//! carnet-server migrate [--from DIR] [--to-postgres URL] [--to-s3 URL [--s3-region R]] [--verify-only | --pictures-first]
+//! carnet-server migrate [--from DIR] [--to-postgres URL] [--to-s3 URL [--s3-region R]] [--verify-only | --files-first]
 //! ```
 //!
 //! Each flag has an environment variable for a container: `CARNET_DATA`
@@ -26,7 +26,9 @@
 //! `CARNET_TLS_CLIENT_CA` (TLS on the listener itself; none by default),
 //! `CARNET_POSTGRES` and `CARNET_S3` (with the features
 //! built in; none by default), `CARNET_S3_REGION`, `CARNET_S3_VIRTUAL_HOST`,
-//! `CARNET_S3_CA`, `CARNET_KEEP_UNTRACKED_PICTURES`.
+//! `CARNET_S3_CA`, `CARNET_KEEP_UNTRACKED_FILES`. The names from when the
+//! server kept only pictures still work: `--keep-untracked-pictures`,
+//! `--pictures-first`, `CARNET_KEEP_UNTRACKED_PICTURES`.
 //! A bucket's keys come only from the environment: `CARNET_S3_ACCESS_KEY`
 //! and `CARNET_S3_SECRET_KEY` (or AWS's own two names).
 
@@ -43,12 +45,12 @@ usage:
                 [--metrics ADDR] [--trusted-proxy LIST] [--client-header cf|xff]
                 [--tls-cert FILE --tls-key FILE [--tls-client-ca FILE]]
                 [--passwords] [--compact-after N] [--postgres URL] [--s3 URL]
-                [--keep-untracked-pictures]
+                [--keep-untracked-files]
   carnet-server invite [--data DIR] [--postgres URL]
   carnet-server backup DIR [--data DIR]
   carnet-server health [--listen ADDR | --metrics ADDR]
   carnet-server migrate [--from DIR] [--to-postgres URL] [--to-s3 URL]
-                [--verify-only | --pictures-first]
+                [--verify-only | --files-first]
 
   --data DIR      where the databases are kept          (CARNET_DATA, ./data)
   --listen ADDR   the address to listen on              (CARNET_LISTEN, 127.0.0.1:8080)
@@ -82,7 +84,7 @@ usage:
                   files: postgres://user:password@host/db (sslmode=require
                   for TLS); built with --features postgres
                                                         (CARNET_POSTGRES, none)
-  --s3 URL        keep the pictures in an S3 bucket instead of files:
+  --s3 URL        keep the files in an S3 bucket instead of on disk:
                   https://host/bucket[/folder]; its keys from
                   CARNET_S3_ACCESS_KEY and CARNET_S3_SECRET_KEY; built
                   with --features s3                    (CARNET_S3, none)
@@ -92,28 +94,31 @@ usage:
   --s3-ca FILE    the CA (PEM) the bucket's certificate is signed by, for
                   a bucket of one's own: trusted instead of the web's roots
                                                         (CARNET_S3_CA, none)
-  --keep-untracked-pictures  start with no accounts beside pictures of
+  --keep-untracked-files  start with no accounts beside files of
                   accounts this server has no record of: refused otherwise, as
                   their records were likely not put back (a new data
-                  folder, an empty database). The pictures are kept, unused
-                                           (CARNET_KEEP_UNTRACKED_PICTURES=1, off)
+                  folder, an empty database). The files are kept, unused
+                                           (CARNET_KEEP_UNTRACKED_FILES=1, off)
+                  old names: --keep-untracked-pictures,
+                  CARNET_KEEP_UNTRACKED_PICTURES
 
   invite          print a new invite code: one account, good for a week
                   (with no account yet, the owner's: good for a day)
   backup DIR      copy every database into DIR (new, or empty), safely
-                  while it serves, and the pictures unless a bucket keeps
+                  while it serves, and the files unless a bucket keeps
                   them; all of it is sealed or public, so it can go
                   anywhere (the SQLite files only: Postgres has pg_dump)
   health          ask the server listening at ADDR whether it's well:
                   exit 0 if so, 1 if not (a container's health check)
   migrate         copy the data folder (--from, else --data) to Postgres
-                  (--to-postgres URL) and its pictures to a bucket
+                  (--to-postgres URL) and its files to a bucket
                   (--to-s3 URL), with the server stopped; run it again
                   to go on, it skips what's copied; it checks all of it
                   after, and never changes the folder. --verify-only:
-                  only check. --pictures-first: only the pictures, to
+                  only check. --files-first: only the files, to
                   the bucket, while the server still runs (no lock), so
-                  the stopped run after has little left to copy
+                  the stopped run after has little left to copy (old
+                  name: --pictures-first)
 ";
 
 #[derive(Default)]
@@ -122,7 +127,7 @@ struct Args {
     health: bool,
     migrate: bool,
     verify_only: bool,
-    pictures_first: bool,
+    files_first: bool,
     backup: Option<PathBuf>,
     data: PathBuf,
     from: Option<PathBuf>,
@@ -144,7 +149,7 @@ struct Args {
     s3_region: String,
     s3_virtual_host: bool,
     s3_ca: Option<PathBuf>,
-    keep_untracked_pictures: bool,
+    keep_untracked_files: bool,
 }
 
 fn env(k: &str) -> Option<String> {
@@ -152,6 +157,12 @@ fn env(k: &str) -> Option<String> {
 }
 
 fn args() -> Result<Args, String> {
+    parse(std::env::args().skip(1), env)
+}
+
+/// The flags given and the variables set (`env`: a variable's value, none
+/// when empty).
+fn parse(given: impl IntoIterator<Item = String>, env: impl Fn(&str) -> Option<String>) -> Result<Args, String> {
     let on = |k: &str| env(k).is_some_and(|v| v == "1" || v == "true");
     let mut a = Args {
         data: env("CARNET_DATA").map_or_else(|| PathBuf::from("data"), PathBuf::from),
@@ -169,7 +180,8 @@ fn args() -> Result<Args, String> {
         s3_region: env("CARNET_S3_REGION").unwrap_or_else(|| "us-east-1".into()),
         s3_virtual_host: on("CARNET_S3_VIRTUAL_HOST"),
         s3_ca: env("CARNET_S3_CA").map(PathBuf::from),
-        keep_untracked_pictures: on("CARNET_KEEP_UNTRACKED_PICTURES"),
+        // Its name from when the server kept only pictures, too.
+        keep_untracked_files: on("CARNET_KEEP_UNTRACKED_FILES") || on("CARNET_KEEP_UNTRACKED_PICTURES"),
         ..Args::default()
     };
     if let Some(list) = env("CARNET_TRUSTED_PROXY") {
@@ -181,7 +193,7 @@ fn args() -> Result<Args, String> {
     if let Some(n) = env("CARNET_COMPACT_AFTER") {
         a.compact_after = n.parse().map_err(|_| format!("CARNET_COMPACT_AFTER={n}: not a number"))?;
     }
-    let mut it = std::env::args().skip(1);
+    let mut it = given.into_iter();
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
@@ -206,11 +218,11 @@ fn args() -> Result<Args, String> {
             "--s3-region" => a.s3_region = value("--s3-region")?,
             "--s3-virtual-host" => a.s3_virtual_host = true,
             "--s3-ca" => a.s3_ca = Some(value("--s3-ca")?.into()),
-            "--keep-untracked-pictures" => a.keep_untracked_pictures = true,
+            "--keep-untracked-files" | "--keep-untracked-pictures" => a.keep_untracked_files = true,
             "--to-postgres" => a.to_postgres = Some(value("--to-postgres")?),
             "--to-s3" => a.to_s3 = Some(value("--to-s3")?),
             "--verify-only" => a.verify_only = true,
-            "--pictures-first" => a.pictures_first = true,
+            "--files-first" | "--pictures-first" => a.files_first = true,
             "--compact-after" => {
                 let n = value("--compact-after")?;
                 a.compact_after = n.parse().ok().filter(|&n: &usize| n > 0).ok_or(format!("--compact-after {n}: not a number of records"))?;
@@ -247,7 +259,7 @@ fn store(a: &Args) -> Result<Option<server::Store>, String> {
     }
 }
 
-/// Where pictures go: a bucket if one is given.
+/// Where files go: a bucket if one is given.
 fn blobs(a: &Args) -> Result<Option<Box<dyn carnet_server::blobs::Blobs>>, String> {
     let Some(url) = &a.s3 else { return Ok(None) };
     #[cfg(feature = "s3")]
@@ -273,24 +285,24 @@ fn migrate(a: &Args) -> Result<(), String> {
             #[cfg(feature = "s3")]
             s3: a.to_s3.as_deref().map(|u| s3_config(u, a)).transpose()?,
             verify_only: a.verify_only,
-            pictures_first: a.pictures_first,
+            files_first: a.files_first,
         };
         #[cfg(not(feature = "s3"))]
         if a.to_s3.is_some() {
             return Err("--to-s3: this carnet-server was built without S3 (cargo build --features s3)".into());
         }
         let done = carnet_server::migrate::run(&plan, &mut |line| eprintln!("carnet-server: {line}")).map_err(|e| e.0)?;
-        if a.pictures_first {
+        if a.files_first {
             eprintln!(
-                "carnet-server: pictures copied first: {} put now ({} bytes), {} there already. The folder is as it was; stop the server, then migrate.",
-                done.put, done.put_bytes, done.pictures_skipped
+                "carnet-server: files copied first: {} put now ({} bytes), {} there already. The folder is as it was; stop the server, then migrate.",
+                done.put, done.put_bytes, done.files_skipped
             );
             return Ok(());
         }
         let what = if a.verify_only { "checked" } else { "migrated and checked" };
         eprintln!(
-            "carnet-server: {what}: {} accounts ({} copied now, {} the same already), {} pictures ({} put now, {} there already). The folder is as it was.",
-            done.rows.accounts, done.copied, done.skipped, done.pictures, done.put, done.pictures_skipped
+            "carnet-server: {what}: {} accounts ({} copied now, {} the same already), {} files ({} put now, {} there already). The folder is as it was.",
+            done.rows.accounts, done.copied, done.skipped, done.files, done.put, done.files_skipped
         );
         Ok(())
     }
@@ -339,7 +351,7 @@ fn main() -> ExitCode {
         if a.postgres.is_some() {
             return fail("backup copies the SQLite files; with Postgres, back up with pg_dump (and the bucket by its own means)".into());
         }
-        // With a bucket, the pictures are its to back up: a folder of
+        // With a bucket, the files are its to back up: a folder of
         // them here is from before it, and left out.
         return match Sharded::open(&a.data).and_then(|s| s.backup_with(to, a.s3.is_none())) {
             Ok(n) => {
@@ -406,7 +418,7 @@ fn main() -> ExitCode {
         };
         let host = server::Host { passwords: a.passwords, store, blobs, ..server::Host::default() };
         let config = Config { data: a.data, origin, compact_after: a.compact_after, web: a.web, trusted: a.trusted, client_header: a.client_header, tls };
-        let start = server::Start { keep_untracked_pictures: a.keep_untracked_pictures };
+        let start = server::Start { keep_untracked_files: a.keep_untracked_files };
         server::serve_started(config, listener, metrics, host, server::SocketLimits::default(), start, stop).await
     });
     match served {
@@ -446,4 +458,36 @@ fn health(listen: &str) -> Result<(), String> {
     let mut reply = String::new();
     s.read_to_string(&mut reply).map_err(|e| e.to_string())?;
     if reply.starts_with("HTTP/1.1 200") { Ok(()) } else { Err(format!("not well: {}", reply.lines().next().unwrap_or("no answer"))) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    /// What `given` and `vars` read as: a variable set empty is none, as
+    /// in a container's.
+    fn parsed(given: &[&str], vars: &[(&str, &str)]) -> super::Args {
+        let var = |k: &str| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string()).filter(|v| !v.is_empty());
+        parse(given.iter().map(|s| s.to_string()), var).unwrap()
+    }
+
+    /// The flags and the variable are named for files now; their names
+    /// from when the server kept only pictures still work.
+    #[test]
+    fn the_names_from_before_files_still_work() {
+        assert!(!parsed(&[], &[]).keep_untracked_files);
+        for flag in ["--keep-untracked-files", "--keep-untracked-pictures"] {
+            assert!(parsed(&[flag], &[]).keep_untracked_files, "{flag}");
+        }
+        for var in ["CARNET_KEEP_UNTRACKED_FILES", "CARNET_KEEP_UNTRACKED_PICTURES"] {
+            assert!(parsed(&[], &[(var, "1")]).keep_untracked_files, "{var}");
+            assert!(!parsed(&[], &[(var, "")]).keep_untracked_files, "{var} empty");
+        }
+        assert!(!parsed(&["migrate"], &[]).files_first);
+        for flag in ["--files-first", "--pictures-first"] {
+            let a = parsed(&["migrate", flag], &[]);
+            assert!(a.migrate && a.files_first, "{flag}");
+        }
+        assert!(parse(["--beside-old-pictures".to_string()], |_| None).is_err_and(|e| e == "--beside-old-pictures: not an option"));
+    }
 }

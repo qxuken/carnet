@@ -1,7 +1,7 @@
-//! Pictures (docs/SYNC.md §4, §7) through the hub: offered, a link given to
+//! Files (docs/SYNC.md §4, §7) through the hub: offered, a link given to
 //! put each the server lacks, kept once by id and said so only once there;
 //! fetched by a link, and opened only as themselves. On memory and on
-//! SQLite alike (the pictures themselves on memory: the links' HTTP is
+//! SQLite alike (the files themselves on memory: the links' HTTP is
 //! `server.rs`'s test).
 
 mod common;
@@ -20,7 +20,7 @@ fn events(net: &mut Net, conn: carnet_server::ConnId) -> Vec<Event> {
 }
 
 /// `pic` offered by `conn`, put at the link the server gives, and kept.
-fn send_picture(net: &mut Net, conn: carnet_server::ConnId, pic: &[u8]) {
+fn send_file(net: &mut Net, conn: carnet_server::ConnId, pic: &[u8]) {
     let id = net.device(conn).session.blob_id(pic);
     net.device(conn).session.offer_blobs(vec![(id, pic.len())]);
     net.pump();
@@ -32,19 +32,19 @@ fn send_picture(net: &mut Net, conn: carnet_server::ConnId, pic: &[u8]) {
     net.pump();
 }
 
-/// A picture of `n` bytes, not all alike.
-fn picture(n: usize, seed: u8) -> Vec<u8> {
+/// A file of `n` bytes, not all alike.
+fn file(n: usize, seed: u8) -> Vec<u8> {
     (0..n).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect()
 }
 
 #[test]
-fn a_picture_goes_up_by_its_link_and_comes_down_whole() {
+fn a_file_goes_up_by_its_link_and_comes_down_whole() {
     for store in stores() {
         let mut net = Net::new(40, store);
         let vault = VaultKey::generate(&mut net.rng);
         let a = net.first_device(&vault);
         let b = net.pair(a, b"laptop", 2);
-        let big = picture(700_000, 1);
+        let big = file(700_000, 1);
         let id = net.device(a).session.blob_id(&big);
         let _ = events(&mut net, a);
         let _ = events(&mut net, b);
@@ -68,7 +68,7 @@ fn a_picture_goes_up_by_its_link_and_comes_down_whole() {
         net.pump();
         assert_eq!(events(&mut net, b), [Event::BlobStored(id)]);
 
-        // The laptop fetches it: the very picture.
+        // The laptop fetches it: the very file.
         net.device(b).session.get_blob(id);
         net.pump();
         assert_eq!(events(&mut net, b), [Event::BlobGot(id, big.clone())]);
@@ -80,10 +80,10 @@ fn a_picture_goes_up_by_its_link_and_comes_down_whole() {
         assert_eq!(events(&mut net, b), [Event::BlobFailed(other)]);
 
         // The server swaps one blob for another under its id: it doesn't
-        // open as that picture.
-        let small = picture(3000, 2);
+        // open as that file.
+        let small = file(3000, 2);
         let small_id = net.device(a).session.blob_id(&small);
-        send_picture(&mut net, a, &small);
+        send_file(&mut net, a, &small);
         let swapped = net.worker.blobs.get(ACCOUNT, &small_id).unwrap().clone();
         net.worker.blobs.put(ACCOUNT, &[9; 32], &swapped);
         let _ = events(&mut net, b);
@@ -93,16 +93,16 @@ fn a_picture_goes_up_by_its_link_and_comes_down_whole() {
     }
 }
 
-/// Another account's picture isn't there for this one, even by its id.
+/// Another account's file isn't there for this one, even by its id.
 #[test]
-fn a_picture_stays_in_its_account() {
+fn a_file_stays_in_its_account() {
     for store in stores() {
         let mut net = Net::new(41, store);
         let vault = VaultKey::generate(&mut net.rng);
         let a = net.first_device(&vault);
-        let pic = picture(5000, 3);
+        let pic = file(5000, 3);
         let id = net.device(a).session.blob_id(&pic);
-        send_picture(&mut net, a, &pic);
+        send_file(&mut net, a, &pic);
         net.hub.store_mut().add_account(b"other", false).unwrap();
         assert!(net.worker.blobs.size(ACCOUNT, &id).is_some());
         assert_eq!(net.worker.blobs.size(b"other", &id), None);
@@ -120,17 +120,17 @@ fn a_picture_stays_in_its_account() {
     }
 }
 
-/// A picture asked for while the device is still logging in (a note
+/// A file asked for while the device is still logging in (a note
 /// opened at once): asked once it's in, and got.
 #[test]
-fn a_picture_asked_for_while_logging_in_comes_once_in() {
+fn a_file_asked_for_while_logging_in_comes_once_in() {
     for store in stores() {
         let mut net = Net::new(42, store);
         let vault = VaultKey::generate(&mut net.rng);
         let a = net.first_device(&vault);
-        let pic = picture(4000, 5);
+        let pic = file(4000, 5);
         let id = net.device(a).session.blob_id(&pic);
-        send_picture(&mut net, a, &pic);
+        send_file(&mut net, a, &pic);
         let mut d = net.take(a);
         d.session.connected();
         d.session.get_blob(id);

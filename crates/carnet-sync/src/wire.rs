@@ -13,7 +13,7 @@ pub use loro_protocol::{BatchId, CrdtType, Permission, UpdateStatusCode};
 
 const CARNET: &[u8; 4] = b"%CRN";
 
-/// The most pictures one `BlobOffer`, `BlobFetch` or `BlobDrop` names: a
+/// The most files one `BlobOffer`, `BlobFetch` or `BlobDrop` names: a
 /// device sends more in frames of this many; a server answers no more of
 /// one (docs/SYNC.md §6).
 pub const MAX_IDS: usize = 64;
@@ -162,7 +162,7 @@ pub enum Carnet {
     /// snapshot of it as the base, whatever the base is now.
     Repair { room: String },
 
-    // Pictures (§4, §7): sealed blobs, by id. The bytes go over HTTP, to
+    // Files (§4, §7): sealed blobs, by id. The bytes go over HTTP, to
     /// and from a short-lived signed URL the server gives here; the socket
     /// says only which, and when they're kept.
     /// Device → server: does it have these? Each comes back as
@@ -192,10 +192,10 @@ pub enum Carnet {
     // What the account keeps, and may (§11).
     /// Device → server: how much is kept, and the limit. `UsageIs` back.
     Usage,
-    /// Server → device: bytes kept for notes and for pictures (sealed);
+    /// Server → device: bytes kept for notes and for files (sealed);
     /// the limit (0: none); whether it may write; its plan and until when
     /// (0: no end).
-    UsageIs { notes: u64, pictures: u64, limit: u64, writable: bool, plan: String, until: u64 },
+    UsageIs { notes: u64, files: u64, limit: u64, writable: bool, plan: String, until: u64 },
 
     // Email and password (§7, password.rs): OPAQUE's messages relayed.
     /// Device → server: set (or change) this account's password, signing
@@ -624,10 +624,10 @@ pub fn encode(frame: &Frame) -> Vec<u8> {
                 }
                 Carnet::PasskeySet => w.push_byte(61),
                 Carnet::PasswordDrop => w.push_byte(56),
-                Carnet::UsageIs { notes, pictures, limit, writable, plan, until } => {
+                Carnet::UsageIs { notes, files, limit, writable, plan, until } => {
                     w.push_byte(51);
                     w.push_uleb128(*notes);
-                    w.push_uleb128(*pictures);
+                    w.push_uleb128(*files);
                     w.push_uleb128(*limit);
                     w.push_byte(u8::from(*writable));
                     w.push_var_string(plan);
@@ -914,7 +914,7 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, String> {
         61 => Carnet::PasskeySet,
         51 => Carnet::UsageIs {
             notes: r.read_uleb128()?,
-            pictures: r.read_uleb128()?,
+            files: r.read_uleb128()?,
             limit: r.read_uleb128()?,
             writable: r.read_byte()? != 0,
             plan: r.read_var_string()?,
@@ -1111,7 +1111,7 @@ mod tests {
             Frame::Carnet(Carnet::PasswordDrop),
             Frame::Carnet(Carnet::PasswordLogin { id: "ann@example.com".into(), request: vec![7; 96] }),
             Frame::Carnet(Carnet::PasswordLoginReply { response: vec![8; 320] }),
-            Frame::Carnet(Carnet::UsageIs { notes: 12_345, pictures: 6_000_000_000, limit: 5 << 30, writable: false, plan: "Personal".into(), until: 1_790_000_000 }),
+            Frame::Carnet(Carnet::UsageIs { notes: 12_345, files: 6_000_000_000, limit: 5 << 30, writable: false, plan: "Personal".into(), until: 1_790_000_000 }),
             Frame::Carnet(Carnet::RoomRemoved { room: "ab12".into() }),
             Frame::Carnet(Carnet::BlobLink { id: [3; 32], put: true, url: "https://n.example/v1/blobs/ab12".into(), expires: 1_760_000_300 }),
             Frame::Carnet(Carnet::BlobLink { id: [3; 32], put: false, url: "https://bucket.example/x?sig=1".into(), expires: 0 }),

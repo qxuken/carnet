@@ -370,22 +370,22 @@ impl Card {
     }
 }
 
-/// A picture's id: a key from the vault's first epoch over the picture's
-/// hash, so the same picture is one blob in a vault, and the id says
+/// A file's id: a key from the vault's first epoch over the file's
+/// hash, so the same file is one blob in a vault, and the id says
 /// nothing about it to anyone without the key. (The first epoch, not the
-/// newest, so a picture keeps its id when keys rotate; a device removed
-/// since could tell whether a picture it has is in the vault, no more.)
+/// newest, so a file keeps its id when keys rotate; a device removed
+/// since could tell whether a file it has is in the vault, no more.)
 pub type BlobId = [u8; 32];
 
-/// The most a picture may weigh.
+/// The most a file may weigh.
 pub const MAX_BLOB: usize = 32 * 1024 * 1024;
 
 const BLOB_MAGIC: &[u8; 4] = b"CRNB";
 
-/// What sealing adds to a picture: the magic, the epoch, the IV, the tag.
+/// What sealing adds to a file: the magic, the epoch, the IV, the tag.
 const BLOB_OVER: u64 = 4 + 4 + 12 + 16;
 
-/// How long a picture of `plain` bytes is once sealed ([`seal_blob`]):
+/// How long a file of `plain` bytes is once sealed ([`seal_blob`]):
 /// what a device says it will put, and the server holds it to.
 pub fn sealed_len(plain: usize) -> u64 {
     plain as u64 + BLOB_OVER
@@ -398,7 +398,7 @@ pub fn blob_id(ring: &Ring, plain: &[u8]) -> BlobId {
     derive(&first.0, &[b"carnet blob id v1", hash.as_slice()])
 }
 
-/// A picture sealed for the server: the magic, the epoch it is sealed
+/// A file sealed for the server: the magic, the epoch it is sealed
 /// under, an IV, and the sealed bytes, with the magic, epoch and id bound
 /// in as associated data.
 pub fn seal_blob(ring: &Ring, id: &BlobId, plain: &[u8], rng: &mut impl Random) -> Vec<u8> {
@@ -414,8 +414,8 @@ pub fn seal_blob(ring: &Ring, id: &BlobId, plain: &[u8], rng: &mut impl Random) 
     out
 }
 
-/// A picture as [`seal_blob`] made it, opened: and only if it is the
-/// picture the id names.
+/// A file as [`seal_blob`] made it, opened: and only if it is the
+/// file the id names.
 pub fn open_blob(ring: &Ring, id: &BlobId, sealed: &[u8]) -> Result<Vec<u8>, Sealed> {
     let rest = sealed.strip_prefix(BLOB_MAGIC.as_slice()).ok_or(Sealed)?;
     let (epoch, rest) = rest.split_at_checked(4).ok_or(Sealed)?;

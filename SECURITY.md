@@ -15,9 +15,9 @@ Say what you found, which version or commit, and how to reproduce it if you can.
 
 In scope:
 
-- **The desktop app**: how it reads and writes the notes folder, pictures and the clipboard, and how it keeps sync keys in the system's keychain.
-- **The sync protocol and its cryptography** (`crates/carnet-sync`): encryption of notes, pictures and the vault, logins, pairing, recovery words, passwords (OPAQUE) and passkeys.
-- **`carnet-server`**: authentication, isolation between accounts, rate limits, signed links to pictures, storage, backups and migration.
+- **The desktop app**: how it reads and writes the notes folder, its files and the clipboard, and how it keeps sync keys in the system's keychain.
+- **The sync protocol and its cryptography** (`crates/carnet-sync`): encryption of notes, files and the vault, logins, pairing, recovery words, passwords (OPAQUE) and passkeys.
+- **`carnet-server`**: authentication, isolation between accounts, rate limits, signed links to files, storage, backups and migration.
 - **The web app** (`web/` and `crates/carnet-web`): what it keeps in the browser, and how it pairs and signs in.
 
 Out of scope: problems that need an attacker who already controls your unlocked device, and the configuration of a particular server (its proxy, TLS or host), unless Carnet's defaults or documentation lead to the mistake.

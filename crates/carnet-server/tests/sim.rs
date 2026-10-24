@@ -126,7 +126,7 @@ struct World {
     /// is online, until the server has done it.
     remover: Option<usize>,
     now: u64,
-    /// The picture worker, as the server runs one beside the hub.
+    /// The file worker, as the server runs one beside the hub.
     worker: Worker<MemoryBlobs>,
 }
 

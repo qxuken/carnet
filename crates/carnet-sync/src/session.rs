@@ -119,15 +119,15 @@ pub enum Event {
     BadSnapshot(String),
     /// The account's rooms as the server keeps them, and its log.
     Inspected(Vec<RoomRow>, Vec<LogRow>),
-    /// A picture offered the server doesn't have: send it ([`Session::put_blob`]),
+    /// A file offered the server doesn't have: send it ([`Session::put_blob`]),
     /// which makes it a [`Transfer`].
     BlobWanted(BlobId),
-    /// A picture the server has, whole: offered and already there, or put
+    /// A file the server has, whole: offered and already there, or put
     /// and answered that it's kept (on the server's disk).
     BlobStored(BlobId),
-    /// A picture asked for, come and opened: the picture itself.
+    /// A file asked for, come and opened: the file itself.
     BlobGot(BlobId, Vec<u8>),
-    /// A picture asked for that the server doesn't have, or that didn't
+    /// A file asked for that the server doesn't have, or that didn't
     /// open as itself; or one being put that didn't go, or wasn't kept:
     /// offered or asked for again later.
     BlobFailed(BlobId),
@@ -137,7 +137,7 @@ pub enum Event {
     /// The server has removed `room` (its note deleted forever): asked by
     /// [`Session::remove_room`], or found so on joining it.
     RoomRemoved(String),
-    /// The server has these pictures marked to drop, as
+    /// The server has these files marked to drop, as
     /// [`Session::drop_blobs`] asked.
     BlobsDropped(Vec<BlobId>),
     /// What the account keeps, and may, as [`Session::usage`] asked.
@@ -167,9 +167,9 @@ pub enum Event {
 /// What an account keeps and may keep (docs/SYNC.md §11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Usage {
-    /// Bytes kept, sealed: the notes, and the pictures.
+    /// Bytes kept, sealed: the notes, and the files.
     pub notes: u64,
-    pub pictures: u64,
+    pub files: u64,
     /// The most it may keep; `None`: no limit (a server of one's own).
     pub limit: Option<u64>,
     pub writable: bool,
@@ -179,34 +179,34 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// Whether the server takes a new picture now: the account can write,
-    /// and is under its limit, if it has one. A picture held back (the
+    /// Whether the server takes a new file now: the account can write,
+    /// and is under its limit, if it has one. A file held back (the
     /// server said [`FULL`] or [`READ_ONLY`]) is offered again once it is.
     pub fn has_room(&self) -> bool {
-        self.writable && self.limit.is_none_or(|limit| self.notes + self.pictures < limit)
+        self.writable && self.limit.is_none_or(|limit| self.notes + self.files < limit)
     }
 }
 
-/// What the server says (`Refused`) of pictures offered while the account
+/// What the server says (`Refused`) of files offered while the account
 /// is full: they stay on the device until [`Usage::has_room`].
-pub const FULL: &str = "This account is full, so new pictures stay on this device for now. Delete some, or move to a bigger plan.";
+pub const FULL: &str = "This account is full, so new files stay on this device for now. Delete some, or move to a bigger plan.";
 
-/// What the server says (`Refused`) of pictures offered while the account
+/// What the server says (`Refused`) of files offered while the account
 /// can't write. The apps say read only once, as [`Event::ReadOnly`] has it,
 /// so they don't show this beside it.
 pub const READ_ONLY: &str = "This account is read only for now: changes stay on this device, and sync once it can write again.";
 
 /// What this device says ([`Event::Failed`], once a login) when the
-/// server gives a link to put a picture at that isn't followed
-/// ([`crate::link::fair`]): a picture store on a host of this network
-/// other than the server's own, say. The picture waits, offered again
+/// server gives a link to put a file at that isn't followed
+/// ([`crate::link::fair`]): a file store on a host of this network
+/// other than the server's own, say. The file waits, offered again
 /// as any held back is.
-pub const PICTURES_UNREACHABLE: &str = "The server's picture storage can't be reached from here, so new pictures stay on this device for now.";
+pub const FILES_UNREACHABLE: &str = "The server's file storage can't be reached from here, so new files stay on this device for now.";
 
-/// Why pictures wait when the server's picture storage refuses them (an
+/// Why files wait when the server's file storage refuses them (an
 /// HTTP 4xx answer other than a timeout or "too many"): its keys, its
 /// clock, a bucket not there. Said by the apps, the same everywhere.
-pub const PICTURES_TURNED_AWAY: &str = "The server's picture storage turned new pictures away, so they stay on this device for now.";
+pub const FILES_TURNED_AWAY: &str = "The server's file storage turned new files away, so they stay on this device for now.";
 
 /// The most letters of the server's own words shown at once.
 pub const SAID_MAX: usize = 200;
@@ -280,7 +280,7 @@ pub fn refusal_words(why: &str) -> String {
 /// the server's).
 const PASSWORD_NOT_SET: &str = "The password couldn't be set: ";
 
-/// How much of a picture goes in one frame.
+/// How much of a file goes in one frame.
 pub const BLOB_PIECE: usize = 192 * 1024;
 
 /// The last list of devices, as read: each row with its card, if it
@@ -347,13 +347,13 @@ pub struct Session {
     /// A pairing this device opened, while it is open.
     pairing: Option<Opener>,
     listed: Option<Listed>,
-    /// Pictures the server wants, and where to put each.
+    /// Files the server wants, and where to put each.
     putting: HashMap<BlobId, String>,
-    /// Pictures asked for, not come yet.
+    /// Files asked for, not come yet.
     fetching: HashSet<BlobId>,
     /// HTTP the driver is to do: [`Session::take_transfers`].
     transfers: Vec<Transfer>,
-    /// Rooms to remove and pictures to drop, until the server says done:
+    /// Rooms to remove and files to drop, until the server says done:
     /// said again on each login.
     removing: BTreeSet<String>,
     dropping: BTreeSet<BlobId>,
@@ -386,7 +386,7 @@ pub struct Session {
     announced: usize,
     /// Said [`TOO_MANY_NEW`] this login.
     too_many: bool,
-    /// Said [`PICTURES_UNREACHABLE`] this login.
+    /// Said [`FILES_UNREACHABLE`] this login.
     unreachable: bool,
     /// Of those, the ones whose join isn't answered yet, and how many came
     /// back empty: an account's own notes come with words, a hostile
@@ -436,7 +436,7 @@ pub fn note_room(room: &str) -> bool {
     room == crate::vault::ROOM || crate::note::Key::parse(room).is_some_and(|k| k.to_string() == room)
 }
 
-/// A picture's bytes to move over HTTP, to or from a short-lived signed
+/// A file's bytes to move over HTTP, to or from a short-lived signed
 /// URL the server gave (docs/SYNC.md §6): the driver does it, and says how
 /// it went ([`Session::transferred`]). The socket only says which.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -605,13 +605,13 @@ impl Session {
         }
     }
 
-    /// The rooms to remove and pictures to drop the server hasn't said
+    /// The rooms to remove and files to drop the server hasn't said
     /// done yet: what a device keeps across a restart, to say again.
     pub fn pending_removals(&self) -> (Vec<String>, Vec<BlobId>) {
         (self.removing.iter().cloned().collect(), self.dropping.iter().copied().collect())
     }
 
-    /// No note shows these pictures any more: the server may drop them,
+    /// No note shows these files any more: the server may drop them,
     /// told now or on the next login, until it says so
     /// ([`Event::BlobsDropped`]).
     pub fn drop_blobs(&mut self, ids: &[BlobId]) {
@@ -628,23 +628,23 @@ impl Session {
         }
     }
 
-    /// Asks whether the server has these pictures, each with its length
+    /// Asks whether the server has these files, each with its length
     /// (as it is here, not sealed): each comes back as
     /// [`Event::BlobWanted`] or [`Event::BlobStored`]. Sent
     /// [`wire::MAX_IDS`] to a frame, each with how long it will be
     /// sealed: the server holds the put to that.
-    pub fn offer_blobs(&mut self, pictures: Vec<(BlobId, usize)>) {
+    pub fn offer_blobs(&mut self, files: Vec<(BlobId, usize)>) {
         if self.state != State::Ready {
             return;
         }
-        for chunk in pictures.chunks(wire::MAX_IDS) {
+        for chunk in files.chunks(wire::MAX_IDS) {
             let ids = chunk.iter().map(|(id, _)| *id).collect();
             let sizes = chunk.iter().map(|(_, n)| sealed_len(*n)).collect();
             self.send(Frame::Carnet(Carnet::BlobOffer { ids, sizes }));
         }
     }
 
-    /// A picture the server wanted, sealed, to be put at the link it gave:
+    /// A file the server wanted, sealed, to be put at the link it gave:
     /// a [`Transfer`], then [`Event::BlobStored`] once the put is answered
     /// (the server's word that it's on its disk). `false` for one too big, or not wanted.
     pub fn put_blob(&mut self, plain: &[u8], rng: &mut impl Random) -> bool {
@@ -658,7 +658,7 @@ impl Session {
         true
     }
 
-    /// Asks for a picture: a [`Transfer`], then [`Event::BlobGot`] or
+    /// Asks for a file: a [`Transfer`], then [`Event::BlobGot`] or
     /// [`Event::BlobFailed`]. Asked while logging in, it's asked once in.
     pub fn get_blob(&mut self, id: BlobId) {
         if self.fetching.insert(id) && self.state == State::Ready {
@@ -666,15 +666,15 @@ impl Session {
         }
     }
 
-    /// The HTTP to do: pictures to put and to fetch.
+    /// The HTTP to do: files to put and to fetch.
     pub fn take_transfers(&mut self) -> Vec<Transfer> {
         std::mem::take(&mut self.transfers)
     }
 
     /// How a [`Transfer`] went: for a fetch, the sealed bytes. A put that
-    /// went is kept: the server answers it only once the picture is on its
+    /// went is kept: the server answers it only once the file is on its
     /// disk, connected or not. One fetched is opened (it must be the
-    /// picture its id names).
+    /// file its id names).
     pub fn transferred(&mut self, id: BlobId, put: bool, result: Result<Vec<u8>, String>) {
         match (put, result) {
             (true, Ok(_)) => self.events.push(Event::BlobStored(id)),
@@ -691,7 +691,7 @@ impl Session {
         }
     }
 
-    /// This device's id for a picture.
+    /// This device's id for a file.
     pub fn blob_id(&self, plain: &[u8]) -> BlobId {
         blob_id(&self.id.ring, plain)
     }
@@ -1149,7 +1149,7 @@ impl Session {
                         self.join(&room, docs);
                     }
                 }
-                // Pictures asked for while logging in.
+                // Files asked for while logging in.
                 let mut ids: Vec<BlobId> = self.fetching.iter().copied().collect();
                 ids.sort_unstable();
                 for chunk in ids.chunks(wire::MAX_IDS) {
@@ -1294,7 +1294,7 @@ impl Session {
             }
             Frame::Carnet(Carnet::Inspected { rooms, log }) => self.events.push(Event::Inspected(rooms, log)),
             Frame::Carnet(Carnet::InviteList { owner, invites, accounts }) => self.events.push(Event::Invites { owner, invites, accounts }),
-            // Pictures: where to put one the server wants, or fetch one
+            // Files: where to put one the server wants, or fetch one
             // asked for; kept; or not there. A link not plainly the web's
             // (`link::fair`) is never followed: a put is offered again
             // later, and why it waits said; a fetch fails.
@@ -1304,7 +1304,7 @@ impl Session {
                 }
                 if put && !self.unreachable {
                     self.unreachable = true;
-                    self.events.push(Event::Failed(PICTURES_UNREACHABLE.into()));
+                    self.events.push(Event::Failed(FILES_UNREACHABLE.into()));
                 }
             }
             Frame::Carnet(Carnet::BlobLink { id, put: true, url, .. }) => {
@@ -1317,7 +1317,7 @@ impl Session {
                 }
             }
             Frame::Carnet(Carnet::BlobStored { id }) => self.events.push(Event::BlobStored(id)),
-            Frame::Carnet(Carnet::UsageIs { notes, pictures, limit, writable, plan, until }) => {
+            Frame::Carnet(Carnet::UsageIs { notes, files, limit, writable, plan, until }) => {
                 // Asked, or told unasked when the account's limit changed
                 // (§11): read only now, or writable again.
                 if self.state == State::Ready {
@@ -1350,7 +1350,7 @@ impl Session {
                 }
                 self.events.push(Event::Usage(Usage {
                     notes,
-                    pictures,
+                    files,
                     limit: (limit > 0).then_some(limit),
                     writable,
                     // The server's own name for it: shown, so made fit to.

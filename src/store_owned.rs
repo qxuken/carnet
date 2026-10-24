@@ -1,13 +1,13 @@
-//! Whose a picture is (docs/SYNC.md §4).
+//! Whose a file is (docs/SYNC.md §4).
 //!
 //! Carnet's are the ones in the notes folder's attachments folder: where a
-//! paste, a drop, an import or an export's gathering puts them. They sync,
-//! and Carnet may tidy them away. Any other picture a note shows (beside
+//! paste, a drop, the paperclip, an import or an export's gathering puts them. They sync,
+//! and Carnet may tidy them away. Any other file a note shows or links to (beside
 //! its note, elsewhere in the folder, or outside it) is the user's: shown,
 //! never synced, never moved or removed but when the user asks for it
 //! (Move into Carnet, Copy into Carnet).
 //!
-//! The sweep: a picture of Carnet's nothing shows any more (no note, a
+//! The sweep: a file of Carnet's nothing shows or links to any more (no note, a
 //! note in Deleted included; no version of one; no text in the trash) for
 //! [`SWEEP_GRACE`] goes to `.trash/attachments/`, where it can be put back
 //! by hand, and is dropped in the vault, so other devices drop their
@@ -15,12 +15,12 @@
 
 use super::*;
 
-/// How long a picture of Carnet's goes unshown before the sweep takes it:
+/// How long a file of Carnet's goes unshown before the sweep takes it:
 /// a week, so one taken out by mistake and put back within days, or one a
 /// note on another device shows and whose text hasn't come yet, stays.
 pub const SWEEP_GRACE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-/// Beside `pictures.txt` in the replica's folder: each picture of Carnet's
+/// Beside `pictures.txt` in the replica's folder: each file of Carnet's
 /// seen unshown, and since when (`path`, tab, milliseconds since 1970).
 const UNSHOWN: &str = "unshown.txt";
 
@@ -377,17 +377,17 @@ impl Store {
     /// notes folder as the vault has it.
     pub fn unname(&mut self, rel: &str) -> bool {
         let Some(r) = &self.replica else { return false };
-        let (changed, unused) = r.vault().drop_picture(rel);
+        let (changed, unused) = r.vault().drop_file(rel);
         if !changed {
             return false;
         }
         let _ = r.persist_vault();
         self.vault_changed = true;
-        self.forgotten.pictures.extend(unused);
+        self.forgotten.files.extend(unused);
         true
     }
 
-    /// The pictures in the attachments folder, by their paths from the
+    /// The files in the attachments folder, by their paths from the
     /// notes folder (as written on disk), and where they are. A few
     /// folders deep; hidden files and ones being written left out.
     pub fn attachments(&self) -> Vec<(String, PathBuf)> {
@@ -416,10 +416,10 @@ impl Store {
         out
     }
 
-    /// The pictures of Carnet's `text` (a note in `folder`) shows that the
+    /// The files of Carnet's `text` (a note in `folder`) shows or links to that the
     /// sweep took to the trash: put back where they were.
     pub(super) fn bring_back(&self, folder: &str, text: &str) {
-        for rel in doc::picture_paths(folder, text, &self.files) {
+        for rel in doc::file_paths(folder, text, &self.files) {
             if !is_owned(&rel) {
                 continue;
             }
@@ -434,15 +434,15 @@ impl Store {
         }
     }
 
-    /// The sweep: the pictures in the attachments folder that nothing
-    /// shows (no note, its unsaved edits and the notes in Deleted
+    /// The sweep: the files in the attachments folder that nothing
+    /// shows or links to (no note, its unsaved edits and the notes in Deleted
     /// included; no version of a note this device keeps; no text in the
     /// trash) and that aren't `busy` (being sent, or wanted back: paths
     /// from the notes folder), seen so for [`SWEEP_GRACE`] since first
     /// seen, go to `.trash/` under the same path, and are dropped in the
     /// vault. Returns their paths. Without a replica nothing goes: there
     /// is no history to ask.
-    pub fn sweep_pictures(&mut self, busy: &BTreeSet<String>, now: SystemTime) -> io::Result<Vec<String>> {
+    pub fn sweep_files(&mut self, busy: &BTreeSet<String>, now: SystemTime) -> io::Result<Vec<String>> {
         let Some(record) = self.replica_dir().map(|d| d.join(UNSHOWN)) else { return Ok(Vec::new()) };
         let seen: HashMap<String, u64> = fs::read_to_string(&record)
             .unwrap_or_default()
@@ -453,7 +453,7 @@ impl Store {
             })
             .collect();
         let low = |p: &str| p.to_lowercase();
-        let mut used: HashSet<String> = self.pictures_in_use().iter().chain(busy).map(|p| low(p)).collect();
+        let mut used: HashSet<String> = self.files_in_use().iter().chain(busy).map(|p| low(p)).collect();
         // The swept ones keep their place in the trash, and aren't here.
         // Only what syncs (pictures, and documents, which `used` has when
         // a note links to them): a file of another kind is no one's to
@@ -461,7 +461,7 @@ impl Store {
         let mut unshown: Vec<(String, PathBuf)> = self
             .attachments()
             .into_iter()
-            .filter(|(rel, _)| crate::pictures::syncs(rel) && !used.contains(&low(rel)))
+            .filter(|(rel, _)| crate::files::syncs(rel) && !used.contains(&low(rel)))
             .collect();
         if !unshown.is_empty() {
             // A note in the trash this device's history doesn't know (put
@@ -518,7 +518,7 @@ impl Store {
         if !is_owned(&rel) || !copy.is_file() {
             return Ok(false);
         }
-        if self.pictures_in_use().iter().any(|p| p.eq_ignore_ascii_case(&rel)) {
+        if self.files_in_use().iter().any(|p| p.eq_ignore_ascii_case(&rel)) {
             return Ok(false);
         }
         self.sweep_one(&rel, copy)?;
@@ -526,7 +526,7 @@ impl Store {
         Ok(true)
     }
 
-    /// One picture swept: to `.trash/` under its path from the notes
+    /// One file swept: to `.trash/` under its path from the notes
     /// folder (or the first name free there), and dropped in the vault.
     fn sweep_one(&mut self, rel: &str, path: &Path) -> io::Result<()> {
         let mut to = self.dir.join(TRASH).join(rel);
@@ -608,7 +608,7 @@ mod tests {
         assert!(file(&s, b_id).contains("![](attachments/hill-view.jpg)"));
         let trashed = fs::read_to_string(&m.trashed[0].0).unwrap();
         assert!(trashed.contains("](../attachments/hill-view.jpg)"), "{trashed}");
-        assert!(s.pictures_in_use().contains("attachments/hill-view.jpg"));
+        assert!(s.files_in_use().contains("attachments/hill-view.jpg"));
         // Its history has it, as a save.
         let i = s.notes.iter().position(|n| n.id == a_id).unwrap();
         assert!(s.history(i).len() >= 2);
@@ -656,7 +656,7 @@ mod tests {
             "![](attachments/..\\..\\secret.docx)\n\n![](attachments\\..\\..\\secret.docx)\n\n![](attachments/../../secret.docx)\n\n![]({outside})\n\n![](file://{outside})\n\n![](attachments/pasted.png)"
         );
         let i = note(&mut s, "", "Walk", &body);
-        assert_eq!(doc::picture_paths("", &s.notes[i].markdown(), &s.files).into_iter().collect::<Vec<_>>(), ["attachments/pasted.png"]);
+        assert_eq!(doc::file_paths("", &s.notes[i].markdown(), &s.files).into_iter().collect::<Vec<_>>(), ["attachments/pasted.png"]);
         s.trash(i).unwrap();
         let t = s.trashed().into_iter().next().unwrap();
         s.delete_forever(&t).unwrap();
@@ -667,7 +667,7 @@ mod tests {
             assert!(s.inside(dir.join(p)).is_err(), "{p}");
         }
         assert!(s.inside(base.join("secret.docx")).is_err() && s.inside(dir.join("attachments/a.png")).is_ok() && s.inside(dir.clone()).is_ok());
-        s.drop_pictures(&["attachments/../../secret.docx".to_string()].into());
+        s.drop_files(&["attachments/../../secret.docx".to_string()].into());
         s.bring_back("", "![](attachments/../../secret.docx)");
         assert!(base.join("secret.docx").exists());
         let _ = fs::remove_dir_all(dir.with_extension("replica"));
@@ -714,13 +714,13 @@ mod tests {
         let i = note(&mut s, "Home", "Walk", "Words.");
         let t0 = SystemTime::now();
         let none = BTreeSet::new();
-        assert!(s.sweep_pictures(&none, t0).unwrap().is_empty(), "seen unshown, kept for now");
-        assert!(s.sweep_pictures(&none, t0 + 6 * DAY).unwrap().is_empty());
+        assert!(s.sweep_files(&none, t0).unwrap().is_empty(), "seen unshown, kept for now");
+        assert!(s.sweep_files(&none, t0 + 6 * DAY).unwrap().is_empty());
         // Busy (being sent): kept, and its week starts again.
         let busy: BTreeSet<String> = ["attachments/pasted.png".to_string()].into();
-        assert!(s.sweep_pictures(&busy, t0 + 8 * DAY).unwrap().is_empty());
-        assert!(s.sweep_pictures(&none, t0 + 8 * DAY).unwrap().is_empty());
-        assert_eq!(s.sweep_pictures(&none, t0 + 15 * DAY).unwrap(), vec!["attachments/pasted.png".to_string()]);
+        assert!(s.sweep_files(&busy, t0 + 8 * DAY).unwrap().is_empty());
+        assert!(s.sweep_files(&none, t0 + 8 * DAY).unwrap().is_empty());
+        assert_eq!(s.sweep_files(&none, t0 + 15 * DAY).unwrap(), vec!["attachments/pasted.png".to_string()]);
         assert!(!dir.join("attachments/pasted.png").exists());
         assert!(dir.join(".trash/attachments/pasted.png").exists(), "in the trash, to be put back by hand");
         assert!(dir.join("Home/mine.jpg").exists() && dir.join("loose.png").exists(), "the user's are never swept");
@@ -746,8 +746,8 @@ mod tests {
         note(&mut s, "", "Trip", "See [report.pdf](attachments/report.pdf).");
         let t0 = SystemTime::now();
         let none = BTreeSet::new();
-        assert!(s.sweep_pictures(&none, t0).unwrap().is_empty());
-        let swept = s.sweep_pictures(&none, t0 + 15 * DAY).unwrap();
+        assert!(s.sweep_files(&none, t0).unwrap().is_empty());
+        let swept = s.sweep_files(&none, t0 + 15 * DAY).unwrap();
         assert_eq!(swept, ["attachments/old.pdf", "attachments/pasted.png"], "the unlinked document and the unshown picture");
         assert!(dir.join("attachments/report.pdf").is_file(), "the linked document stays");
         assert!(dir.join("attachments/tool.sh").is_file(), "no kind of Carnet's: never touched");
@@ -770,13 +770,13 @@ mod tests {
         fs::write(dir.join("attachments/cell.png"), b"c").unwrap();
         fs::write(dir.join("Home/mine.png"), b"m").unwrap();
         let i = note(&mut s, "Home", "Walk", "| a | b |\n| --- | --- |\n| ![|left|260](../attachments/cell.png) and words | ![](mine.png) |");
-        assert!(s.pictures_in_use().contains("attachments/cell.png"));
+        assert!(s.files_in_use().contains("attachments/cell.png"));
         let key = s.notes[i].key.unwrap();
         assert!(s.shown_by(&[key]).contains("attachments/cell.png"), "what sync asks back");
         let t0 = SystemTime::now();
         let none = BTreeSet::new();
         for d in [0, 8, 30] {
-            assert!(s.sweep_pictures(&none, t0 + d * DAY).unwrap().is_empty(), "day {d}");
+            assert!(s.sweep_files(&none, t0 + d * DAY).unwrap().is_empty(), "day {d}");
         }
         assert!(dir.join("attachments/cell.png").exists());
         // Moved to the top: each path from there.
@@ -809,7 +809,7 @@ mod tests {
         let t0 = SystemTime::now();
         let none = BTreeSet::new();
         for d in [0, 8, 30] {
-            assert!(s.sweep_pictures(&none, t0 + d * DAY).unwrap().is_empty(), "day {d}");
+            assert!(s.sweep_files(&none, t0 + d * DAY).unwrap().is_empty(), "day {d}");
         }
         assert!(dir.join("attachments/old.png").exists() && dir.join("attachments/binned.png").exists());
         // The note in Deleted, deleted forever: its picture goes with it

@@ -251,15 +251,15 @@ pub trait Storage {
     fn is_owner(&self, account: &[u8]) -> bool;
     /// Every account: its id, whether it's the owner's, when it was made.
     fn account_list(&self) -> Vec<(Vec<u8>, bool, u64)>;
-    /// Whether `account` is here: what a picture's put and the sweep of
-    /// pictures no account owns ask. A store that can't say answers yes,
+    /// Whether `account` is here: what a file's put and the sweep of
+    /// files no account owns ask. A store that can't say answers yes,
     /// so nothing is let go for a failure. (Every account has a device,
     /// unless a store says better.)
     fn has_account(&self, account: &[u8]) -> bool {
         !self.devices(account).is_empty()
     }
     /// An account gone, and everything it held with it: its devices, its
-    /// records, its pictures, its recovery code.
+    /// records, its files, its recovery code.
     fn remove_account(&mut self, account: &[u8]) -> Result<(), Failed>;
 
     /// The account's recovery code (§7): its public key, the key ring

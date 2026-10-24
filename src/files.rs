@@ -1,29 +1,31 @@
-//! Pictures between devices (docs/SYNC.md §4): the files in the notes
+//! Files between devices (docs/SYNC.md §4): the files in the notes
 //! folder's `attachments/`, Carnet's own, each a sealed blob on the server
-//! by its id, and the vault doc saying which picture is at which path. Any
-//! other picture a note shows is the user's, and stays on its device
+//! by its id, and the vault doc saying which file is at which path. Any
+//! other file a note shows or links to is the user's, and stays on its device
 //! (store_owned.rs).
 //!
-//! A picture here and not in the vault is offered; the server says
+//! A file here and not in the vault is offered; the server says
 //! whether it lacks it, and if so it is sent. Only once the server has it
 //! does the vault say the path holds it, so a device never asks for a
-//! picture not there yet. A picture in the vault and not here is fetched,
-//! opened (it must be the picture its id names), and written.
+//! file not there yet. A file in the vault and not here is fetched,
+//! opened (it must be the file its id names), and written.
 //!
-//! A picture goes when the last note showing it is deleted forever
+//! A file goes when the last note showing it is deleted forever
 //! (`Store::delete_forever`): its path dropped in the vault, and the server
 //! told it may drop it. Dropped on another device, its file here goes too,
 //! unless a note here shows it: then it's wanted, and offered again, which
 //! keeps it on the server.
 //!
-//! Hashing a picture to know its id is done once: an index of path, size,
-//! modified time and id is kept beside the replica (`pictures.txt`).
+//! Hashing a file to know its id is done once: an index of path, size,
+//! modified time and id is kept beside the replica (`pictures.txt`,
+//! named from when only pictures synced: a new name would hash every
+//! file again).
 //!
-//! A picture's id is made under the account's vault key, and the notes
+//! A file's id is made under the account's vault key, and the notes
 //! folder (its replica, this index) outlives an account: set up anew, with
-//! another server or afresh, its pictures have other ids there, and none of
+//! another server or afresh, its files have other ids there, and none of
 //! them is on that server yet. So the index says whose ids it holds, and
-//! one made under another key is started again: every picture hashed
+//! one made under another key is started again: every file hashed
 //! anew, offered, and named in the vault by its new id.
 //!
 //! A Carnet before this one synced the pictures beside notes too. What it
@@ -61,7 +63,7 @@ pub fn syncs(rel: &str) -> bool {
     is_owned(rel) && (carnet_core::doc::is_picture_name(rel) || carnet_core::doc::is_document_name(rel))
 }
 
-/// A picture come by sync, written at `path`: whole or not at all, and
+/// A file come by sync, written at `path`: whole or not at all, and
 /// on macOS marked as from elsewhere before it's there to open.
 fn write_received(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
@@ -77,7 +79,7 @@ fn write_received(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Marks a file as come from elsewhere (macOS's `com.apple.quarantine`,
 /// as a browser marks a download), so the Finder asks before opening it.
-/// Not marked, it's still a picture; so a failure is let be.
+/// Not marked, it's still a file; so a failure is let be.
 #[cfg(target_os = "macos")]
 pub fn quarantine(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
@@ -111,27 +113,27 @@ pub fn quarantine(path: &Path) {
 #[cfg(not(any(target_os = "macos", windows)))]
 pub fn quarantine(_: &Path) {}
 
-/// The index's first line: whose ids it holds ([`Pictures::mark`]).
+/// The index's first line: whose ids it holds ([`FileSync::mark`]).
 const UNDER: &str = "under\t";
 
-/// A picture asked for and not come is asked again after this; one
+/// A file asked for and not come is asked again after this; one
 /// offered and not answered, offered again.
 const RETRY: Duration = Duration::from_secs(30);
 
-/// A picture the server held back (the account full, or read only) is
+/// A file the server held back (the account full, or read only) is
 /// offered again after this, though nothing said there's room: room may
-/// have been made without a word (pictures deleted on another device).
-/// Said there's room ([`Pictures::retry`]), it's offered at once.
+/// have been made without a word (files deleted on another device).
+/// Said there's room ([`FileSync::retry`]), it's offered at once.
 const HELD_AGAIN: Duration = Duration::from_secs(5 * 60);
 
-/// A picture whose sending failed is offered again after a wait: this
+/// A file whose sending failed is offered again after a wait: this
 /// long the first time, twice as long each time after, up to
 /// [`PUT_WAIT_MOST`]; back to the first once one goes.
 const PUT_WAIT_FIRST: Duration = Duration::from_secs(15);
 const PUT_WAIT_MOST: Duration = Duration::from_secs(5 * 60);
 
-/// Why pictures wait when the server's picture storage refuses them.
-pub use carnet_sync::session::PICTURES_TURNED_AWAY as TURNED_AWAY;
+/// Why files wait when the server's file storage refuses them.
+pub use carnet_sync::session::FILES_TURNED_AWAY as TURNED_AWAY;
 
 /// Whether a failed send (`error`, as the transfer has it: `HTTP` and the
 /// status, or other words) won't go however often it's tried: then why,
@@ -153,9 +155,9 @@ struct Known {
 }
 
 #[derive(Default)]
-pub struct Pictures {
+pub struct FileSync {
     index: BTreeMap<String, Known>,
-    /// Whose ids the index holds: [`Pictures::mark`] of the session they
+    /// Whose ids the index holds: [`FileSync::mark`] of the session they
     /// were made in. `None` in an index from before it was kept.
     under: Option<String>,
     /// Where the index is kept; none in tests that don't keep it.
@@ -169,31 +171,31 @@ pub struct Pictures {
     held: HashMap<BlobId, Instant>,
     /// Asked for, and when.
     asked: HashMap<BlobId, Instant>,
-    /// The vault's pictures not here, by path, as the last round found
-    /// them: on their way, unless given up ([`Pictures::coming`]).
+    /// The vault's files not here, by path, as the last round found
+    /// them: on their way, unless given up ([`FileSync::coming`]).
     missing: HashMap<String, BlobId>,
     /// Asked for, and answered with nothing to show: the server hasn't
-    /// it, or what came isn't the picture its id names. Asked again all
+    /// it, or what came isn't the file its id names. Asked again all
     /// the same, in case; forgotten once it comes.
     gone: HashSet<BlobId>,
     /// A fetch's failure, as the transfer had it: whether it will last
     /// (a 4xx), until the session says the fetch failed.
     get_failed: HashMap<BlobId, bool>,
-    /// Sent and failed: offered again once [`Pictures::put_after`].
+    /// Sent and failed: offered again once [`FileSync::put_after`].
     failed: HashSet<BlobId>,
     /// When those are offered again, and how long the wait was.
     put_after: Option<Instant>,
     put_wait: Duration,
-    /// Why the pictures waiting wait, when it won't mend by itself
+    /// Why the files waiting wait, when it won't mend by itself
     /// ([`TURNED_AWAY`]): for Settings to say. Forgotten once one goes, or
     /// at a new login.
     held_why: Option<&'static str>,
-    /// Dropped pictures a note shows again (a version brought back),
+    /// Dropped files a note shows again (a version brought back),
     /// asked for by the id they had: the paths each goes back to.
     reviving: HashMap<BlobId, Vec<String>>,
-    /// The vault's pictures that aren't Carnet's let go this run.
+    /// The vault's files that aren't Carnet's let go this run.
     let_go: bool,
-    /// Pictures written here from another device since last asked: the
+    /// Files written here from another device since last asked: the
     /// app shows them.
     pub arrived: bool,
 }
@@ -217,11 +219,11 @@ fn millis(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-impl Pictures {
+impl FileSync {
     /// With its index kept in `dir` (the replica's folder).
     pub fn open(dir: Option<&Path>) -> Self {
         let file = dir.map(|d| d.join("pictures.txt"));
-        let mut p = Pictures { file, ..Default::default() };
+        let mut p = FileSync { file, ..Default::default() };
         if let Some(text) = p.file.as_ref().and_then(|f| fs::read_to_string(f).ok()) {
             for line in text.lines() {
                 if let Some(mark) = line.strip_prefix(UNDER) {
@@ -242,7 +244,7 @@ impl Pictures {
     fn keep(&self) {
         let Some(file) = &self.file else { return };
         // Its first line says whose ids these are; a Carnet from before
-        // reads it as a line that isn't a picture's, and skips it.
+        // reads it as a line that isn't a file's, and skips it.
         let under = self.under.iter().map(|m| format!("{UNDER}{m}\n"));
         let text: String = under
             .chain(
@@ -258,7 +260,7 @@ impl Pictures {
         }
     }
 
-    /// The pictures in the attachments folder: their paths from the notes
+    /// The files in the attachments folder: their paths from the notes
     /// folder (`/` between parts), with their size and modified time.
     fn scan(store: &Store) -> Vec<(String, PathBuf, u64, u64)> {
         store
@@ -271,7 +273,7 @@ impl Pictures {
             .collect()
     }
 
-    /// Whether pictures are on their way, up or down: the sweep waits.
+    /// Whether files are on their way, up or down: the sweep waits.
     /// One held back by the server isn't on its way.
     pub fn busy(&self) -> bool {
         let now = Instant::now();
@@ -279,7 +281,7 @@ impl Pictures {
         !self.sending.is_empty() || self.offered.values().any(recent) || !self.reviving.is_empty() || self.asked.values().any(recent)
     }
 
-    /// How many pictures put in here the server hasn't got yet: offered,
+    /// How many files put in here the server hasn't got yet: offered,
     /// being sent, or held back (the account full, or read only).
     pub fn waiting(&self) -> usize {
         let mut ids: HashSet<&BlobId> = self.offered.keys().collect();
@@ -289,7 +291,7 @@ impl Pictures {
         ids.len()
     }
 
-    /// Why the pictures waiting wait, when it's something that won't mend
+    /// Why the files waiting wait, when it's something that won't mend
     /// by itself, in words; none while none waits.
     pub fn held_why(&self) -> Option<&'static str> {
         self.held_why.filter(|_| self.waiting() > 0)
@@ -305,7 +307,7 @@ impl Pictures {
         let (true, Err(error)) = (put, result) else { return };
         let now = Instant::now();
         self.failed.insert(id);
-        // Pictures failing together are one failure: the wait grows once.
+        // Files failing together are one failure: the wait grows once.
         if self.put_after.is_none_or(|at| now >= at) {
             self.put_wait = if self.put_wait.is_zero() { PUT_WAIT_FIRST } else { (self.put_wait * 2).min(PUT_WAIT_MOST) };
             self.put_after = Some(now + self.put_wait);
@@ -321,7 +323,7 @@ impl Pictures {
         self.held_why = None;
     }
 
-    /// The wait before failed pictures are offered again, as if over.
+    /// The wait before failed files are offered again, as if over.
     #[cfg(test)]
     pub fn wait_over(&mut self) {
         self.put_after = Some(Instant::now());
@@ -333,14 +335,14 @@ impl Pictures {
         self.put_wait
     }
 
-    /// Whether the vault's picture at `rel` (a path from the notes folder),
+    /// Whether the vault's file at `rel` (a path from the notes folder),
     /// not here, is on its way: asked for, and not given up on. None the
     /// vault doesn't name, or not seen missing yet, is.
     pub fn coming(&self, rel: &str) -> bool {
         self.missing.get(rel).is_some_and(|id| !self.gone.contains(id))
     }
 
-    /// The pictures being sent, held back, or wanted back: paths from the
+    /// The files being sent, held back, or wanted back: paths from the
     /// notes folder.
     pub fn busy_paths(&self) -> BTreeSet<String> {
         let going = |id: &BlobId| self.offered.contains_key(id) || self.sending.contains(id) || self.held.contains_key(id) || self.failed.contains(id);
@@ -361,20 +363,20 @@ impl Pictures {
 
     /// There's room again (the plan raised, the account writable again,
     /// or a new login): what was held back, or offered and not answered,
-    /// is offered at the next [`Pictures::tick`].
+    /// is offered at the next [`FileSync::tick`].
     pub fn retry(&mut self) {
         self.held.clear();
         self.offered.clear();
         self.put_went();
     }
 
-    /// Whether any picture is held back by the server.
+    /// Whether any file is held back by the server.
     #[cfg(test)]
     pub fn is_holding(&self) -> bool {
         !self.held.is_empty()
     }
 
-    /// What names the key a session's picture ids are made under: the id
+    /// What names the key a session's file ids are made under: the id
     /// it gives no bytes at all. Two sessions of one account give the
     /// same; of two accounts, not.
     fn mark(session: &Session) -> String {
@@ -403,13 +405,13 @@ impl Pictures {
         self.keep();
     }
 
-    /// One round: new pictures here hashed and offered, sent ones put in
+    /// One round: new files here hashed and offered, sent ones put in
     /// the vault, missing ones asked for. True if the vault changed.
     pub fn tick(&mut self, store: &mut Store, session: &mut Session) -> bool {
         self.under(session);
         let Some(replica) = store.replica.as_ref() else { return false };
-        let vault = replica.vault().pictures();
-        let dropped = replica.vault().dropped_pictures();
+        let vault = replica.vault().files();
+        let dropped = replica.vault().dropped_files();
         let mut changed_index = false;
 
         // Named by an earlier Carnet, which synced the pictures beside
@@ -429,7 +431,7 @@ impl Pictures {
         // offered again.
         let mut here = Self::scan(store);
         if here.iter().any(|(rel, ..)| dropped.contains(rel)) {
-            let used = store.pictures_in_use();
+            let used = store.files_in_use();
             here.retain(|(rel, path, ..)| {
                 if !dropped.contains(rel) || used.contains(rel) {
                     return true;
@@ -475,7 +477,7 @@ impl Pictures {
                 continue;
             }
             if k.stored {
-                wrote |= store.set_picture(rel, &hex(&k.id));
+                wrote |= store.set_file(rel, &hex(&k.id));
             } else if !self.offered.contains_key(&k.id) && !self.sending.contains(&k.id) && !self.held.contains_key(&k.id) && !self.failed.contains(&k.id) && !offer.iter().any(|(id, _)| *id == k.id) {
                 offer.push((k.id, k.size as usize));
             }
@@ -526,7 +528,7 @@ impl Pictures {
         }
     }
 
-    /// What the session said of a picture. True if the vault changed.
+    /// What the session said of a file. True if the vault changed.
     pub fn event(&mut self, e: &Event, store: &mut Store, session: &mut Session, rng: &mut impl Random) -> io::Result<bool> {
         self.under(session);
         match e {
@@ -535,7 +537,7 @@ impl Pictures {
                 self.held.remove(id);
                 let path = self.index.iter().find(|(_, k)| k.id == *id).map(|(p, _)| store.dir.join(p));
                 match path.and_then(|p| fs::read(p).ok()) {
-                    // Still the picture it was: sent.
+                    // Still the file it was: sent.
                     Some(bytes) if session.blob_id(&bytes) == *id && session.put_blob(&bytes, rng) => {
                         self.sending.insert(*id);
                     }
@@ -553,7 +555,7 @@ impl Pictures {
                 for (rel, k) in self.index.iter_mut().filter(|(_, k)| k.id == *id) {
                     k.stored = true;
                     changed = true;
-                    wrote |= store.set_picture(rel, &hex(id));
+                    wrote |= store.set_file(rel, &hex(id));
                 }
                 if changed {
                     self.keep();
@@ -575,10 +577,10 @@ impl Pictures {
                         self.index.insert(rel.clone(), Known { size: meta.len(), modified: meta.modified().map_or(0, millis), id: *id, stored: true });
                         self.arrived = true;
                     }
-                    wrote |= store.set_picture(&rel, &hex(id));
+                    wrote |= store.set_file(&rel, &hex(id));
                 }
 
-                let vault = store.replica.as_ref().map(|r| r.vault().pictures()).unwrap_or_default();
+                let vault = store.replica.as_ref().map(|r| r.vault().files()).unwrap_or_default();
                 for rel in vault.iter().filter(|(p, v)| unhex(v) == Some(*id) && syncs(p)).map(|(p, _)| p) {
                     // Its path checked twice over: plain (the vault reads
                     // no other), and in the notes folder once joined.
@@ -617,7 +619,7 @@ impl Pictures {
 mod tests {
     use super::*;
 
-    /// A 4xx from the picture storage won't mend by itself; a timeout,
+    /// A 4xx from the file storage won't mend by itself; a timeout,
     /// "too many", a 5xx or no answer at all will.
     #[test]
     fn only_a_refusal_is_lasting() {

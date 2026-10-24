@@ -47,11 +47,11 @@ impl Docs for DeskDocs<'_> {
 }
 
 thread_local! {
-    /// The picture worker, as the server runs one beside the hub: one for
+    /// The file worker, as the server runs one beside the hub: one for
     /// each test (each runs on a thread of its own).
     static WORKER: std::cell::RefCell<carnet_server::blobs::Worker<carnet_server::blobs::MemoryBlobs>> =
         std::cell::RefCell::new(carnet_server::blobs::Worker::memory());
-    /// The pictures the browser has put on the server, counted.
+    /// The files the browser has put on the server, counted.
     static WEB_PUTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// How the browser's puts fail, while they do: as the page says it.
     static WEB_PUT_FAILS: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
@@ -75,7 +75,7 @@ fn pump_with(hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, joiner: &m
 fn deliver(hub: &mut Hub<Memory>, desk: &mut Desk, web: &mut Notes, joiner: &mut Option<Joiner>, rng: &mut Seeded) {
     for _ in 0..1000 {
         let mut moved = false;
-        // Pictures' HTTP, done as the server's links would have it.
+        // Files' HTTP, done as the server's links would have it.
         let serve = |t: &carnet_sync::session::Transfer| WORKER.with(|w| w.borrow_mut().blobs.serve(t));
         for t in desk.session.take_transfers() {
             moved = true;
@@ -405,10 +405,10 @@ fn the_browser_lists_draws_and_ticks() {
     desk.docs[&plan.to_string()].record("# Plan\n\nSome ==words== here.\n\n![[photo.png|200]]\n\n![](/Users/me/Pictures/sea.png)\n\n![](https://example.com/a.png)\n", Origin::Save);
     let v = NoteDoc::new(7);
     // A picture the plan names the Obsidian way, by its name alone.
-    v.put_picture("attachments/2026/photo.png", &"ab".repeat(32));
+    v.put_file("attachments/2026/photo.png", &"ab".repeat(32));
     // One beside its note, not in the attachments folder, as an earlier
     // desktop named it: shown while the vault names it.
-    v.put_picture("Home/hill.jpg", &"cd".repeat(32));
+    v.put_file("Home/hill.jpg", &"cd".repeat(32));
     v.set_place(shop, &Place { folder: "Home".into(), name: "Shop".into(), pinned: true, trashed: false });
     v.set_place(plan, &Place { folder: String::new(), name: "Plan".into(), pinned: false, trashed: false });
     v.set_folder("Home", true);
@@ -655,7 +655,7 @@ fn the_browser_edits_merges_renames_makes_and_deletes_notes() {
 }
 
 #[test]
-fn a_picture_put_in_here_goes_to_the_server_then_the_vault() {
+fn a_file_put_in_here_goes_to_the_server_then_the_vault() {
     let mut rng = Seeded(6);
     let (mut hub, mut desk, mut web) = two(&mut rng);
     let bytes: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
@@ -670,9 +670,9 @@ fn a_picture_put_in_here_goes_to_the_server_then_the_vault() {
     // note showing "not on the server yet" in its place asks again.
     let changed = web.take_changed();
     assert!(changed.iter().any(|r| r == vault::ROOM), "{changed:?}");
-    assert_eq!(web.picture_id(&path).as_deref(), Some(id.as_str()));
+    assert_eq!(web.file_id(&path).as_deref(), Some(id.as_str()));
     // In the vault, for every device; the desktop fetches it whole.
-    assert_eq!(desk.docs[vault::ROOM].pictures().get(&path), Some(&id));
+    assert_eq!(desk.docs[vault::ROOM].files().get(&path), Some(&id));
     let blob: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
     desk.session.get_blob(blob);
     pump(&mut hub, &mut desk, &mut web, &mut rng);
@@ -685,7 +685,7 @@ fn a_picture_put_in_here_goes_to_the_server_then_the_vault() {
         web.upload(&path, vec![1, 2, 3]).unwrap();
     });
     pump(&mut hub, &mut desk, &mut offline, &mut rng);
-    assert!(desk.docs[vault::ROOM].pictures().contains_key(&path));
+    assert!(desk.docs[vault::ROOM].files().contains_key(&path));
     assert!(offline.said.iter().any(|s| matches!(s, Said::Uploaded(_))), "{:?}", offline.said);
 }
 
@@ -707,7 +707,7 @@ fn the_same_picture_put_in_twice_is_named_at_both() {
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert_eq!(WEB_PUTS.with(|p| p.get()) - puts, 1, "sent once");
     assert_eq!(web.said.iter().filter(|s| **s == Said::Uploaded(id.clone())).count(), 1, "{:?}", web.said);
-    let pictures = desk.docs[vault::ROOM].pictures();
+    let pictures = desk.docs[vault::ROOM].files();
     assert_eq!(pictures.get(&first), Some(&id), "the first name too");
     assert_eq!(pictures.get(&second), Some(&id));
     // What the desktop fetches for either name: the picture.
@@ -723,7 +723,7 @@ fn the_same_picture_put_in_twice_is_named_at_both() {
     let puts = WEB_PUTS.with(|p| p.get());
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert_eq!(WEB_PUTS.with(|p| p.get()), puts, "the server has it");
-    let pictures = desk.docs[vault::ROOM].pictures();
+    let pictures = desk.docs[vault::ROOM].files();
     assert!([&first, &second, &third].iter().all(|p| pictures.get(*p) == Some(&id)), "{pictures:?}");
 }
 
@@ -759,8 +759,8 @@ fn a_note_deleted_forever_goes_both_ways() {
     let k = Key::parse(&gone).unwrap();
     assert!(desk.docs[vault::ROOM].gone().contains(&k));
     assert!(hub.store().is_removed(ACCOUNT, &gone) && hub.store().spans(ACCOUNT, &gone).is_empty());
-    assert!(desk.docs[vault::ROOM].dropped_pictures().contains(&only));
-    assert!(desk.docs[vault::ROOM].pictures().contains_key(&shared), "Album still shows it");
+    assert!(desk.docs[vault::ROOM].dropped_files().contains(&only));
+    assert!(desk.docs[vault::ROOM].files().contains_key(&shared), "Album still shows it");
     let unhex = |h: &str| -> [u8; 32] { (0..32).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap() };
     WORKER.with(|w| {
         let w = w.borrow();
@@ -821,15 +821,15 @@ fn a_picture_an_old_version_shows_stays_in_the_browser_too() {
     assert_eq!(web.source(&diary).unwrap().0, "# Diary\n\nno picture now\n");
     assert!(web.delete_forever(&gone, &mut rng));
     pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert_eq!(desk.docs[vault::ROOM].pictures().get(&pic), Some(&id), "Diary's old version shows it: kept");
+    assert_eq!(desk.docs[vault::ROOM].files().get(&pic), Some(&id), "Diary's old version shows it: kept");
 
     // Dropped anyway: asked for by its old id, it's named again.
-    web.rooms.doc(vault::ROOM).drop_picture(&pic);
-    assert!(web.picture_id(&pic).is_none());
+    web.rooms.doc(vault::ROOM).drop_file(&pic);
+    assert!(web.file_id(&pic).is_none());
     assert_eq!(web.get_picture(&pic).as_deref(), Some(id.as_str()));
     pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert_eq!(web.picture_id(&pic).as_deref(), Some(id.as_str()), "named again");
-    assert!(web.pictures.iter().any(|(_, b)| b == &vec![3; 3000]));
+    assert_eq!(web.file_id(&pic).as_deref(), Some(id.as_str()), "named again");
+    assert!(web.files.iter().any(|(_, b)| b == &vec![3; 3000]));
 }
 
 /// A picture the vault names that the server hasn't got (a device named
@@ -843,13 +843,13 @@ fn a_picture_the_server_lacks_is_said_missing_then_comes() {
     let bytes = vec![4u8; 2000];
     let id = desk.session.blob_id(&bytes);
     let hexed: String = id.iter().map(|b| format!("{b:02x}")).collect();
-    desk.docs.entry(vault::ROOM.into()).or_insert_with(|| NoteDoc::new(7)).set_picture("Home/hill.jpg", &hexed);
+    desk.docs.entry(vault::ROOM.into()).or_insert_with(|| NoteDoc::new(7)).set_file("Home/hill.jpg", &hexed);
     desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
     pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert_eq!(web.picture_id("Home/hill.jpg").as_deref(), Some(hexed.as_str()));
+    assert_eq!(web.file_id("Home/hill.jpg").as_deref(), Some(hexed.as_str()));
     assert_eq!(web.get_picture("Home/hill.jpg").as_deref(), Some(hexed.as_str()));
     pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert!(web.pictures.is_empty());
+    assert!(web.files.is_empty());
     assert_eq!(std::mem::take(&mut web.missing), vec![id], "said not to have come");
 
     // The desktop puts it; asked again, it comes.
@@ -864,7 +864,7 @@ fn a_picture_the_server_lacks_is_said_missing_then_comes() {
     web.get_picture("Home/hill.jpg");
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.missing.is_empty());
-    assert!(web.pictures.iter().any(|(i, b)| *i == id && *b == bytes));
+    assert!(web.files.iter().any(|(i, b)| *i == id && *b == bytes));
 }
 
 /// Not a test: a browser's state with 10,000 notes, written where
@@ -931,14 +931,14 @@ fn an_open_browser_learns_its_account_can_write_again() {
     assert!(web.said.contains(&Said::Writable), "{:?}", web.said);
     assert!(web.said.iter().any(|s| matches!(s, Said::Usage(u) if u.writable && u.plan == "Personal")));
     assert!(desk.docs[&ks].text().contains("Typed while suspended."), "what waited went");
-    assert!(desk.docs[vault::ROOM].pictures().contains_key(&pic), "the picture too, without a reload");
+    assert!(desk.docs[vault::ROOM].files().contains_key(&pic), "the picture too, without a reload");
 }
 
-/// A picture put in while the account is over its plan is held back (the
+/// A file put in while the account is over its plan is held back (the
 /// server says it's full); the plan raised while the page is open, it
 /// goes at once, with no reload, and reaches the vault.
 #[test]
-fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
+fn a_file_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     use carnet_server::quota::Limit;
     let mut rng = Seeded(13);
     let (mut hub, mut desk, mut web) = two(&mut rng);
@@ -955,8 +955,8 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     let id = web.upload(&pic, vec![6; 2500]).unwrap();
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert_eq!(web.errors, [carnet_sync::session::FULL.to_string()], "said full");
-    assert!(desk.docs.get(vault::ROOM).is_none_or(|v| !v.pictures().contains_key(&pic)), "held back");
-    assert_eq!(web.pictures_waiting(), 1, "waiting, not up to date");
+    assert!(desk.docs.get(vault::ROOM).is_none_or(|v| !v.files().contains_key(&pic)), "held back");
+    assert_eq!(web.files_waiting(), 1, "waiting, not up to date");
     web.said.clear();
 
     *plan.0.lock().unwrap() = Limit { bytes: Some(5_000_000), writable: true, plan: "Personal".into(), until: 0 };
@@ -971,15 +971,15 @@ fn a_picture_held_back_over_the_plan_goes_once_the_plan_is_raised() {
     }
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
-    assert_eq!(desk.docs[vault::ROOM].pictures().get(&pic), Some(&id));
-    assert_eq!(web.pictures_waiting(), 0, "none waiting once it's there");
+    assert_eq!(desk.docs[vault::ROOM].files().get(&pic), Some(&id));
+    assert_eq!(web.files_waiting(), 0, "none waiting once it's there");
 }
 
-/// A picture the server's storage won't take from here: why is said (not
+/// A file the server's storage won't take from here: why is said (not
 /// as an error), it waits, and it's tried again, going once it can. One
 /// that fails a while (busy, offline) waits saying nothing.
 #[test]
-fn a_picture_the_storage_wont_take_says_why_and_waits() {
+fn a_file_the_storage_wont_take_says_why_and_waits() {
     use carnet_web::notes::{TURNED_AWAY, UNREACHABLE};
     let mut rng = Seeded(21);
     let (mut hub, mut desk, mut web) = two(&mut rng);
@@ -988,41 +988,41 @@ fn a_picture_the_storage_wont_take_says_why_and_waits() {
     // Busy: nothing said.
     WEB_PUT_FAILS.set(Some("HTTP 503"));
     pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert_eq!((web.pictures_waiting(), web.pictures_held()), (1, None));
+    assert_eq!((web.files_waiting(), web.files_held()), (1, None));
     // A store without CORS (no answer while the server is up), then one
     // that refuses: said, each in its words, and never as an error.
-    for (fails, said) in [(UNREACHABLE, carnet_sync::session::PICTURES_UNREACHABLE), ("HTTP 403", TURNED_AWAY)] {
+    for (fails, said) in [(UNREACHABLE, carnet_sync::session::FILES_UNREACHABLE), ("HTTP 403", TURNED_AWAY)] {
         WEB_PUT_FAILS.set(Some(fails));
-        web.retry_pictures();
+        web.retry_files();
         pump(&mut hub, &mut desk, &mut web, &mut rng);
-        assert_eq!((web.pictures_waiting(), web.pictures_held()), (1, Some(said)));
+        assert_eq!((web.files_waiting(), web.files_held()), (1, Some(said)));
     }
     // A passing failure after: what was said stays.
     WEB_PUT_FAILS.set(Some("timed out"));
-    web.retry_pictures();
+    web.retry_files();
     pump(&mut hub, &mut desk, &mut web, &mut rng);
-    assert_eq!(web.pictures_held(), Some(TURNED_AWAY));
+    assert_eq!(web.files_held(), Some(TURNED_AWAY));
     // Mended: it goes, and nothing is said.
     WEB_PUT_FAILS.set(None);
-    web.retry_pictures();
+    web.retry_files();
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.said.contains(&Said::Uploaded(id.clone())), "{:?}", web.said);
-    assert_eq!((web.pictures_waiting(), web.pictures_held()), (0, None));
-    assert_eq!(desk.docs[vault::ROOM].pictures().get(&pic), Some(&id));
+    assert_eq!((web.files_waiting(), web.files_held()), (0, None));
+    assert_eq!(desk.docs[vault::ROOM].files().get(&pic), Some(&id));
 
     // A link to put at that isn't followed (a host of this network not
-    // the server's): said, and the picture offered again when retried.
+    // the server's): said, and the file offered again when retried.
     let pic = web.picture_free("inner", "png");
     let id = web.upload(&pic, vec![9; 900]).unwrap();
     let blob: [u8; 32] = (0..32).map(|i| u8::from_str_radix(&id[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap();
     let link = carnet_sync::wire::Frame::Carnet(carnet_sync::wire::Carnet::BlobLink { id: blob, put: true, url: "http://192.168.1.20:9000/b/x".into(), expires: 0 });
     web.receive(&carnet_sync::wire::encode(&link), &mut rng);
-    assert_eq!(web.pictures_held(), Some(carnet_sync::session::PICTURES_UNREACHABLE));
+    assert_eq!(web.files_held(), Some(carnet_sync::session::FILES_UNREACHABLE));
     assert!(web.errors.is_empty(), "{:?}", web.errors);
-    web.retry_pictures();
+    web.retry_files();
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert!(web.said.contains(&Said::Uploaded(id.clone())), "offered again, and it went");
-    assert_eq!(web.pictures_held(), None);
+    assert_eq!(web.files_held(), None);
     assert!(web.errors.is_empty(), "{:?}", web.errors);
 }
 
@@ -1222,10 +1222,10 @@ fn the_browser_makes_renames_nests_and_deletes_folders() {
     let on_desk = |desk: &Desk| desk.docs[vault::ROOM].folders().into_iter().collect::<Vec<_>>();
     let place = |desk: &Desk, k: Key| desk.docs[vault::ROOM].place(k).unwrap();
 
-    // Made, at the top and inside another; the pictures' name refused.
+    // Made, at the top and inside another; the attachments folder's name refused.
     assert_eq!(web.make_folder("", "Ideas", &mut rng).as_deref(), Ok("Ideas"));
     assert_eq!(web.make_folder("Ideas", "Later: maybe", &mut rng).as_deref(), Ok("Ideas/Later- maybe"));
-    assert_eq!(web.make_folder("Ideas", "attachments", &mut rng), Err("that name is kept for pictures; choose another".to_string()));
+    assert_eq!(web.make_folder("Ideas", "attachments", &mut rng), Err("that name is kept for the notes' attachments; choose another".to_string()));
     pump(&mut hub, &mut desk, &mut web, &mut rng);
     assert_eq!(on_desk(&desk), ["Ideas", "Ideas/Later- maybe", "Work", "Work/Q4"]);
 
