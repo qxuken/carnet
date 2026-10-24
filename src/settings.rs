@@ -55,47 +55,60 @@ pub const LIBRARY_WIDTHS: std::ops::RangeInclusive<u32> = 200..=480;
 pub enum Divider {
     Dots,
     Line,
-    Stars,
-    Asterism,
-    Flourish,
-    /// A printer's leaf, the hedera (❧).
-    Fleuron,
     /// Three small diamonds in a row: a dinkus of lozenges.
     Diamonds,
     /// A short rule each side of a diamond.
     Lozenge,
     /// A swung dash (⁓): one wave.
     Wave,
+    /// The reader's own words (`divider_text`), centred: `~ ✦ ~`, `• • •`.
+    Text,
+    /// The reader's own picture (`divider_picture`), centred, a line of
+    /// text tall or so.
+    Picture,
 }
 
+/// The longest the reader's own words for a divider may be, in letters.
+pub const DIVIDER_TEXT_MOST: usize = 40;
+
 impl Divider {
-    pub const ALL: [Divider; 9] = [
+    pub const ALL: [Divider; 7] = [
         Divider::Dots,
         Divider::Line,
-        Divider::Stars,
-        Divider::Asterism,
-        Divider::Flourish,
-        Divider::Fleuron,
         Divider::Diamonds,
         Divider::Lozenge,
         Divider::Wave,
+        Divider::Text,
+        Divider::Picture,
     ];
+
+    /// What a divider of the reader's own is drawn as while it has nothing
+    /// to show: no words typed, a picture gone or unreadable.
+    pub const FALLBACK: Divider = Divider::Dots;
 
     pub fn key(self) -> &'static str {
         match self {
             Divider::Dots => "dots",
             Divider::Line => "line",
-            Divider::Stars => "stars",
-            Divider::Asterism => "asterism",
-            Divider::Flourish => "flourish",
-            Divider::Fleuron => "fleuron",
             Divider::Diamonds => "diamonds",
             Divider::Lozenge => "lozenge",
             Divider::Wave => "wave",
+            Divider::Text => "text",
+            Divider::Picture => "picture",
         }
     }
 
+    /// A divider by its word. The ways no longer offered, from a file an
+    /// older Carnet wrote, are read as the nearest still here: three
+    /// stars, or stars in a triangle, as three dots; a flourish as a wave;
+    /// a printer's leaf as a diamond between lines.
     pub fn from_key(s: &str) -> Option<Self> {
+        let s = match s {
+            "stars" | "asterism" => "dots",
+            "flourish" => "wave",
+            "fleuron" => "lozenge",
+            s => s,
+        };
         Self::ALL.into_iter().find(|d| d.key() == s)
     }
 
@@ -104,13 +117,11 @@ impl Divider {
         match self {
             Divider::Dots => "Three dots",
             Divider::Line => "A short line",
-            Divider::Stars => "Three stars",
-            Divider::Asterism => "Stars in a triangle",
-            Divider::Flourish => "A flourish",
-            Divider::Fleuron => "A printer's leaf",
             Divider::Diamonds => "Three diamonds",
             Divider::Lozenge => "A diamond between lines",
             Divider::Wave => "A wave",
+            Divider::Text => "Your own words",
+            Divider::Picture => "Your own picture",
         }
     }
 }
@@ -139,6 +150,14 @@ pub struct Settings {
     pub dates_created: bool,
     /// How a divider is drawn.
     pub divider: Divider,
+    /// The words a divider of the reader's own is drawn as; kept when
+    /// another way is chosen, for when it is chosen again.
+    pub divider_text: String,
+    /// The picture a divider of the reader's own is drawn as: a copy in
+    /// the settings' folder, by its name there (so the one picked can be
+    /// moved or thrown away), or, with no folder to copy it to, where it
+    /// was picked. Kept as the words are.
+    pub divider_picture: Option<PathBuf>,
     /// How many lines a dropped letter is tall, at most. A letter drops
     /// only where its paragraph asks (the toolbar's toggle); an old file's
     /// `initial = large`, which dropped every note's first, is passed over.
@@ -199,6 +218,8 @@ impl Default for Settings {
             sort: Sort::Edited,
             dates_created: false,
             divider: Divider::Dots,
+            divider_text: String::new(),
+            divider_picture: None,
             initial_lines: 3,
             initial_font: String::new(),
             initial_accent: true,
@@ -278,6 +299,8 @@ impl Settings {
                 }
                 "dates" => s.dates_created = v == "created",
                 "divider" => s.divider = Divider::from_key(v).unwrap_or(Divider::Dots),
+                "divider_text" => s.divider_text = v.chars().take(DIVIDER_TEXT_MOST).collect(),
+                "divider_picture" if !v.is_empty() => s.divider_picture = Some(PathBuf::from(v)),
                 "initial_lines" => {
                     if let Ok(n) = v.parse::<u32>() {
                         s.initial_lines = n.clamp(*INITIAL_LINES.start(), *INITIAL_LINES.end());
@@ -312,6 +335,20 @@ impl Settings {
     }
 
     pub fn to_text(&self) -> String {
+        // The reader's own divider after the rest: its words, and its
+        // picture's name in this folder (or where it was picked).
+        let picture = self.divider_picture.as_deref().map(Path::display).map(|p| p.to_string()).unwrap_or_default();
+        format!("{}divider_text = {}\ndivider_picture = {picture}\n", self.keys_text(), self.divider_text)
+    }
+
+    /// Where the picture a divider of the reader's own is drawn as is:
+    /// a name is in the settings' folder.
+    pub fn divider_picture_file(&self) -> Option<PathBuf> {
+        let p = self.divider_picture.as_ref()?;
+        if p.is_absolute() { Some(p.clone()) } else { Some(self.dir()?.join(p)) }
+    }
+
+    fn keys_text(&self) -> String {
         let theme = match self.theme {
             ThemePref::System => "system",
             ThemePref::Light => "light",
@@ -362,9 +399,13 @@ impl Settings {
     /// colours, faces, size, width, the letter and dividers, the window
     /// (solid or translucent, taken at the next start), and the writing
     /// aids. Not the notes folder, the library (its order, dates, width,
-    /// whether it shows), nor the check for updates.
+    /// whether it shows), nor the check for updates; and a divider of the
+    /// reader's own, its words or picture, is no longer used but kept, for
+    /// when it is chosen again.
     pub fn reset_look(&mut self) {
         *self = Settings {
+            divider_text: std::mem::take(&mut self.divider_text),
+            divider_picture: self.divider_picture.take(),
             sort: self.sort,
             dates_created: self.dates_created,
             library_w: self.library_w,
@@ -431,7 +472,9 @@ mod tests {
             width: Width::Wide,
             sort: Sort::Title,
             dates_created: true,
-            divider: Divider::Flourish,
+            divider: Divider::Text,
+            divider_text: "~ \u{2726} = ~".into(),
+            divider_picture: Some(PathBuf::from("divider-1.png")),
             initial_lines: 4,
             initial_font: "Zapfino".into(),
             initial_accent: false,
@@ -513,16 +556,63 @@ mod tests {
         assert_eq!(s.file.as_deref(), Some(Path::new("/c/settings.txt")));
     }
 
-    /// Each divider is kept by its own word, the first five as ever, so a
-    /// settings file from before the newer ones reads the same.
+    /// Each divider is kept by its own word, the ornaments' as ever, so a
+    /// settings file from before the reader's own reads the same.
     #[test]
     fn every_divider_is_kept_by_its_word() {
         for d in Divider::ALL {
             let s = Settings { divider: d, ..Settings::default() };
             assert_eq!(Settings::parse(&s.to_text()).divider, d);
         }
-        let words = ["dots", "line", "stars", "asterism", "flourish"];
+        let words = ["dots", "line", "diamonds", "lozenge", "wave"];
         assert_eq!(words.map(|w| Divider::from_key(w).map(Divider::key)), words.map(Some));
-        assert_eq!(Settings::parse("divider = fleuron\n").divider, Divider::Fleuron);
+    }
+
+    /// A file from when there were nine ornaments: the four gone read as
+    /// the nearest still offered, never as the default by mistake, and
+    /// are written back by those words.
+    #[test]
+    fn a_divider_no_longer_offered_reads_as_the_nearest_one() {
+        for (old, now) in [("stars", Divider::Dots), ("asterism", Divider::Dots), ("flourish", Divider::Wave), ("fleuron", Divider::Lozenge)] {
+            let s = Settings::parse(&format!("theme = dark\ndivider = {old}\nsize = 18\n"));
+            assert_eq!((s.divider, s.theme, s.size), (now, ThemePref::Dark, 18), "{old}");
+            assert!(s.to_text().contains(&format!("\ndivider = {}\n", now.key())), "{old}");
+        }
+    }
+
+    /// The reader's own words for a divider come back as typed, but for
+    /// the spaces at their ends: a line's own. Too long, they are cut. A
+    /// file from before them has none, and a reset keeps them.
+    #[test]
+    fn a_dividers_own_words_survive_the_file() {
+        let s = Settings { divider: Divider::Text, divider_text: "\u{2022} \u{2022} \u{2022}".into(), ..Settings::default() };
+        let back = Settings::parse(&s.to_text());
+        assert_eq!((back.divider, back.divider_text.as_str()), (Divider::Text, "\u{2022} \u{2022} \u{2022}"));
+        assert_eq!(back, s);
+        let long = Settings::parse(&format!("divider_text = {}\n", "x".repeat(100)));
+        assert_eq!(long.divider_text.chars().count(), DIVIDER_TEXT_MOST);
+        let old = Settings::parse("divider = dots\n");
+        assert_eq!((old.divider_text.as_str(), old.divider_picture.as_deref()), ("", None));
+        // A reset draws the dots again, the words kept for another time.
+        let mut s = s;
+        s.reset_look();
+        assert_eq!((s.divider, s.divider_text.as_str()), (Divider::Dots, "\u{2022} \u{2022} \u{2022}"));
+        assert!(s.look_is_default());
+    }
+
+    /// The picture is found by its name in the settings' folder, or where
+    /// it was picked when it was kept by its whole path; with no folder, a
+    /// name alone is nowhere.
+    #[test]
+    fn a_dividers_picture_is_found_beside_the_settings() {
+        let folder = std::env::temp_dir().join("carnet-settings-divider");
+        let mut s = Settings { divider_picture: Some(PathBuf::from("divider-7.png")), file: Some(folder.join("settings.txt")), ..Settings::default() };
+        assert_eq!(s.divider_picture_file(), Some(folder.join("divider-7.png")));
+        let whole = folder.join("elsewhere").join("leaf.png");
+        s.divider_picture = Some(whole.clone());
+        assert_eq!(s.divider_picture_file(), Some(whole.clone()));
+        assert_eq!(Settings::parse(&s.to_text()).divider_picture, Some(whole));
+        let loose = Settings { divider_picture: Some(PathBuf::from("divider-7.png")), ..Settings::default() };
+        assert_eq!(loose.divider_picture_file(), None);
     }
 }

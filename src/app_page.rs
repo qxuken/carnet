@@ -19,6 +19,7 @@ use crate::keys;
 use carnet_core::inline;
 use carnet_core::doc::Float;
 use crate::page::Coverage;
+use crate::settings::Divider;
 use crate::slash;
 
 /// How far apart pictures side by side are, their blocks' insets included:
@@ -44,6 +45,21 @@ const HINT_AFTER: f64 = 1.2;
 /// On a typewriter, where the line being written is held: this far down
 /// the page's height.
 const TYPEWRITER_AT: f32 = 0.45;
+/// How tall a divider drawn as the reader's own picture is, at 16px
+/// text: a line's height and a little more, as tall as an ornament's room.
+const DIVIDER_PICTURE_H: f32 = 28.0;
+
+/// What a divider is drawn as.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum DividerLook {
+    /// The reader's own words.
+    Words(String),
+    /// The reader's own picture at its size on the page; no pixels yet
+    /// while it is read, its room held.
+    Picture(Option<kui_native::ImageId>, f32, f32),
+    /// One of the ornaments drawn here.
+    Ornament(Divider),
+}
 
 /// What every block of a page shares as it is drawn: the selection, the
 /// `/` menu, the running list numbers, the body's type.
@@ -758,12 +774,12 @@ impl Carnet {
                 );
             }
             Kind::Divider => {
-                // Drawn as the settings say (three dots, a line, stars, a
-                // flourish). Chosen — by the arrows, a click, or the caret
-                // on it — one way: the ornament in the accent on the
-                // selection's wash, as wide as the text and a band round
-                // the ornament, not its whole tall row; so Backspace or
-                // Delete is seen to have a target.
+                // Drawn as the settings say (three dots, a line, a wave,
+                // the reader's own words or picture). Chosen — by the
+                // arrows, a click, or the caret on it — one way: the
+                // ornament in the accent on the selection's wash, as wide
+                // as the text and a band round the ornament, not its whole
+                // tall row; so Backspace or Delete is seen to have a target.
                 let here = self.editing && self.caret.head.slot == Slot::block(id);
                 let chosen = whole || here;
                 let ink = if chosen { t.accent } else { t.faint };
@@ -777,6 +793,9 @@ impl Carnet {
                 if chosen {
                     wash = wash.bg(t.selection);
                 }
+                // As wide as the text at most, as a picture is.
+                let room = (self.text_w - 10.0).max(48.0);
+                let look = self.divider_look(l.k, room);
                 ui.with(
                     NodeSpec::row()
                         .grow_width()
@@ -784,7 +803,19 @@ impl Carnet {
                         .on_click(Msg::Select { id })
                         .label("Divider"),
                     |ui| {
-                        ui.with(wash, |ui| icons::ornament(ui, self.settings.divider, ink, l.k));
+                        ui.with(wash, |ui| match look {
+                            // In the page's words, quiet as an ornament.
+                            DividerLook::Words(words) => {
+                                ui.text_in(NodeSpec::row().max_width(room).role(Role::None), &words, body.color(ink).nowrap().ellipsis());
+                            }
+                            DividerLook::Picture(Some(img), w, h) => {
+                                ui.image(img, NodeSpec::row().size(w, h).role(Role::None));
+                            }
+                            DividerLook::Picture(None, w, h) => {
+                                ui.leaf(NodeSpec::row().size(w, h).role(Role::None));
+                            }
+                            DividerLook::Ornament(d) => icons::ornament(ui, d, ink, l.k),
+                        });
                     },
                 );
             }
@@ -813,6 +844,45 @@ impl Carnet {
                 });
             }
         });
+    }
+
+    /// What a divider is drawn as now, at `k` times its size at 16px text
+    /// and `room` wide at most: the ornament chosen, or the reader's own
+    /// words or picture — the picture [`DIVIDER_PICTURE_H`] tall, its shape
+    /// kept, narrowed to the room. Words not typed, or a picture gone or
+    /// unreadable, draw the ornament they fall back to; asking is drawing,
+    /// so the picture is kept while dividers show it.
+    pub(super) fn divider_look(&mut self, k: f32, room: f32) -> DividerLook {
+        let d = self.settings.divider;
+        match d {
+            Divider::Text => {
+                let words = self.settings.divider_text.trim();
+                if !words.is_empty() {
+                    return DividerLook::Words(words.to_string());
+                }
+            }
+            Divider::Picture => {
+                let tall = (DIVIDER_PICTURE_H * k).round();
+                let fit = |w: u32, h: u32| {
+                    let wide = tall * w as f32 / h as f32;
+                    let s = (room / wide).min(1.0);
+                    (wide * s, tall * s)
+                };
+                match self.settings.divider_picture_file().map(|p| self.images.get(&p)) {
+                    Some(images::Entry::Ready { id, w, h }) if w > 0 && h > 0 => {
+                        let (w, h) = fit(w, h);
+                        return DividerLook::Picture(Some(id), w, h);
+                    }
+                    Some(images::Entry::Loading { w, h }) => {
+                        let (w, h) = if w > 0 && h > 0 { fit(w, h) } else { (tall, tall) };
+                        return DividerLook::Picture(None, w, h);
+                    }
+                    _ => {}
+                }
+            }
+            _ => return DividerLook::Ornament(d),
+        }
+        DividerLook::Ornament(Divider::FALLBACK)
     }
 
     /// A picture on its own line: its own width, or the one the reader

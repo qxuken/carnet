@@ -2,7 +2,7 @@
 //! library is ordered, where the notes live, and sync. Every change applies at
 //! once and is written straight away; there is no Save.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use kui_native::{FontFamily, Span};
 
@@ -11,6 +11,7 @@ use super::*;
 use carnet_sync::compat::feature;
 use crate::design;
 use crate::look;
+use crate::settings::Divider;
 
 /// Settings → Sync's field maker: a field by its key, its text, its hint,
 /// and what it holds.
@@ -119,7 +120,23 @@ impl Carnet {
                 s.size = (s.size as i64 + by).clamp(lo, hi) as u32;
             }
             Msg::SetDivider { to } => {
-                s.divider = crate::settings::Divider::ALL[(to as usize).min(crate::settings::Divider::ALL.len() - 1)];
+                let d = Divider::ALL[(to as usize).min(Divider::ALL.len() - 1)];
+                // A picture of the reader's own with none picked yet: one
+                // asked for first, and chosen once it is.
+                if d == Divider::Picture && s.divider_picture.is_none() {
+                    self.pick_divider_picture = true;
+                    return;
+                }
+                // Words of their own with none typed: the keyboard where
+                // they go.
+                if d == Divider::Text && s.divider_text.trim().is_empty() && self.settings_open {
+                    self.focus_req = Some(Field::DividerText);
+                }
+                s.divider = d;
+            }
+            Msg::PickDividerPicture => {
+                self.pick_divider_picture = true;
+                return;
             }
             Msg::SetInitialLines { to } => {
                 s.initial_lines = (to as u32 + 2).clamp(*crate::settings::INITIAL_LINES.start(), *crate::settings::INITIAL_LINES.end());
@@ -218,6 +235,57 @@ impl Carnet {
         if let Err(e) = self.settings.save() {
             self.error = Some(format!("Couldn't save the settings: {e}"));
         }
+    }
+
+    /// The words a divider is drawn as, typed: kept to a line, a short
+    /// one (`DIVIDER_TEXT_MOST` letters), and written straight away.
+    pub(super) fn set_divider_text(&mut self, text: &str) {
+        let words: String = text
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(crate::settings::DIVIDER_TEXT_MOST)
+            .collect();
+        if words != self.settings.divider_text {
+            self.settings.divider_text = words;
+            self.save_settings();
+        }
+    }
+
+    /// A picture picked for dividers, and chosen. Copied into the
+    /// settings' folder, so the one picked can be moved or thrown away,
+    /// under a name of its own each time (a new picture under the last
+    /// one's name would be drawn from what is held of the last); the copy
+    /// it replaces goes. With no folder (in tests), kept where it is.
+    pub(super) fn set_divider_picture(&mut self, from: &Path) {
+        let name = from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if !images::is_image(from) {
+            self.error = Some(format!("{name} isn't a picture Carnet shows"));
+            return;
+        }
+        let kept = match self.settings.dir() {
+            Some(dir) => {
+                let ext = from.extension().and_then(|e| e.to_str()).unwrap_or("png").to_ascii_lowercase();
+                let mut stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis());
+                while dir.join(format!("divider-{stamp}.{ext}")).exists() {
+                    stamp += 1;
+                }
+                let own = PathBuf::from(format!("divider-{stamp}.{ext}"));
+                if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(from, dir.join(&own))) {
+                    self.error = Some(format!("Couldn't keep {name} for dividers: {e}"));
+                    return;
+                }
+                // Only a copy made here goes, kept by its name alone:
+                // never a picture of the reader's own, kept by its path.
+                if let Some(old) = self.settings.divider_picture.as_ref().filter(|p| p.is_relative()) {
+                    let _ = std::fs::remove_file(dir.join(old));
+                }
+                own
+            }
+            None => from.to_path_buf(),
+        };
+        self.settings.divider_picture = Some(kept);
+        self.settings.divider = Divider::Picture;
+        self.save_settings();
     }
 
     /// Enter in the font list's search: the first match; the built-in
@@ -403,17 +471,90 @@ impl Carnet {
                 );
             });
             rule(ui, l);
+            // The reader's own picture as it is now, for its tile and to
+            // say why it isn't shown.
+            let picture = s.divider_picture_file().map(|p| self.images.get(&p));
             setting(ui, l, "Dividers", Some("How a divider looks on the page"), |ui| {
                 ui.with_keyed(
                     "dividers",
                     NodeSpec::row().gap(design::space::S).wrap().role(Role::Group).label("Dividers"),
                     |ui| {
-                        for (i, d) in crate::settings::Divider::ALL.iter().enumerate() {
-                            divider_choice(ui, l, i, *d, s.divider == *d);
+                        for (i, d) in Divider::ALL.iter().enumerate() {
+                            divider_choice(ui, l, i, *d, s.divider == *d, |ui, ink| match d {
+                                // Its words, or a word saying what it is.
+                                Divider::Text => {
+                                    let words = s.divider_text.trim();
+                                    let (words, ink) = if words.is_empty() { ("Text", t.faint) } else { (words, ink) };
+                                    ui.text_in(NodeSpec::row().max_width(60.0), words, TextStyle::new(Type::UI.size).color(ink).nowrap().ellipsis());
+                                }
+                                // Its picture, small; until there is one, a
+                                // picture's glyph.
+                                Divider::Picture => match &picture {
+                                    Some(images::Entry::Ready { id, w, h }) if *w > 0 && *h > 0 => {
+                                        let (w, h) = (*w as f32, *h as f32);
+                                        let k = (60.0 / w).min(26.0 / h);
+                                        ui.image(*id, NodeSpec::row().size(w * k, h * k).role(Role::None));
+                                    }
+                                    _ => crate::icons::icon(ui, Icon::Picture, ink, 18.0, false),
+                                },
+                                // As on the page, or smaller where it would
+                                // not fit.
+                                _ => crate::icons::ornament(ui, *d, ink, (56.0 / crate::icons::ornament_width(*d)).min(1.0)),
+                            });
                         }
                     },
                 );
             });
+            // A divider of the reader's own: where its words are typed, or
+            // its picture picked again; a picture not shown says why.
+            if s.divider == Divider::Text {
+                subgroup(ui, l, "divider-own", "Your own divider", |ui| {
+                    sub_setting(ui, l, "Words", |ui| {
+                        ui.with(
+                            NodeSpec::row()
+                                .width(200.0)
+                                .height(32.0)
+                                .padding(Edges { l: 12.0, r: 8.0, t: 0.0, b: 0.0 })
+                                .radius(radius::CONTROL)
+                                .bg(t.sunken)
+                                .cross_align(Align::Center),
+                            |ui| {
+                                let k = ui.text_edit_value(
+                                    "divider-text",
+                                    &s.divider_text,
+                                    &EditOptions {
+                                        style: TextStyle::new(Type::UI.size).color(t.fg),
+                                        placeholder: Some("~ \u{2726} ~".into()),
+                                        ..Default::default()
+                                    },
+                                    Field::DividerText.on(NodeSpec::row().grow_width().min_width(0.0).label("A divider's words")),
+                                );
+                                self.fields.insert(k, Field::DividerText);
+                                self.apply_focus(ui, k, Field::DividerText);
+                            },
+                        );
+                    });
+                });
+            } else if s.divider == Divider::Picture {
+                subgroup(ui, l, "divider-own", "Your own divider", |ui| {
+                    sub_setting(ui, l, "Picture", |ui| {
+                        pill_button(ui, l, "divider-picture", "Choose\u{2026}", false, true, Msg::PickDividerPicture);
+                    });
+                    let why = match &picture {
+                        Some(images::Entry::Failed(why)) => Some(why.clone()),
+                        None => Some("not found".to_string()),
+                        _ => None,
+                    };
+                    if let Some(why) = why {
+                        let fallback = Divider::FALLBACK.name().to_lowercase();
+                        ui.text_in(
+                            NodeSpec::row().grow_width().padding(Edges { l: design::space::L, r: 18.0, t: 0.0, b: design::space::XS }).live(kui_native::Live::Polite),
+                            &format!("The picture isn't shown ({why}): dividers are {fallback} until another is chosen."),
+                            TextStyle::new(Type::SMALL.size).color(t.warning),
+                        );
+                    }
+                });
+            }
             rule(ui, l);
             // A letter drops only where its paragraph asks, from the
             // toolbar; these style every one of them.
@@ -2004,8 +2145,9 @@ fn swatch(ui: &mut Ui<'_>, l: &Look, i: usize, p: design::Palette, on: bool) {
     );
 }
 
-/// A way to draw dividers, drawn that way; the chosen one ringed.
-fn divider_choice(ui: &mut Ui<'_>, l: &Look, i: usize, d: crate::settings::Divider, on: bool) {
+/// A way to draw dividers, drawn that way by `draw` in the ink it is
+/// given; the chosen one ringed.
+fn divider_choice(ui: &mut Ui<'_>, l: &Look, i: usize, d: Divider, on: bool, draw: impl FnOnce(&mut Ui<'_>, Color)) {
     let t = l.t;
     ui.with_indexed(
         i as u64,
@@ -2021,11 +2163,7 @@ fn divider_choice(ui: &mut Ui<'_>, l: &Look, i: usize, d: crate::settings::Divid
             .checked(on)
             .label(d.name())
             .tooltip(d.name()),
-        // As on the page, or smaller where it would not fit.
-        |ui| {
-            let k = (56.0 / crate::icons::ornament_width(d)).min(1.0);
-            crate::icons::ornament(ui, d, if on { l.c.accent_ink } else { t.muted }, k)
-        },
+        |ui| draw(ui, if on { l.c.accent_ink } else { t.muted }),
     );
 }
 

@@ -433,58 +433,15 @@ pub fn icon(ui: &mut Ui<'_>, g: Glyph, ink: Color, size: f32, filled: bool) {
 
 /// A divider's ornament as path data on a box in px at 16px text: its
 /// width and height, what is stroked and what is filled, and the stroke's
-/// width. Drawn, not typed: no font needs to have ⁂ or a fleuron.
+/// width. Drawn, not typed: no font needs to have a lozenge or a swung
+/// dash. The reader's own words or picture are drawn by the page; asked
+/// for here, they are the ornament they fall back to.
 fn ornament_parts(d: Divider) -> (f32, f32, String, String, f32) {
     let dot = |cx: f32, cy: f32, r: f32| format!("M{} {cy} A{r} {r} 0 1 0 {} {cy} A{r} {r} 0 1 0 {} {cy} Z ", cx - r, cx + r, cx - r);
-    // An asterisk: three strokes through its middle, six points.
-    let star = |cx: f32, cy: f32, r: f32| {
-        let (dx, dy) = (r * 0.866, r * 0.5);
-        format!(
-            "M{cx} {} L{cx} {} M{} {} L{} {} M{} {} L{} {} ",
-            cy - r,
-            cy + r,
-            cx - dx,
-            cy - dy,
-            cx + dx,
-            cy + dy,
-            cx - dx,
-            cy + dy,
-            cx + dx,
-            cy - dy
-        )
-    };
     match d {
+        Divider::Text | Divider::Picture => ornament_parts(Divider::FALLBACK),
         Divider::Dots => (33.0, 3.0, String::new(), [1.5, 16.5, 31.5].map(|x| dot(x, 1.5, 1.5)).concat(), 0.0),
         Divider::Line => (96.0, 2.0, "M0 1 L96 1".into(), String::new(), 1.0),
-        Divider::Stars => (44.0, 8.0, [4.0, 22.0, 40.0].map(|x| star(x, 4.0, 3.6)).concat(), String::new(), 1.3),
-        Divider::Asterism => (
-            19.0,
-            16.0,
-            [(9.5, 4.0), (4.0, 12.0), (15.0, 12.0)].map(|(x, y)| star(x, y, 3.4)).concat(),
-            String::new(),
-            1.2,
-        ),
-        // A swash each way from a small diamond, each ending in a curl.
-        Divider::Flourish => (
-            120.0,
-            20.0,
-            "M66 10 C74 4 82 4 88 10 C94 16 102 16 106 10 C108 7 105 4 102 6 \
-             M54 10 C46 4 38 4 32 10 C26 16 18 16 14 10 C12 7 15 4 18 6"
-                .into(),
-            "M60 6 L64 10 L60 14 L56 10 Z".into(),
-            1.3,
-        ),
-        // The hedera: a heart-shaped leaf pointing right, notched where
-        // its stem meets it, the stem curling back over it.
-        Divider::Fleuron => (
-            36.0,
-            22.0,
-            "M15 11 C10 11 6.5 10 5 7.2 C3.6 4.6 5.6 2 8.2 2.8 C10.2 3.4 10 6 7.9 6.1".into(),
-            "M15 11 C11.5 7 13 3 17.5 3.5 C23 4 28 7.5 33 11 C28 14.5 23 18 17.5 18.5 \
-             C13 19 11.5 15 15 11 Z"
-                .into(),
-            1.3,
-        ),
         // Lozenges, a little taller than wide, spaced as the dots are.
         Divider::Diamonds => (
             36.0,
