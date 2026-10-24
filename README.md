@@ -116,7 +116,7 @@ The toolbar's highlighter and text-colour buttons offer ten calm hues. They are 
 | Ctrl+C / Ctrl+X / Ctrl+V | copy and cut (Markdown across blocks); paste (Markdown becomes blocks) |
 | Ctrl+Z / Ctrl+Y or Ctrl+Shift+Z | undo / redo anything: typing, ticks, removed blocks and tables |
 | Alt+↑ / Alt+↓ | move the block (or the selected blocks) |
-| Alt+Shift+↑ / ↓, Alt+Shift+← / → in a table | move the row up or down, the column left or right (the header row stays on top) |
+| Alt+Shift+↑ / ↓, Ctrl+Alt+Shift+← / → in a table | move the row up or down, the column left or right (the header row stays on top) |
 | Ctrl+Alt+0 … 7 | turn the block into text, heading 1–3, checklist, bullets, numbers or a quote |
 | Ctrl+Alt+8 | drop the paragraph's first letter, or put it back |
 | Ctrl+Alt+T / Ctrl+Alt+- | insert a table / a divider |

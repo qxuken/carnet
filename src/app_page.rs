@@ -2403,17 +2403,14 @@ impl Carnet {
         let code = if chord || m.alt { keys::chord_code(&k) } else { k.code };
         let doc = self.doc();
         match code {
-            // In a table's cell, Alt+Shift: its row up or down, its column
-            // left or right. Alt alone still moves the whole table.
-            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
-                if m.alt && shift && !chord && self.caret.head.slot.cell.is_some() =>
-            {
-                self.on_plain(match code {
-                    KeyCode::Up => Msg::MoveRow { by: -1 },
-                    KeyCode::Down => Msg::MoveRow { by: 1 },
-                    KeyCode::Left => Msg::MoveCol { by: -1 },
-                    _ => Msg::MoveCol { by: 1 },
-                });
+            // In a table's cell, Alt+Shift: its row up or down; with the
+            // chord too, its column left or right (Alt+Shift+←→ alone still
+            // selects by word). Alt alone still moves the whole table.
+            KeyCode::Up | KeyCode::Down if m.alt && shift && !chord && self.caret.head.slot.cell.is_some() => {
+                self.on_plain(Msg::MoveRow { by: if code == KeyCode::Up { -1 } else { 1 } });
+            }
+            KeyCode::Left | KeyCode::Right if m.alt && shift && chord && self.caret.head.slot.cell.is_some() => {
+                self.on_plain(Msg::MoveCol { by: if code == KeyCode::Left { -1 } else { 1 } });
             }
             // The note above or below in the library.
             KeyCode::Up | KeyCode::Down if chord && m.alt => self.step_note(code == KeyCode::Up),

@@ -39,13 +39,13 @@ pub const OUTDENT: &str = "shift+tab";
 pub const DUPLICATE: &str = "mod+d";
 pub const REMOVE: &str = "mod+shift+k";
 pub const TICK: &str = "mod+enter";
-// In a table's cell, the block's move with Shift: its row or its column.
-// (Alt+Shift+←→ selects by word elsewhere; in a cell Ctrl+Shift still
-// does, but not Option+Shift on a Mac.)
+// In a table's cell, the block's move with Shift: its row; with the chord
+// too, its column — Alt+Shift+←→ is selecting by word, Option+Shift on a
+// Mac, and stays that in a cell.
 pub const ROW_UP: &str = "alt+shift+up";
 pub const ROW_DOWN: &str = "alt+shift+down";
-pub const COL_LEFT: &str = "alt+shift+left";
-pub const COL_RIGHT: &str = "alt+shift+right";
+pub const COL_LEFT: &str = "mod+alt+shift+left";
+pub const COL_RIGHT: &str = "mod+alt+shift+right";
 // Moving around.
 pub const TOP: &str = "mod+up";
 pub const BOTTOM: &str = "mod+down";

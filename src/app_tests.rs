@@ -226,8 +226,9 @@ fn backspace_takes_empty_lines_and_then_a_table_and_undo_brings_it_back() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A table's row moves with Alt+Shift+↑↓ and its column with Alt+Shift+←→,
-/// or from the toolbar and the page's menu, which grey a move past the
+/// A table's row moves with Alt+Shift+↑↓ and its column with
+/// Ctrl+Alt+Shift+←→ (Alt+Shift+←→ still selects by word in a cell), or
+/// from the toolbar and the page's menu, which grey a move past the
 /// table's edge or the header; the caret goes with its words, and each
 /// move is one undo.
 #[test]
@@ -272,7 +273,13 @@ fn a_tables_rows_and_columns_move_and_the_caret_with_them() {
     assert_eq!(words(&app), ["Day Miles", "Tue 30", "Mon 12"]);
     assert_eq!(app.caret, Caret::at(Pos { slot, byte: 2 }), "the caret in its words");
     assert!(enabled(&mut d, "t-rowup") && !enabled(&mut d, "t-rowdown"), "the bottom row");
+    // Alt+Shift+→ selects to the word's end, the columns where they were.
     key_with(&mut app, &mut d, "right", alt_shift);
+    assert_eq!(words(&app), ["Day Miles", "Tue 30", "Mon 12"]);
+    assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (2, 3), "the word's end selected");
+    app.caret = Caret::at(Pos { slot, byte: 2 });
+    let ctrl_alt_shift = KeyMods { shift: true, ctrl: true, alt: true, super_key: false };
+    key_with(&mut app, &mut d, "right", ctrl_alt_shift);
     assert_eq!(words(&app), ["Miles Day", "30 Tue", "12 Mon"]);
     assert_eq!(app.caret, Caret::at(Pos { slot, byte: 2 }));
     // From the toolbar and the menu.
