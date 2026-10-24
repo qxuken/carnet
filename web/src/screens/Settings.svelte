@@ -64,8 +64,10 @@
 
   onMount(() => {
     sync.listDevices();
-    // Used elsewhere since: asked afresh each time.
-    sync.invites = null;
+    // Used elsewhere since: asked afresh each time, the last list shown
+    // until the answer comes, as the devices' is. Emptied, the owner's
+    // invites went and "Delete the account" showed for a moment, the page
+    // moving under it (the desktop's Settings did the same).
     sync.listInvites();
   });
   onDestroy(() => {
