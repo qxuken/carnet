@@ -30,6 +30,9 @@ const BESIDE_MIN: f32 = 180.0;
 /// How many blocks' rows are kept as last laid out, across notes, before
 /// those of notes not open are let go.
 const ROWS_KEPT: usize = 20_000;
+/// How far a selection's wash, and inline code's, reaches past its first
+/// and last letters: drawn flush with them, it read as cut to the glyphs.
+const SPAN_AIR: f32 = 3.0;
 /// How strongly a picture that's the user's own file, not Carnet's, is
 /// drawn: faint, so it reads as apart from the note's own.
 const THEIRS_OPACITY: f32 = 0.45;
@@ -633,7 +636,7 @@ impl Carnet {
         // measured, so they never crowd each other however the page's
         // margins come out.
         self.float_room = ui.layout_of(ui.child_key(&key)).map_or(self.text_w + 16.0, |r| r.w);
-        ui.with_keyed(&key, NodeSpec::row().grow_width().gap(4.0).cross_align(Align::Start), |ui| {
+        ui.with_keyed(&key, NodeSpec::row().grow_width().gap(4.0).cross_align(Align::Start).on_layout(Value::Null), |ui| {
             for side in [!right, right] {
                 if side {
                     ui.with_keyed("pictures", NodeSpec::row().gap(PICTURE_GAP - 16.0), |ui| {
@@ -1873,7 +1876,8 @@ impl Carnet {
                                 .size((style.size * 0.875).round())
                                 .color(l.c.accent_ink)
                                 .bg(t.fg.with_alpha(0.09))
-                                .bg_radius(4.0);
+                                .bg_radius(4.0)
+                                .bg_pad(SPAN_AIR);
                         }
                         if s.link {
                             sp = sp.color(t.focus_ring).underline();
@@ -1890,7 +1894,9 @@ impl Carnet {
                     // on some of them.
                     let chosen = part.is_some_and(|(f, to)| a >= f && b <= to);
                     if chosen {
-                        sp = sp.bg(wash.map_or(t.selection, |w| over(t.selection, w))).bg_radius(4.0);
+                        // A little air past its first and last letters (kui
+                        // pads only the run's two ends, and moves nothing).
+                        sp = sp.bg(wash.map_or(t.selection, |w| over(t.selection, w))).bg_radius(4.0).bg_pad(SPAN_AIR);
                     }
                     spans.push(sp);
                     broken = text[a..b].ends_with('\n');

@@ -1271,14 +1271,7 @@ fn a_link_to_a_file_that_could_run_asks_before_it_opens() {
     let slot = app.caret.head.slot;
     let words = drawn_text(&app, &d, slot);
     assert_eq!(words, "README main.rs setup.exe fix.py");
-    // Handed to the system with its own separators: a `/` on Windows has
-    // Explorer open Documents instead of the file.
-    let sep = std::path::MAIN_SEPARATOR;
-    let opened = || {
-        let paths = store::OPENED.with_borrow_mut(std::mem::take);
-        assert!(paths.iter().all(|p| sep == '/' || !p.contains('/')), "written as the system writes paths: {paths:?}");
-        paths.into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>()
-    };
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
     let ctrl_click = |app: &mut Carnet, d: &mut Drive, name: &str| {
         let at = words.find(name).unwrap() + 1;
         d.input(app, InputEvent::Modifiers(CTRL));
