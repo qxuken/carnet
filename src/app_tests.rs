@@ -8994,6 +8994,39 @@ fn a_window_360_wide_holds_the_note_the_list_and_the_settings() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A recording (the devtools' Perf tab, `KUI_PERF_TRACE`) names Carnet's
+/// own work: the library, the toolbar and the page drawn, its jobs (sync,
+/// the folder watch, the autosave), a picture's decode timed on its
+/// reader, what the pictures held come to, and the moments a note opened
+/// or was saved.
+#[test]
+fn a_recording_names_carnets_own_work() {
+    let (mut app, mut d, dir) = body("perf-names");
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/dot.png"), crate::images::encode_png(4, 4, &[90; 64]).unwrap()).unwrap();
+    d.core.set_perf_recording(true);
+    type_in(&mut app, &mut d, "words");
+    let i = app.current;
+    app.store.notes[i].doc.push(Block::new(Kind::Image { src: "attachments/dot.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false }));
+    app.store.notes[i].touch();
+    app.last_edit = Instant::now() - SAVE_AFTER;
+    for _ in 0..4 {
+        d.advance(0.1);
+        d.frame(&mut app);
+    }
+    let other = app.order.iter().copied().find(|&n| n != app.current).expect("another note");
+    app.open(other);
+    d.advance(0.1);
+    d.frame(&mut app);
+    d.core.set_perf_recording(false);
+    let trace = d.core.perf_trace();
+    let has = |s: &str| trace.windows(s.len()).any(|w| w == s.as_bytes());
+    for name in ["library", "toolbar", "page", "sync", "folder watch", "autosave", "pictures handed over", "decode picture", "pictures held (bytes)", "note saved", "note opened"] {
+        assert!(has(name), "the recording names {name:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A selection held at the page's foot scrolls it by kui's edge-scroll
 /// feel: on with the pointer still, faster the longer it's held, within a
 /// cap, slower at once when the pointer eases back; and a pointer pinned

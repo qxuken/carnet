@@ -309,7 +309,7 @@ impl Carnet {
         if !self.caret_fresh && self.reveal_wait < 3 {
             self.reveal_wait += 1;
             self.reveal = true;
-            ui.request_frame();
+            ui.request_frame_for("caret reveal");
             return;
         }
         self.reveal_wait = 0;
@@ -550,7 +550,7 @@ impl Carnet {
                 if e.0 != end {
                     *e = (end, e.1.saturating_add(1));
                     if e.1 < 6 {
-                        ui.request_frame();
+                        ui.request_frame_for("float settling");
                     }
                 } else {
                     e.1 = 0;
@@ -1333,7 +1333,7 @@ impl Carnet {
                 ui.image(img, NodeSpec::row().size(gw, gh).radius(6.0).opacity(0.75).role(Role::None));
             });
         }
-        ui.request_frame();
+        ui.request_frame_for("picture drag");
     }
 
     /// A table's cell something carried will go into: a ring in the
@@ -1981,7 +1981,7 @@ impl Carnet {
                 }
                 _ => {
                     ui.leaf_keyed("caret", bar(style.line_height, (0.0, 0.0), false));
-                    ui.request_frame();
+                    ui.request_frame_for("caret not laid out");
                 }
             }
         });

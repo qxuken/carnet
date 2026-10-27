@@ -90,10 +90,11 @@ pub struct Decoded {
 }
 
 /// What a reader found of a picture: its size, from the file's header,
-/// then its pixels, or why not.
+/// then its pixels, or why not, and how long reading it took in ms (none
+/// for pixels already in hand): a recording's `decode picture` track.
 enum Landed {
     Size(u32, u32),
-    Done(Result<Decoded, String>),
+    Done(Result<Decoded, String>, Option<f64>),
 }
 
 type Inbox = Arc<Mutex<Vec<(PathBuf, Landed)>>>;
@@ -189,9 +190,11 @@ impl Images {
             let (w, h) = known.unwrap_or_else(|| size(path));
             let loading = Entry::Loading { w, h };
             self.hold(path, loading.clone());
+            let began = Instant::now();
             let r = decode(path);
+            let took = began.elapsed().as_secs_f64() * 1000.0;
             if let Ok(mut q) = self.inbox.lock() {
-                q.push((path.to_path_buf(), Landed::Done(r)));
+                q.push((path.to_path_buf(), Landed::Done(r, Some(took))));
             }
             return loading;
         };
@@ -233,7 +236,7 @@ impl Images {
         }
         self.hold(path, Entry::Loading { w: d.w, h: d.h });
         if let Ok(mut q) = self.inbox.lock() {
-            q.push((path.to_path_buf(), Landed::Done(Ok(fit(d)))));
+            q.push((path.to_path_buf(), Landed::Done(Ok(fit(d)), None)));
         }
     }
 
@@ -259,7 +262,12 @@ impl Images {
                     }
                     continue;
                 }
-                Landed::Done(r) => r,
+                Landed::Done(r, took) => {
+                    if let Some(ms) = took {
+                        core.perf_measure("decode picture", ms);
+                    }
+                    r
+                }
             };
             let (e, pixels) = match r {
                 Ok(d) => {
@@ -279,6 +287,9 @@ impl Images {
                 }
                 None => self.hold_with(&path, e, pixels),
             }
+        }
+        if landed {
+            core.perf_gauge("pictures held (bytes)", self.bytes() as f64);
         }
         landed
     }
@@ -442,7 +453,9 @@ fn readers(inbox: Inbox, waker: Waker) -> Queue {
                 if w > 0 && h > 0 {
                     land(Landed::Size(w, h));
                 }
-                land(Landed::Done(decode(&path)));
+                let began = Instant::now();
+                let r = decode(&path);
+                land(Landed::Done(r, Some(began.elapsed().as_secs_f64() * 1000.0)));
             }
         };
         let _ = std::thread::Builder::new().name(format!("carnet-picture-{i}")).spawn(read);

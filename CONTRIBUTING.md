@@ -94,6 +94,12 @@ Frame cost on a note with 2,000 lines:
 cargo test --release big_note -- --nocapture
 ```
 
+**Where a frame's time goes.** kui records a running app as a timeline: each frame's phases and why it ran, and Carnet's own spans (`library`, `toolbar`, `page`, `settings`, `sync`, `folder watch`, `autosave`, the pictures let go and handed over), a picture's decode timed on its reader thread (`decode picture`), what the pictures held come to, the moments a note opened or was saved or the folder was read again, which thread woke the window (`wake: sync`, `wake: pictures`, `wake: folder watch`, …) and what asked for a frame (`request: caret reveal`, …). Nothing is timed while nobody records. In a debug build, F12 opens the devtools, whose Perf tab shows it live and records on its button; or write a session to a file and open it in Perfetto or Chrome's tracing:
+
+```bash
+env KUI_PERF_TRACE=carnet.pftrace cargo run --release
+```
+
 **The server with Postgres and S3.** `carnet-server`'s storage and migration tests also run against a real Postgres and an S3-compatible bucket when they're given one; without them those tests skip themselves. [The server's README](crates/carnet-server/README.md#tests) has the commands.
 
 **The sync protocol's fixtures.** `crates/carnet-sync/protocol/` holds how each protocol version's frames encode, byte for byte, so that apps and servers of different versions keep understanding each other ([docs/SYNC.md](docs/SYNC.md) §14). A change to the wire fails the test with what to do: raise the protocol number, keep the old fixture, and bless the new one with `CARNET_BLESS=1 cargo test -p carnet-sync wire`.

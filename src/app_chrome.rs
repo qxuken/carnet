@@ -63,7 +63,7 @@ impl Carnet {
         if !shown {
             if open {
                 // Its last frames: drawn until it has gone.
-                ui.request_frame();
+                ui.request_frame_for("library closing");
             } else {
                 // Nothing of it is there to take a dragged file.
                 self.card_rects.clear();

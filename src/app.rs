@@ -815,6 +815,10 @@ pub struct Carnet {
     pub drop_index: Option<usize>,
     /// The library's cards as last laid out: what a dragged file hovers.
     card_rects: Vec<(usize, Rect)>,
+    /// Moments for a recording's timeline (`perf_mark`) — a note opened,
+    /// saved, the folder read again — noted where they happen, which has
+    /// no core to hand, and put on it by the next frame.
+    marks: Vec<&'static str>,
     /// Their nodes, as last drawn: a card a click gave the keyboard to is
     /// the list holding it, as the window was before kui let a click
     /// focus what it lands on.
@@ -1375,6 +1379,7 @@ impl Carnet {
             drop_index: None,
             card_rects: Vec::new(),
             card_keys: Vec::new(),
+            marks: Vec::new(),
             page_rect: None,
             scroll_key: None,
             resizing: None,
@@ -1884,6 +1889,7 @@ impl Carnet {
         }
         // Not renamed while the title is being typed.
         let rename = !self.title_focused;
+        self.marks.push("note saved");
         match self.store.save(i, rename) {
             Ok(Saved::Merged) => {
                 self.error = None;
@@ -1916,7 +1922,7 @@ impl Carnet {
     /// changed it: without the window having to come to the front.
     fn watch_tick(&mut self) {
         if self.watch.as_ref().is_none_or(|w| w.dir() != self.store.dir) {
-            let waker = self.waker.clone();
+            let waker = self.waker.as_ref().map(|w| w.named("folder watch"));
             self.watch = Some(crate::watch::Watch::start(self.store.dir.clone(), move || {
                 if let Some(w) = &waker {
                     w.wake();
@@ -1932,6 +1938,7 @@ impl Carnet {
     /// note is followed by id; if it went, the first in the list opens.
     fn rescan(&mut self) {
         self.rescans += 1;
+        self.marks.push("folder rescanned");
         let open = self.store.notes.get(self.current).map(|n| n.id);
         // Each note as it is before: one reread from disk comes back
         // with its `rev` moved on.
@@ -2005,6 +2012,7 @@ impl Carnet {
         if self.note_window.is_some() {
             return;
         }
+        self.marks.push("note opened");
         self.folders_clicked = false;
         // Another note (⌥⌘↓ comes from the keyboard): not being written yet.
         self.typing = false;
@@ -4091,7 +4099,7 @@ impl Carnet {
         if let Some(p) = crate::oscursor::over_window(ui.core().scale()) {
             drag.at = Some(p);
         }
-        ui.request_frame();
+        ui.request_frame_for("file drag");
         let Some(at) = drag.at else { return };
         let inside = |r: &Rect| at.x >= r.x && at.x <= r.x + r.w && at.y >= r.y && at.y <= r.y + r.h;
         // Resting on a card (of the main window's library).
@@ -4865,15 +4873,17 @@ fn blank_note() -> Note {
 impl App for Carnet {
     fn setup(&mut self, waker: Waker) {
         self.waker = Some(waker.clone());
-        let wake = waker.clone();
+        // Each thread wakes the window under its own name, so a recording
+        // (the devtools' Perf tab, `KUI_PERF_TRACE`) says which woke it.
+        let wake = waker.named("sync");
         self.sync.set_wake(move || wake.wake());
-        let wake = waker.clone();
+        let wake = waker.named("signup");
         self.signup.set_wake(move || wake.wake());
-        let wake = waker.clone();
+        let wake = waker.named("server check");
         self.connect.set_wake(move || wake.wake());
-        let wake = waker.clone();
+        let wake = waker.named("update check");
         self.updates.set_wake(move || wake.wake());
-        self.images.set_waker(waker);
+        self.images.set_waker(waker.named("pictures"));
     }
 
     /// The main window's frame, or a note window's as that window's own
@@ -4964,15 +4974,29 @@ impl Carnet {
     /// sweep, Settings' dialogs — is the main window's alone.
     fn window_view(&mut self, ui: &mut Ui<'_>) {
         let main = self.note_window.is_none();
+        // Each of the frame's own jobs a span of its own, read in the
+        // devtools' Perf tab or a `KUI_PERF_TRACE` (nothing is timed while
+        // nobody records).
+        macro_rules! timed {
+            ($name:literal, $work:expr) => {{
+                let s = ui.core().span_begin($name);
+                let r = $work;
+                ui.core().span_end(s);
+                r
+            }};
+        }
         // Autosave once typing has paused.
         if self.store.notes[self.current].dirty && self.last_edit.elapsed() >= SAVE_AFTER {
-            self.save_current();
+            timed!("autosave", self.save_current());
+        }
+        for m in self.marks.drain(..) {
+            ui.core().perf_mark(m);
         }
         if main {
-            self.watch_tick();
-            self.sync_tick();
-            self.connect_tick();
-            self.updates_tick();
+            timed!("folder watch", self.watch_tick());
+            timed!("sync", self.sync_tick());
+            timed!("server check", self.connect_tick());
+            timed!("update check", self.updates_tick());
             if self.joined_said && !self.settings_open {
                 self.joined_said = false;
                 self.sync.joined = None;
@@ -5062,10 +5086,10 @@ impl Carnet {
         }
         // Pictures the last frame didn't draw may go; a frame is asked
         // for when the next could, should nothing else draw one.
-        if let Some(wait) = self.images.sweep(ui.core(), std::time::Instant::now()) {
+        if let Some(wait) = timed!("pictures let go", self.images.sweep(ui.core(), std::time::Instant::now())) {
             ui.request_frame_at(ui.now() + wait.as_secs_f64());
         }
-        if self.images.pump(ui.core()) {
+        if timed!("pictures handed over", self.images.pump(ui.core())) {
             self.reveal = self.reveal || self.editing;
         }
         // Settings' asks are the main window's.
@@ -5239,17 +5263,17 @@ impl Carnet {
             return;
         }
         if !narrow {
-            self.library_pane(ui, &l);
+            ui.span("library", |ui| self.library_pane(ui, &l));
         }
         let main_w = vw - self.side_w(narrow);
         ui.with(
             NodeSpec::column().grow_width().grow_height().bg(l.t.bg),
             |ui| {
                 if self.settings_open {
-                    self.settings_page(ui, &l, narrow, main_w);
+                    ui.span("settings", |ui| self.settings_page(ui, &l, narrow, main_w));
                 } else {
-                    self.strip(ui, &l, narrow);
-                    self.page(ui, &l, main_w);
+                    ui.span("toolbar", |ui| self.strip(ui, &l, narrow));
+                    ui.span("page", |ui| self.page(ui, &l, main_w));
                     // The words scrolling up under the strip fade out
                     // rather than being cut at its edge. Paint only: a
                     // press here is the page's. Clear of the library's
