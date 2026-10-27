@@ -2007,7 +2007,7 @@ impl Carnet {
         self.save_current();
     }
 
-    fn open(&mut self, note: usize) {
+    pub(crate) fn open(&mut self, note: usize) {
         // A note's own window keeps to it.
         if self.note_window.is_some() {
             return;
@@ -4857,6 +4857,12 @@ impl Carnet {
             None if me.is_none() && r.origin == Some(Origin::Save) => "Edited here".into(),
             None => base.into(),
         }
+    }
+
+    /// Whether a picture asked for is still being read: what a screenshot
+    /// waits out (shots.rs).
+    pub(crate) fn pictures_loading(&self) -> bool {
+        self.images.counts().0 > 0
     }
 }
 

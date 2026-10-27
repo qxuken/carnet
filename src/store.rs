@@ -397,8 +397,16 @@ pub struct Trashed {
 
 impl Store {
     pub fn open(dir: PathBuf) -> io::Result<Self> {
+        let replica = replica_dir(&dir);
+        Self::open_with(dir, replica)
+    }
+
+    /// [`open`](Store::open), the notes' history kept in `replica` (none,
+    /// with `None`) rather than in the app's data folder: the screenshots'
+    /// library, which leaves nothing behind there (shots.rs).
+    pub fn open_with(dir: PathBuf, replica: Option<PathBuf>) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
-        let (replica, replica_refused) = match replica_dir(&dir).map(|d| Replica::open(&d)) {
+        let (replica, replica_refused) = match replica.map(|d| Replica::open(&d)) {
             Some(Ok(r)) => (Some(r), None),
             Some(Err(e)) => (None, Newer::of(&e).map(Newer::to_string)),
             None => (None, None),

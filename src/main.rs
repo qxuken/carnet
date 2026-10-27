@@ -14,6 +14,7 @@ mod keys;
 mod look;
 mod oscursor;
 mod settings;
+mod shots;
 mod signup;
 mod slash;
 mod store;
@@ -47,6 +48,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(dir.join(format!("ornament-{}.svg", d.key())), icons::ornament_svg(d, "#2f2a27"))?;
         }
         return Ok(());
+    }
+    // `carnet --screenshots docs`: the README's pictures of the app, taken
+    // by the app with no window, over a demo library of its own.
+    if let Some(i) = args.iter().position(|a| a == "--screenshots") {
+        let dir = std::path::PathBuf::from(args.get(i + 1).map_or("screenshots", String::as_str));
+        return Ok(shots::run(&dir)?);
     }
     let settings = settings::Settings::load();
     // Asked of the system once, as the window opens: the blurred desktop
