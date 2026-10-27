@@ -865,7 +865,9 @@ impl PageEditor {
     /// [[at, src, alt, width, wk]] its pictures, each the letter at `at`
     /// of its words}]], hd: a table's first row its header, ini: a
     /// paragraph's first line whose first letter drops, 1, or 2 when the
-    /// letter has a colour of its own}]`. Flags: 1 bold, 2 italic, 4
+    /// letter has a colour of its own, tl: [[at, name, href, kind]] a line
+    /// of file links' tiles, each the letter at `at` of its words, as the
+    /// desktop draws them (`page::tiles`)}]`. Flags: 1 bold, 2 italic, 4
     /// struck, 8 code, 16 link, 32 a cell's picture, 64 underlined; colours 0xRRGGBBAA,
     /// a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
@@ -918,8 +920,9 @@ impl PageEditor {
                         format!("[{}]", cells.join(","))
                     })
                     .collect();
+                let tiles: Vec<String> = l.tiles.iter().map(|t| format!("[{},{},{},{}]", t.at, json(&t.name), json(&t.href), json(&t.kind))).collect();
                 format!(
-                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}],"hd":{},"ini":{}}}"#,
+                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}],"hd":{},"ini":{},"tl":[{}]}}"#,
                     l.kind,
                     l.first,
                     l.indent,
@@ -933,7 +936,8 @@ impl PageEditor {
                     float_number(l.float),
                     cells.join(","),
                     l.head,
-                    l.initial
+                    l.initial,
+                    tiles.join(",")
                 )
             })
             .collect();

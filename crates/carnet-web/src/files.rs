@@ -55,8 +55,23 @@ pub fn could_run(name: &str) -> bool {
     doc::could_run(name)
 }
 
+/// The tiles a line of a note's words is drawn as, the desktop's rule
+/// (`doc::file_line`): `[[name, href, kind]]` as JSON, one for each link
+/// to a file the note keeps, when the line is those links and nothing
+/// else; `null` for any other line, the words it is.
+#[wasm_bindgen]
+pub fn file_line(line: &str) -> String {
+    match doc::file_line(line) {
+        Some(files) => {
+            let tiles: Vec<String> = files.iter().map(|f| format!("[{},{},{}]", crate::json(&f.name), crate::json(&f.target), crate::json(&doc::file_kind(&f.path)))).collect();
+            format!("[{}]", tiles.join(","))
+        }
+        None => "null".into(),
+    }
+}
+
 /// Whether a file of this name goes in as a picture (`doc::is_picture_name`),
-/// where any other is linked among the words.
+/// where any other is linked on a line of its own, as a tile.
 #[wasm_bindgen]
 pub fn is_picture_name(name: &str) -> bool {
     doc::is_picture_name(name)

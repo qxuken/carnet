@@ -573,13 +573,16 @@ pub struct Peek {
 /// A press on the page, until it is let go.
 /// A piece of a table cell that has pictures among its words: a stretch
 /// of its words (`from..to` of its text), or a picture (its Markdown), and
-/// the node it was drawn in — the words' text, the picture's box.
+/// the node it was drawn in — the words' text, the picture's box. Or a
+/// tile of a line of file links (`file`, a `picture` too: one letter to
+/// the caret), its card.
 #[derive(Clone, Copy, Debug)]
 pub struct Piece {
     pub from: usize,
     pub to: usize,
     pub key: Key,
     pub picture: bool,
+    pub file: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -171,6 +171,28 @@ button { font: inherit; color: inherit; }
 .cm-carried { position: fixed; z-index: 50; width: 120px; height: auto; border-radius: 6px; opacity: 0.75; pointer-events: none; }
 .picture-card-words { display: grid; min-width: 0; }
 .picture-card-words small { font-size: 13px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A file a note keeps, on a line of files alone (export::viewer's
+   `p.files`, the editor's `FileTile`, page.ts): a tile, as the desktop
+   draws one (app_page.rs `tile`), side by side and wrapping, 10px apart.
+   A rounded card on the sunken wash with a hairline round it, 220px wide;
+   a paperclip, the file's name (cut short with "…"), and its kind faint
+   under it. A link all over; chosen in the editor, the accent's ring. */
+.note p.files { display: flex; flex-wrap: wrap; gap: 10px; margin: 4px 0 16px; }
+.note li .file-tile { margin: 2px 0; }
+.note .file-tile {
+  display: inline-flex; align-items: center; gap: 10px; box-sizing: border-box; width: 220px; max-width: 100%;
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--sunken);
+  color: var(--ink); text-decoration: none; text-indent: 0; font: 400 14px/20px var(--sans); vertical-align: middle; cursor: pointer;
+}
+.note .file-tile:hover { background: color-mix(in srgb, var(--ink) 4%, var(--sunken)); }
+.note .file-tile .clip {
+  flex: none; width: 18px; height: 18px; background: var(--muted);
+  -webkit-mask: url('./icons/attach.svg') center / contain no-repeat; mask: url('./icons/attach.svg') center / contain no-repeat;
+}
+.note .file-tile .words { display: grid; min-width: 0; }
+.note .file-tile .name, .note .file-tile .kind { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.note .file-tile .kind { font-size: 12.5px; line-height: 17px; color: var(--muted); }
+.note .file-tile.on { box-shadow: 0 0 0 2px var(--page), 0 0 0 4px var(--accent); }
 .note mark { background: var(--mark, var(--highlight)); color: inherit; border-radius: 3px; padding: 0 2px; }
 .note .ink { color: var(--ink); }
 /* A paragraph's dropped first letter (export::viewer's `p.initial`, the

@@ -1600,9 +1600,77 @@ fn linked_file(target: &str) -> bool {
     !target.rsplit(['/', '\\']).next().unwrap_or(target).trim_end_matches(['.', ' ']).is_empty() && !is_picture_name(target)
 }
 
+/// A link to a file the note keeps, on a line of them alone, which the
+/// page draws as a tile ([`file_line`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLink {
+    /// Where it is in the text, `[` to its closing `)`.
+    pub at: (usize, usize),
+    /// Its words: the file's name, as the link shows it.
+    pub name: String,
+    /// Its address as written, `<…>` and any title taken off.
+    pub target: String,
+    /// The address with its `%` escapes read: the file's path from the
+    /// note's folder.
+    pub path: String,
+}
+
+/// Whether a link's address (its `%` escapes read) is to a file the note
+/// keeps in Carnet's attachments folder, as [`linked_paths`] reads a
+/// file's: a path, not a web address nor anything else with a scheme
+/// (`mailto:`, `data:`), not a place in the note (`#…`) nor one from the
+/// top of the disk (`/…`, `C:\…`), each part a plain name
+/// ([`crate::name::is_plain_name`]), and the first past any `..` the
+/// attachments folder (`attachments/report.pdf`, from a folder
+/// `../attachments/report.pdf`), where every file put in a note goes (a
+/// link to another note, or to a file kept anywhere else, is a link). A
+/// file of any kind, a Markdown file picked among them too, but not a
+/// picture, which is the pictures' to draw.
+pub fn is_file_target(path: &str) -> bool {
+    let t = path.trim();
+    if t.is_empty() || t.starts_with(['#', '/', '\\']) || t.contains("://") {
+        return false;
+    }
+    let scheme = t.split_once(':').is_some_and(|(s, _)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)));
+    let parts = t.split(['/', '\\']).all(|p| matches!(p, "" | "." | "..") || crate::name::is_plain_name(p));
+    let mut named = t.split(['/', '\\']).filter(|p| !matches!(*p, "" | "." | ".."));
+    let kept = named.next().is_some_and(|p| p.eq_ignore_ascii_case("attachments")) && named.next().is_some();
+    !scheme && parts && kept && linked_file(t)
+}
+
+/// A line of the page's that is links to files the note keeps and nothing
+/// else ([`is_file_target`]): `[a.pdf](attachments/a.pdf)`, or several
+/// with whitespace between, as files put in are written. Each link's
+/// words plain (no style, nor a mark but a backslash's, which makes it a
+/// letter) and on one line. `None` for any other: a file link among other
+/// words is a link among words, and so is one styled, or beside a
+/// picture's link or a web address. What it holds is the page's to say
+/// (a paragraph's or a list item's words; a heading, a quote or a cell is
+/// words whatever they are): this reads the text alone.
+pub fn file_line(text: &str) -> Option<Vec<FileLink>> {
+    inline::file_line(text)
+}
+
+/// Whether a block of `kind` draws a line of file links alone as tiles
+/// ([`file_line`]): a paragraph, and a list item (a checklist's too); a
+/// heading, a quote, a table's cell or code never.
+pub fn draws_tiles(kind: &Kind) -> bool {
+    matches!(kind, Kind::Text(_) | Kind::Item { .. })
+}
+
+/// What a tile says a file is, by its name: its kind in capitals (`PDF`,
+/// `DOCX`), or `File` for a name with none (`README`).
+pub fn file_kind(name: &str) -> String {
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name).trim_end_matches(['.', ' ']);
+    match name.rsplit_once('.') {
+        Some((stem, kind)) if !stem.is_empty() && !kind.is_empty() && kind.len() <= 10 && kind.chars().all(char::is_alphanumeric) => kind.to_uppercase(),
+        _ => "File".to_string(),
+    }
+}
+
 /// `%` escapes read back (`%20` a space, `%28` a parenthesis); one that
 /// isn't two hex digits, or that makes no UTF-8, kept as written.
-fn percent_decoded(s: &str) -> String {
+pub(crate) fn percent_decoded(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

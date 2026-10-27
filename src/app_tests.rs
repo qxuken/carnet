@@ -1155,9 +1155,10 @@ fn markdown_files_dropped_on_the_window_come_in_as_notes() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
-/// The toolbar's paperclip asks for any file; what comes back goes in at
-/// the caret: a picture as a picture, a document as a link among the
-/// words, set apart from them by a space.
+/// The toolbar's paperclip asks for any file; what comes back goes in
+/// where the caret is: a picture as a picture, a document as a link on a
+/// line of its own after the caret's, drawn as a tile, never among the
+/// words.
 #[test]
 fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
     let (mut app, mut d, dir) = body("paperclip");
@@ -1186,11 +1187,12 @@ fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
     std::fs::write(&pdf, b"%PDF-1.4").unwrap();
     app.insert_files(std::slice::from_ref(&pdf));
     d.frame(&mut app);
-    assert_eq!(texts(&app)[0], "See the [Trip plan (v2).pdf](attachments/Trip-plan-%28v2%29.pdf) plan", "{:?}", texts(&app));
+    assert_eq!(texts(&app), ["See the plan", "[Trip plan (v2).pdf](attachments/Trip-plan-%28v2%29.pdf)"], "{:?}", texts(&app));
     assert_eq!(std::fs::read(dir.join("attachments/Trip-plan-(v2).pdf")).unwrap(), b"%PDF-1.4");
-    // The link reads as one, and opens the copy.
-    assert_eq!(drawn_text(&app, &d, app.caret.head.slot), "See the Trip plan (v2).pdf plan");
-    let (_, _, url) = page::link_at(app.doc(), page::Caret::at(page::Pos { byte: 10, ..app.caret.head })).expect("a link");
+    // A tile, which opens the copy.
+    d.frame(&mut app);
+    assert_eq!(app.cell_pieces.get(&app.caret.head.slot).map(|p| p.len()), Some(1), "a tile");
+    let (_, _, url) = page::link_at(app.doc(), app.caret).expect("a link");
     assert_eq!(app.store.linked_file("", &url).as_deref(), Some(dir.join("attachments/Trip-plan-(v2).pdf").as_path()));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
@@ -1250,10 +1252,28 @@ fn an_svg_goes_in_as_a_picture() {
     let _ = std::fs::remove_dir_all(outside);
 }
 
-/// A link to a file opens it in its own app: a `README`, source code, a
-/// PDF at once. One that could run (a program, a script, a shortcut) asks
-/// first, naming it: Cancel (or Enter, which is on it, or Esc) opens
-/// nothing, Open anyway opens it.
+/// Tile `k` of the line of files in `slot`, as last laid out.
+fn tile_rect(app: &Carnet, d: &Drive, slot: Slot, k: usize) -> kui_native::Rect {
+    let p = app.cell_pieces.get(&slot).expect("a line of tiles")[k];
+    assert!(p.file, "a tile");
+    d.core.layout_of(p.key).expect("laid out")
+}
+
+/// A press on the middle of tile `k` of the line of files in `slot`, keys
+/// `mods` held.
+fn click_tile(app: &mut Carnet, d: &mut Drive, slot: Slot, k: usize, mods: KeyMods) {
+    let r = tile_rect(app, d, slot, k);
+    d.input(app, InputEvent::Modifiers(mods));
+    d.click(app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+    d.frame(app);
+    d.frame(app);
+}
+
+/// A tile opens its file in its own app, as a link to it does: a
+/// `README`, source code, a PDF at once. One that could run (a program, a
+/// script, a shortcut) asks first, naming it: Cancel (or Enter, which is
+/// on it, or Esc) opens nothing, Open anyway opens it.
 #[test]
 fn a_link_to_a_file_that_could_run_asks_before_it_opens() {
     let (mut app, mut d, dir) = body("open-ask");
@@ -1267,17 +1287,13 @@ fn a_link_to_a_file_that_could_run_asks_before_it_opens() {
         std::fs::write(f, b"x").unwrap();
     }
     app.insert_files(&picked);
-    d.frame(&mut app);
+    d_frame_twice(&mut app, &mut d);
     let slot = app.caret.head.slot;
-    let words = drawn_text(&app, &d, slot);
-    assert_eq!(words, "README main.rs setup.exe fix.py");
+    assert_eq!(app.cell_pieces.get(&slot).map(|p| p.len()), Some(4), "four tiles");
     let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
     let ctrl_click = |app: &mut Carnet, d: &mut Drive, name: &str| {
-        let at = words.find(name).unwrap() + 1;
-        d.input(app, InputEvent::Modifiers(CTRL));
-        click_drawn(app, d, slot, at);
-        d.input(app, InputEvent::Modifiers(KeyMods::NONE));
-        d.frame(app);
+        let k = names.iter().position(|n| *n == name).unwrap();
+        click_tile(app, d, slot, k, CTRL);
     };
     let file = |n: &str| dir.join("attachments").join(n);
     opened();
@@ -1343,6 +1359,185 @@ fn slash_file_asks_for_files_and_links_them_on_its_line() {
     assert!(dir.join("attachments/Tickets.pdf").is_file());
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
+}
+
+/// Files outside the notes for a test: each name, written with `len`
+/// bytes, in a folder of its own.
+fn files_outside(name: &str, files: &[(&str, usize)]) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+    let outside = std::env::temp_dir().join(format!("carnet-{name}-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let paths = files
+        .iter()
+        .map(|(n, len)| {
+            let p = outside.join(n);
+            std::fs::write(&p, vec![b'x'; *len]).unwrap();
+            p
+        })
+        .collect();
+    (outside, paths)
+}
+
+/// A README and a PDF picked together go in as one line of their own
+/// after the caret's, never among its words, and the page draws it as two
+/// tiles side by side: a card each, the tile's width whatever the name, a
+/// paperclip, the file's name, and its kind and size from the file. The
+/// Markdown stays the links.
+#[test]
+fn picked_files_are_one_line_of_tiles() {
+    let (mut app, mut d, dir) = body("tiles");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "Trip notes");
+    key(&mut app, &mut d, "left");
+    let (outside, picked) = files_outside("tiles", &[("README", 12), ("Trip plan, final and signed by everyone.pdf", 1200)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let line = "[README](attachments/README) [Trip plan, final and signed by everyone.pdf](attachments/Trip-plan,-final-and-signed-by-everyone.pdf)";
+    assert_eq!(texts(&app), ["Trip notes", line], "{:?}", texts(&app));
+    let slot = app.caret.head.slot;
+    assert_eq!(app.caret, page::Caret::at(page::end(app.doc(), slot)), "the caret after the last");
+    let (a, b) = (tile_rect(&app, &d, slot, 0), tile_rect(&app, &d, slot, 1));
+    assert_eq!((a.w, b.w), (super::page_view::TILE_W, super::page_view::TILE_W), "the tile's width, whatever the name");
+    assert!((a.y - b.y).abs() < 0.5 && b.x > a.x + a.w, "side by side: {a:?} {b:?}");
+    let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+    for words in ["README", "File \u{b7} 12 bytes", "Trip plan, final and signed by everyone.pdf", "PDF \u{b7} 1.2 KB"] {
+        assert!(shown(&d, words), "{words}");
+    }
+    // The name cut short in its tile.
+    let name = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Trip plan, final and signed by everyone.pdf")).unwrap().rect;
+    assert!(name.x + name.w <= b.x + b.w, "{name:?} in {b:?}");
+    // A paragraph's words beside it are words, as ever.
+    assert!(!app.cell_pieces.contains_key(&page::Slot::block(blocks(&app)[0].id)));
+    assert_eq!(app.store.notes[app.current].markdown().trim_end().rsplit("\n\n").next(), Some(line));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A tile is its link all over. A plain click (links opening on ⌘-click)
+/// chooses it, its ring on; a ⌘-click opens its file, as the settings say
+/// a link opens; with links opening on a click, a click does. One that
+/// could run asks first. Its menu is its link's, and Show in folder.
+#[test]
+fn a_tile_opens_as_its_link_does() {
+    let (mut app, mut d, dir) = body("tile-open");
+    d.core.set_inspect(true);
+    let (outside, picked) = files_outside("tile-open", &[("report.pdf", 8), ("setup.exe", 8)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let slot = app.caret.head.slot;
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    opened();
+    let line = texts(&app)[0].clone();
+    let ea = line.find(' ').unwrap();
+    click_tile(&mut app, &mut d, slot, 0, KeyMods::NONE);
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((0, ea)), "chosen");
+    assert!(opened().is_empty(), "a plain click doesn't open it");
+    click_tile(&mut app, &mut d, slot, 0, CTRL);
+    assert_eq!(opened(), [dir.join("attachments/report.pdf")]);
+    click_tile(&mut app, &mut d, slot, 1, CTRL);
+    assert!(opened().is_empty() && app.open_ask.is_some(), "a program asks first");
+    key(&mut app, &mut d, "escape");
+    assert!(app.open_ask.is_none());
+    app.settings.link_open = page::LinkOpen::Click;
+    click_tile(&mut app, &mut d, slot, 0, KeyMods::NONE);
+    assert_eq!(opened(), [dir.join("attachments/report.pdf")], "a click, links opening on one");
+    app.settings.link_open = page::LinkOpen::ModClick;
+    // Right-click: its link's menu, and where it is.
+    let r = tile_rect(&app, &d, slot, 1);
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(r.x + r.w / 2.0, r.y + r.h / 2.0)));
+    d.input(&mut app, InputEvent::MouseDown { button: kui_native::MouseButton::Secondary, clicks: 1 });
+    d.input(&mut app, InputEvent::MouseUp { button: kui_native::MouseButton::Secondary });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((ea + 1, line.len())), "chosen by the right-click");
+    let menu: Vec<String> = app.page_menu().iter().map(|i| i.label.clone()).collect();
+    for want in ["Open link", "Copy link address", "Remove link", super::reveal_label()] {
+        assert!(menu.iter().any(|m| m == want), "{want} in {menu:?}");
+    }
+    app.page_action("copy-link");
+    assert_eq!(app.clip_out.as_ref().map(|c| c.0.as_str()), Some("attachments/setup.exe"));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A tile is one unit to the keys, as a picture among a cell's words is:
+/// ← chooses it, then is past it, the caret drawn at its edge; ↑ from
+/// the line below comes onto the line of tiles; Backspace takes a tile
+/// whole, its link and the space before it, and Undo brings it back; a
+/// selection over one copies its Markdown; and words typed beside them
+/// make the line words again, the links as they were.
+#[test]
+fn a_tile_is_one_unit_to_the_keys() {
+    let (mut app, mut d, dir) = body("tile-keys");
+    d.core.set_inspect(true);
+    let (outside, picked) = files_outside("tile-keys", &[("a.pdf", 8), ("b.zip", 8)]);
+    app.insert_files(&picked);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "Below");
+    d_frame_twice(&mut app, &mut d);
+    let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+    assert_eq!(texts(&app), [line, "Below"]);
+    let slot = page::Slot::block(blocks(&app)[0].id);
+    let (ea, sb) = (line.find(' ').unwrap(), line.find(' ').unwrap() + 1);
+    // ↑ from below: onto the tiles' line.
+    key(&mut app, &mut d, "up");
+    assert_eq!(app.caret.head.slot, slot);
+    key(&mut app, &mut d, "end");
+    assert_eq!(app.caret, page::Caret::at(page::Pos { slot, byte: line.len() }));
+    // Where the caret is drawn: at the edge of the tile beside it.
+    let (a, b) = (tile_rect(&app, &d, slot, 0), tile_rect(&app, &d, slot, 1));
+    let at = |byte| app.rect_at(&d.core, slot, byte).unwrap().x;
+    assert_eq!((at(0), at(ea), at(sb), at(line.len())), (a.x, a.x + a.w, b.x, b.x + b.w));
+    key(&mut app, &mut d, "left");
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((sb, line.len())), "chosen first");
+    key(&mut app, &mut d, "left");
+    assert_eq!(app.caret, page::Caret::at(page::Pos { slot, byte: sb }), "then before it");
+    key(&mut app, &mut d, "left");
+    assert_eq!(app.caret.head.byte, ea, "over the space");
+    // A selection over it: its Markdown.
+    key_with(&mut app, &mut d, "left", SHIFT);
+    assert_eq!(page::copy(app.doc(), app.caret).as_deref(), Some("[a.pdf](attachments/a.pdf)"));
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("[a.pdf](attachments/a.pdf)"));
+    // Backspace with it chosen: gone, its space too; Undo, back.
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app), ["[b.zip](attachments/b.zip)", "Below"]);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app), [line, "Below"]);
+    // Delete before the second: it goes.
+    app.caret = page::Caret::at(page::Pos { slot, byte: sb });
+    key(&mut app, &mut d, "delete");
+    assert_eq!(texts(&app)[0], "[a.pdf](attachments/a.pdf)");
+    key_with(&mut app, &mut d, "z", CTRL);
+    // Words typed at the end: words again, the links among them.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    type_in(&mut app, &mut d, " to read");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app)[0], format!("{line} to read"));
+    assert!(!app.cell_pieces.contains_key(&slot));
+    assert_eq!(drawn_text(&app, &d, slot), "a.pdf b.zip to read");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A link to a file among a sentence's words is a link there: drawn as
+/// its words, opened as a link is. A tile is only for a line of files.
+#[test]
+fn a_file_link_in_a_sentence_stays_a_link() {
+    let (mut app, mut d, dir) = body("tile-sentence");
+    d.core.set_inspect(true);
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/a.pdf"), b"x").unwrap();
+    type_in(&mut app, &mut d, "See [a.pdf](attachments/a.pdf) first");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "**[a.pdf](attachments/a.pdf)**");
+    d_frame_twice(&mut app, &mut d);
+    let ids: Vec<Slot> = blocks(&app).iter().take(2).map(|b| page::Slot::block(b.id)).collect();
+    assert_eq!(drawn_text(&app, &d, ids[0]), "See a.pdf first");
+    assert_eq!(drawn_text(&app, &d, ids[1]), "a.pdf", "styled, it's words");
+    assert!(ids.iter().all(|s| !app.cell_pieces.contains_key(s)));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Shift+F3 goes round the cases of the word the caret is in, as Word's
@@ -8174,6 +8369,156 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     drop(app);
     remove_test_dir(dir);
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// With sync on, a tile for the user's own file that isn't here (one in
+/// a folder's own `attachments`, not Carnet's, which doesn't sync) says
+/// it's on another device, as a picture's card does; one of Carnet's own
+/// that is nowhere says it isn't found, as it does with sync off.
+#[test]
+fn a_tile_for_a_file_not_here_says_where_it_is() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-tile-elsewhere-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    let (store, dir) = temp_store("tile-elsewhere");
+    drop(store);
+    std::fs::create_dir_all(dir.join("Home")).unwrap();
+    std::fs::write(dir.join("Home/Weekend.md"), "# Weekend\n\n[plan.pdf](attachments/plan.pdf)\n\n[gone.pdf](../attachments/gone.pdf)\n\nAfter\n").unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.frame(&mut app);
+    let count = |d: &Drive, s: &str| d.core.nodes().iter().filter(|n| n.text.as_deref() == Some(s)).count();
+    let i = app.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    app.open(i);
+    d.core.set_inspect(true);
+    for _ in 0..6 {
+        d.frame(&mut app);
+    }
+    assert_eq!(count(&d, super::page_view::FILE_MISSING), 2, "sync off: this is the only device");
+    assert_eq!(count(&d, super::page_view::ELSEWHERE), 0);
+    let tiled = |app: &Carnet| blocks(app).iter().filter(|b| app.cell_pieces.get(&page::Slot::block(b.id)).is_some_and(|p| p.iter().all(|p| p.file))).count();
+    assert_eq!(tiled(&app), 2, "each a tile");
+    assert!(count(&d, "plan.pdf") >= 1 && count(&d, "gone.pdf") >= 1, "named");
+
+    app.sync_server = origin.clone();
+    app.sync_code = invite.text();
+    app.on_plain(Msg::SyncStart);
+    let t0 = Instant::now();
+    while app.sync.status != crate::sync::Status::Online {
+        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: online");
+        d.frame(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let i = app.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    app.open(i);
+    let t0 = Instant::now();
+    while count(&d, super::page_view::ELSEWHERE) == 0 {
+        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: on another device");
+        d.frame(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let tiles = page::tiles(app.doc(), page::Slot::block(blocks(&app)[0].id));
+    assert_eq!(app.file_state(&tiles[0]).map_err(|e| e.1), Err(super::page_view::ELSEWHERE), "the user's, on the device that has it");
+    let tiles = page::tiles(app.doc(), page::Slot::block(blocks(&app)[1].id));
+    assert_eq!(app.file_state(&tiles[0]).map_err(|e| e.1), Err(super::page_view::FILE_MISSING), "Carnet's own, missing, as before");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(app);
+    remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A note come from another device while a file it keeps is still on its
+/// way: its tile says it's downloading, then, once it has come, its kind
+/// and size, and a click opens it.
+#[test]
+fn a_tile_for_a_file_on_its_way_says_so_then_opens() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-tile-coming-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&mut [(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+
+    // A: a note keeping a PDF, on the server.
+    let (mut a, mut da, dir_a) = fresh("tile-coming-a");
+    a.sync_server = origin.clone();
+    a.sync_how = 0;
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Harbour");
+    let (outside, picked) = files_outside("tile-coming", &[("tides.pdf", 8)]);
+    a.insert_files(&picked);
+    a.save_current();
+    until("A's file on the server", &mut [(&mut a, &mut da)], &|x| {
+        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty()) && x[0].0.sync.files_waiting() == 0
+    });
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+
+    // B comes in, its files held on the way.
+    let (mut b, mut db, dir_b) = fresh("tile-coming-b");
+    b.sync.hold_fetches = true;
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    until("B has the note, its file asked for", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
+        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty())
+    });
+    let i = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
+    b.open(i);
+    db.core.set_inspect(true);
+    until("B says it's on its way", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, super::page_view::DOWNLOADING));
+    let slot = blocks(&b).iter().map(|bl| page::Slot::block(bl.id)).find(|s| !page::tiles(b.doc(), *s).is_empty()).expect("a line of tiles");
+    let tiles = page::tiles(b.doc(), slot);
+    assert_eq!(tiles.len(), 1, "{:?}", texts(&b));
+    assert_eq!(b.file_state(&tiles[0]).map_err(|e| e.1), Err(super::page_view::DOWNLOADING));
+    assert!(shown(&db, "tides.pdf") && !shown(&db, super::page_view::FILE_MISSING));
+
+    // Let through: its kind and size, and it opens.
+    b.sync.hold_fetches = false;
+    until("B has the file", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, "PDF \u{b7} 8 bytes"));
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    opened();
+    click_tile(&mut b, &mut db, slot, 0, CTRL);
+    assert_eq!(opened().len(), 1, "opened");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop((a, b));
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(outside);
 }
 
 /// A device joining an account lets its untouched welcome note go, and

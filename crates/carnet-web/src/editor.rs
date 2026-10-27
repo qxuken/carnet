@@ -1113,8 +1113,26 @@ impl Editor {
         }
         if let (Some(slot), true) = (l.slot, matches!(b.kind, Kind::Text(_) | Kind::Heading { .. } | Kind::Item { .. } | Kind::Quote(_))) {
             look.runs = self.runs(slot, l);
+            look.tiles = self.tiles(slot, l);
         }
         look
+    }
+
+    /// A line of file links' tiles, as the desktop draws them
+    /// ([`page::tiles`]): each where its one letter is in the line's words.
+    fn tiles(&self, slot: Slot, l: &Line) -> Vec<Tile> {
+        let tiles = page::tiles(&self.doc, slot);
+        if tiles.is_empty() {
+            return Vec::new();
+        }
+        let v = page::visible(&self.doc, slot);
+        tiles
+            .into_iter()
+            .filter_map(|f| {
+                let d = v.drawn(f.at.0).checked_sub(l.start).filter(|&d| d < l.text.len())?;
+                Some(Tile { at: byte_to_u16(&l.text, d), kind: doc::file_kind(&f.path), name: f.name, href: f.target })
+            })
+            .collect()
     }
 
     /// A numbered item's number, as the desktop counts: a run starts at
@@ -1145,7 +1163,7 @@ impl Editor {
     /// A line's words in runs of one style: `(from, to)` in UTF-16 with
     /// the style, plain runs left out.
     fn runs(&self, slot: Slot, l: &Line) -> Runs {
-        let _r = page::reading(slot);
+        let _r = page::reading(&self.doc, slot);
         let t = page::text(&self.doc, slot);
         let v = page::visible(&self.doc, slot);
         let styles = inline::styles(t);
@@ -1162,7 +1180,8 @@ impl Editor {
                 if at < l.start || at >= end || l.text.as_bytes().get(at - l.start).is_none() {
                     continue;
                 }
-                let s = Style { marker: false, ..*s };
+                // A tile's letter is the tile's to draw (`tiles`).
+                let s = Style { marker: false, file: false, ..*s };
                 if s == Style::default() {
                     continue;
                 }
@@ -1218,9 +1237,21 @@ pub struct CellPicture {
     pub wiki: bool,
 }
 
+/// A tile of a line of file links: where its one letter is (UTF-16), the
+/// file's name, the address its link opens, and its kind (`PDF`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tile {
+    pub at: usize,
+    pub name: String,
+    pub href: String,
+    pub kind: String,
+}
+
 /// How a line is drawn.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Look {
+    /// A line of file links alone: a tile for each ([`page::tiles`]).
+    pub tiles: Vec<Tile>,
     pub kind: &'static str,
     pub first: bool,
     pub indent: u8,
@@ -2314,15 +2345,54 @@ mod tests {
         assert_eq!(e.markdown(), md);
     }
 
-    /// A document picked goes in as a link among the caret's words, as
-    /// the desktop links one.
+    /// A document picked goes in as a link on a line of its own after the
+    /// caret's, as the desktop puts one: drawn as a tile, one letter of
+    /// CodeMirror's words, where its tile goes. A second picked from
+    /// beside it joins it there.
     #[test]
-    fn a_file_goes_in_as_a_link() {
+    fn a_file_goes_in_on_a_line_of_its_own() {
         let mut e = Editor::open("# T\n\nsee here\n");
         e.select(1, 3, 1, 3);
         assert!(e.insert_links(&[("plan.pdf".into(), "../attachments/plan.pdf".into())]));
-        assert_eq!(e.markdown(), "# T\n\nsee [plan.pdf](../attachments/plan.pdf) here\n");
-        assert_eq!(e.lines()[1].text, "see plan.pdf here");
+        assert_eq!(e.markdown(), "# T\n\nsee here\n\n[plan.pdf](../attachments/plan.pdf)\n");
+        assert_eq!(e.lines()[2].text, "[");
+        assert_eq!(e.caret_lc(), (2, 1, 2, 1));
+        assert!(e.insert_links(&[("a b.zip".into(), "../attachments/a b.zip".into())]));
+        assert_eq!(e.markdown(), "# T\n\nsee here\n\n[plan.pdf](../attachments/plan.pdf) [a b.zip](../attachments/a%20b.zip)\n");
+        let tiles = |e: &Editor| e.look(2).tiles.iter().map(|t| (t.at, t.name.clone(), t.href.clone(), t.kind.clone())).collect::<Vec<_>>();
+        assert_eq!(
+            tiles(&e),
+            [
+                (0, "plan.pdf".into(), "../attachments/plan.pdf".into(), "PDF".into()),
+                (2, "a b.zip".into(), "../attachments/a%20b.zip".into(), "ZIP".into())
+            ]
+        );
+        assert!(e.look(1).tiles.is_empty());
+    }
+
+    /// As on the desktop: a tile is one letter to the caret. → chooses it,
+    /// Backspace after it takes it whole with its space, a copy of it is
+    /// its Markdown, and words typed beside it make the line words again,
+    /// the link a link among them. A link to a file in a sentence is one.
+    #[test]
+    fn a_tile_is_one_letter() {
+        let line = "[report.pdf](attachments/report.pdf) [README](attachments/README)";
+        let mut e = Editor::open(&format!("# T\n\n{line}\n\nSee [report.pdf](attachments/report.pdf) here.\n"));
+        assert_eq!(e.lines()[1].text, "[ [");
+        assert_eq!(e.lines()[2].text, "See report.pdf here.");
+        assert!(e.look(2).tiles.is_empty());
+        e.select(1, 0, 1, 1);
+        assert_eq!(e.copy().as_deref(), Some("[report.pdf](attachments/report.pdf)"));
+        e.select(1, 3, 1, 3);
+        assert!(e.backspace(false));
+        assert_eq!(e.markdown(), "# T\n\n[report.pdf](attachments/report.pdf)\n\nSee [report.pdf](attachments/report.pdf) here.\n");
+        assert!(e.undo());
+        assert_eq!(e.lines()[1].text, "[ [");
+        e.select(1, 3, 1, 3);
+        assert!(e.input(" and more"));
+        assert_eq!(e.lines()[1].text, "report.pdf README and more");
+        assert!(e.look(1).tiles.is_empty());
+        assert!(e.markdown().contains(&format!("{line} and more")));
     }
 
     /// The finding on the desktop: a colour tried on a selection over

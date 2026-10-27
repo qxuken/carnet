@@ -2,7 +2,7 @@
 //! a document or a chat keeps its headings, lists, tables and styles.
 //! Apps that take only text take the Markdown beside it.
 
-use crate::doc::{Block, CellPicture, Kind, ListStyle, from_markdown, parse_blocks};
+use crate::doc::{Block, CellPicture, FileLink, Kind, ListStyle, file_kind, file_line, from_markdown, parse_blocks};
 use crate::inline;
 use std::collections::HashMap;
 
@@ -87,9 +87,14 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                 out.push_str(&format!("<{tag}>"));
                 lists.push((tag, *indent));
             }
+            // The viewer's: an item of files alone, their tiles.
+            let words = |t: &str| match file_line(t).filter(|_| viewer) {
+                Some(files) => tiles(&files),
+                None => spans(t),
+            };
             if *style == ListStyle::Todo && viewer {
                 let checked = if *done { " checked" } else { "" };
-                out.push_str(&format!("<li class=\"task{}\"><input type=\"checkbox\" data-task=\"{task}\"{checked}><span>{}</span></li>", if *done { " done" } else { "" }, spans(text)));
+                out.push_str(&format!("<li class=\"task{}\"><input type=\"checkbox\" data-task=\"{task}\"{checked}><span>{}</span></li>", if *done { " done" } else { "" }, words(text)));
                 task += 1;
                 continue;
             } else {
@@ -98,7 +103,7 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
                     out.push_str(if *done { "\u{2611} " } else { "\u{2610} " });
                 }
             }
-            out.push_str(&spans(text));
+            out.push_str(&words(text));
             out.push_str("</li>");
             continue;
         }
@@ -106,6 +111,11 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
         match &b.kind {
             // The empty line the editor keeps at the end draws nothing.
             Kind::Text(t) if viewer && t.trim().is_empty() => {}
+            // The viewer's: a line of files alone, a tile for each, as the
+            // desktop draws it. A copy keeps the links, for a mail.
+            Kind::Text(t) if viewer && file_line(t).is_some() => {
+                out.push_str(&format!("<p class=\"files\">{}</p>", tiles(&file_line(t).unwrap_or_default())));
+            }
             // A dropped first letter: the paragraph's class, for the page's
             // styles to drop (`::first-letter`); `own` when the letter has
             // a colour of its own, which the styles then leave it.
@@ -189,6 +199,27 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
     }
     close_to(&mut out, &mut lists, 0);
     out
+}
+
+/// A line of file links as the viewer draws it ([`file_line`]): a tile for
+/// each, a link still (`<a class="file-tile">`, the page opening the file as
+/// any link to one), its paperclip (`.clip`, the page's styles draw it),
+/// its name and its kind ([`file_kind`]).
+fn tiles(files: &[FileLink]) -> String {
+    files
+        .iter()
+        .map(|f| {
+            let href = safe_href(&f.target).unwrap_or_default();
+            format!(
+                "<a class=\"file-tile\" href=\"{}\" title=\"{}\"><span class=\"clip\" aria-hidden=\"true\"></span><span class=\"words\"><span class=\"name\">{}</span><span class=\"kind\">{}</span></span></a>",
+                escape(&href),
+                escape(&f.name),
+                escape(&f.name),
+                escape(&file_kind(&f.path)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Where a picture is put, by its `src` and whether an Obsidian embed's.
@@ -509,6 +540,25 @@ mod tests {
         // In a copy's HTML too.
         let c = html("[x *y*](https://x.test)", |s, _| s.to_string());
         assert!(c.contains("<a href=\"https://x.test\">x <i>y</i></a>"), "{c}");
+    }
+
+    /// A line of files alone is a tile for each in the reader, a link
+    /// still, with its paperclip, its name and its kind; in a list item
+    /// too. A file linked among words is the link it is, and a copy for a
+    /// mail keeps the links.
+    #[test]
+    fn a_line_of_files_is_tiles_in_the_reader() {
+        let md = "# T\n\n[report.pdf](attachments/report.pdf) [READ <ME>](../attachments/READ%20ME)\n\n- [ ] [a.zip](attachments/a.zip)\n\nSee [report.pdf](attachments/report.pdf) here.\n";
+        let v = viewer(md, |s, _| Picture::Url(s.into()));
+        assert!(
+            v.contains("<p class=\"files\"><a class=\"file-tile\" href=\"attachments/report.pdf\" title=\"report.pdf\"><span class=\"clip\" aria-hidden=\"true\"></span><span class=\"words\"><span class=\"name\">report.pdf</span><span class=\"kind\">PDF</span></span></a> <a class=\"file-tile\" href=\"../attachments/READ%20ME\""),
+            "{v}"
+        );
+        assert!(v.contains("<span class=\"name\">READ &lt;ME&gt;</span><span class=\"kind\">File</span>"), "{v}");
+        assert!(v.contains("data-task=\"0\"><span><a class=\"file-tile\" href=\"attachments/a.zip\""), "{v}");
+        assert!(v.contains("<p>See <a href=\"attachments/report.pdf\">report.pdf</a> here.</p>"), "{v}");
+        let h = html(md, |s, _| s.to_string());
+        assert!(!h.contains("class=\"file") && h.contains("<a href=\"attachments/report.pdf\">report.pdf</a> <a href=\"../attachments/READ%20ME\">"), "{h}");
     }
 
     /// Underlined words come out as `<u>` in a copy and in the reader,

@@ -113,7 +113,8 @@
 
   /// Files picked with the paperclip or `/file`, as the desktop takes
   /// them: a picture put in as a picture, every other file kept beside
-  /// the notes (`addFile`) and linked among the caret's words.
+  /// the notes (`addFile`) and linked on a line of its own after the
+  /// caret's, a tile for each (`page::insert_links`).
   async function take(files: File[]) {
     if (!pe) return;
     const names: string[] = [];

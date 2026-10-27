@@ -28,35 +28,63 @@
 //! an edit takes it whole. Elsewhere a picture is a block of its own
 //! (`doc::Kind::Image`), and the same marks are the `!` and link they
 //! look like.
+//!
+//! A paragraph's (or a list item's) words that are links to files the
+//! note keeps and nothing else (`[a.pdf](attachments/a.pdf) [b.zip](…)`,
+//! [`doc::file_line`]) are drawn as a tile each: read so only while a
+//! [`file_text`] lives, as the page reads such a block. Each link's `[`
+//! is then its one word, drawn as the tile, and the rest its marks, as a
+//! cell's picture is; any other line, or a file link among other words,
+//! is the link it looks like.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
-use crate::doc::{self, CellPicture};
+use crate::doc::{self, CellPicture, FileLink};
 
 thread_local! {
     /// Whether the text being read is a table cell's: see [`CellText`].
     static IN_CELL: Cell<bool> = const { Cell::new(false) };
+    /// Whether a line of file links alone is read as tiles: see
+    /// [`file_text`].
+    static FILES: Cell<bool> = const { Cell::new(false) };
 }
 
 /// While it lives, text is read as a table's cell has it, a picture among
 /// its words read as one (or, made with `false`, as any other text: a
-/// paragraph in the same edit). Dropped, reading is as it was.
+/// paragraph in the same edit); or (made by [`file_text`]) as a block
+/// whose line of file links is tiles. Dropped, reading is as it was.
 #[must_use]
 pub struct CellText {
-    was: bool,
+    was: (bool, bool),
 }
 
 /// Text read as a table's cell (`true`) or as any other text has it,
 /// until what this gives is dropped.
 pub fn cell_text(on: bool) -> CellText {
-    CellText { was: IN_CELL.replace(on) }
+    CellText { was: (IN_CELL.replace(on), FILES.replace(false)) }
+}
+
+/// Text read as a paragraph's or a list item's: a line of links to files
+/// the note keeps, and nothing else, a tile for each ([`doc::file_line`]),
+/// its `[` the one word and the rest marks, so the caret steps over it
+/// whole and an edit takes it whole. Until what this gives is dropped.
+pub fn file_text() -> CellText {
+    CellText { was: (IN_CELL.replace(false), FILES.replace(true)) }
 }
 
 impl Drop for CellText {
     fn drop(&mut self) {
-        IN_CELL.set(self.was);
+        IN_CELL.set(self.was.0);
+        FILES.set(self.was.1);
     }
+}
+
+/// The file links of a line drawn as tiles, as the text is read now
+/// (under a [`file_text`]): each its place, its words and its address.
+/// Empty for any other line, or read otherwise.
+pub fn tiles(text: &str) -> Vec<FileLink> {
+    read(text).files
 }
 
 /// The pictures among a cell's words, as the cell's editor reads them: not
@@ -84,6 +112,9 @@ pub struct Style {
     /// A picture among a cell's words: its `!`, the one word it has,
     /// drawn as the picture ([`cell_pictures`] says which).
     pub picture: bool,
+    /// A link to a file on a line of them alone, read as tiles: its `[`,
+    /// the one word it has, drawn as the tile ([`tiles`] says which).
+    pub file: bool,
 }
 
 /// The plain highlighter, `==…==` or a `<mark>` with no colour: the
@@ -106,6 +137,9 @@ pub enum Kind {
     /// A picture among a cell's words: nothing opens it, its `!` is its
     /// word, and the rest its closing marks.
     Picture,
+    /// A link to a file drawn as a tile ([`file_text`]): its `[` is its
+    /// word, and the rest its closing marks, as a cell's picture.
+    File,
     /// A line break written as Markdown's hard one: two spaces or more, or
     /// a backslash, at the end of a line that goes on. They are its
     /// opening marks, its `\n` its one word, and nothing closes it; so the
@@ -129,7 +163,7 @@ impl Kind {
             Kind::Strike => ("~~", "~~"),
             Kind::Underline => ("<u>", "</u>"),
             Kind::Code => ("`", "`"),
-            Kind::Link | Kind::Tint | Kind::Picture | Kind::Break => ("", ""),
+            Kind::Link | Kind::Tint | Kind::Picture | Kind::File | Kind::Break => ("", ""),
         }
     }
 
@@ -144,6 +178,7 @@ impl Kind {
             Kind::Link => s.link,
             Kind::Tint => s.ink != 0 || s.mark != 0,
             Kind::Picture => s.picture,
+            Kind::File => s.file,
             Kind::Break => false,
         }
     }
@@ -173,6 +208,8 @@ struct Read {
     tints: Vec<Tint>,
     pairs: Vec<Pair>,
     pictures: Vec<CellPicture>,
+    /// A line of file links read as tiles: each link ([`tiles`]).
+    files: Vec<FileLink>,
     /// The marks of every line break ([`breaks`]).
     breaks: Vec<(usize, usize)>,
     /// Each `--` drawn as an em dash ([`dashes`]).
@@ -659,7 +696,91 @@ fn read_counting(text: &str, count: Count) -> Read {
         }
     }
     let dashes = dashes_of(text, &st, &quiet);
-    Read { styles: st, tints: found, pairs, pictures, breaks, dashes }
+    let mut r = Read { styles: st, tints: found, pairs, pictures, files: Vec::new(), breaks, dashes };
+    if FILES.get() && !IN_CELL.get() {
+        tile_files(text, &mut r);
+    }
+    r
+}
+
+/// The file links of a line that is nothing else ([`doc::file_line`]),
+/// as `r` read it as any other text: `None` for any other line. Only
+/// links written `[words](address)`, each to a file the note keeps
+/// ([`doc::is_file_target`]), its words plain (a backslash before a mark
+/// aside: the mark is a letter) and on one line, with nothing but
+/// whitespace (and the line breaks it makes) before, between and after.
+fn file_links_of(text: &str, r: &Read) -> Option<Vec<FileLink>> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let b = text.as_bytes();
+    let mut links: Vec<&Pair> = Vec::new();
+    for p in &r.pairs {
+        match p.kind {
+            Kind::Link if p.open.1 == p.open.0 + 1 && b[p.open.0] == b'[' => links.push(p),
+            Kind::Break => {}
+            _ => return None,
+        }
+    }
+    links.sort_by_key(|p| p.open.0);
+    let gap = |g: &str| g.replace("\\\n", "\n").chars().all(char::is_whitespace);
+    let plain = Style { link: true, ..Style::default() };
+    let mut out = Vec::new();
+    let mut last = 0;
+    for p in links {
+        if !gap(&text[last..p.open.0]) {
+            return None;
+        }
+        let words = &text[p.open.1..p.close.0];
+        if words.contains('\n') {
+            return None;
+        }
+        let mut name = String::new();
+        for (k, ch) in words.char_indices() {
+            let s = r.styles[p.open.1 + k];
+            match (s.marker, ch) {
+                (true, '\\') => {}
+                (false, _) if s == plain => name.push(ch),
+                _ => return None,
+            }
+        }
+        // Inside the brackets: `<…>`, or the address with any title after.
+        let raw = text[p.close.0 + 2..p.close.1 - 1].trim();
+        let target = match raw.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+            Some(t) => t,
+            None => raw.find(" \"").or_else(|| raw.find(" '")).map_or(raw, |s| raw[..s].trim_end()),
+        };
+        let path = doc::percent_decoded(target);
+        if name.trim().is_empty() || !doc::is_file_target(&path) {
+            return None;
+        }
+        out.push(FileLink { at: (p.open.0, p.close.1), name, target: target.to_string(), path });
+        last = p.close.1;
+    }
+    (!out.is_empty() && gap(&text[last..])).then_some(out)
+}
+
+/// A line of file links read as tiles: each link's `[` its one word (a
+/// [`Style::file`]), the rest its marks, its pair a [`Kind::File`]'s.
+fn tile_files(text: &str, r: &mut Read) {
+    let Some(files) = file_links_of(text, r) else { return };
+    r.pairs.retain(|p| p.kind != Kind::Link);
+    for f in &files {
+        let (a, e) = f.at;
+        r.styles[a] = Style { file: true, ..Style::default() };
+        r.styles[a + 1..e].fill(Style { marker: true, ..Style::default() });
+        r.pairs.push(Pair { kind: Kind::File, open: (a, a), close: (a + 1, e) });
+    }
+    // A name's `--` is no dash drawn: the tile is drawn, not its words.
+    r.dashes.retain(|d| !files.iter().any(|f| f.at.0 <= d.0 && d.1 <= f.at.1));
+    r.files = files;
+}
+
+/// The file links of `text` if it is a line of them alone, read as any
+/// other text ([`doc::file_line`]).
+pub(crate) fn file_line(text: &str) -> Option<Vec<FileLink>> {
+    let _plain = cell_text(false);
+    file_links_of(text, &read(text))
 }
 
 /// What a `--` is drawn as.
@@ -1332,7 +1453,8 @@ pub struct Visible {
     /// The source's ranges that are words, in order.
     pub runs: Vec<(usize, usize)>,
     /// A cell's pictures, in the source: each one word, its `!`, and
-    /// the caret after it past all of it.
+    /// the caret after it past all of it. A line's tiles too ([`tiles`]),
+    /// each one word, its `[`.
     pub atoms: Vec<(usize, usize)>,
     /// Each `--` drawn as one letter, an em dash ([`dashes`]), in the
     /// source: the caret steps over it whole, never between its dashes,
@@ -1420,7 +1542,7 @@ impl Visible {
                 _ => runs.push((a, b)),
             }
         }
-        let atoms = r.pictures.iter().map(|p| p.at).collect();
+        let atoms = r.pictures.iter().map(|p| p.at).chain(r.files.iter().map(|f| f.at)).collect();
         let dashes = if dashed { r.dashes } else { Vec::new() };
         Self { len: text.len(), runs, atoms, dashes }
     }
@@ -1589,7 +1711,7 @@ fn cut_keeping(text: &str, a: usize, b: usize, keep: Option<Kind>) -> (String, u
         // Code is never kept whole around a change: its words are literal,
         // so a style goes outside it, not as marks inside; nor a picture,
         // whose one word is never parted from its marks.
-        if keep.is_some_and(|k| k != p.kind) && !matches!(p.kind, Kind::Code | Kind::Picture) && o1 <= a && b <= c0 {
+        if keep.is_some_and(|k| k != p.kind) && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::File) && o1 <= a && b <= c0 {
             continue;
         }
         let mut at = vec![o1, c0];
@@ -1686,7 +1808,7 @@ pub fn merge(text: &str) -> String {
             opening.entry(q.open.0).or_default().push(q);
         }
         for p in &ps {
-            if matches!(p.kind, Kind::Link | Kind::Code | Kind::Picture | Kind::Break) {
+            if matches!(p.kind, Kind::Link | Kind::Code | Kind::Picture | Kind::File | Kind::Break) {
                 continue;
             }
             let same = |q: &&Pair| {
@@ -1723,7 +1845,7 @@ pub fn join(left: &str, right: &str) -> String {
     // of `left` past `end` and all of `right` before `start`.
     let (mut end, mut start) = (left.len(), 0);
     // Each pair met has a closing mark, so `end` moves back and it ends.
-    while let Some(p) = lp.iter().find(|p| p.close.1 == end && p.close.0 < end && !matches!(p.kind, Kind::Link | Kind::Picture | Kind::Break)) {
+    while let Some(p) = lp.iter().find(|p| p.close.1 == end && p.close.0 < end && !matches!(p.kind, Kind::Link | Kind::Picture | Kind::File | Kind::Break)) {
         // Two code spans: one, its marks made for the words of both.
         if p.kind == Kind::Code {
             let Some(q) = rp.iter().find(|q| q.open.0 == start && q.kind == Kind::Code) else { break };
@@ -1905,7 +2027,7 @@ fn wrapping(ps: &[Pair], len: usize) -> Vec<&Pair> {
         p.open.0 == s
             && p.close.1 == e
             && (p.open.1 > p.open.0 || p.close.1 > p.close.0)
-            && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::Break)
+            && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::File | Kind::Break)
     }) {
         (s, e) = (p.open.1, p.close.0);
         out.push(p);
@@ -2020,6 +2142,16 @@ fn retag(text: &mut String, t: &Tint, ink: Option<u32>, mark: Option<u32>) {
 
 /// The link the caret at `at` is in: its pair and its address.
 pub fn link_at(text: &str, at: usize) -> Option<(Pair, String)> {
+    // A tile, the caret beside it or the tile chosen: its link, as any
+    // other text reads it, so it is followed, changed or taken off its
+    // words as a link is.
+    if FILES.get()
+        && !IN_CELL.get()
+        && let Some(f) = tiles(text).into_iter().find(|f| f.at.0 <= at && at <= f.at.1)
+    {
+        let _plain = cell_text(false);
+        return link_at(text, f.at.0 + 1);
+    }
     pairs(text)
         .into_iter()
         .find(|p| p.kind == Kind::Link && p.open.1 <= at && at <= p.close.0)
@@ -2220,7 +2352,7 @@ pub fn change_case(text: &str, a: usize, b: usize, case: Case) -> Option<(String
     let (mut stop, mut start) = (false, true);
     let mut end = b;
     for (i, ch) in text.char_indices() {
-        let drawn = st.get(i).is_some_and(|s| !s.marker && !s.picture);
+        let drawn = st.get(i).is_some_and(|s| !s.marker && !s.picture && !s.file);
         if !drawn {
             out.push(ch);
             continue;

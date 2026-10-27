@@ -73,7 +73,7 @@ describe('the welcome note', () => {
     const pc = welcome_markdown(false);
     expect(pc.startsWith('# Welcome to Carnet\n\n')).toBe(true);
     expect(pc).toContain('press Ctrl+B for bold');
-    expect(pc).toContain('| /file | any file, linked among the words |');
+    expect(pc).toContain('| /file | any file, a tile on its own line |');
     expect(welcome_markdown(true)).toContain('press ⌘B for bold');
   });
 });

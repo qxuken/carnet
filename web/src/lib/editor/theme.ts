@@ -81,6 +81,13 @@ export const theme = EditorView.theme({
   '.cm-u.cm-s': { textDecorationLine: 'underline line-through' },
   '.cm-l.cm-u': { textUnderlineOffset: 'auto' },
   '.cm-marked': { borderRadius: '3px' },
+  // A line of files alone (page.ts `FileTile`; styles.css `.file-tile`
+  // draws each): the tiles' rows apart, as the reader's `p.files` has them.
+  '.cm-files': { lineHeight: '58px' },
+  '.cm-files .file-tile': { lineHeight: '20px' },
+  '.cm-files .file-tile .kind': { lineHeight: '17px' },
+  // Chosen: its ring, not the selection's wash over it.
+  '&.cm-focused .cm-files ::selection, .cm-files ::selection': { backgroundColor: 'transparent !important' },
   // A divider as the desktop draws it, in the way this browser chose
   // (lib/divider.ts's `--divider-*` on the root, which the reader's `hr`
   // reads too, styles.css): a line tall, centred, never wider than the

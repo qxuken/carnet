@@ -1,14 +1,14 @@
 // Files in notes, as the desktop has them: put in with the paperclip,
-// `/file`, a drop or a paste (a picture shown, any other file linked
-// among the words, sync.svelte.ts `attach`); opened from a link, the
+// `/file`, a drop or a paste (a picture shown, any other file linked on
+// a line of its own, a tile, sync.svelte.ts `attach`); opened from a link, the
 // bytes handed to the browser (open.svelte.ts); and Markdown files
 // dropped on the page, which come in as notes (`importNotes`). What
 // they say, and the choices they make, worked out here apart from the
 // page (files.test.ts).
 
 /// A file put in a note: a picture, its `src` for the page's picture,
-/// or any other file, its `src` and its name for a link among the words
-/// (the desktop's `page::insert_links` writes `[name](src)`).
+/// or any other file, its `src` and its name for a link on a line of its
+/// own (the desktop's `page::insert_links` writes `[name](src)`).
 export type Attached = { picture: boolean; name: string; src: string };
 
 /// Whether a file is Markdown by its name (`.md`, `.markdown`): a note,
