@@ -122,7 +122,8 @@ A nightly CI job runs every target from the corpus earlier nights built up. A cr
 
 | Path | What |
 |---|---|
-| `src/main.rs` | the entry point, and `--tokens` / `--icons` exports |
+| `src/main.rs` | the entry point, and `--tokens` / `--icons` / `--screenshots` exports |
+| `src/shots.rs` | `--screenshots`: the README's pictures, taken headless over a demo library |
 | `src/app.rs` | the app: state, notes, events |
 | `src/app_page.rs` | the page's drawing, keys, pointer, paste and drop |
 | `src/app_chrome.rs` | the library, the search and the toolbar |
@@ -170,6 +171,16 @@ cargo run --release -- --tokens docs/tokens.json
 ```bash
 cargo run --release -- --icons docs/icons
 ```
+
+### The screenshots
+
+The README's pictures of the desktop app (`docs/light.png`, `dark.png`, `settings.png` and `narrow.png`) are taken by the app itself, with no window: a demo library made in a temporary folder, the settings in memory, sync and the update check off, and the system pinned to a Mac's (light or dark, its accent, the faces Carnet ships, the traffic lights and rounded corners drawn on), so they come out the same on any machine. Take them again after a change that shows, and look at them before committing:
+
+```bash
+cargo run -p carnet -- --screenshots docs
+```
+
+It takes a few seconds and needs a GPU (a software one does). `docs/web.png`, the web app, is taken by hand. The demo library, the shots and the waiting are in `src/shots.rs`.
 
 The app icon is a page of a small notebook: ruled lines, a clay margin rule, and a C in Source Serif sitting on a line (`assets/icon/carnet.svg`, with a dark twin beside it, and `carnet-small.svg` with fewer, heavier lines for 64 px and under). `assets/icon/render.sh` turns them into the PNGs, the Mac's `.icns` and Windows' `.ico`.
 
