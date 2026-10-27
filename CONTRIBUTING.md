@@ -4,9 +4,9 @@ Thanks for taking an interest. This page covers how to build Carnet, run its tes
 
 ## Where development happens
 
-Carnet's primary repository is on Forgejo, at [drydock9.qxuken.dev/qxuken/carnet](https://drydock9.qxuken.dev/qxuken/carnet). It push-mirrors to [github.com/qxuken/carnet](https://github.com/qxuken/carnet), where the releases and the server's images are made.
+Carnet lives on GitHub, at [github.com/qxuken/carnet](https://github.com/qxuken/carnet): the code, the issues, the checks, the releases and the server's images.
 
-Issues and pull requests on GitHub are welcome. A pull request opened there is checked by GitHub Actions, then merged on Forgejo, and the mirror brings it back to GitHub. You don't need an account on the forge.
+Issues and pull requests are welcome. A pull request is checked by GitHub Actions (`ci.yml`, below) and, once it passes and has been read, merged into `main` there.
 
 Security problems should not go in a public issue: see [SECURITY.md](SECURITY.md).
 
@@ -20,7 +20,7 @@ cargo run --release
 
 `cargo build` and `cargo test` cover the whole workspace: the app, `carnet-core`, `carnet-sync`, `carnet-server` and `carnet-web`. `fuzz/` is a workspace of its own.
 
-Carnet's UI framework is [kui](https://drydock9.qxuken.dev/qxuken/kui), used from crates.io as `kui-native` at the exact version `Cargo.toml` pins, so a release of Carnet names the kui it was built with. To try Carnet against a local checkout of kui, point the dependency at it with `path = "../kui/crates/kui-native"`.
+Carnet's UI framework is [kui](https://github.com/qxuken/kui), used from crates.io as `kui-native` at the exact version `Cargo.toml` pins, so a release of Carnet names the kui it was built with. To try Carnet against a local checkout of kui, point the dependency at it with `path = "../kui/crates/kui-native"`.
 
 The fonts in `assets/fonts/` (Source Serif 4 and Inter, under the SIL Open Font License) are ordinary files in the repository, built into the binary.
 
@@ -72,7 +72,7 @@ cargo test
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Both must pass before a change is merged; CI runs them on every push and pull request (with `--locked`). CI also builds `carnet-core` and `carnet-sync` for the browser, which keeps the UI framework, files and threads out of what the web app is built on:
+Both must pass before a change is merged; CI runs them on every push to `main` and every pull request (with `--locked`). CI also builds `carnet-core` and `carnet-sync` for the browser, which keeps the UI framework, files and threads out of what the web app is built on:
 
 ```bash
 cargo build -p carnet-core -p carnet-sync --target wasm32-unknown-unknown
@@ -180,14 +180,15 @@ The subject line says, in plain words, what is different afterwards, from the po
 
 ## Continuous integration
 
-| Workflow | Where | When | What |
-|---|---|---|---|
-| `.forgejo/workflows/ci.yml` | Forgejo | every push and pull request | the tests and clippy; `carnet-core` and `carnet-sync` for wasm; `carnet-server` with Postgres and S3 built in, against a real Postgres and bucket; the web app's wasm, type check and build |
-| `.forgejo/workflows/edge.yml` | Forgejo | every push to main | the server's image as main stands, pushed to the forge's registry as `drydock9.qxuken.dev/qxuken/carnet-server:main` (and `:<commit>`); the forge's runners have no Docker daemon, so `packaging/server/image.sh` assembles it with crane |
-| `.forgejo/workflows/fuzz.yml` | Forgejo | nightly, and by hand | every fuzz target for a few minutes each |
-| `.github/workflows/pr.yml` | GitHub | pull requests | the tests, clippy, the wasm build and the web app, for contributions opened on GitHub |
-| `.github/workflows/release.yml` | GitHub | a `v*` tag | the installers, on a draft release |
-| `.github/workflows/image.yml` | GitHub | a `v*` tag | the server's image for amd64 and arm64, on ghcr.io and Docker Hub |
+Every workflow is GitHub Actions', in `.github/workflows/`, on GitHub's Ubuntu runners but for the `.dmg`, which is built on macOS.
+
+| Workflow | When | What |
+|---|---|---|
+| `ci.yml` | every push to main and every pull request | the tests and clippy; `carnet-core` and `carnet-sync` for wasm; `carnet-server` with Postgres and S3 built in, against a real Postgres and bucket (service containers); the web app's wasm, type check, tests and build |
+| `edge.yml` | every push to main | the server's image as main stands, for amd64, pushed to `ghcr.io/qxuken/carnet-server:main` (and `:<commit>`) |
+| `fuzz.yml` | nightly, and by hand | every fuzz target for a few minutes each |
+| `release.yml` | a `v*` tag | the installers, on a draft release |
+| `image.yml` | a `v*` tag | the server's image for amd64 and arm64, on ghcr.io and Docker Hub |
 
 ## Packaging
 
@@ -222,17 +223,13 @@ The Mac build is signed ad hoc unless `CARNET_SIGN_IDENTITY` names a Developer I
 
 ## Releasing
 
-Releases are made on GitHub, on runners for each system. Tag the version `Cargo.toml` names (`v0.1.0` for 0.1.0), push it to Forgejo, and push it to GitHub by name as well: the mirror carries tags on its own schedule and doesn't start GitHub's workflows reliably.
+Releases are made on GitHub, on runners for each system. Tag the version `Cargo.toml` names (`v0.1.0` for 0.1.0) and push it with `main`:
 
 ```bash
 git push --atomic origin main v0.1.0
 ```
 
-```bash
-git push github main v0.1.0
-```
-
-On GitHub the tag runs two workflows:
+The tag runs two workflows:
 
 - `release.yml` checks that the tag matches `Cargo.toml`'s version and runs the tests, then builds the Linux tarballs (x64 and arm64) and the Windows installer and `.zip` in `packaging/build-env.sh`'s environment, and the `.dmg` on a macOS runner. It puts them, with `SHA256SUMS`, on a draft release, which is published by hand. The `.app` is signed ad hoc unless the signing secrets the workflow lists exist.
 - `image.yml` builds the server's image for amd64 and arm64 and pushes it to `ghcr.io/qxuken/carnet-server` and, with its secrets, to Docker Hub as `qxuken/carnet-server`, tagged with the version, `<major>.<minor>` and `latest` (a prerelease gets only its own tag).

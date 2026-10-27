@@ -9,13 +9,11 @@
 #   nu scripts/package.nu linux     Carnet-<v>-linux-{x64,arm64}.tar.gz: the
 #                                   binary, a menu entry, the icon, install.sh
 #   nu scripts/package.nu all       the three, from a Mac
-#   nu scripts/package.nu upload v<v>  what dist/ holds for <v>, onto the
-#                                   tag's Forgejo release (a draft if new)
 #
-# Pushing a v* tag to GitHub runs .github/workflows/release.yml, which
-# runs `windows`, `linux` and (on GitHub's macOS runner) `mac`, and puts
-# every file on a draft GitHub Release. `upload` is for a Forgejo release
-# by hand.
+# Pushing a v* tag runs .github/workflows/release.yml, which runs
+# `windows`, `linux` and (on GitHub's macOS runner) `mac`, and puts every
+# file on a draft GitHub Release. A file built by hand goes on it with
+# `gh release upload v<v> dist/<file> --clobber`.
 #
 # Needs, for each:
 #   mac      a Mac with Xcode's command line tools
@@ -23,7 +21,6 @@
 #            LLVM's llvm-rc for the exe's icon (brew install llvm) and Docker
 #            (NSIS runs in the build image); on Windows: MSVC and NSIS
 #   linux    Docker
-#   upload   $env.FORGEJO_TOKEN, a token that can write the repository
 # The build image (packaging/Dockerfile, which runs packaging/build-env.sh)
 # is made on first use and cached. Inside it, or anywhere build-env.sh has
 # run with CARNET_BUILD_ENV=1 (CI's job), Linux and NSIS run directly.
@@ -274,69 +271,6 @@ def linux-env [triple: string] {
         PKG_CONFIG_PATH: $pc
         PKG_CONFIG_LIBDIR: $pc
     } | insert $flags_var "-C link-arg=-Wl,--allow-shlib-undefined"
-}
-
-# Puts what dist/ holds for the tag's version on its Forgejo release,
-# making the release (a draft) if there is none and replacing a file of
-# the same name. CI runs it after its builds; on a Mac, run it after
-# `mac` to add the .dmg. $env.FORGEJO_TOKEN is a token that can write
-# the repository (CI passes its own); FORGEJO_URL and FORGEJO_REPO default
-# to CI's, else drydock9's qxuken/carnet.
-def "main upload" [
-    tag: string  # v<version>, as Cargo.toml names it
-] {
-    cd $ROOT
-    let v = (version)
-    if $tag != $"v($v)" { error make {msg: $"($tag) is not Cargo.toml's version \(v($v)\)"} }
-    let token = ($env.FORGEJO_TOKEN? | default "")
-    if ($token | is-empty) { error make {msg: "$env.FORGEJO_TOKEN is not set"} }
-    let server = ($env.FORGEJO_URL? | default ($env.GITHUB_SERVER_URL? | default "https://drydock9.qxuken.dev"))
-    let repo = ($env.FORGEJO_REPO? | default ($env.GITHUB_REPOSITORY? | default "qxuken/carnet"))
-    let api = $"($server)/api/v1/repos/($repo)/releases"
-    let headers = {Authorization: $"token ($token)"}
-
-    let files = (glob ($ROOT | path join dist $"($APP)-($v)-*") | where {|f| ($f | path type) == "file" } | sort)
-    if ($files | is-empty) { error make {msg: $"dist/ has nothing for ($v)"} }
-
-    step $"release ($tag)"
-    let existing = (http get --headers $headers $"($api)?limit=50" | where tag_name == $tag)
-    let release = if ($existing | is-empty) {
-        let body = ([
-            $"($APP) ($v)."
-            ""
-            "The macOS .dmg is built on a Mac (`nu scripts/package.nu mac`) and added"
-            $"with `nu scripts/package.nu upload ($tag)`; README.md's Installing says what"
-            "to do with each file."
-        ] | str join "
-")
-        let made = (http post --headers $headers --content-type application/json $api {
-            tag_name: $tag
-            name: $"($APP) ($v)"
-            body: $body
-            draft: true
-            prerelease: ($v | str contains "-")
-        })
-        print $"made a draft: ($made.html_url)"
-        $made
-    } else {
-        print $"adding to ($existing.0.html_url)"
-        $existing.0
-    }
-
-    for f in $files {
-        let name = ($f | path basename)
-        for old in ($release.assets | where name == $name) {
-            http delete --headers $headers $"($api)/($release.id)/assets/($old.id)"
-        }
-        print $"uploading ($name)"
-        # curl for the multipart upload; the token goes in on stdin, not in
-        # the process's arguments.
-        $"header = \"Authorization: token ($token)\"" | (must curl -fsS -K - -o /dev/null
-            -F $"attachment=@($f)"
-            $"($api)/($release.id)/assets?name=($name | url encode)")
-    }
-    print $"
-($release.html_url)"
 }
 
 # Every installer, from a Mac.

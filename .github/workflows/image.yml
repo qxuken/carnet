@@ -6,8 +6,8 @@
 #   docker.io/<DOCKERHUB_REPOSITORY>:the same     (when Docker Hub's secrets exist)
 #
 # A prerelease (`v0.2.0-rc.1`) gets its own tag only, never `latest`.
-# main's image, between releases, is the forge's (.forgejo/workflows/
-# edge.yml).
+# main's image, between releases, is edge.yml's: ghcr.io/<owner>/
+# carnet-server:main, and :<sha>, for amd64.
 #
 # Secrets and variables:
 #   * DOCKERHUB_USERNAME, and DOCKERHUB_TOKEN (an access token that can

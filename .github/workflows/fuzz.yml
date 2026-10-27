@@ -1,5 +1,5 @@
-# Every night, and by hand: each libFuzzer target in fuzz/ for a few
-# minutes, on what the nights before found.
+# GitHub Actions: every night, and by hand, each libFuzzer target in
+# fuzz/ for a few minutes, on what the nights before found.
 #
 #   markdown   any text as a note file: read, written, read again, HTML
 #   inline     any line, any edit the page makes to it at any caret
@@ -13,7 +13,9 @@
 # Not on every push: libFuzzer needs nightly Rust, and it finds things by
 # running long. The property tests (ci.yml) are the quick net; this is the
 # slow, wide one. Its corpus — the inputs that reached new code — is
-# cached from night to night, so each run starts where the last stopped.
+# cached from night to night, kept even from a night that crashed, so
+# each run starts where the last stopped. (GitHub drops a cache unused
+# for a week, and stops a schedule after 60 days without a commit.)
 # A crash fails the job and leaves its input as an artifact:
 #
 #   cargo +nightly fuzz run <target> fuzz/artifacts/<target>/crash-…
@@ -31,41 +33,39 @@ on:
         description: Seconds per target
         default: '300'
 
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+
 jobs:
   fuzz:
-    runs-on: docker
-    container:
-      image: node:24-bookworm
-    env:
-      CARGO_HOME: /usr/local/cargo
-      RUSTUP_HOME: /usr/local/rustup
-      CARGO_TERM_COLOR: always
-      SECONDS_PER_TARGET: ${{ inputs.seconds || '300' }}
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Build environment
-        run: |
-          set -eux
-          curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal \
-              --default-toolchain nightly
-          echo "${CARGO_HOME}/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install nightly --profile minimal && rustup default nightly
 
       - name: Restore cargo-fuzz and the registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
-            /usr/local/cargo/bin/cargo-fuzz
-            /usr/local/cargo/registry/index
-            /usr/local/cargo/registry/cache
-          key: fuzz-tools-${{ hashFiles('fuzz/Cargo.toml') }}
+            ~/.cargo/bin/cargo-fuzz
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: fuzz-tools-${{ hashFiles('fuzz/Cargo.toml', 'fuzz/Cargo.lock') }}
 
       - name: cargo-fuzz
         run: command -v cargo-fuzz || cargo install cargo-fuzz --locked
 
       # Keyed by the run, restored from the newest: the corpus only grows.
       - name: Restore the corpus
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v6
         with:
           path: fuzz/corpus
           key: fuzz-corpus-${{ github.run_id }}
@@ -88,9 +88,16 @@ jobs:
           done
           exit $status
 
+      - name: Keep the corpus
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+
       - name: Crashing inputs
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts

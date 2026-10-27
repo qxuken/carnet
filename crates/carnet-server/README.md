@@ -6,7 +6,7 @@ It is one binary, with SQLite and a folder of files: nothing else to run. [docs/
 
 ## Run it
 
-The released images are on Docker Hub as `qxuken/carnet-server` and on GitHub's registry as `ghcr.io/qxuken/carnet-server`, for amd64 and arm64. Each release is tagged with its version (`0.1.1`), its minor version (`0.1`) and `latest`.
+The released images are on Docker Hub as `qxuken/carnet-server` and on GitHub's registry as `ghcr.io/qxuken/carnet-server`, for amd64 and arm64. Each release is tagged with its version (`0.1.1`), its minor version (`0.1`) and `latest`. Between releases, `ghcr.io/qxuken/carnet-server:main` is the server as `main` stands, for amd64 only: the newest, and the least tried.
 
 ```bash
 docker run -d --name carnet -v carnet:/data -p 8080:8080 -e CARNET_ORIGIN=https://notes.example.com qxuken/carnet-server

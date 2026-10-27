@@ -14,9 +14,8 @@
 # the local build image), Windows through cargo-xwin and NSIS; the .dmg on
 # GitHub's macOS runner, which carries Xcode.
 #
-# Tags reach GitHub through Forgejo's push mirror, but do not count on the
-# mirror to start this: push the tag here by name too (CONTRIBUTING.md's
-# Releasing).
+# The tag is pushed here with main (CONTRIBUTING.md's Releasing), and
+# starts this and image.yml at once.
 #
 # Signing: the .app is signed ad hoc, which Apple silicon needs to run it,
 # unless the secrets below exist. With them it is signed with a Developer
