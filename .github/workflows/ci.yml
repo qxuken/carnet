@@ -1,0 +1,140 @@
+# GitHub Actions: every push to main and every pull request, the tests,
+# and carnet-core built for the browser.
+#
+#   test     the app's headless UI tests and carnet-core's round trips
+#            (the workspace's default members are both), clippy on the
+#            workspace, warnings as errors, and carnet-core and
+#            carnet-sync for wasm32-unknown-unknown: what keeps kui, files
+#            and threads out of the crates the PWA is built on
+#            (docs/SYNC.md §8)
+#   server   carnet-server with Postgres and S3 built in, its storage and
+#            migration tests run against a real Postgres and a real bucket
+#            (RustFS, S3's API) as service containers
+#   web      the viewer (web/): crates/carnet-web as wasm, its types
+#            checked, its tests, and the page built as carnet-server
+#            serves it
+#
+# A branch pushed here is checked by its pull request, not by its push,
+# so a change is checked once. No secrets: a pull request from a fork
+# gets none, and needs none.
+#
+# On GitHub's Ubuntu runner, with ALSA's headers (kui's sound links
+# libasound). Swatinem/rust-cache keeps the registry and the target dir
+# per job, saved from main only, so pull requests start from main's and
+# don't crowd it out. Debug info is off: with it, the test build of kui's
+# tree (wgpu, naga, winit, all at opt-level 2) fills more disk than the
+# tests need, and a failure's backtrace still names the test.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A pull request's newer push stops its older run; main's runs each finish.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # kui's sound links ALSA.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - run: rustup toolchain install stable --profile minimal -c clippy -t wasm32-unknown-unknown && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Tests
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: carnet-core and carnet-sync for the browser
+        run: cargo build --locked -p carnet-core -p carnet-sync --target wasm32-unknown-unknown
+
+  # The storage the hosted service runs on: Postgres and a bucket, both
+  # real, so `migrate` and the S3 store are tested as they run. Without
+  # these the tests skip themselves (tests/common's `postgres`/`bucket`).
+  # The job runs on the runner itself, so the services are on localhost,
+  # at the ports they're given; the test bucket is made by the tests.
+  server:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: carnet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+      rustfs:
+        image: rustfs/rustfs
+        env:
+          RUSTFS_ACCESS_KEY: carnet
+          RUSTFS_SECRET_KEY: carnetsecret
+        ports:
+          - 9000:9000
+    env:
+      CARNET_TEST_POSTGRES: postgres://postgres:carnet@127.0.0.1:5432/postgres?sslmode=disable
+      CARNET_TEST_S3: http://127.0.0.1:9000/carnet-test
+      CARNET_S3_ACCESS_KEY: carnet
+      CARNET_S3_SECRET_KEY: carnetsecret
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal -c clippy && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Postgres is waited for by its health check; the bucket takes a few
+      # seconds more to take connections.
+      - name: Wait for Postgres and the bucket
+        shell: bash
+        run: |
+          for i in $(seq 1 60); do
+            if (echo > /dev/tcp/127.0.0.1/5432) 2>/dev/null && curl -s -o /dev/null http://127.0.0.1:9000/; then exit 0; fi
+            sleep 1
+          done
+          echo "the services did not come up"; exit 1
+      - name: The server, with Postgres and S3
+        run: cargo test --locked -p carnet-server --all-features
+      - name: Clippy, with them
+        run: cargo clippy --locked -p carnet-server --all-features --all-targets -- -D warnings
+
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install stable --profile minimal -t wasm32-unknown-unknown && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      # The CLI's version is the one carnet-web pins (wasm-bindgen =0.2.129).
+      - run: cargo install --locked wasm-bindgen-cli --version 0.2.129
+      - name: The viewer
+        working-directory: web
+        run: |
+          set -eux
+          npm ci
+          npm run wasm
+          npm run check
+          npm test
+          npx vite build

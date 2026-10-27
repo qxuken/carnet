@@ -217,7 +217,7 @@ cd carnet
 cargo run --release
 ```
 
-Carnet is built on [kui](https://drydock9.qxuken.dev/qxuken/kui), its author's native UI framework, taken from crates.io as [`kui-native`](https://crates.io/crates/kui-native) at the exact version `Cargo.toml` pins. The fonts in `assets/fonts/` are ordinary files in the repository and are built into the binary.
+Carnet is built on [kui](https://github.com/qxuken/kui), its author's native UI framework, taken from crates.io as [`kui-native`](https://crates.io/crates/kui-native) at the exact version `Cargo.toml` pins. The fonts in `assets/fonts/` are ordinary files in the repository and are built into the binary.
 
 The web app is built with Node and Rust's `wasm32-unknown-unknown` target; [CONTRIBUTING.md](CONTRIBUTING.md) has the steps, along with tests, packaging and releasing.
 
