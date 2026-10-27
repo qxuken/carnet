@@ -3249,7 +3249,7 @@ fn runs_by_mode(_: &Path) -> bool {
 /// opens text as text.
 #[cfg(test)]
 pub fn open_file(path: &Path) -> io::Result<()> {
-    open_url(&path.to_string_lossy())
+    open_url(&native(path).to_string_lossy())
 }
 
 /// Opens a file in the notes folder in the system's own app for it.
@@ -3260,7 +3260,14 @@ pub fn open_file(path: &Path) -> io::Result<()> {
         std::process::Command::new("open").arg("-t").arg(path).spawn()?;
         return Ok(());
     }
-    open_url(&path.to_string_lossy())
+    open_url(&native(path).to_string_lossy())
+}
+
+/// A path written as this system writes one: a note's link joined to its
+/// folder keeps the link's `/`, which Windows' Explorer reads as no path at
+/// all, and opens Documents instead of the file.
+fn native(path: &Path) -> PathBuf {
+    path.components().collect()
 }
 
 /// A file system's error in plain words: what went wrong, without the
@@ -3308,7 +3315,7 @@ pub fn open_url(url: &str) -> io::Result<()> {
 /// folder itself (kui's `show_in_folder`). Linux file managers have no
 /// common "select this file", so there it opens the folder.
 pub fn reveal(path: &Path) -> io::Result<()> {
-    kui_native::show_in_folder(&path.to_string_lossy()).map_err(io::Error::other)
+    kui_native::show_in_folder(&native(path).to_string_lossy()).map_err(io::Error::other)
 }
 
 /// `n` is the welcome note as [`welcome`] makes it (`fresh`, its
