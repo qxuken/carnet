@@ -1036,7 +1036,7 @@ impl Carnet {
                             .role(Role::None)
                             // Clipped by the page's scroller like the picture,
                             // not painted over the toolbar when scrolled under it.
-                            .float(FloatConfig::parent().offset(-5.0, -5.0).clipped()),
+                            .float(FloatConfig::parent().offset(-5.0, -5.0)),
                     );
                     if selected {
                         // The handles: a bar on each side and a dot on the
@@ -1058,7 +1058,7 @@ impl Carnet {
                             ui.leaf_keyed(
                                 key,
                                 handle(8.0, 30.0_f32.min(dh * 0.5))
-                                    .float(FloatConfig::parent().inside(at, Align::Center).offset(if left { -9.0 } else { 9.0 }, 0.0).clipped())
+                                    .float(FloatConfig::parent().inside(at, Align::Center).offset(if left { -9.0 } else { 9.0 }, 0.0))
                                     .on_drag(Msg::ResizePicture { id, side: left as u64 })
                                     .cursor(kui_native::CursorShape::EwResize),
                             );
@@ -1071,7 +1071,7 @@ impl Carnet {
                         ui.leaf_keyed(
                             "resize",
                             handle(14.0, 14.0)
-                                .float(FloatConfig::parent().inside(at, Align::End).offset(dx, 10.0).clipped())
+                                .float(FloatConfig::parent().inside(at, Align::End).offset(dx, 10.0))
                                 .on_drag(Msg::ResizePicture { id, side: right as u64 })
                                 .cursor(cursor),
                         );
@@ -1089,7 +1089,7 @@ impl Carnet {
                                 .size(dw + PICTURE_GAP, 1.5)
                                 .bg(t.accent)
                                 .role(Role::None)
-                                .float(FloatConfig::parent().inside(Align::Start, Align::End).offset(-PICTURE_GAP / 2.0, 9.0).clipped()),
+                                .float(FloatConfig::parent().inside(Align::Start, Align::End).offset(-PICTURE_GAP / 2.0, 9.0)),
                         );
                     }
                     if resizing.is_some() {
@@ -1098,7 +1098,7 @@ impl Carnet {
                                 .pad_xy(8.0, 3.0)
                                 .radius(radius::CONTROL)
                                 .bg(l.card)
-                                .float(FloatConfig::parent().inside(Align::Start, Align::End).offset(8.0, -8.0).clipped()),
+                                .float(FloatConfig::parent().inside(Align::Start, Align::End).offset(8.0, -8.0)),
                             &format!("{} \u{00d7} {}", dw.round(), dh.round()),
                             TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
                         );
@@ -1147,7 +1147,7 @@ impl Carnet {
                 .pad(4.0)
                 .radius(radius::CONTROL)
                 .bg(l.card)
-                .float(FloatConfig::parent().inside(Align::Start, Align::Start).offset(6.0, 6.0).clipped())
+                .float(FloatConfig::parent().inside(Align::Start, Align::Start).offset(6.0, 6.0))
                 .label("Your file, not Carnet's")
                 .tooltip("Your file, not Carnet's: it isn't synced, and Carnet won't remove it"),
             |ui| icons::icon(ui, Glyph::CloudOff, t.muted, 14.0, false),
@@ -1179,7 +1179,7 @@ impl Carnet {
                 .shadow_color(l.shadow)
                 .shadow_blur(14.0)
                 .shadow_y(3.0)
-                .float(FloatConfig::parent().at(x, Align::End).self_at(x, Align::Start).offset(if right { 5.0 } else { -5.0 }, 22.0).clipped()),
+                .float(FloatConfig::parent().at(x, Align::End).self_at(x, Align::Start).offset(if right { 5.0 } else { -5.0 }, 22.0)),
             |ui| {
                 ui.with(NodeSpec::row().grow_width().gap(8.0).cross_align(Align::Start), |ui| {
                     icons::icon(ui, Glyph::CloudOff, t.muted, 14.0, false);
@@ -1584,7 +1584,7 @@ impl Carnet {
                 .radius(1.0)
                 .bg(t.accent)
                 .opacity(if blink { 1.0 } else { 0.0 })
-                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0).clipped())
+                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0))
                 .role(Role::None)
         };
         let Some((nw, nh)) = natural else {
@@ -1644,7 +1644,7 @@ impl Carnet {
                     .radius(radius::CARD)
                     .border(2.0, ring)
                     .role(Role::None)
-                    .float(FloatConfig::parent().offset(-4.0, -4.0).clipped()),
+                    .float(FloatConfig::parent().offset(-4.0, -4.0)),
             );
             if let Some(right) = bar {
                 ui.leaf_keyed("caret", caret(dh, right));
@@ -1940,7 +1940,7 @@ impl Carnet {
                 ui.text_in_keyed(
                     "hint",
                     NodeSpec::row()
-                        .float(FloatConfig::parent().clipped())
+                        .float(FloatConfig::parent())
                         .enter(kui_native::Enter::default().opacity(0.0))
                         .transition(320.0)
                         .role(Role::None),
@@ -1962,7 +1962,7 @@ impl Carnet {
                     .radius(1.0)
                     .bg(t.accent)
                     .opacity(if on { 1.0 } else { 0.0 })
-                    .float(FloatConfig::parent().offset(dx, dy).clipped())
+                    .float(FloatConfig::parent().offset(dx, dy))
                     .role(Role::None)
             };
             // On an empty line the caret is the line's start: nothing to
@@ -2671,7 +2671,8 @@ impl Carnet {
         let t = l.t;
         let sel = self.slash_sel.min(shown.len() - 1);
         // Under the line, or over it when the page has no room below: never
-        // over the line being typed.
+        // over the line being typed. A menu: whole past the page's edge,
+        // not cut by its scroller.
         let tall = 12.0 + shown.len() as f32 * 35.0;
         let above = match (self.row_rects.iter().find(|(b, _)| *b == id).map(|(_, r)| *r), self.page_rect) {
             (Some(r), Some(p)) => r.y + r.h + tall + 8.0 > p.y + p.h && r.y - tall - 8.0 >= p.y,
@@ -2681,7 +2682,7 @@ impl Carnet {
         ui.with_keyed(
             "slash",
             NodeSpec::column()
-                .float(FloatConfig::parent().at(Align::Start, at).self_at(Align::Start, me).offset(-16.0, dy).fit())
+                .float(FloatConfig::parent().at(Align::Start, at).self_at(Align::Start, me).offset(-16.0, dy).fit().escaping())
                 .width(280.0)
                 .pad(6.0)
                 .gap(1.0)
@@ -3395,45 +3396,26 @@ impl Carnet {
         }
     }
 
-    /// A selection dragged to the page's top or bottom edge, or past it:
-    /// the page scrolls, faster the further the pointer goes — from a
-    /// band inside the edge, up to a cap — and goes on while the pointer
-    /// is held still, the moving end following the words under it. kui's
-    /// own rate: 10 px a second for each px, 1000 at most.
+    /// A selection dragged into the page's top or bottom edge zone, or
+    /// past it: the page scrolls by kui's edge-scroll feel (`edge_scroll`:
+    /// faster the deeper the pointer is, and the longer it's held there;
+    /// a pointer pinned at a full-screen window's edge all the way in;
+    /// easing back slows it), and goes on while the pointer is held still,
+    /// the moving end following the words under it.
     pub(super) fn drag_scroll(&mut self, ui: &mut Ui<'_>, key: Key) {
-        const BAND: f32 = 24.0;
-        const REACH: f32 = 100.0;
-        const RATE: f32 = 10.0;
-        let (Some((at, from, then)), Some(r), Some(_)) = (self.drag_at, self.page_rect, self.drag) else { return };
+        let (Some((at, from, _)), Some(r), Some(_)) = (self.drag_at, self.page_rect, self.drag) else { return };
         // A press near the edge that has not moved is a click, not a drag.
         if (at.x - from.x).hypot(at.y - from.y) < 4.0 || matches!(self.drag, Some(Drag::Margin { moved: false, .. })) {
             return;
         }
-        let past = if at.y < r.y + BAND {
-            -(r.y + BAND - at.y)
-        } else if at.y > r.y + r.h - BAND {
-            at.y - (r.y + r.h - BAND)
-        } else {
-            0.0
-        };
-        let now = ui.now();
-        self.drag_at = Some((at, from, now));
-        let Some(g) = ui.scroll_geometry(key).filter(|_| past != 0.0) else { return };
-        let dt = (now - then).clamp(0.0, 0.1) as f32;
-        let dt = if dt > 0.0 { dt } else { 1.0 / 60.0 };
-        let step = past.clamp(-REACH, REACH) * RATE * dt;
-        let to = (g.offset.y + step).clamp(0.0, g.max_offset.y.max(0.0));
-        if (to - g.offset.y).abs() < 0.01 {
+        self.drag_at = Some((at, from, ui.now()));
+        if ui.edge_scroll(key, at, r).is_none() {
             return;
         }
-        // At once, not eased: the page moves at the drag's rate.
-        let d = Vec2::new(0.0, to - g.offset.y);
-        ui.shift_scroll(key, d, d);
         // The end under the pointer, against the layout as drawn now; the
         // next frame, against the one scrolled.
         let core = ui.core();
         self.drag_to(core, at.x, at.y);
-        ui.request_frame();
     }
 
     /// Whether the pointer is over a link that a press there, with the keys
@@ -3689,7 +3671,7 @@ fn drop_line(ui: &mut Ui<'_>, l: &Look) {
                 .height(3.0)
                 .radius(1.5)
                 .bg(t.accent)
-                .float(FloatConfig::parent().offset(0.0, -1.5).clipped()),
+                .float(FloatConfig::parent().offset(0.0, -1.5)),
         );
         ui.leaf(
             NodeSpec::row()
@@ -3697,7 +3679,7 @@ fn drop_line(ui: &mut Ui<'_>, l: &Look) {
                 .radius(5.0)
                 .bg(l.card)
                 .border(2.5, t.accent)
-                .float(FloatConfig::parent().offset(-6.0, -5.0).clipped()),
+                .float(FloatConfig::parent().offset(-6.0, -5.0)),
         );
     });
 }

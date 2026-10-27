@@ -23,7 +23,7 @@ keyring = "4"
 # kui as released on crates.io, pinned: a release of Carnet names the kui
 # it was built with. To try kui's main, point this at a checkout with
 # `path = "../kui/crates/kui-native"`.
-kui-native = "=0.1.0-alpha.67"
+kui-native = "=0.1.0-alpha.68"
 # Pictures in notes: what a paste brings beyond text (kui puts a picture on
 # the clipboard but reads only text back) and the files'. Both are already
 # in kui-native's tree; these name them for Carnet's use.
@@ -33,11 +33,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # events (FSEvents, inotify, ReadDirectoryChangesW), so an idle folder
 # costs nothing (src/watch.rs).
 notify = "8.2"
-# A divider's picture may be an SVG: drawn once, as it's picked, into the
-# PNG a divider shows. Text in it in the system's fonts (fontdb is in
-# kui's tree already); no pictures inside it, which would bring a JPEG
-# decoder of its own.
-resvg = { version = "0.49", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "svgz"] }
+# A divider's picture, and a note's, may be an SVG: drawn into pixels as
+# it's picked or shown. kui's own version (it draws SVGs too), so one
+# resvg, tiny-skia and fontdb are built, not two of each; text in it in
+# the system's fonts; a gzipped one read as it is (0.46 always does). No
+# pictures inside it, which would bring a JPEG decoder of its own.
+resvg = { version = "=0.46.0", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
 # Local time: a pasted picture's file is named for when it was pasted, as
 # the clock on the wall says it.
 jiff = "0.2"

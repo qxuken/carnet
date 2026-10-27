@@ -4883,14 +4883,15 @@ fn a_folders_chevron_folds_its_subfolders_away_and_back() {
     assert!(chevron(&mut d, &mut app, "A").is_some());
     assert_eq!(heard_open(&mut d, "A"), Some(true), "a reader hears it open");
     assert_eq!(heard_open(&mut d, "B"), None);
+    let (before, fold) = (d.core.focus(), chevron(&mut d, &mut app, "A"));
     click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
     assert_eq!(rows_drawn(&app), ["A", "B"]);
     assert_eq!(folded(&app), ["A"]);
     assert_eq!(app.folder.as_deref(), Some("B"), "the chevron only folds: the folder shown stays");
     assert!(app.folder_rects.iter().all(|(f, _)| !f.starts_with("A/")), "nor rows for a drag");
     assert_eq!(heard_open(&mut d, "A"), Some(false), "and shut now");
-    // The keyboard is not held in the chevron.
-    assert!(d.core.focus().is_none_or(|k| k == Key::ROOT), "{:?}", d.core.focus());
+    // The keyboard is not held in the chevron: it stays where it was.
+    assert!(d.core.focus() == before && d.core.focus() != fold, "{:?}", d.core.focus());
     click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
     assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "B"]);
     assert!(folded(&app).is_empty());
@@ -8993,6 +8994,12 @@ fn a_window_360_wide_holds_the_note_the_list_and_the_settings() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A selection held at the page's foot scrolls it by kui's edge-scroll
+/// feel: on with the pointer still, faster the longer it's held, within a
+/// cap, slower at once when the pointer eases back; and a pointer pinned
+/// at a full-screen window's own edge, inside the page, scrolls it as
+/// fast as one past it, where the old rate, set by the distance past the
+/// page's edge, barely moved it.
 #[test]
 fn a_selection_held_past_the_page_edge_scrolls_it() {
     let (mut app, mut d, dir) = body("drag-scroll");
@@ -9026,9 +9033,19 @@ fn a_selection_held_past_the_page_edge_scrolls_it() {
         offsets.push(d.core.scroll_offset(key).y);
     }
     assert!(offsets[29] > offsets[5] + 50.0, "it goes on scrolling with the pointer still: {offsets:?}");
-    // 40px past the edge (64 into the band): about 640 px a second.
-    let per_frame = (offsets[29] - offsets[9]) / 20.0;
-    assert!((6.0..16.0).contains(&per_frame), "{per_frame} px a frame");
+    // Held, it speeds up; within kui's cap of 3000 px a second.
+    let (early, late) = (offsets[5] - offsets[1], offsets[29] - offsets[25]);
+    assert!(late > early * 1.5, "faster the longer it's held: {early} then {late} px in 4 frames");
+    assert!(late / 4.0 <= 3000.0 / 60.0 + 1.0, "{} px a frame", late / 4.0);
+    // Eased back toward the words by more than a few px: slower at once.
+    let inside = Vec2::new(from.x, page_rect.y + page_rect.h - 50.0);
+    d.input(&mut app, InputEvent::CursorMoved(inside));
+    let at = d.core.scroll_offset(key).y;
+    d.advance(1.0 / 60.0);
+    d.frame(&mut app);
+    d.advance(1.0 / 60.0);
+    d.frame(&mut app);
+    assert!(d.core.scroll_offset(key).y - at < late / 2.0, "slowed when eased back");
     let head = app.doc().index_of(app.caret.head.slot.block).unwrap();
     assert!(head > 10, "the selection follows the words under the pointer: block {head}");
     assert_eq!(page::ordered(app.doc(), app.caret).0.slot.block, app.doc().blocks()[0].id, "from where it began");
@@ -9041,6 +9058,31 @@ fn a_selection_held_past_the_page_edge_scrolls_it() {
         d.frame(&mut app);
     }
     assert!((d.core.scroll_offset(key).y - stopped).abs() < 0.5, "and stops when let go");
+    // Full screen: the pointer can go no further than the window's own
+    // edge, a pixel inside the page, and that is all the way in.
+    d.core.set_scroll(key, Vec2::new(0.0, 0.0));
+    for _ in 0..5 {
+        d.advance(0.05);
+        d.frame(&mut app);
+    }
+    let first = app.row_rects[0].1;
+    let from = Vec2::new(first.x + 20.0, first.y + first.h / 2.0);
+    let pinned = Vec2::new(from.x, d.viewport.h - 1.0);
+    assert!(pinned.y < page_rect.y + page_rect.h, "inside the page");
+    d.input(&mut app, InputEvent::CursorMoved(from));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(from.x + 8.0, from.y + 8.0)));
+    d.input(&mut app, InputEvent::CursorMoved(pinned));
+    d.frame(&mut app);
+    let at = d.core.scroll_offset(key).y;
+    for _ in 0..60 {
+        d.advance(1.0 / 60.0);
+        d.frame(&mut app);
+    }
+    let second = d.core.scroll_offset(key).y - at;
+    assert!(second > 600.0, "a second pinned at the window's edge: {second} px");
+    d.input(&mut app, InputEvent::mouse_up());
+    d.frame(&mut app);
     let _ = std::fs::remove_dir_all(dir);
 }
 

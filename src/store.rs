@@ -3288,53 +3288,19 @@ pub fn open_url(url: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Opens a web or mail address in the system's own app for it.
+/// Opens a web or mail address, or a file, in the system's own app for
+/// it: kui's `open_external`, the platform's own opener with no shell
+/// between.
 #[cfg(not(test))]
 pub fn open_url(url: &str) -> io::Result<()> {
-    use std::process::Command;
-    #[cfg(windows)]
-    Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()?;
-    #[cfg(target_os = "macos")]
-    Command::new("open").arg(url).spawn()?;
-    #[cfg(not(any(windows, target_os = "macos")))]
-    Command::new("xdg-open").arg(url).spawn()?;
-    Ok(())
+    kui_native::open_external(url).map_err(io::Error::other)
 }
+
 /// Opens the OS file manager on `path`: a file selected in its folder, or a
-/// folder itself. Linux file managers have no common "select this file",
-/// so there it opens the folder.
+/// folder itself (kui's `show_in_folder`). Linux file managers have no
+/// common "select this file", so there it opens the folder.
 pub fn reveal(path: &Path) -> io::Result<()> {
-    use std::process::Command;
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // Explorer wants `/select,"C:\a b\c.md"` exactly; Rust's own
-        // quoting would wrap the whole argument and Explorer ignores it.
-        let arg = if path.is_dir() {
-            format!("\"{}\"", path.display())
-        } else {
-            format!("/select,\"{}\"", path.display())
-        };
-        Command::new("explorer").raw_arg(arg).spawn()?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut cmd = Command::new("open");
-        if !path.is_dir() {
-            cmd.arg("-R");
-        }
-        cmd.arg(path).spawn()?;
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let dir = if path.is_dir() {
-            path
-        } else {
-            path.parent().unwrap_or(path)
-        };
-        Command::new("xdg-open").arg(dir).spawn()?;
-    }
-    Ok(())
+    kui_native::show_in_folder(&path.to_string_lossy()).map_err(io::Error::other)
 }
 
 /// `n` is the welcome note as [`welcome`] makes it (`fresh`, its

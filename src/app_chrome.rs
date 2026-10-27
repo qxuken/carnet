@@ -36,7 +36,8 @@ impl Carnet {
                 // Not drawn at rest; under the pointer and while dragged,
                 // one solid line the window's height, whatever the window
                 // shows through (nothing laid over it: the fade under the
-                // toolbar starts past it).
+                // toolbar starts past it). Just past the library's side,
+                // so out of its clip.
                 if shown {
                     let t = l.t;
                     let h = ui.viewport().h;
@@ -46,7 +47,7 @@ impl Carnet {
                         "library-edge",
                         NodeSpec::row()
                             .size(EDGE_W, h)
-                            .float(FloatConfig::parent().inside(Align::End, Align::Start).offset(EDGE_W, 0.0))
+                            .float(FloatConfig::parent().inside(Align::End, Align::Start).offset(EDGE_W, 0.0).escaping())
                             .bg(if self.library_from.is_some() { t.border_strong } else { Color::TRANSPARENT })
                             .hover_bg(t.border_strong)
                             .cursor(kui_native::CursorShape::EwResize)
@@ -66,6 +67,7 @@ impl Carnet {
             } else {
                 // Nothing of it is there to take a dragged file.
                 self.card_rects.clear();
+                self.card_keys.clear();
                 self.folder_rects.clear();
             }
         }
@@ -228,6 +230,7 @@ impl Carnet {
                 })
                 .collect();
             let mut rects: Vec<(usize, Rect)> = Vec::new();
+            let mut keys: Vec<Key> = Vec::new();
             widgets::uniform_list_with(
                 ui,
                 "library",
@@ -300,6 +303,7 @@ impl Carnet {
                     if let Some(r) = ui.layout_of(ck) {
                         rects.push((n, r));
                     }
+                    keys.push(ck);
                     ui.with_indexed(0, card, |ui| {
                         ui.with(
                             NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center),
@@ -360,6 +364,7 @@ impl Carnet {
                 },
             );
             self.card_rects = rects;
+            self.card_keys = keys;
             self.sidebar_foot(ui, l);
         });
     }
@@ -444,6 +449,7 @@ impl Carnet {
         // Nothing of the library is drawn to take a dragged note or file,
         // nor a folder row for the arrows.
         self.card_rects.clear();
+        self.card_keys.clear();
         self.folder_rects.clear();
         self.folder_rows.clear();
         let Some(v) = &self.versions else { return };
@@ -651,8 +657,10 @@ impl Carnet {
                     .label(said)
                     .expanded(open)
                     // The rows' ← and → do it from the keyboard: not a Tab
-                    // stop of its own.
+                    // stop of its own, and a press leaves the keyboard
+                    // where it was.
                     .focus_region()
+                    .keep_focus()
                     .center(),
                 |ui| {
                     // Turned a quarter, open; a short turn between.

@@ -815,6 +815,10 @@ pub struct Carnet {
     pub drop_index: Option<usize>,
     /// The library's cards as last laid out: what a dragged file hovers.
     card_rects: Vec<(usize, Rect)>,
+    /// Their nodes, as last drawn: a card a click gave the keyboard to is
+    /// the list holding it, as the window was before kui let a click
+    /// focus what it lands on.
+    card_keys: Vec<Key>,
     /// The page's scroller as last laid out: its edges scroll a drag.
     page_rect: Option<Rect>,
     /// The page's scroller, as last declared (the body's key sink is
@@ -1370,6 +1374,7 @@ impl Carnet {
             file_drag: None,
             drop_index: None,
             card_rects: Vec::new(),
+            card_keys: Vec::new(),
             page_rect: None,
             scroll_key: None,
             resizing: None,
@@ -4193,6 +4198,14 @@ impl Carnet {
     /// A key no sink took: the window's Tab ring, and the app's chords.
     /// Also what a menu bar row plays back while the page lacks the
     /// keyboard.
+    /// The keyboard on nothing in particular, as a click on a note's card
+    /// or a folder leaves it: on the window, or on the card the click
+    /// focused (kui gives a click's keyboard to what it lands on, where it
+    /// left it with the window), the list's arrows the window's.
+    fn keyboard_on_the_list(&self, focus: Option<Key>) -> bool {
+        focus.is_none_or(|f| f == Key::ROOT || self.card_keys.contains(&f))
+    }
+
     pub(super) fn root_press(&mut self, k: kui_native::KeyPress, core: &mut Core) {
         if self.debug_key(&k, core) {
             return;
@@ -4211,7 +4224,7 @@ impl Carnet {
         // ← and → fold and unfold it.
         if matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right)
             && self.folders_clicked
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
         {
             let row = if self.deleted {
                 FolderRow::Deleted
@@ -4228,7 +4241,7 @@ impl Carnet {
         if matches!(k.code, KeyCode::Up | KeyCode::Down)
             && self.cards_clicked
             && !(m.ctrl || m.super_key || m.alt)
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
         {
             let up = k.code == KeyCode::Up;
             if m.shift {
@@ -4255,7 +4268,7 @@ impl Carnet {
             && !(m.ctrl || m.super_key || m.alt || m.shift)
             && (self.cards_clicked || self.folders_clicked)
             && self.picked.len() > 1
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
         {
             self.trash_picked();
             return;
@@ -4267,7 +4280,7 @@ impl Carnet {
             && !(m.ctrl || m.alt || m.shift)
             && self.folders_clicked
             && !self.deleted
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
             && let Some(f) = self.folder.clone()
         {
             self.folder_row_key(&FolderRow::Folder(f), &k);
@@ -4278,7 +4291,7 @@ impl Carnet {
         // the folder shown is renamed, as Finder's selected one is.
         if k.code == KeyCode::F(2)
             && !(m.ctrl || m.super_key || m.alt || m.shift)
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
             && let Some(f) = self.folder.clone()
         {
             self.start_rename(&f);
@@ -5129,7 +5142,7 @@ impl Carnet {
         }
         if focused != self.last_focus {
             // The keyboard went somewhere: no longer the folders' arrows.
-            if main && focused.is_some_and(|f| f != Key::ROOT) {
+            if main && !self.keyboard_on_the_list(focused) {
                 self.folders_clicked = false;
                 self.cards_clicked = false;
             }
