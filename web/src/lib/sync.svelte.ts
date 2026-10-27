@@ -457,7 +457,7 @@ class Sync {
 
   /// Files put in a note in `folder`, as the desktop's paperclip, `/file`,
   /// a drop or a paste put them: a picture (by its name, or its kind) as a
-  /// picture, any other file as it is, to link among the words, each
+  /// picture, any other file as it is, to link on a line of its own, each
   /// under its own name. What went in, in order; what couldn't (too big to
   /// sync, unreadable: a folder, say) is said, the first by name, and the
   /// rest still go. What the editor's `/file` and paperclip call.

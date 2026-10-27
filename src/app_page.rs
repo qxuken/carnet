@@ -42,6 +42,13 @@ pub(super) const ELSEWHERE: &str = "Not on this device";
 /// What stands in for a picture of Carnet's that sync is bringing here
 /// (another device's, not come yet): the web's words.
 pub(super) const DOWNLOADING: &str = "Downloading\u{2026}";
+/// What a tile says of a file a note keeps that isn't anywhere here.
+pub(super) const FILE_MISSING: &str = "File not found";
+/// How wide a tile is, whatever its file's name: one too long for it is
+/// cut short with "…".
+pub(super) const TILE_W: f32 = 220.0;
+/// How far apart tiles side by side are, and rows of them.
+const TILE_GAP: f32 = 10.0;
 /// A picture's height for its width while it's on its way, as the web's
 /// `.picture-card.coming`: 4:3.
 pub(super) const COMING_SHAPE: f32 = 0.75;
@@ -713,7 +720,7 @@ impl Carnet {
                 // Paragraphs sit 12px apart; list items closer, so a
                 // list reads as one thing and prose as several.
                 ui.with(NodeSpec::row().grow_width().pad_xy(0.0, l.air(6.0)), |ui| {
-                    self.slot_line(ui, l, Slot::block(id), text, body, hint, false, cov);
+                    self.words_or_tiles(ui, l, Slot::block(id), text, body, hint, false, cov);
                     if let Some((_, shown)) = slash.as_ref().filter(|(b, _)| *b == id) {
                         self.slash_menu(ui, l, id, shown);
                     }
@@ -795,7 +802,7 @@ impl Carnet {
                         marker(ui, l, id, *style, *done, n, depth, text);
                         let ink = if *done { body.color(t.muted) } else { body };
                         let hint = empty_here.then_some(if *style == ListStyle::Todo { "To-do" } else { "List" });
-                        self.slot_line(ui, l, Slot::block(id), text, ink, hint, *done, cov);
+                        self.words_or_tiles(ui, l, Slot::block(id), text, ink, hint, *done, cov);
                     },
                 );
             }
@@ -1537,19 +1544,19 @@ impl Carnet {
                 ui.with_indexed(k as u64, NodeSpec::column().grow_width(), |ui| match pic {
                     None => {
                         if let Some(key) = self.line_part(ui, l, slot, text, (a, b), style, None, false, cov, at_caret) {
-                            pieces.push(Piece { from: a, to: b, key, picture: false });
+                            pieces.push(Piece { from: a, to: b, key, picture: false, file: false });
                         }
                     }
                     Some(p) => {
                         let side = at_caret.then_some(byte >= b);
                         let key = self.cell_picture(ui, l, p, room, chosen(a, b), side);
-                        pieces.push(Piece { from: a, to: b, key, picture: true });
+                        pieces.push(Piece { from: a, to: b, key, picture: true, file: false });
                     }
                 });
             }
         });
         // What was drawn, as a line's text says it (`line_part`).
-        let _cell = page::reading(slot);
+        let _cell = page::reading(self.doc(), slot);
         let hidden: Vec<(usize, usize)> = inline::runs(text).iter().filter(|r| r.2.marker).map(|r| (r.0, r.1)).collect();
         self.drawn.insert(slot, hash(&format!("{hidden:?}{text}")));
         self.cell_pieces.insert(slot, pieces);
@@ -1659,6 +1666,170 @@ impl Carnet {
         key
     }
 
+    /// A paragraph's or a list item's words: drawn as words
+    /// ([`slot_line`](Self::slot_line)), or, a line of links to files the
+    /// note keeps and nothing else (`page::tiles`), a tile for each.
+    #[allow(clippy::too_many_arguments)]
+    fn words_or_tiles(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, style: TextStyle, hint: Option<&str>, strike: bool, cov: &Coverage) {
+        let tiles = if text.contains("](") { page::tiles(self.doc(), slot) } else { Vec::new() };
+        if tiles.is_empty() {
+            self.cell_pieces.remove(&slot);
+            self.slot_line(ui, l, slot, text, style, hint, strike, cov);
+        } else {
+            self.tile_line(ui, l, slot, text, &tiles, cov);
+        }
+    }
+
+    /// A line of file links as tiles, side by side, wrapping: each one
+    /// letter to the caret, as a cell's picture is, which stands beside
+    /// the one it is next to (the spaces between them aren't drawn: one
+    /// after a tile is beside it, one right before the next beside that).
+    /// Chosen, a tile wears the accent's ring, and the caret isn't shown.
+    /// The tiles are the slot's pieces (`cell_pieces`): what the caret and
+    /// a press are measured against.
+    fn tile_line(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, tiles: &[carnet_core::doc::FileLink], cov: &Coverage) {
+        let here = self.editing && self.caret.head.slot == slot;
+        let byte = self.caret.head.byte.min(text.len());
+        // The tile the caret is beside, and on which side (`true` its right).
+        let beside = here.then(|| {
+            if byte <= tiles[0].at.0 {
+                return (0, false);
+            }
+            if let Some(k) = tiles.iter().position(|f| f.at.0 == byte) {
+                return (k, false);
+            }
+            (tiles.iter().rposition(|f| f.at.1 <= byte).unwrap_or(0), true)
+        });
+        let editing = self.editing;
+        let chosen = |a: usize, b: usize| {
+            cov.whole.contains(&slot.block) || cov.parts.get(&slot).is_some_and(|&(f, to)| editing && f <= a && b <= to && f < to)
+        };
+        let mut pieces = Vec::new();
+        let row = ui.with(NodeSpec::row().grow_width().wrap().gap(TILE_GAP).cross_gap(TILE_GAP).pad_xy(0.0, l.air(4.0)).label("Files"), |ui| {
+            for (k, f) in tiles.iter().enumerate() {
+                let side = beside.filter(|b| b.0 == k).map(|b| b.1);
+                let ring = chosen(f.at.0, f.at.1);
+                ui.with_indexed(k as u64, NodeSpec::row(), |ui| {
+                    let key = self.tile(ui, l, f, ring, side);
+                    pieces.push(Piece { from: f.at.0, to: f.at.1, key, picture: true, file: true });
+                });
+            }
+        });
+        if here {
+            self.caret_fresh = true;
+        }
+        self.drawn.insert(slot, hash(text));
+        self.cell_pieces.insert(slot, pieces);
+        self.slot_keys.insert(slot, row);
+    }
+
+    /// One file a note keeps, as a tile: a rounded card with a paperclip,
+    /// the file's name (cut short with "…" past the tile's width) and,
+    /// faintly under it, its kind and size, read from the file; one not
+    /// here says why, as a picture's card does (another device's, one
+    /// sync is bringing). The whole tile is the link: a press opens it as
+    /// a press on a link does (`page_drag`). `chosen`, the accent's ring
+    /// round it; the caret beside it on the left or the right (`side`,
+    /// `true` the right), drawn while nothing is selected. Returns its
+    /// card's node.
+    fn tile(&mut self, ui: &mut Ui<'_>, l: &Look, f: &carnet_core::doc::FileLink, chosen: bool, side: Option<bool>) -> Key {
+        let t = l.t;
+        let state = self.file_state(f);
+        let (glyph, meta) = match &state {
+            Ok(size) => (Glyph::Attach, format!("{} \u{b7} {}", carnet_core::doc::file_kind(&f.path), super::settings_view::size_words(*size))),
+            Err((glyph, why)) => (*glyph, why.to_string()),
+        };
+        let key = ui.child_key("tile");
+        let drawn = ui.layout_of(key);
+        let ring = if chosen { t.accent } else { Color::TRANSPARENT };
+        let blink = ui.caret_visible();
+        let bar = side.filter(|_| self.caret.is_empty());
+        ui.with_keyed(
+            "tile",
+            NodeSpec::row()
+                .width(TILE_W)
+                .pad_xy(12.0, 9.0)
+                .gap(10.0)
+                .cross_align(Align::Center)
+                .radius(radius::CARD)
+                .bg(t.sunken)
+                .hover_bg(t.hover)
+                .border(1.0, t.border)
+                .on_layout(Value::Null)
+                .role(Role::Link)
+                .label(format!("{}, {meta}", f.name))
+                .tooltip(&f.name),
+            |ui| {
+                icons::icon(ui, glyph, t.muted, 18.0, false);
+                ui.with(NodeSpec::column().grow_width().min_width(0.0).gap(2.0), |ui| {
+                    ui.text_in(NodeSpec::row().grow_width().min_width(0.0), &f.name, TextStyle::new(Type::UI.size).color(t.fg).nowrap().ellipsis());
+                    ui.text_in(NodeSpec::row().grow_width().min_width(0.0), &meta, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap().ellipsis());
+                });
+                // The ring an overlay 4px out, so choosing it moves nothing:
+                // the tile's size as last laid out.
+                if let Some(r) = drawn {
+                    ui.leaf(
+                        NodeSpec::row()
+                            .size(r.w + 8.0, r.h + 8.0)
+                            .radius(radius::CARD + 3.0)
+                            .border(2.0, ring)
+                            .role(Role::None)
+                            .float(FloatConfig::parent().offset(-4.0, -4.0)),
+                    );
+                }
+                if let Some(right) = bar {
+                    let h = drawn.map_or(40.0, |r| r.h);
+                    ui.leaf_keyed(
+                        "caret",
+                        NodeSpec::row()
+                            .size(2.0, h.max(8.0))
+                            .radius(1.0)
+                            .bg(t.accent)
+                            .opacity(if blink { 1.0 } else { 0.0 })
+                            .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 6.0 } else { -6.0 }, 0.0))
+                            .role(Role::None),
+                    );
+                }
+            },
+        );
+        key
+    }
+
+    /// What a tile's file is now: here, its size; else why not, and the
+    /// glyph that goes with it, as a picture's card says it
+    /// (`unshown_why`): one of Carnet's that sync is bringing, the user's
+    /// own on another device, or gone.
+    pub(super) fn file_state(&self, f: &carnet_core::doc::FileLink) -> Result<u64, (Glyph, &'static str)> {
+        let folder = self.page_folder();
+        let Some(path) = self.store.resolve(&folder, &f.target) else { return Err((Glyph::Warning, FILE_MISSING)) };
+        if let Ok(m) = std::fs::metadata(&path)
+            && m.is_file()
+        {
+            return Ok(m.len());
+        }
+        let theirs = !self.store.owns(&path);
+        if !theirs && self.sync.file_coming(&self.store, &path) {
+            Err((Glyph::Cloud, DOWNLOADING))
+        } else if theirs && self.sync.is_on() {
+            Err((Glyph::CloudOff, ELSEWHERE))
+        } else {
+            Err((Glyph::Warning, FILE_MISSING))
+        }
+    }
+
+    /// The tile under a point, by the last layout: its slot, where it is
+    /// in the slot's text, and the address its link opens.
+    pub(super) fn tile_under(&self, core: &Core, x: f32, y: f32) -> Option<(Slot, usize, usize, String)> {
+        let (slot, a, b) = self.cell_pieces.iter().find_map(|(slot, pieces)| {
+            pieces.iter().filter(|p| p.file).find_map(|p| {
+                let r = core.layout_of(p.key)?;
+                (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h).then_some((*slot, p.from, p.to))
+            })
+        })?;
+        let f = page::tiles(self.doc(), slot).into_iter().find(|f| f.at == (a, b))?;
+        Some((slot, a, b, f.target))
+    }
+
     /// One slot's text: a `line` row holding the wrapped text — its inline
     /// styles drawn, their markers faint, the part the selection covers on
     /// the selection's wash, an IME composition underlined at the caret —
@@ -1706,7 +1877,7 @@ impl Carnet {
         let byte = self.caret.head.byte.min(text.len());
         let byte = if code_block { byte.clamp(lo, hi) } else { byte };
         // A cell's text as a cell's: its pictures among its words.
-        let _cell = page::reading(slot);
+        let _cell = page::reading(self.doc(), slot);
         let runs = if code_block {
             vec![(0, text.len(), inline::Style::default())]
         } else {
@@ -2008,11 +2179,17 @@ impl Carnet {
 
     /// Where the last layout put source byte `b` of `slot`. In a cell with
     /// pictures, in the stretch of words that holds it, else at the edge
-    /// of the picture beside it.
+    /// of the picture beside it. On a line of tiles, at the edge of the
+    /// one it is beside: the spaces between them aren't drawn, so a place
+    /// among them is after the tile before (before the first, the first's
+    /// left edge).
     pub(super) fn rect_at(&self, core: &Core, slot: Slot, b: usize) -> Option<Rect> {
         if let Some(pieces) = self.cell_pieces.get(&slot) {
             let words = pieces.iter().find(|p| !p.picture && p.from <= b && b <= p.to);
-            let p = words.or_else(|| pieces.iter().find(|p| p.from <= b && b <= p.to))?;
+            let p = words
+                .or_else(|| pieces.iter().find(|p| p.from <= b && b <= p.to))
+                .or_else(|| pieces.iter().rev().find(|p| p.file && p.to <= b))
+                .or_else(|| pieces.first().filter(|p| p.file))?;
             if p.picture {
                 let r = core.layout_of(p.key)?;
                 let x = if b <= p.from { r.x } else { r.x + r.w };
@@ -2027,19 +2204,23 @@ impl Carnet {
     /// The source byte of `slot` under a point, by the last layout. In a
     /// cell with pictures, of the piece nearest it up or down: a byte of
     /// its words, or before or after its picture, by the picture's half.
+    /// On a line of tiles, the tile nearest it, its row first, then along
+    /// it: before or after it, by its half.
     fn byte_under(&self, core: &Core, slot: Slot, at: Vec2) -> Option<usize> {
         if let Some(pieces) = self.cell_pieces.get(&slot) {
-            let span = |p: &Piece| -> Option<(f32, f32)> {
+            // How far it is up or down, and (for a picture or a tile)
+            // left or right.
+            let off = |p: &Piece| -> Option<(f32, f32)> {
+                let dy = |top: f32, bottom: f32| (top - at.y).max(0.0).max(at.y - bottom);
                 if p.picture {
                     let r = core.layout_of(p.key)?;
-                    return Some((r.y, r.y + r.h));
+                    return Some((dy(r.y, r.y + r.h), (r.x - at.x).max(0.0).max(at.x - (r.x + r.w))));
                 }
                 let n = self.drawn_byte(slot, p.to) - self.drawn_byte(slot, p.from);
                 let (a, e) = (core.caret_rect(p.key, 0)?, core.caret_rect(p.key, n)?);
-                Some((a.y, e.y + e.h))
+                Some((dy(a.y, e.y + e.h), 0.0))
             };
-            let off = |(top, bottom): (f32, f32)| (top - at.y).max(0.0).max(at.y - bottom);
-            let (p, _) = pieces.iter().filter_map(|p| Some((p, off(span(p)?)))).min_by(|a, b| a.1.total_cmp(&b.1))?;
+            let (p, _) = pieces.iter().filter_map(|p| Some((p, off(p)?))).min_by(|a, b| a.1.0.total_cmp(&b.1.0).then(a.1.1.total_cmp(&b.1.1)))?;
             if p.picture {
                 let r = core.layout_of(p.key)?;
                 return Some(if at.x < r.x + r.w / 2.0 { p.from } else { p.to });
@@ -2059,7 +2240,7 @@ impl Carnet {
     /// layout: its cell and where it is in the cell's text.
     fn cell_picture_under(&self, core: &Core, x: f32, y: f32) -> Option<(Slot, usize, usize)> {
         self.cell_pieces.iter().find_map(|(slot, pieces)| {
-            pieces.iter().filter(|p| p.picture).find_map(|p| {
+            pieces.iter().filter(|p| p.picture && !p.file).find_map(|p| {
                 let r = core.layout_of(p.key)?;
                 (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h).then_some((*slot, p.from, p.to))
             })
@@ -2120,7 +2301,15 @@ impl Carnet {
             // inside the selection, which the menu then acts on.
             Event::ContextMenu(at) => {
                 let (x, y) = (at.x, at.y);
-                if let Some(pos) = self.hit(core, x, y)
+                // On a tile: it, chosen, the menu its link's; unless the
+                // selection holds it, which the menu then acts on.
+                let tile = self.tile_under(core, x, y);
+                if let Some((slot, a, b, _)) = tile {
+                    let (pa, pb) = (Pos { slot, byte: a }, Pos { slot, byte: b });
+                    if !(page::contains(self.doc(), self.caret, pa) && page::contains(self.doc(), self.caret, pb)) {
+                        self.caret = Caret { anchor: pa, head: pb };
+                    }
+                } else if let Some(pos) = self.hit(core, x, y)
                     && !page::contains(self.doc(), self.caret, pos)
                 {
                     self.caret = Caret::at(pos);
@@ -2154,8 +2343,13 @@ impl Carnet {
                 item("Open link", "open-link").enabled(carnet_core::export::safe_href(&url).is_some()),
                 item("Copy link address", "copy-link"),
                 item("Remove link", "unlink"),
-                MenuItem::separator(),
             ]);
+            // A tile's file, where it is on the disk.
+            if page::chosen_tile(doc, self.caret).is_some() {
+                let here = self.store.linked_file(&self.page_folder(), &url).is_some();
+                items.push(item(super::reveal_label(), "reveal-file").enabled(here));
+            }
+            items.push(MenuItem::separator());
         }
         items.extend([
             item("Cut", "cut").accel("mod+x").enabled(selected || picture),
@@ -2326,6 +2520,14 @@ impl Carnet {
             "reveal-picture" => {
                 let folder = self.store.notes[self.current].folder.clone();
                 if let Some(p) = self.picture_at_caret().and_then(|(s, wiki)| self.store.picture_file(&folder, &s, wiki))
+                    && let Err(e) = store::reveal(&p)
+                {
+                    self.error = Some(format!("Couldn't open the folder: {e}"));
+                }
+            }
+            "reveal-file" => {
+                let folder = self.store.notes[self.current].folder.clone();
+                if let Some(p) = page::link_at(self.doc(), self.caret).and_then(|(_, _, url)| self.store.linked_file(&folder, &url))
                     && let Err(e) = store::reveal(&p)
                 {
                     self.error = Some(format!("Couldn't open the folder: {e}"));
@@ -2810,6 +3012,19 @@ impl Carnet {
             self.open_linked(path);
             return;
         }
+        // One in the attachments folder that isn't here: said so, as its
+        // tile says it, not taken for an address.
+        let decoded = store::decode_src(url.trim());
+        if carnet_core::doc::is_file_target(&decoded) {
+            let name = decoded.rsplit(['/', '\\']).next().unwrap_or(&decoded);
+            let coming = self.store.resolve(&folder, url.trim()).is_some_and(|p| self.sync.file_coming(&self.store, &p));
+            self.error = Some(if coming {
+                format!("\u{201c}{name}\u{201d} is still on its way here: it opens once it has come")
+            } else {
+                format!("\u{201c}{name}\u{201d} isn't on this device")
+            });
+            return;
+        }
         // Read as a browser reads it, given its scheme, then read again:
         // `me@example.com?attach=…` is a mail link only once it has one.
         // What opens is the address as read, not as written.
@@ -3288,7 +3503,11 @@ impl Carnet {
                 }
                 self.link_opened = false;
                 let pos = self.hit(core, x, y).filter(|_| !self.in_margin(x, y));
+                // A tile is its link all over: a press anywhere on it is
+                // one on its words.
+                let tile = self.tile_under(core, x, y);
                 let url = |doc: &Doc| match pos {
+                    _ if tile.is_some() => tile.as_ref().map(|t| t.3.clone()),
                     Some(pos) if cmd => page::link_at(doc, Caret::at(pos)).map(|l| l.2),
                     Some(pos) => page::link_under(doc, pos, how),
                     None => None,
@@ -3307,6 +3526,16 @@ impl Carnet {
                         self.link_press = url(self.doc()).map(|url| LinkPress { url, at: Vec2::new(x, y), caret });
                     }
                     None => {}
+                }
+                // A press on a tile that doesn't open it chooses it,
+                // whole, as a press on a picture does.
+                if !core.modifiers().shift
+                    && let Some((slot, a, b, _)) = tile
+                {
+                    self.caret = Caret { anchor: Pos { slot, byte: a }, head: Pos { slot, byte: b } };
+                    self.drag = None;
+                    self.reveal = false;
+                    return;
                 }
                 // A press on a picture among a cell's words chooses it,
                 // whole; a drag carries it, as one on its own line.
@@ -3432,6 +3661,10 @@ impl Carnet {
         let how = self.settings.link_open;
         if self.drag.is_some() || self.resizing.is_some() || !how.hand(m.ctrl || m.super_key, m.shift) {
             return false;
+        }
+        // A tile is its link all over.
+        if self.tile_under(core, p.x, p.y).is_some() {
+            return true;
         }
         self.hit(core, p.x, p.y)
             .filter(|_| !self.in_margin(p.x, p.y))

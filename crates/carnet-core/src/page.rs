@@ -441,16 +441,41 @@ fn code_cut(t: &str, a: usize, b: usize) -> String {
 }
 
 /// A slot's text read as its own: a cell's with its pictures among the
-/// words ([`inline::CellText`]), any other as text. Until it is dropped.
-pub fn reading(slot: Slot) -> inline::CellText {
-    inline::cell_text(slot.cell.is_some())
+/// words ([`inline::CellText`]); a paragraph's or a list item's with a
+/// line of file links alone read as tiles ([`inline::file_text`]); any
+/// other as text. Until it is dropped.
+pub fn reading(doc: &Doc, slot: Slot) -> inline::CellText {
+    match slot.cell {
+        Some(_) => inline::cell_text(true),
+        None if block_of(doc, slot).is_some_and(|b| doc::draws_tiles(&b.kind)) => inline::file_text(),
+        None => inline::cell_text(false),
+    }
+}
+
+/// The tiles of `slot`'s line of file links ([`doc::file_line`]), if the
+/// page draws its words so: each link's place, words and address.
+pub fn tiles(doc: &Doc, slot: Slot) -> Vec<doc::FileLink> {
+    let _r = reading(doc, slot);
+    inline::tiles(text(doc, slot))
+}
+
+/// The tile the caret chooses end to end, and nothing more (an arrow onto
+/// it, a press on it): where it is in the slot's text. Chosen, it wears
+/// the accent's ring, and Backspace or Delete takes it.
+pub fn chosen_tile(doc: &Doc, c: Caret) -> Option<(usize, usize)> {
+    let slot = c.head.slot;
+    if slot.cell.is_some() || c.anchor.slot != slot || c.is_empty() {
+        return None;
+    }
+    let ends = (c.anchor.byte.min(c.head.byte), c.anchor.byte.max(c.head.byte));
+    tiles(doc, slot).into_iter().map(|f| f.at).find(|&at| at == ends)
 }
 
 /// A slot's words as the page draws them: its marks hidden, code whole;
 /// a picture in a cell one word, stepped over whole, and so is a `--`,
 /// drawn as an em dash ([`inline::dashes`]).
 pub fn visible(doc: &Doc, slot: Slot) -> Visible {
-    let _r = reading(slot);
+    let _r = reading(doc, slot);
     let t = text(doc, slot);
     if styled(doc, slot) { Visible::page(t) } else { Visible::all(t) }
 }
@@ -588,11 +613,16 @@ fn drawn_edges(doc: &Doc, slot: Slot, v: &Visible) -> (usize, usize) {
     }
 }
 
-/// The picture among cell `slot`'s words drawn as the letter at `drawn`
-/// of them: where it is in the text.
-fn cell_picture_drawn_at(doc: &Doc, slot: Slot, v: &Visible, drawn: usize) -> Option<(usize, usize)> {
-    slot.cell?;
-    inline::cell_pictures(text(doc, slot)).into_iter().map(|p| p.at).find(|&(a, b)| v.drawn(a) == drawn && v.drawn(b) == drawn + 1)
+/// The picture among cell `slot`'s words, or the tile of a line of file
+/// links, drawn as the letter at `drawn` of them: where it is in the text.
+fn atom_drawn_at(v: &Visible, drawn: usize) -> Option<(usize, usize)> {
+    v.atoms.iter().copied().find(|&(a, b)| v.drawn(a) == drawn && v.drawn(b) == drawn + 1)
+}
+
+/// Whether `slot`'s words are a line of tiles: by the word, ← → and the
+/// deletes go a tile at a time there, as by the letter.
+fn tiled(doc: &Doc, slot: Slot) -> bool {
+    slot.cell.is_none() && !tiles(doc, slot).is_empty()
 }
 
 /// One character (or word) left, into the previous slot at an edge; with
@@ -611,15 +641,17 @@ pub fn left(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
         return Caret::at(ordered(doc, c).0);
     }
     let p = c.head;
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let t = text(doc, p.slot);
-    // By the words: marks are not there to step over.
+    // By the words: marks are not there to step over. Tiles go one at a
+    // time, by the word too.
     let v = visible(doc, p.slot);
+    let word = word && !tiled(doc, p.slot);
     // In code, past its first line is past its fence: on to what is above.
     let (lo, hi) = drawn_edges(doc, p.slot, &v);
     let d = v.drawn(p.byte).clamp(lo, hi);
     if !extend && !word && d > 0
-        && let Some((a, b)) = cell_picture_drawn_at(doc, p.slot, &v, prev_char(&v.text(t), d))
+        && let Some((a, b)) = atom_drawn_at(&v, prev_char(&v.text(t), d))
     {
         return Caret { anchor: Pos { byte: b, ..p }, head: Pos { byte: a, ..p } };
     }
@@ -655,13 +687,14 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
         return Caret::at(ordered(doc, c).1);
     }
     let p = c.head;
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let t = text(doc, p.slot);
     let v = visible(doc, p.slot);
+    let word = word && !tiled(doc, p.slot);
     let (lo, hi) = drawn_edges(doc, p.slot, &v);
     let d = v.drawn(p.byte).clamp(lo, hi);
     if !extend && !word && d < v.drawn_len()
-        && let Some((a, b)) = cell_picture_drawn_at(doc, p.slot, &v, d)
+        && let Some((a, b)) = atom_drawn_at(&v, d)
     {
         return Caret { anchor: Pos { byte: a, ..p }, head: Pos { byte: b, ..p } };
     }
@@ -688,7 +721,7 @@ pub fn right(doc: &Doc, c: Caret, word: bool, extend: bool) -> Caret {
 
 /// The word under a position (a double click).
 pub fn word_at(doc: &Doc, p: Pos) -> Caret {
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let v = visible(doc, p.slot);
     let t = v.text(text(doc, p.slot));
     let mut a = floor_char(&t, v.drawn(p.byte));
@@ -849,7 +882,7 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
     let (a, b) = ordered(doc, *c);
     let all = slots(doc);
     let (ia, ib) = (index(&all, a.slot), index(&all, b.slot));
-    let read_a = reading(a.slot);
+    let read_a = reading(doc, a.slot);
     // Within one slot: its text.
     if ia == ib {
         if is_atomic(doc, a.slot) {
@@ -913,12 +946,12 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
     let tail = if cov.whole.contains(&b.slot.block) {
         None
     } else {
-        let _r = reading(b.slot);
+        let _r = reading(doc, b.slot);
         Some(split_text(text(doc, b.slot), b.byte, b_marks).1)
     };
     // Cells of a partly covered table are cleared where covered.
     for (s, &(f, t)) in &cov.parts {
-        let _r = reading(*s);
+        let _r = reading(doc, *s);
         if s.cell.is_some() && !cov.whole.contains(&s.block)
             && let Some(text) = text_mut(doc, *s)
         {
@@ -1040,15 +1073,16 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let old = text(doc, p.slot).to_string();
     let marks = styled(doc, p.slot);
     let byte = if marks { settle_pos(doc, p).byte } else { p.byte };
+    let read = (marks && s.starts_with('\n')).then(|| reading(doc, p.slot));
     let Some(t) = text_mut(doc, p.slot) else { return false };
     let mut byte = floor_char(t, byte);
     // A line broken after its last letter: the marks closing the words
     // and those of the break it had stay that line's, the new break after
     // them ([`break_at`]).
     if marks && s.starts_with('\n') {
-        let _r = reading(p.slot);
         byte = break_at(t, byte);
     }
+    drop(read);
     t.insert_str(byte, &s);
     *c = Caret::at(Pos {
         byte: byte + s.len(),
@@ -1189,11 +1223,16 @@ fn entry(doc: &Doc, b: &Block, byte: usize) -> Pos {
 /// is selected, so the next Backspace removes it. An empty line under a
 /// divider, a table or a picture goes, and that is selected.
 pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
+    // A tile chosen goes as it would from after it: with its space.
+    if let Some((_, b)) = chosen_tile(doc, *c) {
+        *c = Caret::at(Pos { byte: b, ..c.head });
+    }
     if delete_selection(doc, c) {
         return true;
     }
     let p = c.head;
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
+    let word = word && !tiled(doc, p.slot);
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     if is_atomic(doc, p.slot) {
         doc.remove(i);
@@ -1212,7 +1251,7 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
         let t = text(doc, p.slot);
         let w = v.text(t);
         let nd = if word { prev_word(&w, d) } else { prev_char(&w, d) }.max(lo);
-        let (from, to) = (v.source(nd), v.at(d));
+        let (from, to) = tile_with_space(t, &v, (v.source(nd), v.at(d)), true);
         let marks = styled(doc, p.slot);
         let mut at = from;
         if let Some(t) = text_mut(doc, p.slot) {
@@ -1331,6 +1370,25 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     }
 }
 
+/// What a Backspace (`before`) or a Delete takes, `from..to` of `t`: a
+/// tile whole, with the space that parts it from the one before it
+/// (Backspace) or after it (Delete), or, at the line's edge, on its other
+/// side, so the tiles left stay a line of them, one space apart. Any other
+/// stretch as it is.
+fn tile_with_space(t: &str, v: &Visible, (from, to): (usize, usize), before: bool) -> (usize, usize) {
+    if !v.atoms.contains(&(from, to)) || t.as_bytes().get(from) != Some(&b'[') {
+        return (from, to);
+    }
+    let b = t.as_bytes();
+    let space_before = from > 0 && b[from - 1] == b' ';
+    let space_after = b.get(to) == Some(&b' ');
+    match (before, space_before, space_after) {
+        (true, true, _) | (false, true, false) => (from - 1, to),
+        (_, _, true) => (from, to + 1),
+        _ => (from, to),
+    }
+}
+
 /// After removing block `i` going backwards: the end of what is above.
 fn after_removal_up(doc: &mut Doc, i: usize) -> Pos {
     if doc.is_empty() {
@@ -1351,11 +1409,16 @@ fn after_removal_up(doc: &mut Doc, i: usize) -> Pos {
 /// goes, a table or a picture below is selected (an empty line above
 /// any of them goes first, and it is selected).
 pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
+    // A tile chosen goes as it would from before it: with its space.
+    if let Some((a, _)) = chosen_tile(doc, *c) {
+        *c = Caret::at(Pos { byte: a, ..c.head });
+    }
     if delete_selection(doc, c) {
         return true;
     }
     let p = c.head;
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
+    let word = word && !tiled(doc, p.slot);
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     if is_atomic(doc, p.slot) {
         doc.remove(i);
@@ -1371,7 +1434,7 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     if d < hi {
         let w = v.text(t);
         let nd = if word { next_word(&w, d) } else { next_char(&w, d) }.min(hi);
-        let (from, to) = (v.source(d), v.at(nd));
+        let (from, to) = tile_with_space(t, &v, (v.source(d), v.at(nd)), false);
         let marks = styled(doc, p.slot);
         if let Some(t) = text_mut(doc, p.slot) {
             if marks {
@@ -1442,7 +1505,7 @@ pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
     }
     replace_selection(doc, c);
     let p = c.head;
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let Some(i) = doc.index_of(p.slot.block) else { return false };
     let kind = doc.blocks()[i].kind.clone();
     let t = text(doc, p.slot).to_string();
@@ -2554,7 +2617,7 @@ fn edit_ranges(
         if from >= to || !styled(doc, s) {
             continue;
         }
-        let _r = reading(s);
+        let _r = reading(doc, s);
         let old = text(doc, s).len();
         let Some((t, x, y)) = f(text(doc, s), from, to) else { continue };
         // Across blocks, an end at a slot's start or at its end stays
@@ -2608,7 +2671,7 @@ fn selection_style(doc: &Doc, c: Caret) -> Option<inline::Style> {
         if !styled(doc, s) || is_atomic(doc, s) {
             continue;
         }
-        let _r = reading(s);
+        let _r = reading(doc, s);
         let text = text(doc, s);
         let st = inline::styles(text);
         let bytes = text.as_bytes();
@@ -2630,6 +2693,7 @@ fn selection_style(doc: &Doc, c: Caret) -> Option<inline::Style> {
                     ink: if a.ink == x.ink { a.ink } else { 0 },
                     marker: false,
                     picture: a.picture && x.picture,
+                    file: a.file && x.file,
                 },
             });
         }
@@ -2644,7 +2708,7 @@ fn letter_style(doc: &Doc, c: Caret) -> inline::Style {
     if !styled(doc, a.slot) {
         return inline::Style::default();
     }
-    let _r = reading(a.slot);
+    let _r = reading(doc, a.slot);
     let t = text(doc, a.slot);
     let v = Visible::of(t);
     let d = v.drawn(a.byte);
@@ -2697,7 +2761,7 @@ pub fn case_after(doc: &Doc, c: Caret) -> Option<inline::Case> {
         if from >= to || !styled(doc, s) {
             continue;
         }
-        let _r = reading(s);
+        let _r = reading(doc, s);
         let t = text(doc, s);
         let st = inline::styles(t);
         words.extend(t[from..to].char_indices().filter(|(i, _)| st.get(from + i).is_some_and(|s| !s.marker && !s.picture)).map(|(_, ch)| ch));
@@ -2712,7 +2776,7 @@ pub fn link_at(doc: &Doc, c: Caret) -> Option<(Slot, usize, String)> {
     if !styled(doc, p.slot) {
         return None;
     }
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     inline::link_at(text(doc, p.slot), p.byte).map(|(_, url)| (p.slot, p.byte, url))
 }
 
@@ -2799,7 +2863,7 @@ pub fn link_under(doc: &Doc, pos: Pos, how: LinkOpen) -> Option<String> {
     if !styled(doc, pos.slot) {
         return None;
     }
-    let _r = reading(pos.slot);
+    let _r = reading(doc, pos.slot);
     let (pair, url) = inline::link_at(text(doc, pos.slot), pos.byte)?;
     if how == LinkOpen::Click && !(pair.open.1 < pos.byte && pos.byte < pair.close.0) {
         return None;
@@ -2810,7 +2874,7 @@ pub fn link_under(doc: &Doc, pos: Pos, how: LinkOpen) -> Option<String> {
 /// The link at `at` in `slot` given address `url`, or taken off its words
 /// when `url` is `None`.
 pub fn set_link(doc: &mut Doc, slot: Slot, at: usize, url: Option<&str>) -> bool {
-    let _r = reading(slot);
+    let _r = reading(doc, slot);
     let t = text(doc, slot);
     let new = match url {
         Some(u) => inline::set_link(t, at, u),
@@ -2833,7 +2897,7 @@ pub fn make_link(doc: &mut Doc, c: &mut Caret, url: &str) -> bool {
             return false;
         }
         let p = c.head;
-        let _r = reading(p.slot);
+        let _r = reading(doc, p.slot);
         let link = format!("[{}]({})", url.trim(), inline::link_target(url));
         if let Some(t) = text_mut(doc, p.slot) {
             t.insert_str(p.byte, &link);
@@ -2846,25 +2910,48 @@ pub fn make_link(doc: &mut Doc, c: &mut Caret, url: &str) -> bool {
     edit_ranges(doc, c, |t, a, b| inline::make_link(t, a, b, url))
 }
 
-/// Links to files, `(name, src)`, put in at the caret one after another
-/// with a space between, each `[name](src)`, its name's brackets made
-/// round so it reads as one link; what was selected goes. Where the caret
-/// can't hold words (a picture chosen, code, a divider), a paragraph of
-/// their own goes in after its block. The caret after the last.
+/// Links to files, `(name, src)`, put in as a line of their own, one
+/// after another with a space between, each `[name](src)`, its name's
+/// brackets made round so it reads as one link: a line the page draws as
+/// a tile for each ([`doc::file_line`]), as pictures go in on lines of
+/// their own. Never among the caret's words: a paragraph of their own
+/// goes in after the caret's block (the selection's last), what is
+/// selected left as it is. The caret's line itself takes them when it is
+/// empty, and joins them on when it is a line of tiles already. In a
+/// table's cell, which holds no line of its own, they go in among its
+/// words at the caret, links there, what was selected in it gone. The
+/// caret after the last.
 pub fn insert_links(doc: &mut Doc, c: &mut Caret, links: &[(String, String)]) -> bool {
     if links.is_empty() {
         return false;
     }
-    if !c.is_empty() && styled(doc, c.head.slot) && styled(doc, c.anchor.slot) {
+    let md = links_markdown(links);
+    if c.head.slot.cell.is_some() && c.anchor.slot == c.head.slot {
+        return links_in_cell(doc, c, &md);
+    }
+    let last = ordered(doc, *c).1.slot;
+    let at = doc.index_of(last.block).map_or(doc.len(), |i| i + 1);
+    let here = (last.cell.is_none() && doc.get(last.block).is_some_and(|b| doc::draws_tiles(&b.kind))).then(|| text(doc, last).to_string());
+    let put = match here {
+        Some(t) if t.trim().is_empty() && c.is_empty() => md,
+        Some(t) if doc::file_line(&t).is_some() => format!("{} {md}", t.trim_end()),
+        _ => return insert_links_at(doc, c, at, links),
+    };
+    let Some(t) = text_mut(doc, last) else { return false };
+    *t = put;
+    *c = Caret::at(end(doc, last));
+    true
+}
+
+/// Links to files (`md`, as [`links_markdown`] writes them) among a
+/// table cell's words, at the caret, apart from the words either side;
+/// what was selected in it goes. The caret after the last.
+fn links_in_cell(doc: &mut Doc, c: &mut Caret, md: &str) -> bool {
+    if !c.is_empty() {
         delete_selection(doc, c);
     }
-    if !c.is_empty() || !styled(doc, c.head.slot) {
-        let at = doc.index_of(ordered(doc, *c).1.slot.block).map_or(doc.len(), |i| i + 1);
-        return insert_links_at(doc, c, at, links);
-    }
-    let md = links_markdown(links);
     let p = c.head;
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let Some(t) = text_mut(doc, p.slot) else { return false };
     // Apart from the words either side.
     let pre = if p.byte > 0 && !t[..p.byte].ends_with(char::is_whitespace) { " " } else { "" };
@@ -2888,15 +2975,24 @@ pub fn insert_links_at(doc: &mut Doc, c: &mut Caret, at: usize, links: &[(String
 }
 
 /// `[name](src)` for each, a space between; a name's brackets made round,
-/// so it reads as one link. The path as it is, a relative one (never
-/// taken for a web address, as a typed one would be), with nothing in it
-/// to end the link early.
+/// so it reads as one link, and a backslash before each letter that could
+/// read as a mark (`my*draft*.pdf`), so its words are its name, plain, as
+/// a tile's are ([`doc::file_line`]). The path as it is, a relative one
+/// (never taken for a web address, as a typed one would be), with nothing
+/// in it to end the link early.
 fn links_markdown(links: &[(String, String)]) -> String {
     links
         .iter()
         .map(|(name, src)| {
             let path = src.replace('%', "%25").replace(' ', "%20").replace('(', "%28").replace(')', "%29");
-            format!("[{}]({path})", name.replace('[', "(").replace(']', ")"))
+            let mut words = String::with_capacity(name.len());
+            for ch in name.replace('[', "(").replace(']', ")").chars() {
+                if matches!(ch, '\\' | '*' | '_' | '~' | '`' | '=' | '<' | '>') {
+                    words.push('\\');
+                }
+                words.push(ch);
+            }
+            format!("[{words}]({path})")
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -2909,7 +3005,7 @@ pub fn insert_styled(doc: &mut Doc, c: &mut Caret, s: &str, pre: &str, post: &st
         return insert(doc, c, s);
     }
     let p = c.head;
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let Some(t) = text_mut(doc, p.slot) else { return false };
     let (n, caret) = inline::insert_styled(t, p.byte, s, pre, post);
     *t = n;
@@ -3019,7 +3115,7 @@ fn past_link(doc: &Doc, c: Caret) -> Option<Pos> {
     if !c.is_empty() || !styled(doc, p.slot) {
         return None;
     }
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let t = text(doc, p.slot);
     let v = Visible::of(t);
     let d = v.drawn(p.byte);
@@ -3031,7 +3127,7 @@ fn past_link(doc: &Doc, c: Caret) -> Option<Pos> {
 
 /// The style a letter typed at `p` would have.
 fn typed_style(doc: &Doc, p: Pos) -> inline::Style {
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let mut t = text(doc, p.slot).to_string();
     t.insert(p.byte, 'x');
     inline::styles(&t)[p.byte]
@@ -3092,7 +3188,7 @@ impl Typing {
         if !c.is_empty() || c.head != (Pos { slot: k.slot, byte: k.end }) {
             return None;
         }
-        let _r = reading(k.slot);
+        let _r = reading(doc, k.slot);
         let t = text(doc, k.slot);
         let spaces = t.get(k.close.1..k.end)?;
         (closings(t, k.close.0) == Some(k.close.1) && spaces.chars().all(spacing)).then_some(k)
@@ -3127,7 +3223,7 @@ impl Typing {
             return inline::switch_at("", 0, kind);
         }
         let p = self.styled_at(doc, c).head;
-        let _r = reading(p.slot);
+        let _r = reading(doc, p.slot);
         inline::switch_at(text(doc, p.slot), p.byte, kind)
     }
 
@@ -3178,7 +3274,7 @@ impl Typing {
     /// run's other colour, if it has one, which the words typed keep.
     pub fn tint_off(&self, doc: &Doc, c: Caret, ink: bool) -> Option<(String, String, Option<u32>)> {
         let p = self.styled_at(doc, c).head;
-        let _r = reading(p.slot);
+        let _r = reading(doc, p.slot);
         let t = text(doc, p.slot);
         let run = inline::tints(t)
             .into_iter()
@@ -3261,7 +3357,7 @@ impl Typing {
     fn spaces(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
         let pending = self.pending.take().filter(|q| q.caret == *c);
         let p = c.head;
-        let _r = reading(p.slot);
+        let _r = reading(doc, p.slot);
         if !styled(doc, p.slot) {
             self.carry = None;
             return insert(doc, c, s);
@@ -3306,7 +3402,7 @@ impl Typing {
 
     /// Letters alone (no space among them), at the caret.
     fn letters(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
-        let _r = reading(c.head.slot);
+        let _r = reading(doc, c.head.slot);
         let pending = self.pending.take().filter(|q| q.caret == *c);
         let Some(k) = self.carry_at(doc, *c) else {
             self.carry = None;
@@ -3359,7 +3455,7 @@ fn spaces_shown(doc: &mut Doc, c: Caret) {
     if !c.is_empty() || !styled(doc, p.slot) {
         return;
     }
-    let _r = reading(p.slot);
+    let _r = reading(doc, p.slot);
     let Some(t) = text_mut(doc, p.slot) else { return };
     let e = p.byte;
     let Some(nl) = t.get(e..).and_then(|r| r.find('\n')).map(|k| e + k) else { return };
@@ -3394,7 +3490,7 @@ pub fn copy(doc: &Doc, c: Caret) -> Option<String> {
     }
     let (a, b) = ordered(doc, c);
     if a.slot == b.slot && !is_atomic(doc, a.slot) {
-        let _r = reading(a.slot);
+        let _r = reading(doc, a.slot);
         let t = text(doc, a.slot);
         let item = a.slot.cell.is_none() && matches!(kind_at(doc, a.slot), Some(Kind::Item { .. }));
         let v = visible(doc, a.slot);
@@ -5222,6 +5318,189 @@ mod tests {
         let ahead = h.redo(State::of(d, *c)).expect("a step to redo");
         d.restore(ahead.blocks);
         (done, after, same)
+    }
+
+    /// A line of links to files the note keeps, and nothing else, is a
+    /// line of tiles: one link or several, whitespace between, its names
+    /// read past their backslashes and its paths past their `%` escapes.
+    /// A picture's link or a web address isn't one, nor a link to a note
+    /// or to a file outside the attachments folder; other words, a style
+    /// or code make it words again; and only a paragraph or a list item
+    /// draws it so, never a heading, a quote or a cell.
+    #[test]
+    fn what_a_line_of_files_is() {
+        let names = |t: &str| doc::file_line(t).map(|f| f.into_iter().map(|f| (f.name, f.path)).collect::<Vec<_>>());
+        assert_eq!(names("[a.pdf](attachments/a.pdf)"), Some(vec![("a.pdf".into(), "attachments/a.pdf".into())]));
+        assert_eq!(
+            names("  [a b.pdf](../attachments/a%20b.pdf) [README](<attachments/READ ME>)\t[my\\_draft\\*.zip](attachments/my_draft%3Dv2.zip) "),
+            Some(vec![
+                ("a b.pdf".into(), "../attachments/a b.pdf".into()),
+                ("README".into(), "attachments/READ ME".into()),
+                ("my_draft*.zip".into(), "attachments/my_draft=v2.zip".into()),
+            ])
+        );
+        let f = doc::file_line(" [a](attachments/a.pdf)").unwrap();
+        assert_eq!((f[0].at, f[0].target.as_str()), ((1, 23), "attachments/a.pdf"));
+        for words in [
+            "",
+            "   ",
+            "[p.png](attachments/p.png)",
+            "[a.pdf](attachments/a.pdf) [p](attachments/p.png)",
+            "[site](https://x.test/attachments/a.pdf)",
+            "[mail](mailto:a@b.test)",
+            "[top](#attachments/a.pdf)",
+            "[root](/attachments/a.pdf)",
+            "[note](Other.md)",
+            "[elsewhere](Work/report.pdf)",
+            "[folder](attachments)",
+            "see [a.pdf](attachments/a.pdf)",
+            "[a.pdf](attachments/a.pdf) and more",
+            "[a.pdf](attachments/a.pdf), [b.pdf](attachments/b.pdf)",
+            "**[a.pdf](attachments/a.pdf)**",
+            "[**a**.pdf](attachments/a.pdf)",
+            "`[a.pdf](attachments/a.pdf)`",
+            "[a.pdf](attachments/a.pdf) https://x.test",
+            "[a.pdf](attachments/a.pdf)![](attachments/p.png)",
+            "<https://x.test>",
+        ] {
+            assert_eq!(doc::file_line(words), None, "{words:?}");
+        }
+        // As the page reads a block: a paragraph's and an item's tiles, a
+        // heading's and a quote's words.
+        let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+        let (_, d) = doc::from_markdown(&format!("{line}\n\n- {line}\n\n- [ ] {line}\n\n## {line}\n\n> {line}\n\n| {line} |\n|---|\n| {line} |\n"));
+        let tiled: Vec<usize> = d.blocks().iter().map(|b| block_slots(b).iter().map(|s| tiles(&d, *s).len()).sum()).collect();
+        assert_eq!(tiled, [2, 2, 2, 0, 0, 0, 0], "{:?}", texts(&d));
+        let s = Slot::block(d.blocks()[0].id);
+        assert_eq!(visible(&d, s).text(text(&d, s)), "[ [", "a tile is one letter, its `[`");
+        let h = Slot::block(d.blocks()[3].id);
+        assert_eq!(visible(&d, h).text(text(&d, h)), "a.pdf b.zip", "a heading's links are words");
+        assert_eq!(doc::file_kind("attachments/Report.final.PDF"), "PDF");
+        assert_eq!(doc::file_kind("attachments/README"), "File");
+    }
+
+    /// Files put in go on a line of their own, as pictures do, never among
+    /// the caret's words: after the caret's line, on it when it is empty,
+    /// joined on when it is a line of tiles already. Several at once make
+    /// one line. In a table's cell, which holds no line, among its words.
+    #[test]
+    fn files_go_in_on_a_line_of_their_own() {
+        let files = [("a.pdf".to_string(), "attachments/a.pdf".to_string()), ("README".to_string(), "attachments/README".to_string())];
+        let line = "[a.pdf](attachments/a.pdf) [README](attachments/README)";
+        let (mut d, mut c) = para("Words here", 5);
+        let (done, md, same) = undone(&mut d, &mut c, |d, c| insert_links(d, c, &files));
+        assert!(done && same, "one step of the history");
+        assert_eq!(md.trim_end(), format!("Words here\n\n{line}"));
+        assert_eq!(c.head, end(&d, Slot::block(d.blocks()[1].id)), "the caret after the last");
+        assert_eq!(tiles(&d, c.head.slot).len(), 2);
+        // Another, from beside them: on their line.
+        assert!(insert_links(&mut d, &mut c, &[("b c.zip".into(), "attachments/b c.zip".into())]));
+        assert_eq!(text(&d, c.head.slot), format!("{line} [b c.zip](attachments/b%20c.zip)"));
+        assert_eq!(tiles(&d, c.head.slot).len(), 3);
+        // An empty line takes them; the words above stay as they were.
+        let mut d = doc(vec![Block::text("Above"), Block::text(""), Block::text("Below")]);
+        let mut c = at(&d, 1, 0);
+        assert!(insert_links(&mut d, &mut c, &files));
+        assert_eq!(texts(&d), ["Text:Above", &format!("Text:{line}"), "Text:Below"]);
+        // A selection of words stays: the files after its line.
+        let mut d = doc(vec![Block::text("one two")]);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot: s, byte: 0 }, head: Pos { slot: s, byte: 3 } };
+        assert!(insert_links(&mut d, &mut c, &files[..1]));
+        assert_eq!(texts(&d), ["Text:one two", "Text:[a.pdf](attachments/a.pdf)"]);
+        // A name that could read as marks is its name, a tile still.
+        let mut d = doc(vec![Block::text("")]);
+        let mut c = at(&d, 0, 0);
+        assert!(insert_links(&mut d, &mut c, &[("my*draft*_v2.pdf".into(), "attachments/my-draft-v2.pdf".into())]));
+        assert_eq!(tiles(&d, c.head.slot).into_iter().map(|f| f.name).collect::<Vec<_>>(), ["my*draft*_v2.pdf"]);
+        // In a cell: among its words, links there.
+        let (mut d, _, x, _) = with_table();
+        let mut c = Caret::at(Pos { slot: x, byte: 0 });
+        assert!(insert_links(&mut d, &mut c, &files[..1]));
+        assert!(text(&d, x).starts_with("[a.pdf](attachments/a.pdf) "), "{}", text(&d, x));
+        assert!(tiles(&d, x).is_empty());
+    }
+
+    /// A tile is one letter to the caret, as a cell's picture is: ← and →
+    /// choose it, then pass it (by the word too); Backspace after it, or
+    /// Delete before it, takes its link whole, with the space between it
+    /// and the next, and so does either with it chosen; a copy of it is
+    /// its Markdown; words typed beside it make the line words again, the
+    /// link as it was. Each one step of the history.
+    #[test]
+    fn a_tile_is_one_letter_to_the_caret() {
+        let (a, b) = ("[a.pdf](attachments/a.pdf)", "[b.pdf](attachments/b.pdf)");
+        let line = format!("{a} {b}");
+        let d = doc(vec![Block::text(&line)]);
+        let s = Slot::block(d.blocks()[0].id);
+        let p = |byte| Pos { slot: s, byte };
+        let (ea, sb, eb) = (a.len(), a.len() + 1, line.len());
+        // → chooses the first, then is past it; over the space; the next.
+        let mut c = Caret::at(p(0));
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            c = right(&d, c, false, false);
+            seen.push((c.anchor.byte, c.head.byte));
+        }
+        assert_eq!(seen, [(0, ea), (ea, ea), (sb, sb), (sb, eb), (eb, eb)]);
+        assert_eq!(chosen_tile(&d, Caret { anchor: p(sb), head: p(eb) }), Some((sb, eb)));
+        assert_eq!(right(&d, Caret::at(p(0)), true, false), Caret { anchor: p(0), head: p(ea) }, "by the word, a tile at a time");
+        let mut c = Caret::at(p(eb));
+        let mut back = Vec::new();
+        for _ in 0..5 {
+            c = left(&d, c, false, false);
+            back.push((c.anchor.byte, c.head.byte));
+        }
+        assert_eq!(back, [(eb, sb), (sb, sb), (ea, ea), (ea, 0), (0, 0)]);
+        // Shift+→ takes it whole too.
+        assert_eq!(right(&d, Caret::at(p(0)), false, true).head, p(ea));
+        // A copy: its Markdown, one tile or both.
+        assert_eq!(copy(&d, Caret { anchor: p(0), head: p(ea) }).as_deref(), Some(a));
+        assert_eq!(copy(&d, Caret { anchor: p(0), head: p(eb) }).as_deref(), Some(line.as_str()));
+        // Its link: beside it, or chosen.
+        assert_eq!(link_at(&d, Caret::at(p(ea))).map(|l| l.2).as_deref(), Some("attachments/a.pdf"));
+        assert_eq!(link_at(&d, Caret { anchor: p(sb), head: p(eb) }).map(|l| l.2).as_deref(), Some("attachments/b.pdf"));
+        // Backspace after the last: it goes, with the space before it.
+        let (mut d1, mut c) = (d.clone(), Caret::at(p(eb)));
+        let (done, md, same) = undone(&mut d1, &mut c, |d, c| backspace(d, c, false));
+        assert!(done && same);
+        assert_eq!(md.trim_end(), a);
+        assert_eq!(c, Caret::at(p(ea)));
+        // By the word, the same: a tile, not the line.
+        let (mut d1, mut c) = (d.clone(), Caret::at(p(eb)));
+        assert!(backspace(&mut d1, &mut c, true));
+        assert_eq!(text(&d1, s), a);
+        // Delete before the first: it goes, with the space after it.
+        let (mut d1, mut c) = (d.clone(), Caret::at(p(0)));
+        let (done, md, same) = undone(&mut d1, &mut c, |d, c| delete(d, c, false));
+        assert!(done && same);
+        assert_eq!(md.trim_end(), b);
+        assert_eq!(c, Caret::at(p(0)));
+        // Chosen: either takes it, its space too.
+        let (mut d1, mut c) = (d.clone(), Caret { anchor: p(0), head: p(ea) });
+        assert!(backspace(&mut d1, &mut c, false));
+        assert_eq!(text(&d1, s), b);
+        let (mut d1, mut c) = (d.clone(), Caret { anchor: p(eb), head: p(sb) });
+        assert!(delete(&mut d1, &mut c, false));
+        assert_eq!(text(&d1, s), a);
+        // The last one gone: an empty line.
+        let (mut d1, mut c) = (doc(vec![Block::text(a)]), Caret::at(p(ea)));
+        let s1 = Slot::block(d1.blocks()[0].id);
+        c.head.slot = s1;
+        c.anchor.slot = s1;
+        assert!(backspace(&mut d1, &mut c, false));
+        assert_eq!(text(&d1, s1), "");
+        // Words typed beside it: the line is words again, its links whole.
+        let (mut d1, mut c) = (d.clone(), Caret::at(p(eb)));
+        let (done, md, same) = undone(&mut d1, &mut c, |d, c| insert(d, c, " and notes"));
+        assert!(done && same);
+        assert_eq!(md.trim_end(), format!("{line} and notes"));
+        assert!(tiles(&d1, s).is_empty());
+        assert_eq!(visible(&d1, s).text(text(&d1, s)), "a.pdf b.pdf and notes");
+        // Typed over a chosen tile: it goes, the words in its place.
+        let (mut d1, mut c) = (d.clone(), Caret { anchor: p(0), head: p(ea) });
+        assert!(insert(&mut d1, &mut c, "x"));
+        assert_eq!(text(&d1, s), format!("x {b}"));
     }
 
     #[test]

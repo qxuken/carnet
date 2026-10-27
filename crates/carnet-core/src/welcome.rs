@@ -175,7 +175,7 @@ pub fn doc(key: impl Fn(Shortcut) -> String) -> Doc {
             &["/divider", "a divider"],
             &["/code", "a code block"],
             &["/picture", "pictures from your files"],
-            &["/file", "any file, linked among the words"],
+            &["/file", "any file, a tile on its own line"],
         ]))),
         Block::text("A start is enough: /ta is a table, /h the headings. Beside most, the menu shows what to type instead next time: #, -, ---."),
         heading("Tables that stay put"),
@@ -215,7 +215,7 @@ pub fn doc(key: impl Fn(Shortcut) -> String) -> Doc {
         heading("Pictures, files and other notes"),
         Block::text(format!(
             "Paste a screenshot with {}, drop a picture on the page, or use the paperclip in the \
-             toolbar: pictures show in the note, and a PDF or a document is linked among the words. \
+             toolbar: pictures show in the note, and a PDF or a document goes on a line of its own, as a tile that opens it. \
              Either is kept in the attachments folder beside your notes.",
             k(Shortcut::Paste)
         )),
