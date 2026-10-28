@@ -89,6 +89,17 @@ impl Raw {
 }
 
 /// What was sent to `conn`, decoded.
+/// The nameplate a pairing opened with.
+fn opened(outs: &[Out], conn: ConnId) -> u32 {
+    frames(outs, conn)
+        .into_iter()
+        .find_map(|f| match f {
+            Frame::Carnet(Carnet::PairOpened { nameplate }) => Some(nameplate),
+            _ => None,
+        })
+        .expect("a pairing opened")
+}
+
 fn frames(outs: &[Out], conn: ConnId) -> Vec<Frame> {
     outs.iter()
         .filter_map(|o| match o {
@@ -452,15 +463,15 @@ fn a_device_writes_where_it_joined_and_snapshots_when_asked() {
         raw.send(a, &Frame::Carnet(Carnet::PairApprove { device: b"evil".to_vec(), public: [6; 32] }));
         assert!(raw.hub.store().device(A, b"evil").is_none());
         // Opened, but nobody has joined it yet.
-        raw.send(a, &Frame::Carnet(Carnet::PairOpen));
+        let outs = raw.send(a, &Frame::Carnet(Carnet::PairOpen));
+        let nameplate = opened(&outs, a);
         raw.send(a, &Frame::Carnet(Carnet::PairApprove { device: b"evil".to_vec(), public: [6; 32] }));
         assert!(raw.hub.store().device(A, b"evil").is_none());
         // Another device's pairing: a2 can't approve what a1 opened.
         let a2k = raw.a2.clone();
         let a2 = raw.login(A, b"a2", &a2k);
-        let (j, n) = raw.open("");
-        raw.send(j, &Frame::Carnet(Carnet::PairJoin { nameplate: 1, pake: vec![1] }));
-        let _ = n;
+        let (j, _) = raw.open("");
+        raw.send(j, &Frame::Carnet(Carnet::PairJoin { nameplate, pake: vec![1] }));
         raw.send(a2, &Frame::Carnet(Carnet::PairApprove { device: b"evil".to_vec(), public: [6; 32] }));
         assert!(raw.hub.store().device(A, b"evil").is_none(), "approved by a device that didn't open it");
     }
@@ -530,12 +541,16 @@ fn too_many_tries_from_one_address_are_turned_away() {
 
         // Joining open pairings by guessing their numbers, from one address:
         // ten, then turned away, so a pairing can't be spoilt over and over.
+        // Its number is four digits at random, not the smallest free, so
+        // there's no telling which are open.
         let a = raw.login(A, b"a1", &a1);
-        raw.send(a, &Frame::Carnet(Carnet::PairOpen));
+        let outs = raw.send(a, &Frame::Carnet(Carnet::PairOpen));
+        let nameplate = opened(&outs, a);
+        assert!((1000..=9999).contains(&nameplate), "{nameplate}");
         let mut spoilt = 0;
         for _ in 0..20 {
             let (j, _) = raw.open("192.0.2.1");
-            let outs = raw.send(j, &Frame::Carnet(Carnet::PairJoin { nameplate: 1, pake: vec![1] }));
+            let outs = raw.send(j, &Frame::Carnet(Carnet::PairJoin { nameplate, pake: vec![1] }));
             if denied(&outs, j).as_deref() == Some(TOO_MANY) {
                 continue;
             }

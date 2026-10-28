@@ -408,6 +408,8 @@ struct Gate {
     open: std::collections::HashMap<String, usize>,
     opens: Limiter,
     started: Instant,
+    /// When `opens` was last pruned, in seconds from `started`.
+    pruned: f64,
 }
 
 impl Gate {
@@ -418,7 +420,11 @@ impl Gate {
             return false;
         }
         *self.open.entry(client.to_string()).or_default() += 1;
-        if self.opens.len() > 10_000 {
+        // Past ten thousand, the full buckets are forgotten: once a
+        // second at most, so a crowd of clients isn't walked for each
+        // socket.
+        if self.opens.len() > 10_000 && now - self.pruned >= 1.0 {
+            self.pruned = now;
             self.opens.prune(now);
         }
         true
@@ -741,7 +747,7 @@ pub async fn serve_started(
     }
     let refused = Arc::new(AtomicU64::new(0));
     let closes = Arc::new(Closes::default());
-    let gate = Gate { open: Default::default(), opens: Limiter::new(limits::SOCKETS), started: Instant::now() };
+    let gate = Gate { open: Default::default(), opens: Limiter::new(limits::SOCKETS), started: Instant::now(), pruned: f64::NEG_INFINITY };
     let app = App {
         hub: tx.clone(),
         origin: config.origin.as_str().into(),

@@ -64,9 +64,9 @@ pub struct Join {
 
 #[wasm_bindgen]
 impl Join {
-    /// By a pairing code (`47-381095`).
+    /// By a pairing code (`4721-381095`).
     pub fn pair(code: &str) -> Result<Join, JsError> {
-        let code = PairCode::parse(code).ok_or_else(|| JsError::new("That isn't a code from another device: it looks like 47-381095"))?;
+        let code = PairCode::parse(code).ok_or_else(|| JsError::new("That isn't a code from another device: it looks like 4721-381095"))?;
         let device = WebRandom.bytes::<8>().to_vec();
         let key = DeviceKey::generate(&mut WebRandom);
         Ok(Join { way: Way::Pair(Joiner::new(code, device.clone(), key.clone())), device, key })
@@ -581,7 +581,7 @@ impl Vault {
     }
 
     /// What else happened since last asked, as JSON: `[{"devices":
-    /// [{id, name, seen, you, online}]} | {"code": "47-381095"} | {"paired":
+    /// [{id, name, seen, you, online}]} | {"code": "4721-381095"} | {"paired":
     /// id} | {"pairFailed": why} | {"recoverySet": true} | {"rekeyed":
     /// true} | {"removed": true, "account": bool} | {"invites": {owner,
     /// waiting: [{hash, until, code}], accounts: [{id, owner, made, seen,

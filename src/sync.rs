@@ -280,7 +280,7 @@ pub const KEYS_IN_FILE: &str = "This computer has no keychain running, so sync's
 #[derive(Clone, Debug, PartialEq)]
 pub enum How {
     /// A code, told apart by its shape: an invite (`K7QF-2M9D-XW4H-P3TA`)
-    /// makes a new account; a pairing code (`47-381095`), from a device
+    /// makes a new account; a pairing code (`4721-381095`), from a device
     /// already in, joins its account.
     Code(String),
     /// The recovery words.
@@ -731,7 +731,7 @@ impl Sync {
                 (None, Some(_)) => Starter::Enroll(Enroller::new(code.trim(), device.clone(), key.clone(), &mut OsRandom)),
                 (None, None) => {
                     return self.error = Some(
-                        "That isn't a code: an invite looks like K7QF-2M9D-XW4H-P3TA, and one from another device like 47-381095".into(),
+                        "That isn't a code: an invite looks like K7QF-2M9D-XW4H-P3TA, and one from another device like 4721-381095".into(),
                     );
                 }
             },

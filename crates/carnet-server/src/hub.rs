@@ -179,6 +179,10 @@ impl Backfill {
     }
 }
 
+/// The numbers a pairing's code starts with: four digits, picked at
+/// random (`Hub::free_nameplate`).
+const NAMEPLATES: std::ops::RangeInclusive<u32> = 1000..=9999;
+
 /// A pairing open (§7): the device in that opened it, and the new device
 /// once one joins. The nameplate is spent on the first join.
 struct Pairing {
@@ -302,9 +306,13 @@ pub struct Hub<S: Storage> {
     /// recovery.
     tries: Limiter,
     /// Password sign-ins by email, from any client
-    /// ([`limits::PASSWORD_TRIES`]): only emails a password signs in as,
-    /// so as many as there are passwords, however many made-up ones come.
+    /// ([`limits::PASSWORD_TRIES`]): emails a password signs in as, so as
+    /// many as there are passwords, however many made-up ones come.
     password_tries: Limiter,
+    /// And emails none does, counted alike, so a refusal never tells
+    /// which an email is; kept apart, so made-up ones crowd out no real
+    /// one, and let through once it's full rather than refused.
+    unknown_tries: Limiter,
     /// How much each account may keep, and whether it may write.
     quota: std::sync::Arc<dyn Quota>,
     /// Told of each account an invite makes.
@@ -357,6 +365,7 @@ impl<S: Storage> Hub<S> {
             stats: Stats::default(),
             tries: Limiter::new(limits::TRIES),
             password_tries: Limiter::new(limits::PASSWORD_TRIES),
+            unknown_tries: Limiter::new(limits::PASSWORD_TRIES),
             quota: std::sync::Arc::new(Unlimited),
             admission: std::sync::Arc::new(ByInvite),
             passwords: None,
@@ -489,6 +498,17 @@ impl<S: Storage> Hub<S> {
         r
     }
 
+    /// A device let in by a pairing or a recovery, added: a failure to
+    /// write it counted as [`kept`](Hub::kept) counts one, an id another
+    /// device has already refused and not.
+    fn device_added(&mut self, account: &[u8], device: &[u8], public: [u8; 32]) -> Result<(), storage::Failed> {
+        let added = self.store.add_device(account, device, public);
+        if added.as_ref().is_err_and(|e| e.0 != storage::DEVICE_TAKEN) {
+            self.stats.storage_failures += 1;
+        }
+        added
+    }
+
     /// When a room is compacted: past `count` live records, or `bytes` of
     /// them (200 and 256 KiB unless said).
     pub fn compact_when(&mut self, count: usize, bytes: usize) {
@@ -544,6 +564,7 @@ impl<S: Storage> Hub<S> {
         if now >= self.last_purge + 3600 {
             self.last_purge = now;
             self.tries.prune(now as f64);
+            self.unknown_tries.prune(now as f64);
             let purged = self.store.purge(now.saturating_sub(KEEP));
             let _ = self.kept(purged);
             self.last_write.retain(|_, &mut t| now < t + QUIET);
@@ -817,7 +838,7 @@ impl<S: Storage> Hub<S> {
                 out
             }
             (None, Some(account), Frame::Room(m)) => self.room_message(conn, &account, &me, m),
-            (None, Some(account), Frame::Carnet(c)) => self.ready_message(conn, account, me, c),
+            (None, Some(account), Frame::Carnet(c)) => self.ready_message(conn, account, me, c, rng),
             // Tries at something: counted, and past the limit refused.
             (Some(_), None, Frame::Carnet(Carnet::PairJoin { .. } | Carnet::Recover { .. } | Carnet::Enroll { .. } | Carnet::PasswordLogin { .. }))
                 if !self.tried(conn) =>
@@ -836,10 +857,12 @@ impl<S: Storage> Hub<S> {
                 }
                 let id = password::id(&id);
                 let record = self.store.password_of(&id).map(|(_, r)| r);
-                // Counted by the email too, from wherever it's tried: one
-                // that signs in to nothing isn't (there's nothing to
-                // guess, and made-up ones could crowd out real ones).
-                if record.is_some() && !self.password_tries.allow(&id, self.now as f64) {
+                // Counted by the email too, from wherever it's tried, and
+                // one that signs in to nothing just the same: were it not,
+                // a refusal would say which emails have an account.
+                let now = self.now as f64;
+                let counted = if record.is_some() { self.password_tries.allow(&id, now) } else { self.unknown_tries.allow_unless_full(&id, now) };
+                if !counted {
                     self.stats.limited += 1;
                     return self.deny(conn, limits::TOO_MANY_FOR_EMAIL);
                 }
@@ -873,12 +896,11 @@ impl<S: Storage> Hub<S> {
     }
 
     /// What a logged-in device asks beside its rooms: pairings, recovery.
-    fn ready_message(&mut self, conn: ConnId, account: Vec<u8>, me: Vec<u8>, c: Carnet) -> Vec<Out> {
+    fn ready_message(&mut self, conn: ConnId, account: Vec<u8>, me: Vec<u8>, c: Carnet, rng: &mut impl Random) -> Vec<Out> {
         match c {
             Carnet::PairOpen => {
                 let mut out = self.end_pairing_of(conn, "another pairing opened");
-                // The smallest number free: codes stay short.
-                let nameplate = (1..).find(|n| !self.pairings.contains_key(n)).expect("a free number");
+                let nameplate = self.free_nameplate(rng);
                 self.pairings.insert(nameplate, Pairing { opener: conn, joiner: None, approved: false });
                 self.stats.pairings += 1;
                 out.push(carnet(conn, Carnet::PairOpened { nameplate }));
@@ -892,7 +914,7 @@ impl<S: Storage> Hub<S> {
                 }
                 p.approved = true;
                 // The device in vouches for it; the next login is its own.
-                if self.store.add_device(&account, &device, public).is_err() {
+                if self.device_added(&account, &device, public).is_err() {
                     return self.end_pairing_of(conn, "the server could not keep the new device");
                 }
                 Vec::new()
@@ -1583,6 +1605,21 @@ impl<S: Storage> Hub<S> {
         out
     }
 
+    /// A nameplate no pairing open has: four digits, at random, so a
+    /// stranger joining numbers it guesses (which spends a pairing, right
+    /// code or not) seldom finds one open; the smallest free past them in
+    /// the unlikely case that tries come up taken.
+    fn free_nameplate(&self, rng: &mut impl Random) -> u32 {
+        for _ in 0..32 {
+            let [a, b, c, d]: [u8; 4] = rng.bytes();
+            let n = NAMEPLATES.start() + u32::from_be_bytes([a, b, c, d]) % (NAMEPLATES.end() - NAMEPLATES.start() + 1);
+            if !self.pairings.contains_key(&n) {
+                return n;
+            }
+        }
+        (NAMEPLATES.end() + 1..).find(|n| !self.pairings.contains_key(n)).expect("a free number")
+    }
+
     /// A new device joins the pairing with this nameplate. One join per
     /// nameplate, right code or not: a guess spends it.
     fn join(&mut self, conn: ConnId, nonce: [u8; 32], nameplate: u32, pake: Vec<u8>) -> Vec<Out> {
@@ -1656,7 +1693,7 @@ impl<S: Storage> Hub<S> {
         if device.is_empty() || device.len() > MAX_DEVICE_ID || !verify(&public, &m, &signature) {
             return self.deny(conn, "not that recovery code's signature");
         }
-        if self.store.add_device(&account, &device, device_public).is_err() {
+        if self.device_added(&account, &device, device_public).is_err() {
             return self.deny(conn, "the server could not keep the new device");
         }
         self.stats.recoveries += 1;

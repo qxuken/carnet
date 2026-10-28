@@ -3,8 +3,8 @@
 //! with no I/O, like the session: frames in, frames out.
 //!
 //! **Pairing.** The device in opens a pairing; the server gives it a
-//! nameplate, a small number, and the device picks six random digits: the
-//! code is both, `47-381095`. The new device types it. Each side starts
+//! nameplate, four digits at random, and the device picks six random
+//! digits: the code is both, `4721-381095`. The new device types it. Each side starts
 //! SPAKE2 with the whole code as its password, and the server relays their
 //! messages. From those it learns nothing it can use: the two sides end
 //! with one key only if their codes matched, and a server guessing the
