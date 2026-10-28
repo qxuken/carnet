@@ -759,7 +759,7 @@ Apps update when their owners let them, and a self-hosted server when its owner 
 
 - A protocol is supported for **12 months after the release that replaced it**, or two protocols back, whichever is longer.
 - Dropping one takes two releases. First raise `DEPRECATED` past it, so its apps ask for an update while still syncing. A release or more later, raise `OLDEST`.
-- Before raising `OLDEST`, check the server's metrics. `carnet_sockets_by_protocol` shows how many logged-in sockets still speak each protocol. `carnet_sockets_by_app` and `carnet_logins_by_app_total` show which app and version they're on: the app adds `&app=desktop-macos&version=0.1.3` (or `web`, `web-installed`) to its address. At most 64 app–version pairs are counted apart; the rest are counted as `other`.
+- Before raising `OLDEST`, check the server's metrics. `carnet_sockets_by_protocol` shows how many logged-in sockets still speak each protocol. `carnet_sockets_by_app` and `carnet_logins_by_app_total` show which app and version they're on: the app adds `&app=desktop-macos&version=0.1.4` (or `web`, `web-installed`) to its address. At most 64 app–version pairs are counted apart; the rest are counted as `other`.
 
 **What's stored is versioned separately from the wire.** The server's SQLite and Postgres layouts carry their own schema version and upgrade themselves when a newer server opens them. Notes are Loro documents, which keep their own compatibility. The apps' own stores follow one rule: **no stamp means layout 1; an older one is brought up a step at a time; a newer one is refused and left as it is.**
 
