@@ -118,6 +118,12 @@ pub enum Glyph {
     EyeOff,
     /// A dropped first letter: a tall A, lines beside it and under it.
     Initial,
+    /// Open in its own app: an arrow out of the corner of a box.
+    External,
+    /// Copy: a sheet over another.
+    Copy,
+    /// Copy the path: the sheets, a slash on the one in front.
+    CopyPath,
 }
 
 // The rounded frames several icons share, corners of radius 1.5.
@@ -128,6 +134,11 @@ const CLOUD: &str = "M7.5 18.5h9.5a3 3 0 1 0-.23-5.99a5 5 0 1 0-9.74-.98A3.5 3.5
 /// The cloud, struck through its middle: the stroke the same length past
 /// each side, the outline parted where it crosses.
 const CLOUD_OFF: &str = "M15.81 18.5H7.5A3.5 3.5 0 0 1 7.03 11.53A5 5 0 0 1 7.14 9.83M8.83 7.14A5 5 0 0 1 16.77 12.51A3 3 0 0 1 19.16 17.46M5.5 6L20 20.5";
+/// A sheet in front (x 8–19.5, y 8.5–20) and the edge of one behind it.
+const COPY: &str = "M9.5 8.5h8.5a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z \
+                    M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2";
+const COPY_PATH: &str = "M9.5 8.5h8.5a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z \
+                         M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2 M15.5 11.5l-3.5 6";
 const FRAME_COL: &str ="M5 3.5h6a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5z ";
 
 impl Glyph {
@@ -296,6 +307,12 @@ impl Glyph {
             ),
             Passkey => ("M5 16.5v-4.5a7 7 0 0 1 14 0v2 M8.5 19.5v-7.5a3.5 3.5 0 0 1 7 0v5 M12 12v8", ""),
             Initial => ("M3.5 14.5L7.25 4.5l3.75 10 M4.9 10.8h4.7 M14 5.5h6.5 M14 10h6.5 M14 14.5h6.5 M3.5 19h17", ""),
+            External => (
+                "M13.5 4.5h6v6 M19.5 4.5l-8.5 8.5 M17.5 13.5v4.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V8A1.5 1.5 0 0 1 6 6.5h4.5",
+                "",
+            ),
+            Copy => (COPY, ""),
+            CopyPath => (COPY_PATH, ""),
             Link => (
                 "M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1 M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1",
                 "",
@@ -317,7 +334,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 73] = [
+    pub const ALL: [Glyph; 76] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Underline, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -328,7 +345,7 @@ impl Glyph {
         Glyph::Download, Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
         Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
         Glyph::TableHeader, Glyph::ChevronRight, Glyph::Attach,
-        Glyph::RowUp, Glyph::RowDown, Glyph::ColLeft, Glyph::ColRight,
+        Glyph::RowUp, Glyph::RowDown, Glyph::ColLeft, Glyph::ColRight, Glyph::External, Glyph::Copy, Glyph::CopyPath,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.

@@ -304,6 +304,10 @@ pub enum Msg {
     /// The selected picture beside the words (1 left, 2 right) or on its
     /// own line (0).
     Float { to: u64 },
+    /// A file's tool on its tile, the one chosen or beside the caret
+    /// (app_chrome.rs `FILE_*`): open, show in folder, copy, copy path,
+    /// remove.
+    FileTool { what: u64 },
     /// The selected picture, the user's own file, taken into the
     /// attachments folder: moved (0), every note following it, or copied
     /// (1), for this note alone.
@@ -714,6 +718,10 @@ pub struct Carnet {
     blur: bool,
     /// Text to put on the clipboard on the next frame, and its HTML.
     clip_out: Option<(String, Option<String>)>,
+    /// The Markdown Carnet last put on the clipboard, and the folder of the
+    /// note it came from: a line of files pasted into a note in another
+    /// folder has its links made from there (`pasted_here`).
+    clip_md: Option<(String, String)>,
     /// A picture to put on the clipboard on the next frame: its size and
     /// straight RGBA.
     picture_out: Option<(u32, u32, Vec<u8>)>,
@@ -1338,6 +1346,7 @@ impl Carnet {
             step: None,
             blur: false,
             clip_out: None,
+            clip_md: None,
             picture_out: None,
             pending_menu: None,
             list_view: false,
@@ -1809,6 +1818,11 @@ impl Carnet {
             if self.notice.as_ref().is_some_and(|n| n.undo.as_ref().is_some_and(Undo::is_edit)) {
                 self.notice = None;
             }
+            // Words typed onto a line of their own (beside a line of
+            // files, a picture): that line's step, so the rest of the
+            // word typed there is the same one undo.
+            let after = self.caret.head.slot.block;
+            let block = if step == Step::Typing && after != block && !before.blocks.iter().any(|b| b.id == after) { after } else { block };
             self.histories.entry(id).or_default().record(step, block, before);
             self.edited();
         } else {
@@ -3609,6 +3623,7 @@ impl Carnet {
                 | Msg::Tint { .. }
                 | Msg::TintMenu { .. }
                 | Msg::Float { .. }
+                | Msg::FileTool { .. }
                 | Msg::IntoCarnet { .. }
                 | Msg::LinkAct { .. }
                 | Msg::CloseLink
@@ -4017,6 +4032,7 @@ impl Carnet {
                     self.edit(Step::Other, |d, _| page::set_image_float(d, id, to));
                 }
             }
+            Msg::FileTool { what } => self.file_tool(what),
             Msg::Slash { index } => self.run_slash(index as usize),
             Msg::FoldFolder { index } => {
                 if let Some(f) = self.fold_target(index) {
@@ -4162,6 +4178,7 @@ impl Carnet {
             Some(p) => format!("file:///{}", p.display().to_string().replace('\\', "/").trim_start_matches('/')),
             None => src.to_string(),
         });
+        self.clip_md = Some((md.clone(), folder.to_string()));
         self.clip_out = Some((md, Some(html)));
     }
 

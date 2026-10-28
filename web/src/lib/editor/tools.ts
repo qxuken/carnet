@@ -7,9 +7,10 @@
 /// What a block becomes (its kind, a paragraph's dropped first letter);
 /// a list's in and out and a to-do's tick; the words' styles; what to put
 /// in (a table, a divider, pictures and files); the block's own moves (up,
-/// down, away); a table's rows and columns; a picture's place and size;
-/// and Undo, the web's own, for a phone with no keys.
-export type Group = 'turn' | 'list' | 'styles' | 'insert' | 'clip' | 'moves' | 'table' | 'place' | 'undo';
+/// down, away); a table's rows and columns; a picture's place and size; a
+/// file's, on a line of files (open it, copy it, take it out); and Undo,
+/// the web's own, for a phone with no keys.
+export type Group = 'turn' | 'list' | 'styles' | 'insert' | 'clip' | 'moves' | 'table' | 'place' | 'file' | 'undo';
 
 /// The groups for `kind` (`PageEditor.kind_here`), in the strip's order:
 /// a set's own first, then the styles, what to put in and the moves, in
@@ -34,6 +35,10 @@ export function toolSet(kind: string, holds: number): Group[] {
       return ['moves', 'insert', 'undo'];
     case 'picture':
       return ['place', 'moves', 'insert', 'undo'];
+    // A file on a line of files, chosen or the caret beside it: its own,
+    // the line's moves (up and down: Remove is the file's), what to put in.
+    case 'file':
+      return ['file', 'moves', 'insert', 'undo'];
   }
   // A selection over blocks of different kinds: what applies to any.
   const out: Group[] = [];
@@ -43,6 +48,20 @@ export function toolSet(kind: string, holds: number): Group[] {
   out.push('moves', 'undo');
   return out;
 }
+
+/// The toolbar's names for its sets, as a screen reader says them: the
+/// desktop's (`ToolSet::label`).
+export const SET_NAMES: Record<string, string> = {
+  title: 'Insert tools',
+  words: 'Text tools',
+  list: 'List tools',
+  table: 'Table tools',
+  code: 'Code block tools',
+  divider: 'Divider tools',
+  picture: 'Picture tools',
+  file: 'File tools',
+  blocks: 'Block tools',
+};
 
 /// Of a block's kinds, those a list's set offers: its own and back to a
 /// paragraph (each kind's tool, pressed again, is that). A heading or a

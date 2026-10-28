@@ -60,7 +60,7 @@ describe('a line of files', () => {
     ]);
   });
 
-  it('loses a tile whole to Backspace, and is words again once typed beside', () => {
+  it('loses a tile whole to Backspace, and keeps a row of its own when typed beside', () => {
     const e = open(`# T\n\n${LINE}\n`);
     e.update({ selection: { anchor: e.line(2).to } });
     // The page's Backspace (page.ts's keymap runs it), shown.
@@ -71,10 +71,31 @@ describe('a line of files', () => {
     const e2 = open(`# T\n\n${LINE}\n`);
     const end = e2.line(2).to;
     e2.update({ selection: { anchor: end } });
+    // Typed after the last tile, as CodeMirror hands it over: a paragraph
+    // of its own under the line, the space before it nothing; the tiles
+    // stay tiles, and the caret is on the new line.
     e2.update({ changes: { from: end, insert: ' x' }, userEvent: 'input.type', selection: { anchor: end + 2 } });
-    expect(e2.pe.markdown()).toBe(`# T\n\n${LINE} x\n`);
-    expect(e2.state().doc.line(2).text).toBe('report.pdf README x');
-    expect(e2.look(2).tl).toEqual([]);
+    expect(e2.pe.markdown()).toBe(`# T\n\n${LINE}\n\nx\n`);
+    expect(e2.state().doc.line(2).text).toBe('[ [');
+    expect(e2.state().doc.line(3).text).toBe('x');
+    expect(e2.look(2).tl.length).toBe(2);
+    expect(e2.state().selection.main.head).toBe(e2.line(3).to);
+    // Before the first: a paragraph above it.
+    const e3 = open(`# T\n\n${LINE}\n`);
+    const start = e3.line(2).from;
+    e3.update({ selection: { anchor: start } });
+    e3.update({ changes: { from: start, insert: 'y' }, userEvent: 'input.type', selection: { anchor: start + 1 } });
+    expect(e3.pe.markdown()).toBe(`# T\n\ny\n\n${LINE}\n`);
+  });
+
+  it('pastes a tile copied as a row of its own, never among the words', () => {
+    const e = open(`# T\n\n${LINE}\n\nSome words here\n`);
+    e.pe.select(1, 0, 1, 1);
+    const md = e.pe.tile_copy();
+    expect(md).toBe('[report.pdf](attachments/report.pdf)');
+    e.pe.select(2, 4, 2, 4);
+    expect(e.pe.paste(md!)).toBe(true);
+    expect(e.pe.markdown()).toBe(`# T\n\n${LINE}\n\nSome words here\n\n${md}\n`);
   });
 
   it('goes in on a line of its own when a file is picked', () => {

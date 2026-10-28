@@ -2281,6 +2281,7 @@ impl Carnet {
                 let pasted = std::mem::take(&mut self.paste_pending) || t.pasted;
                 self.preedit = None;
                 if pasted {
+                    let s = self.pasted_here(s);
                     self.edit(Step::Other, |d, c| page::paste(d, c, &s));
                 } else {
                     // Writing on: the colour picker has been left behind.
@@ -2335,25 +2336,43 @@ impl Carnet {
             MenuItem::new(label).id(Act::Page { what: action.into() })
         };
         let picture = self.picture_at_caret().is_some();
+        let tile = page::tile_at(doc, self.caret);
         let mut items = Vec::new();
-        if let Some((_, _, url)) = page::link_at(doc, self.caret) {
+        if let Some(f) = &tile {
+            // A tile's file: opened, copied as a line of its own (a paste
+            // puts it in as a row of tiles), its full path, the link taken
+            // off its name, where it is on the disk.
+            let here = self.tile_file().is_some();
+            items.extend([
+                item("Open link", "open-link").enabled(carnet_core::export::safe_href(&f.target).is_some()),
+                item("Copy", "copy-tile").accel("mod+c"),
+                item("Copy path", "copy-path-file"),
+            ]);
+            // KUI-CLIPBOARD-FILES: "Copy file", the file itself on the
+            // clipboard to paste into Explorer, Finder or a mail, goes here
+            // (and as a tool in the file set, app_chrome.rs) once kui can
+            // put files there: alpha.69 writes text, HTML or an image
+            // only, and `set_clipboard_files(paths)` has been asked of it.
+            // Its action then hands kui `self.tile_file()` on the next
+            // frame, as `copy-path-file` hands it the path through
+            // `clip_out`. Not offered till then: nothing is faked.
+            items.extend([item("Remove link", "unlink"), item(super::reveal_label(), "reveal-file").enabled(here), MenuItem::separator()]);
+        } else if let Some((_, _, url)) = page::link_at(doc, self.caret) {
             // Only a link a note may follow is offered to open (export.rs
             // `safe_href`): a `javascript:` one isn't, as on the web.
             items.extend([
                 item("Open link", "open-link").enabled(carnet_core::export::safe_href(&url).is_some()),
                 item("Copy link address", "copy-link"),
                 item("Remove link", "unlink"),
+                MenuItem::separator(),
             ]);
-            // A tile's file, where it is on the disk.
-            if page::chosen_tile(doc, self.caret).is_some() {
-                let here = self.store.linked_file(&self.page_folder(), &url).is_some();
-                items.push(item(super::reveal_label(), "reveal-file").enabled(here));
-            }
-            items.push(MenuItem::separator());
+        }
+        items.push(item("Cut", "cut").accel("mod+x").enabled(selected || picture));
+        // A tile's Copy is its own, above.
+        if tile.is_none() {
+            items.push(item("Copy", "copy").accel("mod+c").enabled(selected || picture));
         }
         items.extend([
-            item("Cut", "cut").accel("mod+x").enabled(selected || picture),
-            item("Copy", "copy").accel("mod+c").enabled(selected || picture),
             item("Paste", "paste").accel("mod+v"),
             item("Select all", "all").accel("mod+a"),
             item("Copy note as Markdown", "copy-note"),
@@ -2525,19 +2544,15 @@ impl Carnet {
                     self.error = Some(format!("Couldn't open the folder: {e}"));
                 }
             }
-            "reveal-file" => {
-                let folder = self.store.notes[self.current].folder.clone();
-                if let Some(p) = page::link_at(self.doc(), self.caret).and_then(|(_, _, url)| self.store.linked_file(&folder, &url))
-                    && let Err(e) = store::reveal(&p)
-                {
-                    self.error = Some(format!("Couldn't open the folder: {e}"));
-                }
-            }
+            "reveal-file" => self.file_tool(super::chrome::FILE_REVEAL),
+            "copy-tile" => self.file_tool(super::chrome::FILE_COPY),
+            "copy-path-file" => self.file_tool(super::chrome::FILE_PATH),
             "all" => {
                 let all = page::select_all(self.doc());
                 self.move_to(all);
             }
             "link" => self.open_link_editor(),
+            "open-link" if page::tile_at(self.doc(), self.caret).is_some() => self.file_tool(super::chrome::FILE_OPEN),
             "open-link" => {
                 if let Some((_, _, url)) = page::link_at(self.doc(), self.caret) {
                     self.open_url(&url);
@@ -2606,6 +2621,74 @@ impl Carnet {
                 }
             }
         }
+    }
+
+    /// The file of the tile a file's tools act on (`page::tile_at`: the one
+    /// chosen, or the one the caret is beside), where it is on this disk;
+    /// `None` when it isn't here.
+    pub(super) fn tile_file(&self) -> Option<std::path::PathBuf> {
+        let f = page::tile_at(self.doc(), self.caret)?;
+        self.store.linked_file(&self.page_folder(), &f.target)
+    }
+
+    /// A file's tool, from the toolbar or the tile's menu, on the tile
+    /// chosen or the one the caret is beside (app_chrome.rs `FILE_*`).
+    /// Open as a press on it opens it (one that could run asked about
+    /// first); Show in folder; Copy, its link as a line of its own, which a
+    /// paste anywhere in a note puts in as a row of tiles; Copy path, the
+    /// file's full path on this computer, as it writes paths; Remove, the
+    /// tile taken out of the note, its line with it when it was the last.
+    pub(super) fn file_tool(&mut self, what: u64) {
+        use super::chrome::{FILE_COPY, FILE_OPEN, FILE_PATH, FILE_REMOVE, FILE_REVEAL};
+        let Some(f) = page::tile_at(self.doc(), self.caret) else { return };
+        self.focus_page = true;
+        self.editing = true;
+        let folder = self.store.notes[self.current].folder.clone();
+        match what {
+            FILE_OPEN => self.open_url(&f.target),
+            FILE_REVEAL => {
+                if let Some(p) = self.tile_file()
+                    && let Err(e) = store::reveal(&p)
+                {
+                    self.error = Some(format!("Couldn't open the folder: {e}"));
+                }
+            }
+            FILE_COPY => {
+                if let Some(md) = page::tile_markdown(self.doc(), self.caret) {
+                    self.copy_markdown(md, &folder);
+                    self.say = Some(format!("{} copied", f.name));
+                }
+            }
+            FILE_PATH => match self.store.resolve(&folder, &f.target) {
+                Some(p) => {
+                    self.clip_out = Some((store::native_path(&p).display().to_string(), None));
+                    self.say = Some("Path copied".into());
+                }
+                None => self.error = Some(format!("\u{201c}{}\u{201d} has no path on this computer", f.name)),
+            },
+            FILE_REMOVE if self.edit(Step::Other, page::remove_tile) => self.notify("Removed", Some(Undo::Edit)),
+            _ => {}
+        }
+    }
+
+    /// Text pasted, as it goes in here: a line of files Carnet copied from
+    /// a note in another folder has its links made from this note's folder,
+    /// so they reach the same files (`../attachments/…` from `Work`). Any
+    /// other text as it is.
+    pub(super) fn pasted_here(&self, s: String) -> String {
+        let Some((md, from)) = &self.clip_md else { return s };
+        let here = &self.store.notes[self.current].folder;
+        if from == here || s.replace("\r\n", "\n").trim() != md.trim() {
+            return s;
+        }
+        let Some(links) = carnet_core::doc::file_line(md.trim()) else { return s };
+        // Each from here, as a file put in here is linked (its escapes
+        // the link's own to write).
+        let moved: Option<Vec<(String, String)>> = links
+            .iter()
+            .map(|f| Some((f.name.clone(), store::decode_src(&self.store.src_for(here, &self.store.resolve(from, &f.target)?, false)))))
+            .collect();
+        moved.map_or(s, |l: Vec<(String, String)>| page::links_markdown(&l))
     }
 
     /// The page's key handling, for tests that need a press the driver

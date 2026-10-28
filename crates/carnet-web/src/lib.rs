@@ -1264,10 +1264,30 @@ impl PageEditor {
     }
 
     /// Links to files, each `names[i]` to `srcs[i]` as the note links it,
-    /// put in at the caret among its words (a document picked or dropped).
+    /// put in on a line of their own after the caret's (a document picked
+    /// or dropped), a tile each.
     pub fn insert_links(&mut self, names: Vec<String>, srcs: Vec<String>) -> bool {
         let links: Vec<(String, String)> = names.into_iter().zip(srcs).collect();
         self.e.insert_links(&links)
+    }
+
+    /// The tile the file tools act on (the one chosen, or the one the
+    /// caret is beside), as JSON `[name, href, kind]`; none off a line of
+    /// files.
+    pub fn tile_here(&self) -> Option<String> {
+        self.e.tile_here().map(|(name, href, kind)| format!("[{},{},{}]", json(&name), json(&href), json(&kind)))
+    }
+
+    /// That tile's Markdown, a line of files of its own: what Copy puts on
+    /// the clipboard, which a paste puts in as a row of tiles.
+    pub fn tile_copy(&self) -> Option<String> {
+        self.e.tile_copy()
+    }
+
+    /// That tile taken out of the note, its line with it when it was the
+    /// last.
+    pub fn remove_tile(&mut self) -> bool {
+        self.e.remove_tile()
     }
 
     /// The `/` menu, while the caret ends a `/word` line, as JSON:
