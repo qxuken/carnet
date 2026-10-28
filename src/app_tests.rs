@@ -1675,17 +1675,29 @@ fn a_tile_has_tools_of_its_own() {
     assert_eq!(texts(&app)[1], "[report.pdf](attachments/report.pdf)");
     key_with(&mut app, &mut d, "z", CTRL);
     assert_eq!(texts(&app)[1], line);
-    // The menu: Copy and Copy path, never "Copy link address", nor a
-    // second Copy; Show in folder, Remove link and Open link as they were.
+    // The menu: Copy, Copy file and Copy path, never "Copy link address",
+    // nor a second Copy; Show in folder, Remove link and Open link as they
+    // were.
     app.caret = page::Caret { anchor: page::Pos { slot, byte: 0 }, head: page::Pos { slot, byte: ea } };
     let menu: Vec<String> = app.page_menu().iter().map(|i| i.label.clone()).collect();
-    for want in ["Open link", "Copy", "Copy path", "Remove link", super::reveal_label(), "Paste"] {
+    for want in ["Open link", "Copy", "Copy file", "Copy path", "Remove link", super::reveal_label(), "Paste"] {
         assert!(menu.iter().any(|m| m == want), "{want} in {menu:?}");
     }
-    assert!(!menu.iter().any(|m| m == "Copy link address" || m == "Copy file"), "{menu:?}");
+    assert!(!menu.iter().any(|m| m == "Copy link address"), "{menu:?}");
     assert_eq!(menu.iter().filter(|m| *m == "Copy").count(), 1, "{menu:?}");
     app.page_action("copy-path-file");
     assert_eq!(app.clip_out.as_ref().map(|c| std::path::PathBuf::from(&c.0)), Some(store::native_path(&dir.join("attachments/report.pdf"))));
+    // Copy file: the file itself, its whole path, as a file manager copies
+    // one (a headless run keeps the paths as its clipboard's text).
+    d_frame_twice(&mut app, &mut d);
+    let _ = d.core.take_menu_actions();
+    press(&mut app, &mut d, "t-fclip");
+    let files = d.core.take_menu_actions().into_iter().find_map(|a| match a {
+        kui_native::MenuAction::SetClipboardFiles { paths } => Some(paths),
+        _ => None,
+    });
+    let want = store::native_path(&dir.join("attachments").join("report.pdf")).display().to_string();
+    assert_eq!(files.map(|p| p.into_iter().map(|p| p.to_string()).collect::<Vec<_>>()), Some(vec![want]));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }

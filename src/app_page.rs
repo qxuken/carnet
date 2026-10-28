@@ -2340,23 +2340,19 @@ impl Carnet {
         let mut items = Vec::new();
         if let Some(f) = &tile {
             // A tile's file: opened, copied as a line of its own (a paste
-            // puts it in as a row of tiles), its full path, the link taken
-            // off its name, where it is on the disk.
+            // puts it in as a row of tiles), the file itself (to paste into
+            // a file manager or a mail), its full path, the link taken off
+            // its name, where it is on the disk.
             let here = self.tile_file().is_some();
             items.extend([
                 item("Open link", "open-link").enabled(carnet_core::export::safe_href(&f.target).is_some()),
                 item("Copy", "copy-tile").accel("mod+c"),
+                item("Copy file", "copy-file").enabled(here),
                 item("Copy path", "copy-path-file"),
+                item("Remove link", "unlink"),
+                item(super::reveal_label(), "reveal-file").enabled(here),
+                MenuItem::separator(),
             ]);
-            // KUI-CLIPBOARD-FILES: "Copy file", the file itself on the
-            // clipboard to paste into Explorer, Finder or a mail, goes here
-            // (and as a tool in the file set, app_chrome.rs) once kui can
-            // put files there: alpha.69 writes text, HTML or an image
-            // only, and `set_clipboard_files(paths)` has been asked of it.
-            // Its action then hands kui `self.tile_file()` on the next
-            // frame, as `copy-path-file` hands it the path through
-            // `clip_out`. Not offered till then: nothing is faked.
-            items.extend([item("Remove link", "unlink"), item(super::reveal_label(), "reveal-file").enabled(here), MenuItem::separator()]);
         } else if let Some((_, _, url)) = page::link_at(doc, self.caret) {
             // Only a link a note may follow is offered to open (export.rs
             // `safe_href`): a `javascript:` one isn't, as on the web.
@@ -2547,6 +2543,7 @@ impl Carnet {
             "reveal-file" => self.file_tool(super::chrome::FILE_REVEAL),
             "copy-tile" => self.file_tool(super::chrome::FILE_COPY),
             "copy-path-file" => self.file_tool(super::chrome::FILE_PATH),
+            "copy-file" => self.file_tool(super::chrome::FILE_CLIP),
             "all" => {
                 let all = page::select_all(self.doc());
                 self.move_to(all);
@@ -2635,11 +2632,12 @@ impl Carnet {
     /// chosen or the one the caret is beside (app_chrome.rs `FILE_*`).
     /// Open as a press on it opens it (one that could run asked about
     /// first); Show in folder; Copy, its link as a line of its own, which a
-    /// paste anywhere in a note puts in as a row of tiles; Copy path, the
-    /// file's full path on this computer, as it writes paths; Remove, the
-    /// tile taken out of the note, its line with it when it was the last.
+    /// paste anywhere in a note puts in as a row of tiles; Copy file, the
+    /// file itself, as a file manager copies one; Copy path, the file's
+    /// full path on this computer, as it writes paths; Remove, the tile
+    /// taken out of the note, its line with it when it was the last.
     pub(super) fn file_tool(&mut self, what: u64) {
-        use super::chrome::{FILE_COPY, FILE_OPEN, FILE_PATH, FILE_REMOVE, FILE_REVEAL};
+        use super::chrome::{FILE_CLIP, FILE_COPY, FILE_OPEN, FILE_PATH, FILE_REMOVE, FILE_REVEAL};
         let Some(f) = page::tile_at(self.doc(), self.caret) else { return };
         self.focus_page = true;
         self.editing = true;
@@ -2659,6 +2657,13 @@ impl Carnet {
                     self.say = Some(format!("{} copied", f.name));
                 }
             }
+            FILE_CLIP => match self.tile_file() {
+                Some(p) => {
+                    self.files_out = Some(vec![store::native_path(&p).display().to_string()]);
+                    self.say = Some(format!("{} copied as a file", f.name));
+                }
+                None => self.error = Some(format!("\u{201c}{}\u{201d} isn't on this device", f.name)),
+            },
             FILE_PATH => match self.store.resolve(&folder, &f.target) {
                 Some(p) => {
                     self.clip_out = Some((store::native_path(&p).display().to_string(), None));

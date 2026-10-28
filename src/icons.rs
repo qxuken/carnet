@@ -124,6 +124,9 @@ pub enum Glyph {
     Copy,
     /// Copy the path: the sheets, a slash on the one in front.
     CopyPath,
+    /// Copy the file itself: the sheets, the one in front a page with its
+    /// corner folded.
+    CopyFile,
 }
 
 // The rounded frames several icons share, corners of radius 1.5.
@@ -139,6 +142,9 @@ const COPY: &str = "M9.5 8.5h8.5a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5
                     M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2";
 const COPY_PATH: &str = "M9.5 8.5h8.5a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z \
                          M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2 M15.5 11.5l-3.5 6";
+/// The sheet in front as a page, its top right corner folded over.
+const COPY_FILE: &str = "M9.5 8.5h6l4 4v6a1.5 1.5 0 0 1-1.5 1.5H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z M15.5 8.5v4h4 \
+                         M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2";
 const FRAME_COL: &str ="M5 3.5h6a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5z ";
 
 impl Glyph {
@@ -313,6 +319,7 @@ impl Glyph {
             ),
             Copy => (COPY, ""),
             CopyPath => (COPY_PATH, ""),
+            CopyFile => (COPY_FILE, ""),
             Link => (
                 "M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1 M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1",
                 "",
@@ -334,7 +341,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 76] = [
+    pub const ALL: [Glyph; 77] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Underline, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -346,6 +353,7 @@ impl Glyph {
         Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
         Glyph::TableHeader, Glyph::ChevronRight, Glyph::Attach,
         Glyph::RowUp, Glyph::RowDown, Glyph::ColLeft, Glyph::ColRight, Glyph::External, Glyph::Copy, Glyph::CopyPath,
+        Glyph::CopyFile,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.

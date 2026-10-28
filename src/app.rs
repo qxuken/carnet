@@ -725,6 +725,9 @@ pub struct Carnet {
     /// A picture to put on the clipboard on the next frame: its size and
     /// straight RGBA.
     picture_out: Option<(u32, u32, Vec<u8>)>,
+    /// Files to put on the clipboard on the next frame, as a file
+    /// manager's Copy does.
+    files_out: Option<Vec<String>>,
     /// A context menu to open on the next frame: the node it is about,
     /// where, and what.
     pending_menu: Option<(Key, Vec2, MenuFor)>,
@@ -1111,6 +1114,7 @@ editor! {
     blur: bool,
     clip_out: Option<(String, Option<String>)>,
     picture_out: Option<(u32, u32, Vec<u8>)>,
+    files_out: Option<Vec<String>>,
     pending_menu: Option<(Key, Vec2, MenuFor)>,
     list_view: bool,
     settings_open: bool,
@@ -1348,6 +1352,7 @@ impl Carnet {
             clip_out: None,
             clip_md: None,
             picture_out: None,
+            files_out: None,
             pending_menu: None,
             list_view: false,
             folder: None,
@@ -5109,6 +5114,9 @@ impl Carnet {
         }
         if let Some((w, h, rgba)) = self.picture_out.take() {
             ui.set_clipboard_image(w, h, rgba);
+        }
+        if let Some(paths) = self.files_out.take() {
+            ui.set_clipboard_files(paths);
         }
         // Pictures the last frame didn't draw may go; a frame is asked
         // for when the next could, should nothing else draw one.

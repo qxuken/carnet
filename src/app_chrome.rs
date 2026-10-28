@@ -1158,9 +1158,8 @@ impl Carnet {
         }
         // A file on a line of tiles (the one chosen, or the caret beside):
         // what to do with it. Copy carries it as a line of its own, which a
-        // paste puts in as a row of tiles; Copy path its place on this
-        // computer. (Copy file, the file itself on the clipboard, waits on
-        // kui: see KUI-CLIPBOARD-FILES in app_page.rs.)
+        // paste puts in as a row of tiles; Copy file the file itself, for a
+        // file manager or a mail; Copy path its place on this computer.
         let mut file = Vec::new();
         if set == ToolSet::File {
             let here = self.tile_file().is_some();
@@ -1168,6 +1167,7 @@ impl Carnet {
                 ("t-fopen", Icon::External, "Open the file", "Open the file in its own app".to_string(), FILE_OPEN, here),
                 ("t-freveal", Icon::Folder, super::reveal_label(), super::reveal_label().to_string(), FILE_REVEAL, here),
                 ("t-fcopy", Icon::Copy, "Copy", keys::hint("Copy, to paste as a file of its own", "mod+c"), FILE_COPY, true),
+                ("t-fclip", Icon::CopyFile, "Copy file", "Copy the file itself, to paste in a folder or a mail".to_string(), FILE_CLIP, here),
                 ("t-fpath", Icon::CopyPath, "Copy path", "Copy the file's full path".to_string(), FILE_PATH, true),
                 ("t-fremove", Icon::Trash, "Remove", keys::hint("Remove the file from the note", "backspace"), FILE_REMOVE, true),
             ] {
@@ -1675,12 +1675,13 @@ impl ToolSet {
 
 /// What a file's tool does to the tile chosen, or the one the caret is
 /// beside (`Msg::FileTool`): opens it, shows it in its folder, copies it
-/// as a line of its own, copies its path, takes it out.
+/// as a line of its own, copies its path, takes it out, copies the file.
 pub(super) const FILE_OPEN: u64 = 0;
 pub(super) const FILE_REVEAL: u64 = 1;
 pub(super) const FILE_COPY: u64 = 2;
 pub(super) const FILE_PATH: u64 = 3;
 pub(super) const FILE_REMOVE: u64 = 4;
+pub(super) const FILE_CLIP: u64 = 5;
 
 /// How long the tools move after their set changes, seconds: well past
 /// their 140 ms ease, so they have arrived before it ends. (Faded for the
