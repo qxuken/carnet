@@ -808,7 +808,9 @@ mod tests {
         let t0 = SystemTime::now();
         let none = BTreeSet::new();
         assert!(s.sweep_files(&none, t0).unwrap().is_empty());
-        let swept = s.sweep_files(&none, t0 + 15 * DAY).unwrap();
+        // In the folder's order, which is the system's: sorted to compare.
+        let mut swept = s.sweep_files(&none, t0 + 15 * DAY).unwrap();
+        swept.sort();
         assert_eq!(swept, ["attachments/old.pdf", "attachments/old.rs", "attachments/pasted.png", "attachments/tool.sh"], "the unlinked files and the unshown picture");
         for kept in ["report.pdf", "README", "setup.exe"] {
             assert!(dir.join(ATTACHMENTS).join(kept).is_file(), "the linked {kept} stays");
