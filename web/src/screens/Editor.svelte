@@ -24,7 +24,7 @@
   import { opener } from '../lib/open.svelte';
   import { isMarkdownName } from '../lib/files';
   import { commands, follow as followSlash, hintOf, iconOf, slashHere, slashKeys, type Slash } from '../lib/editor/slash';
-  import { LIST_TURNS, toolSet } from '../lib/editor/tools';
+  import { LIST_TURNS, SET_NAMES, toolSet } from '../lib/editor/tools';
 
   let props: {
     key: string;
@@ -347,6 +347,35 @@
   ];
   const undoTool: Tool = { icon: () => 'undo', label: 'Undo', f: (pe) => pe.undo() };
 
+  /// A file on a line of files, chosen or the caret beside it, as the
+  /// desktop's file tools: opened from the vault (asked first if it could
+  /// run), copied as a line of files of its own, which a paste anywhere
+  /// in a note puts in as a row of tiles, or taken out. A browser has no
+  /// folder to show it in, nor a path of this computer's to copy.
+  const fileTools: Tool[] = [
+    {
+      icon: () => 'external',
+      label: 'Open the file',
+      f: (pe) => {
+        const t = pe.tile_here();
+        if (!t) return false;
+        const [name, href] = JSON.parse(t) as [string, string, string];
+        if (!opener.link(folderOf, href)) sync.say(`“${name}” isn’t in the notes`);
+        return false;
+      },
+    },
+    {
+      icon: () => 'copy',
+      label: 'Copy',
+      f: (pe) => {
+        const md = pe.tile_copy();
+        if (md) navigator.clipboard?.writeText(md).catch(() => sync.say("Couldn't copy the file"));
+        return false;
+      },
+    },
+    { icon: () => 'trash', label: 'Remove', f: (pe) => pe.remove_tile() },
+  ];
+
   /// The tools for what the caret is in, as on the desktop (tools.ts):
   /// never one that does nothing there. In a list, its kinds, not a
   /// heading, a quote or a first letter, which are a paragraph's.
@@ -363,28 +392,20 @@
           return insertTools;
         case 'clip':
           return [clipTool];
+        // On a line of files, its moves; Remove is the file's.
         case 'moves':
-          return moveTools;
+          return kind === 'file' ? moveTools.slice(0, 2) : moveTools;
         case 'table':
           return tableTools;
         case 'place':
           return placeTools;
+        case 'file':
+          return fileTools;
         case 'undo':
           return [undoTool];
       }
     }),
   );
-  /// A screen reader's name for the strip, as the desktop's: its set.
-  const SET_NAMES: Record<string, string> = {
-    title: 'Insert tools',
-    words: 'Text tools',
-    list: 'List tools',
-    table: 'Table tools',
-    code: 'Code block tools',
-    divider: 'Divider tools',
-    picture: 'Picture tools',
-    blocks: 'Block tools',
-  };
 
   /// What's written, sent; what came meanwhile, merged in.
   function send() {

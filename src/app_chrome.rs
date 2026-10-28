@@ -916,6 +916,10 @@ impl Carnet {
         if self.picture_here().is_some() {
             return ToolSet::Picture;
         }
+        // On a line of files, beside a tile or one chosen: its file's.
+        if page::tile_at(self.doc(), self.caret).is_some() {
+            return ToolSet::File;
+        }
         let (a, h) = (self.caret.anchor.slot, self.caret.head.slot);
         if h.cell.is_some() && a.block == h.block {
             return ToolSet::Table;
@@ -1152,6 +1156,31 @@ impl Carnet {
                 place.push(d);
             }
         }
+        // A file on a line of tiles (the one chosen, or the caret beside):
+        // what to do with it. Copy carries it as a line of its own, which a
+        // paste puts in as a row of tiles; Copy path its place on this
+        // computer. (Copy file, the file itself on the clipboard, waits on
+        // kui: see KUI-CLIPBOARD-FILES in app_page.rs.)
+        let mut file = Vec::new();
+        if set == ToolSet::File {
+            let here = self.tile_file().is_some();
+            for (key, icon, name, hint, what, can) in [
+                ("t-fopen", Icon::External, "Open the file", "Open the file in its own app".to_string(), FILE_OPEN, here),
+                ("t-freveal", Icon::Folder, super::reveal_label(), super::reveal_label().to_string(), FILE_REVEAL, here),
+                ("t-fcopy", Icon::Copy, "Copy", keys::hint("Copy, to paste as a file of its own", "mod+c"), FILE_COPY, true),
+                ("t-fpath", Icon::CopyPath, "Copy path", "Copy the file's full path".to_string(), FILE_PATH, true),
+                ("t-fremove", Icon::Trash, "Remove", keys::hint("Remove the file from the note", "backspace"), FILE_REMOVE, true),
+            ] {
+                let mut d = def(key, icon, name, hint, Msg::FileTool { what });
+                d.enabled = can;
+                if what == FILE_COPY {
+                    d.spec = Some("mod+c");
+                }
+                file.push(d);
+            }
+            // The line's moves: up and down, as other blocks'.
+            file.extend(moves.iter().take(2).cloned());
+        }
         // What the set shows, in order. Its own tools come first, at the
         // strip's start; the styles, what to put in and the block's moves
         // follow in the same order wherever they apply, so what the sets
@@ -1200,6 +1229,7 @@ impl Carnet {
                 place.extend(moves);
                 vec![place, insert]
             }
+            ToolSet::File => vec![file, insert],
         };
         groups.retain(|g| !g.is_empty());
         // The tools start where the text does, less what the strip's
@@ -1615,6 +1645,10 @@ pub(super) enum ToolSet {
     Divider,
     /// A picture: where it sits and its moves, and what to put in.
     Picture,
+    /// A file on a line of tiles, chosen or the caret beside it: open it,
+    /// show it in its folder, copy it (as a line of its own) or its path,
+    /// take it out; the line's moves; what to put in.
+    File,
     /// A selection over blocks of different kinds: what the block becomes,
     /// in and out where it has list items, the styles where it has words,
     /// the moves.
@@ -1633,10 +1667,20 @@ impl ToolSet {
             ToolSet::Code => "Code block tools",
             ToolSet::Divider => "Divider tools",
             ToolSet::Picture => "Picture tools",
+            ToolSet::File => "File tools",
             ToolSet::Blocks => "Block tools",
         }
     }
 }
+
+/// What a file's tool does to the tile chosen, or the one the caret is
+/// beside (`Msg::FileTool`): opens it, shows it in its folder, copies it
+/// as a line of its own, copies its path, takes it out.
+pub(super) const FILE_OPEN: u64 = 0;
+pub(super) const FILE_REVEAL: u64 = 1;
+pub(super) const FILE_COPY: u64 = 2;
+pub(super) const FILE_PATH: u64 = 3;
+pub(super) const FILE_REMOVE: u64 = 4;
 
 /// How long the tools move after their set changes, seconds: well past
 /// their 140 ms ease, so they have arrived before it ends. (Faded for the

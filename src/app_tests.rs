@@ -1452,11 +1452,12 @@ fn a_tile_opens_as_its_link_does() {
     d_frame_twice(&mut app, &mut d);
     assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((ea + 1, line.len())), "chosen by the right-click");
     let menu: Vec<String> = app.page_menu().iter().map(|i| i.label.clone()).collect();
-    for want in ["Open link", "Copy link address", "Remove link", super::reveal_label()] {
+    for want in ["Open link", "Copy", "Copy path", "Remove link", super::reveal_label()] {
         assert!(menu.iter().any(|m| m == want), "{want} in {menu:?}");
     }
-    app.page_action("copy-link");
-    assert_eq!(app.clip_out.as_ref().map(|c| c.0.as_str()), Some("attachments/setup.exe"));
+    assert!(!menu.iter().any(|m| m == "Copy link address"), "{menu:?}");
+    app.page_action("copy-tile");
+    assert_eq!(app.clip_out.as_ref().map(|c| c.0.as_str()), Some("[setup.exe](attachments/setup.exe)"));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }
@@ -1466,7 +1467,7 @@ fn a_tile_opens_as_its_link_does() {
 /// the line below comes onto the line of tiles; Backspace takes a tile
 /// whole, its link and the space before it, and Undo brings it back; a
 /// selection over one copies its Markdown; and words typed beside them
-/// make the line words again, the links as they were.
+/// go on a line of their own, the tiles as they were.
 #[test]
 fn a_tile_is_one_unit_to_the_keys() {
     let (mut app, mut d, dir) = body("tile-keys");
@@ -1510,13 +1511,206 @@ fn a_tile_is_one_unit_to_the_keys() {
     key(&mut app, &mut d, "delete");
     assert_eq!(texts(&app)[0], "[a.pdf](attachments/a.pdf)");
     key_with(&mut app, &mut d, "z", CTRL);
-    // Words typed at the end: words again, the links among them.
+    // Words typed at the end: a paragraph of their own after the tiles,
+    // the space before them nothing; the tiles stay tiles.
     app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
     type_in(&mut app, &mut d, " to read");
     d_frame_twice(&mut app, &mut d);
-    assert_eq!(texts(&app)[0], format!("{line} to read"));
-    assert!(!app.cell_pieces.contains_key(&slot));
-    assert_eq!(drawn_text(&app, &d, slot), "a.pdf b.zip to read");
+    assert_eq!(texts(&app), [line, "to read", "Below"]);
+    assert_eq!(app.cell_pieces.get(&slot).map(Vec::len), Some(2), "still two tiles");
+    assert_eq!(app.caret.head.slot, page::Slot::block(blocks(&app)[1].id), "the caret on the new line");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A line of files keeps a row of its own, as a picture on its own line
+/// does: a letter typed after its last tile starts a paragraph under it,
+/// one typed before its first a paragraph above it; Enter at its end, an
+/// empty line under it, the caret there; a space is nothing there; and
+/// Backspace from the line under it chooses its last tile, never joining
+/// the two. Each one undo.
+#[test]
+fn a_line_of_files_keeps_a_row_of_its_own() {
+    let (mut app, mut d, dir) = body("tile-row");
+    d.core.set_inspect(true);
+    let (outside, picked) = files_outside("tile-row", &[("a.pdf", 8), ("b.zip", 8)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+    assert_eq!(texts(&app), [line]);
+    let slot = page::Slot::block(blocks(&app)[0].id);
+    // After the last tile: a letter starts a paragraph under the line.
+    type_in(&mut app, &mut d, "N");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app), [line, "N"]);
+    type_in(&mut app, &mut d, "otes");
+    assert_eq!(texts(&app), [line, "Notes"], "then the words go on there");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app), [line], "undone");
+    // Before the first: a paragraph above it.
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    type_in(&mut app, &mut d, "Files:");
+    assert_eq!(texts(&app), ["Files:", line]);
+    // A space beside the tiles: nothing.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    type_in(&mut app, &mut d, " ");
+    assert_eq!(texts(&app), ["Files:", line]);
+    // Enter at its end: an empty line under it, the caret there.
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app), ["Files:", line, ""]);
+    assert_eq!(app.caret.head.slot, page::Slot::block(blocks(&app)[2].id));
+    type_in(&mut app, &mut d, "After");
+    d_frame_twice(&mut app, &mut d);
+    // Backspace at the start of the line under it: its last tile chosen,
+    // the lines apart; again, the tile goes.
+    app.caret = page::Caret::at(page::start(page::Slot::block(blocks(&app)[2].id)));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app), ["Files:", line, "After"]);
+    let sb = line.find(' ').unwrap() + 1;
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((sb, line.len())));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app), ["Files:", "[a.pdf](attachments/a.pdf)", "After"]);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.cell_pieces.get(&slot).map(Vec::len), Some(1), "a tile still");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A tile's own tools, on the toolbar while one is chosen or the caret is
+/// beside it ("File tools"): Open (a program asked about first), Show in
+/// folder, Copy, which a paste anywhere in a note puts in as a line of
+/// files of its own, Copy path, the file's full path as this computer
+/// writes one, and Remove; and the line's moves. Its menu has the same,
+/// and no "Copy link address".
+#[test]
+fn a_tile_has_tools_of_its_own() {
+    let (mut app, mut d, dir) = body("tile-tools");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "Intro words");
+    let (outside, picked) = files_outside("tile-tools", &[("report.pdf", 8), ("setup.exe", 8)]);
+    app.insert_files(&picked);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "Middle of the note");
+    d_frame_twice(&mut app, &mut d);
+    let line = "[report.pdf](attachments/report.pdf) [setup.exe](attachments/setup.exe)";
+    assert_eq!(texts(&app), ["Intro words", line, "Middle of the note"]);
+    let slot = page::Slot::block(blocks(&app)[1].id);
+    let ea = line.find(' ').unwrap();
+    // A click on the first chooses it: the file's tools.
+    click_tile(&mut app, &mut d, slot, 0, KeyMods::NONE);
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((0, ea)));
+    assert_eq!(app.tool_set, Some(chrome::ToolSet::File));
+    for k in ["t-fopen", "t-freveal", "t-fcopy", "t-fpath", "t-fremove", "t-up", "t-down", "t-attach"] {
+        assert!(d.key_of(k).is_some(), "the file's tools have {k}");
+    }
+    for k in ["t-text", "t-h1", "t-bold", "t-color", "t-del", "t-inline"] {
+        assert!(d.key_of(k).is_none(), "no {k} for a file");
+    }
+    let named = |d: &mut Drive, s: &str| d.core.access_tree().nodes.iter().any(|n| n.name.as_deref() == Some(s));
+    assert!(named(&mut d, "File tools"), "a screen reader hears what they are for");
+    // The caret beside the second, nothing chosen: its file's still.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.tool_set, Some(chrome::ToolSet::File));
+    assert_eq!(page::tile_at(app.doc(), app.caret).map(|f| f.name).as_deref(), Some("setup.exe"));
+    // Open: a program asks first; a PDF opens.
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    opened();
+    let press = |app: &mut Carnet, d: &mut Drive, k: &str| {
+        let key = d.key_of(k).unwrap_or_else(|| panic!("{k}"));
+        d.click_key(app, key);
+        d.frame(app);
+        d.frame(app);
+    };
+    press(&mut app, &mut d, "t-fopen");
+    assert!(opened().is_empty() && app.open_ask.is_some(), "setup.exe asks first");
+    key(&mut app, &mut d, "escape");
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fopen");
+    assert_eq!(opened(), [dir.join("attachments/report.pdf")]);
+    // Show in folder: the file, shown where it is.
+    store::REVEALED.with_borrow_mut(std::mem::take);
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-freveal");
+    assert_eq!(store::REVEALED.with_borrow_mut(std::mem::take), [dir.join("attachments/report.pdf")]);
+    // Copy path: the whole path, as this computer writes it.
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fpath");
+    let path = copied(&mut d).expect("a path copied");
+    assert_eq!(std::path::Path::new(&path), store::native_path(&dir.join("attachments").join("report.pdf")));
+    assert!(std::path::Path::new(&path).is_absolute() && std::path::Path::new(&path).is_file(), "{path}");
+    if cfg!(windows) {
+        assert!(!path.contains('/'), "Windows' own separators: {path}");
+    }
+    // Copy, then a paste in the middle of a paragraph: a second line of
+    // files, a row of its own after that paragraph, the words as they were.
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fcopy");
+    let md = copied(&mut d).expect("the tile copied");
+    assert_eq!(md, "[report.pdf](attachments/report.pdf)");
+    let middle = page::Slot::block(blocks(&app)[2].id);
+    app.caret = page::Caret::at(page::Pos { slot: middle, byte: 6 });
+    d.input(&mut app, InputEvent::Paste { text: md.clone(), marks: Default::default() });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app), ["Intro words", line, "Middle of the note", "[report.pdf](attachments/report.pdf)"]);
+    let pasted = page::Slot::block(blocks(&app)[3].id);
+    assert_eq!(app.cell_pieces.get(&pasted).map(Vec::len), Some(1), "drawn as a tile, on its own row");
+    // A copy over the words and a line of files: pasted, the tiles back.
+    let all = page::Caret { anchor: page::start(page::Slot::block(blocks(&app)[0].id)), head: page::end(app.doc(), slot) };
+    let both = page::copy(app.doc(), all).unwrap();
+    app.caret = page::Caret::at(page::end(app.doc(), pasted));
+    key(&mut app, &mut d, "enter");
+    d.input(&mut app, InputEvent::Paste { text: both, marks: Default::default() });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app)[4..], ["Intro words".to_string(), line.to_string()], "{:?}", texts(&app));
+    assert_eq!(app.cell_pieces.get(&page::Slot::block(blocks(&app)[5].id)).map(Vec::len), Some(2));
+    // Remove: that tile goes, with its space; Undo brings it back.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fremove");
+    assert_eq!(texts(&app)[1], "[report.pdf](attachments/report.pdf)");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app)[1], line);
+    // The menu: Copy and Copy path, never "Copy link address", nor a
+    // second Copy; Show in folder, Remove link and Open link as they were.
+    app.caret = page::Caret { anchor: page::Pos { slot, byte: 0 }, head: page::Pos { slot, byte: ea } };
+    let menu: Vec<String> = app.page_menu().iter().map(|i| i.label.clone()).collect();
+    for want in ["Open link", "Copy", "Copy path", "Remove link", super::reveal_label(), "Paste"] {
+        assert!(menu.iter().any(|m| m == want), "{want} in {menu:?}");
+    }
+    assert!(!menu.iter().any(|m| m == "Copy link address" || m == "Copy file"), "{menu:?}");
+    assert_eq!(menu.iter().filter(|m| *m == "Copy").count(), 1, "{menu:?}");
+    app.page_action("copy-path-file");
+    assert_eq!(app.clip_out.as_ref().map(|c| std::path::PathBuf::from(&c.0)), Some(store::native_path(&dir.join("attachments/report.pdf"))));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A line of files copied from a note in one folder and pasted into a
+/// note in another reaches the same files: its links are made from there.
+#[test]
+fn a_line_of_files_pasted_in_another_folder_still_reaches_its_files() {
+    let (mut app, mut d, dir) = body("tile-folders");
+    let (outside, picked) = files_outside("tile-folders", &[("plan.pdf", 8)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let slot = page::Slot::block(blocks(&app)[0].id);
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    app.file_tool(chrome::FILE_COPY);
+    d.frame(&mut app);
+    let md = copied(&mut d).expect("copied");
+    assert_eq!(md, "[plan.pdf](attachments/plan.pdf)");
+    // Into a note in Work.
+    app.store.notes[app.current].folder = "Work".into();
+    std::fs::create_dir_all(dir.join("Work")).unwrap();
+    app.caret = page::Caret::at(page::end(app.doc(), slot));
+    d.input(&mut app, InputEvent::Paste { text: md, marks: Default::default() });
+    d.frame(&mut app);
+    assert_eq!(texts(&app), ["[plan.pdf](attachments/plan.pdf) [plan.pdf](../attachments/plan.pdf)"]);
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }

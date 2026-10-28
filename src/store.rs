@@ -926,7 +926,6 @@ impl Store {
         let to = self.copy_in_file(from)?;
         Ok(relative(&self.folder_dir(folder), &to))
     }
-
     /// The files in an export's `Attachments` folders ([`picture_folders`](
     /// Self::picture_folders)) that notes link to move into the attachments
     /// folder, where pictures are kept and synced from, and the links follow
@@ -3307,8 +3306,30 @@ pub fn open_url(url: &str) -> io::Result<()> {
 /// Opens the OS file manager on `path`: a file selected in its folder, or a
 /// folder itself (kui's `show_in_folder`). Linux file managers have no
 /// common "select this file", so there it opens the folder.
+#[cfg(not(test))]
 pub fn reveal(path: &Path) -> io::Result<()> {
     kui_native::show_in_folder(&path.to_string_lossy()).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test had the file manager show, in order: nothing is shown.
+    pub static REVEALED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Shows `path` in its folder: in a test, kept in [`REVEALED`].
+#[cfg(test)]
+pub fn reveal(path: &Path) -> io::Result<()> {
+    REVEALED.with_borrow_mut(|r| r.push(path.to_path_buf()));
+    Ok(())
+}
+
+/// `p` written whole, as this system writes a path: its own separators
+/// (a note's link joined to its folder keeps the link's `/`), and each
+/// `.` and `..` read, so it names the file from the top of its disk
+/// (`C:\Users\me\Documents\Carnet\attachments\plan.pdf`).
+pub fn native_path(p: &Path) -> PathBuf {
+    path_parts(p).iter().collect()
 }
 
 /// `n` is the welcome note as [`welcome`] makes it (`fresh`, its

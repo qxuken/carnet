@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { initSync, PageEditor } from '../../wasm/carnet_web.js';
 import { tableKey } from './table';
-import { toolSet } from './tools';
+import { SET_NAMES, toolSet } from './tools';
 
 // No window here: what pictures.ts listens for, never sent.
 vi.hoisted(() => {
@@ -43,6 +43,22 @@ describe('the toolbar, as the desktop sets it', () => {
   it('over blocks of different kinds, what applies to any', () => {
     expect(at(1, 2, 2, 2)).toEqual(['turn', 'list', 'styles', 'moves', 'undo']);
     expect(at(3, 1, 4, 1)).toEqual(['turn', 'moves', 'undo']);
+  });
+
+  it('on a line of files, the file tools, for the tile chosen or beside the caret', () => {
+    const pe = new PageEditor('# T\n\nWords\n\n[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)\n');
+    pe.select(2, 1, 2, 0);
+    expect(pe.kind_here()).toBe('file');
+    expect(toolSet(pe.kind_here(), pe.blocks_here())).toEqual(['file', 'moves', 'insert', 'undo']);
+    expect(SET_NAMES[pe.kind_here()]).toBe('File tools');
+    expect(JSON.parse(pe.tile_here()!)).toEqual(['a.pdf', 'attachments/a.pdf', 'PDF']);
+    pe.select(2, 3, 2, 3);
+    expect(JSON.parse(pe.tile_here()!)[0]).toBe('b.zip');
+    expect(pe.remove_tile()).toBe(true);
+    expect(pe.markdown()).toBe('# T\n\nWords\n\n[a.pdf](attachments/a.pdf)\n');
+    pe.select(1, 2, 1, 2);
+    expect(pe.kind_here()).toBe('words');
+    expect(pe.tile_here()).toBeUndefined();
   });
 
   it('ticks a to-do from its tool', () => {

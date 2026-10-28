@@ -471,6 +471,106 @@ pub fn chosen_tile(doc: &Doc, c: Caret) -> Option<(usize, usize)> {
     tiles(doc, slot).into_iter().map(|f| f.at).find(|&at| at == ends)
 }
 
+/// The tile a file's tools act on (the toolbar's file set, the tile's
+/// menu): the one chosen, else the one the caret is beside on a line of
+/// tiles, as the page draws the caret: before the first, the first; right
+/// before a tile, that one; else the last one it is after. `None` off a
+/// line of tiles, or for a selection reaching past its line.
+pub fn tile_at(doc: &Doc, c: Caret) -> Option<doc::FileLink> {
+    let slot = c.head.slot;
+    if slot.cell.is_some() || c.anchor.slot != slot {
+        return None;
+    }
+    let tiles = tiles(doc, slot);
+    if let Some(at) = chosen_tile(doc, c) {
+        return tiles.into_iter().find(|f| f.at == at);
+    }
+    let byte = c.head.byte;
+    let k = if byte <= tiles.first()?.at.0 {
+        0
+    } else if let Some(k) = tiles.iter().position(|f| f.at.0 == byte) {
+        k
+    } else {
+        tiles.iter().rposition(|f| f.at.1 <= byte).unwrap_or(0)
+    };
+    tiles.into_iter().nth(k)
+}
+
+/// The tile [`tile_at`] gives, as a copy carries it: its link, a line of
+/// files of its own, which a paste puts in as a row of its own
+/// ([`paste`]).
+pub fn tile_markdown(doc: &Doc, c: Caret) -> Option<String> {
+    let f = tile_at(doc, c)?;
+    Some(text(doc, c.head.slot)[f.at.0..f.at.1].to_string())
+}
+
+/// The tile [`tile_at`] gives, taken out of the note: its link and the
+/// space beside it, as Backspace takes a chosen one; the last of its
+/// line, the line with it. The caret where it was.
+pub fn remove_tile(doc: &mut Doc, c: &mut Caret) -> bool {
+    let Some(f) = tile_at(doc, *c) else { return false };
+    let slot = c.head.slot;
+    if tiles(doc, slot).len() == 1 {
+        *c = Caret::at(Pos { slot, byte: 0 });
+        return remove_block(doc, c);
+    }
+    *c = Caret { anchor: Pos { slot, byte: f.at.1 }, head: Pos { slot, byte: f.at.0 } };
+    backspace(doc, c, false)
+}
+
+/// Where words typed at `c` go when it is on a line of tiles (a line of
+/// files keeps a row of its own, as a picture does): its block, and
+/// whether before it (the caret at the line's start, before its first
+/// tile) or after it (anywhere else, or, `chosen` counting, a tile
+/// chosen). `None` anywhere else, or for a selection: what is typed over
+/// it takes its place first, as over a chosen picture.
+fn file_row(doc: &Doc, c: Caret, chosen: bool) -> Option<(usize, bool)> {
+    let p = c.head;
+    if p.slot.cell.is_some() || c.anchor.slot != p.slot || (!c.is_empty() && !(chosen && chosen_tile(doc, c).is_some())) {
+        return None;
+    }
+    let first = tiles(doc, p.slot).first()?.at.0;
+    Some((doc.index_of(p.slot.block)?, c.is_empty() && p.byte <= first))
+}
+
+/// A new line beside block `i`, a line of tiles: before it or after it,
+/// of the line's own kind (a list's item, its style and depth, as Enter
+/// in a list makes one; else a paragraph), or a paragraph whatever it is
+/// (`paragraph`), holding `s`. Its slot.
+fn file_row_beside(doc: &mut Doc, i: usize, before: bool, s: &str, paragraph: bool) -> Slot {
+    let kind = match &doc.blocks()[i].kind {
+        Kind::Item { style, indent, .. } if !paragraph => Kind::item(*style, *indent, s),
+        _ => Kind::Text(s.to_string()),
+    };
+    let b = Block::new(kind);
+    let slot = Slot::block(b.id);
+    doc.insert(if before { i } else { i + 1 }, b);
+    slot
+}
+
+/// Words typed (or put in) at the caret on a line of tiles ([`file_row`]):
+/// never among them, but on a line of their own beside it, the caret at
+/// their end there; spaces and tabs before them are nothing there, and
+/// nothing else is typed; a line break alone is Enter. `None` when the
+/// caret isn't on a line of tiles, or is a selection (a tile chosen too),
+/// which what is typed takes the place of first.
+fn beside_tiles(doc: &mut Doc, c: &mut Caret, s: &str) -> Option<bool> {
+    if s.is_empty() {
+        return None;
+    }
+    let (i, before) = file_row(doc, *c, false)?;
+    let words = s.trim_start_matches([' ', '\t']);
+    if words.is_empty() {
+        return Some(false);
+    }
+    if words.trim().is_empty() {
+        return Some(enter(doc, c, false));
+    }
+    let slot = file_row_beside(doc, i, before, words, false);
+    *c = Caret::at(Pos { slot, byte: words.len() });
+    Some(true)
+}
+
 /// A slot's words as the page draws them: its marks hidden, code whole;
 /// a picture in a cell one word, stepped over whole, and so is a `--`,
 /// drawn as an em dash ([`inline::dashes`]).
@@ -1050,7 +1150,16 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     if s.is_empty() {
         return delete_selection(doc, c);
     }
-    replace_selection(doc, c);
+    // A line of tiles is a row of its own: what is typed by it goes on
+    // a line beside it.
+    if let Some(done) = beside_tiles(doc, c, s) {
+        return done;
+    }
+    // A tile chosen goes as Backspace takes it, with its space.
+    let replaced = (chosen_tile(doc, *c).is_some() && backspace(doc, c, false)) | replace_selection(doc, c);
+    if let Some(done) = beside_tiles(doc, c, s) {
+        return done || replaced;
+    }
     let p = c.head;
     if is_atomic(doc, p.slot) {
         let i = doc.index_of(p.slot.block).unwrap_or(0);
@@ -1347,6 +1456,31 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
                     *c = Caret::at(end(doc, Slot::block(doc.blocks()[prev].id)));
                     false
                 }
+                // A line of tiles above keeps its own row: nothing joins
+                // it. Its last tile is chosen, so the next Backspace takes
+                // it; an empty line goes first, as under a picture.
+                _ if tiled(doc, Slot::block(doc.blocks()[prev].id)) => {
+                    let above = Slot::block(doc.blocks()[prev].id);
+                    let Some(last) = tiles(doc, above).pop() else { return false };
+                    let gone = t.is_empty() && i + 1 < doc.len();
+                    if gone {
+                        doc.remove(i);
+                    }
+                    *c = Caret { anchor: Pos { slot: above, byte: last.at.1 }, head: Pos { slot: above, byte: last.at.0 } };
+                    gone
+                }
+                // From a line of tiles' start, the words above aren't
+                // joined by its links: an empty line there goes, else the
+                // caret goes up to the end of the words.
+                _ if tiled(doc, p.slot) => {
+                    let above = Slot::block(doc.blocks()[prev].id);
+                    if matches!(&doc.blocks()[prev].kind, Kind::Text(w) if w.is_empty()) {
+                        doc.remove(prev);
+                        return true;
+                    }
+                    *c = Caret::at(end(doc, above));
+                    false
+                }
                 _ => {
                     let prev_id = doc.blocks()[prev].id;
                     let single = single_line(&doc.blocks()[prev].kind);
@@ -1474,6 +1608,27 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
             empty
         }
         Kind::Raw(_) => false,
+        // A line of tiles below keeps its own row, as Backspace's: an
+        // empty line above it goes, else its first tile is chosen.
+        _ if tiled(doc, Slot::block(next.id)) => {
+            let below = Slot::block(next.id);
+            let Some(first) = tiles(doc, below).into_iter().next() else { return false };
+            let empty = matches!(&doc.blocks()[i].kind, Kind::Text(t) if t.is_empty());
+            if empty {
+                doc.remove(i);
+            }
+            *c = Caret { anchor: Pos { slot: below, byte: first.at.0 }, head: Pos { slot: below, byte: first.at.1 } };
+            empty
+        }
+        // From a line of tiles' end, the words below aren't joined to its
+        // links: an empty line there goes, else nothing does.
+        _ if tiled(doc, p.slot) => {
+            let empty = matches!(&next.kind, Kind::Text(t) if t.is_empty()) && i + 2 < doc.len();
+            if empty {
+                doc.remove(i + 1);
+            }
+            empty
+        }
         _ => {
             let single = single_line(&doc.blocks()[i].kind);
             let rest = next.text_ref().unwrap_or("").to_string();
@@ -1503,7 +1658,22 @@ pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
     if chosen_atom(doc, *c).is_some() {
         *c = Caret::at(c.head);
     }
+    // A line of tiles, a row of its own: a new line after it, or before it
+    // from its start, where the caret stays; never the tiles parted.
+    // Shift+Enter alike, a break among tiles being no line of its own.
+    let beside = |doc: &mut Doc, c: &mut Caret| {
+        let (i, before) = file_row(doc, *c, true)?;
+        let slot = file_row_beside(doc, i, before, "", false);
+        *c = if before { Caret::at(c.head) } else { Caret::at(Pos { slot, byte: 0 }) };
+        Some(true)
+    };
+    if let Some(done) = beside(doc, c) {
+        return done;
+    }
     replace_selection(doc, c);
+    if let Some(done) = beside(doc, c) {
+        return done;
+    }
     let p = c.head;
     let _r = reading(doc, p.slot);
     let Some(i) = doc.index_of(p.slot.block) else { return false };
@@ -2925,22 +3095,48 @@ pub fn insert_links(doc: &mut Doc, c: &mut Caret, links: &[(String, String)]) ->
     if links.is_empty() {
         return false;
     }
-    let md = links_markdown(links);
+    put_file_line(doc, c, &links_markdown(links))
+}
+
+/// A line of file links (`md`, a [`doc::file_line`]) put in as
+/// [`insert_links`] puts files: a row of its own after the caret's line,
+/// or that line itself when it is empty, or joined on to it when it is a
+/// line of tiles already; among a cell's words in a table.
+fn put_file_line(doc: &mut Doc, c: &mut Caret, md: &str) -> bool {
     if c.head.slot.cell.is_some() && c.anchor.slot == c.head.slot {
-        return links_in_cell(doc, c, &md);
+        return links_in_cell(doc, c, md);
     }
     let last = ordered(doc, *c).1.slot;
     let at = doc.index_of(last.block).map_or(doc.len(), |i| i + 1);
     let here = (last.cell.is_none() && doc.get(last.block).is_some_and(|b| doc::draws_tiles(&b.kind))).then(|| text(doc, last).to_string());
     let put = match here {
-        Some(t) if t.trim().is_empty() && c.is_empty() => md,
+        Some(t) if t.trim().is_empty() && c.is_empty() => md.to_string(),
         Some(t) if doc::file_line(&t).is_some() => format!("{} {md}", t.trim_end()),
-        _ => return insert_links_at(doc, c, at, links),
+        _ => {
+            if !insert_blocks_at(doc, c, at, vec![Kind::Text(md.to_string())]) {
+                return false;
+            }
+            *c = Caret::at(end(doc, c.head.slot));
+            return true;
+        }
     };
     let Some(t) = text_mut(doc, last) else { return false };
     *t = put;
     *c = Caret::at(end(doc, last));
     true
+}
+
+/// What a paste of `s` is when it is a line of file links and nothing
+/// else (a tile copied, [`tile_markdown`]): the links, one space apart,
+/// each as it was written. `None` for anything else.
+fn pasted_file_line(s: &str) -> Option<String> {
+    let t = s.trim();
+    // Two paragraphs are two lines: blocks, as any other paste.
+    if t.contains("\n\n") {
+        return None;
+    }
+    let links = doc::file_line(t)?;
+    Some(links.iter().map(|f| &t[f.at.0..f.at.1]).collect::<Vec<_>>().join(" "))
 }
 
 /// Links to files (`md`, as [`links_markdown`] writes them) among a
@@ -2980,7 +3176,7 @@ pub fn insert_links_at(doc: &mut Doc, c: &mut Caret, at: usize, links: &[(String
 /// a tile's are ([`doc::file_line`]). The path as it is, a relative one
 /// (never taken for a web address, as a typed one would be), with nothing
 /// in it to end the link early.
-fn links_markdown(links: &[(String, String)]) -> String {
+pub fn links_markdown(links: &[(String, String)]) -> String {
     links
         .iter()
         .map(|(name, src)| {
@@ -3328,6 +3524,12 @@ impl Typing {
     /// switched on, plain, the style still on for the letters after it.
     /// At the end of a link's words, it goes past the link ([`past_link`]).
     pub fn type_text(&mut self, doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
+        // By a line of tiles: on a line of its own ([`insert`]'s rule).
+        if let Some(done) = beside_tiles(doc, c, s) {
+            self.pending = None;
+            self.carry = None;
+            return done;
+        }
         let mut changed = false;
         if !c.is_empty() {
             if s.is_empty() {
@@ -3335,7 +3537,19 @@ impl Typing {
                 self.carry = None;
                 return delete_selection(doc, c);
             }
-            changed = self.make_room(doc, c);
+            // A tile chosen goes as Backspace takes it, with its space.
+            changed = if chosen_tile(doc, *c).is_some() {
+                self.pending = None;
+                self.carry = None;
+                backspace(doc, c, false)
+            } else {
+                self.make_room(doc, c)
+            };
+            if let Some(done) = beside_tiles(doc, c, s) {
+                self.pending = None;
+                self.carry = None;
+                return done || changed;
+            }
         }
         if let Some(p) = past_link(doc, *c).filter(|_| !s.is_empty() && self.carry_at(doc, *c).is_none()) {
             if let Some(q) = self.pending.as_mut().filter(|q| q.caret == *c) {
@@ -3565,7 +3779,10 @@ pub fn copy_for_html(doc: &Doc, c: Caret) -> Option<String> {
 /// Ctrl+V: one line types in; several lines that read as structure (a
 /// list, a table, headings) become blocks at the caret, the text after the
 /// caret carrying on below them. In a table's cell, the words go in, their
-/// pictures written plainly ([`doc::plain_pictures`]).
+/// pictures written plainly ([`doc::plain_pictures`]). A line of file links
+/// alone (a tile copied) goes in as files picked do, a row of its own
+/// ([`insert_links`]); and on a line of tiles, what is pasted goes on a
+/// line beside it, as what is typed there does.
 pub fn paste(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let s = s.replace("\r\n", "\n");
     let p = c.head;
@@ -3574,6 +3791,21 @@ pub fn paste(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     }
     if matches!(kind_at(doc, p.slot), Some(Kind::Raw(_))) {
         return insert(doc, c, &s);
+    }
+    // A line of file links alone (a tile copied): a row of its own, as
+    // files picked go in, never among the caret's words.
+    if let Some(md) = pasted_file_line(&s) {
+        return put_file_line(doc, c, &md);
+    }
+    // On a line of tiles, anything else goes on a line of its own beside
+    // it, as typing does: one line typed there, blocks from there.
+    let replaced = !c.is_empty() && c.anchor.slot == c.head.slot && tiled(doc, c.head.slot) && replace_selection(doc, c);
+    if let Some((i, before)) = file_row(doc, *c, false) {
+        if s.trim().is_empty() {
+            return (s.contains('\n') && enter(doc, c, false)) || replaced;
+        }
+        let slot = file_row_beside(doc, i, before, "", true);
+        *c = Caret::at(Pos { slot, byte: 0 });
     }
     let parsed = doc::parse_blocks(s.trim_end_matches('\n'));
     // One line types in, unless it's a picture (as one copied is): a
@@ -3618,8 +3850,11 @@ pub fn paste(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     // else a paragraph of its own.
     let last = last.unwrap();
     let end_byte = last.text_ref().map_or(0, str::len);
+    // A line of tiles pasted last keeps its own row: the words after go
+    // under it.
+    let tiles_last = doc::draws_tiles(&last.kind) && last.text_ref().is_some_and(|t| doc::file_line(t).is_some());
     if !tail.is_empty() {
-        if last.text_ref().is_some() && !matches!(last.kind, Kind::Raw(_)) {
+        if last.text_ref().is_some() && !matches!(last.kind, Kind::Raw(_)) && !tiles_last {
             if let Some(t) = doc.block_mut(last_i).text_mut() {
                 t.push_str(&one_line(&tail));
             }
@@ -5425,8 +5660,8 @@ mod tests {
     /// choose it, then pass it (by the word too); Backspace after it, or
     /// Delete before it, takes its link whole, with the space between it
     /// and the next, and so does either with it chosen; a copy of it is
-    /// its Markdown; words typed beside it make the line words again, the
-    /// link as it was. Each one step of the history.
+    /// its Markdown; words typed beside it go on a line of their own, the
+    /// tiles as they were. Each one step of the history.
     #[test]
     fn a_tile_is_one_letter_to_the_caret() {
         let (a, b) = ("[a.pdf](attachments/a.pdf)", "[b.pdf](attachments/b.pdf)");
@@ -5490,17 +5725,237 @@ mod tests {
         c.anchor.slot = s1;
         assert!(backspace(&mut d1, &mut c, false));
         assert_eq!(text(&d1, s1), "");
-        // Words typed beside it: the line is words again, its links whole.
+        // Words typed beside it go on a line of their own after it, the
+        // spaces before them nothing there: the tiles stay tiles.
         let (mut d1, mut c) = (d.clone(), Caret::at(p(eb)));
         let (done, md, same) = undone(&mut d1, &mut c, |d, c| insert(d, c, " and notes"));
         assert!(done && same);
-        assert_eq!(md.trim_end(), format!("{line} and notes"));
-        assert!(tiles(&d1, s).is_empty());
-        assert_eq!(visible(&d1, s).text(text(&d1, s)), "a.pdf b.pdf and notes");
-        // Typed over a chosen tile: it goes, the words in its place.
+        assert_eq!(md.trim_end(), format!("{line}\n\nand notes"));
+        assert_eq!(tiles(&d1, s).len(), 2);
+        // Typed over a chosen tile: it goes, with its space, and the words
+        // go where it was, on a line of their own.
         let (mut d1, mut c) = (d.clone(), Caret { anchor: p(0), head: p(ea) });
         assert!(insert(&mut d1, &mut c, "x"));
-        assert_eq!(text(&d1, s), format!("x {b}"));
+        assert_eq!(texts(&d1), ["Text:x", &format!("Text:{b}")]);
+        // The only one, chosen and typed over: the line is the words.
+        let mut d1 = doc(vec![Block::text(a)]);
+        let s1 = Slot::block(d1.blocks()[0].id);
+        let mut c = Caret { anchor: Pos { slot: s1, byte: 0 }, head: Pos { slot: s1, byte: ea } };
+        assert!(insert(&mut d1, &mut c, "x"));
+        assert_eq!(texts(&d1), ["Text:x"]);
+    }
+
+    /// A line of files is a row of its own, as a picture on its own line
+    /// is: a letter typed at its end, or after its last tile, starts a
+    /// paragraph after it, the caret there; at its start, before its first
+    /// tile, one before it. A space or a tab adds nothing to it. The line
+    /// stays as it was, and each is one step of the history. Typing goes
+    /// through [`Typing`] as the keys do, and a paste the same.
+    #[test]
+    fn typing_by_a_line_of_files_starts_a_line_of_its_own() {
+        let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+        let fresh = || {
+            let d = doc(vec![Block::text("Above"), Block::text(line), Block::text("Below")]);
+            let s = Slot::block(d.blocks()[1].id);
+            (d, s)
+        };
+        let ea = line.find(' ').unwrap();
+        // At its end: a paragraph after it.
+        let (mut d, s) = fresh();
+        let mut c = Caret::at(Pos { slot: s, byte: line.len() });
+        let mut typing = Typing::default();
+        let (done, _, same) = undone(&mut d, &mut c, |d, c| typing.type_text(d, c, "x"));
+        assert!(done && same);
+        assert_eq!(texts(&d), ["Text:Above", &format!("Text:{line}"), "Text:x", "Text:Below"]);
+        assert_eq!((c.head.slot, c.head.byte), (Slot::block(d.blocks()[2].id), 1), "the caret after the letter, on the new line");
+        assert!(typing.type_text(&mut d, &mut c, "y"));
+        assert_eq!(texts(&d)[2], "Text:xy", "then typing goes on there");
+        // After its first tile, between the two: after it too.
+        let (mut d, s) = fresh();
+        let mut c = Caret::at(Pos { slot: s, byte: ea });
+        assert!(Typing::default().type_text(&mut d, &mut c, "x"));
+        assert_eq!(texts(&d)[1..3], [format!("Text:{line}"), "Text:x".to_string()]);
+        // At its start: a paragraph before it.
+        let (mut d, s) = fresh();
+        let mut c = Caret::at(Pos { slot: s, byte: 0 });
+        assert!(Typing::default().type_text(&mut d, &mut c, "x"));
+        assert_eq!(texts(&d), ["Text:Above", "Text:x", &format!("Text:{line}"), "Text:Below"]);
+        assert_eq!(c, Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 1 }));
+        // A space, a tab: nothing.
+        for ws in [" ", "\t", "  "] {
+            let (mut d, s) = fresh();
+            let mut c = Caret::at(Pos { slot: s, byte: line.len() });
+            assert!(!Typing::default().type_text(&mut d, &mut c, ws), "{ws:?}");
+            assert!(!insert(&mut d, &mut c, ws), "{ws:?}");
+            assert_eq!(texts(&d)[1], format!("Text:{line}"));
+            assert_eq!(c, Caret::at(Pos { slot: s, byte: line.len() }));
+        }
+        // A list of files: the new line is the list's next item.
+        let mut d = doc(vec![Block::new(Kind::item(ListStyle::Todo, 1, line))]);
+        let s = Slot::block(d.blocks()[0].id);
+        let mut c = Caret::at(Pos { slot: s, byte: line.len() });
+        assert!(Typing::default().type_text(&mut d, &mut c, "milk"));
+        assert!(matches!(&d.blocks()[1].kind, Kind::Item { style: ListStyle::Todo, indent: 1, done: false, text, .. } if text == "milk"), "{:?}", texts(&d));
+        // A paste of words: the same, one line or several.
+        let (mut d, s) = fresh();
+        let mut c = Caret::at(Pos { slot: s, byte: line.len() });
+        let (done, _, same) = undone(&mut d, &mut c, |d, c| paste(d, c, "pasted words"));
+        assert!(done && same);
+        assert_eq!(texts(&d), ["Text:Above", &format!("Text:{line}"), "Text:pasted words", "Text:Below"]);
+        let (mut d, s) = fresh();
+        let mut c = Caret::at(Pos { slot: s, byte: 0 });
+        assert!(paste(&mut d, &mut c, "# Head\n\nwords\n"));
+        assert_eq!(texts(&d), ["Text:Above", "Head:Head", "Text:words", &format!("Text:{line}"), "Text:Below"]);
+    }
+
+    /// Enter at a line of files' end makes an empty line after it, the
+    /// caret there; at its start, one before it, the caret staying with
+    /// the tiles; with a tile chosen, after it. Never are its tiles parted,
+    /// Shift+Enter neither.
+    #[test]
+    fn enter_by_a_line_of_files_makes_a_line_beside_it() {
+        let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+        let fresh = || {
+            let d = doc(vec![Block::text(line), Block::text("Below")]);
+            let s = Slot::block(d.blocks()[0].id);
+            (d, s)
+        };
+        let ea = line.find(' ').unwrap();
+        for soft in [false, true] {
+            let (mut d, s) = fresh();
+            let mut c = Caret::at(Pos { slot: s, byte: line.len() });
+            let (done, _, same) = undone(&mut d, &mut c, |d, c| enter(d, c, soft));
+            assert!(done && same);
+            assert_eq!(texts(&d), [&format!("Text:{line}"), "Text:", "Text:Below"], "soft {soft}");
+            assert_eq!(c, Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 0 }));
+        }
+        let (mut d, s) = fresh();
+        let mut c = Caret::at(Pos { slot: s, byte: 0 });
+        assert!(enter(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:", &format!("Text:{line}"), "Text:Below"]);
+        assert_eq!(c, Caret::at(Pos { slot: s, byte: 0 }), "the caret stays with the tiles");
+        // Between the tiles, or the first chosen: after the line, whole.
+        for c0 in [Caret::at(Pos { slot: s, byte: ea + 1 }), Caret { anchor: Pos { slot: s, byte: 0 }, head: Pos { slot: s, byte: ea } }] {
+            let (mut d, s) = fresh();
+            let mut c = Caret { anchor: Pos { slot: s, ..c0.anchor }, head: Pos { slot: s, ..c0.head } };
+            assert!(enter(&mut d, &mut c, false));
+            assert_eq!(texts(&d), [&format!("Text:{line}"), "Text:", "Text:Below"]);
+        }
+    }
+
+    /// Backspace at the start of the line under a line of files never
+    /// joins the two: it chooses the last tile, so the next Backspace takes
+    /// it; an empty line there goes first. Delete at a line of files' end
+    /// leaves the words below where they are, and Delete at the end of the
+    /// line above it chooses its first tile. Backspace and Delete still
+    /// take a tile whole.
+    #[test]
+    fn backspace_after_a_line_of_files_chooses_its_last_tile() {
+        let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+        let sb = line.find(' ').unwrap() + 1;
+        let mut d = doc(vec![Block::text(line), Block::text("Below")]);
+        let (s, below) = (Slot::block(d.blocks()[0].id), Slot::block(d.blocks()[1].id));
+        let mut c = Caret::at(Pos { slot: below, byte: 0 });
+        assert!(!backspace(&mut d, &mut c, false), "nothing changes");
+        assert_eq!(texts(&d), [&format!("Text:{line}"), "Text:Below"]);
+        assert_eq!(chosen_tile(&d, c), Some((sb, line.len())), "its last tile chosen");
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:[a.pdf](attachments/a.pdf)", "Text:Below"], "then it goes");
+        // An empty line under it goes, and the last tile is chosen.
+        let mut d = doc(vec![Block::text(line), Block::text(""), Block::text("After")]);
+        let mut c = Caret::at(Pos { slot: Slot::block(d.blocks()[1].id), byte: 0 });
+        assert!(backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), [&format!("Text:{line}"), "Text:After"]);
+        assert_eq!(chosen_tile(&d, c), Some((sb, line.len())));
+        // From the line of files' own start: the words above stay apart.
+        let mut d = doc(vec![Block::text("Above"), Block::text(line)]);
+        let s2 = Slot::block(d.blocks()[1].id);
+        let mut c = Caret::at(Pos { slot: s2, byte: 0 });
+        assert!(!backspace(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:Above", &format!("Text:{line}")]);
+        assert_eq!(c, Caret::at(end(&d, Slot::block(d.blocks()[0].id))));
+        // Delete at its end: the words below stay apart.
+        let mut d = doc(vec![Block::text(line), Block::text("Below")]);
+        let mut c = Caret::at(Pos { slot: s, byte: line.len() });
+        c.head.slot = Slot::block(d.blocks()[0].id);
+        c.anchor = c.head;
+        assert!(!delete(&mut d, &mut c, false));
+        assert_eq!(texts(&d), [&format!("Text:{line}"), "Text:Below"]);
+        // Delete at the end of the words above it: its first tile chosen.
+        let mut d = doc(vec![Block::text("Above"), Block::text(line)]);
+        let mut c = Caret::at(end(&d, Slot::block(d.blocks()[0].id)));
+        assert!(!delete(&mut d, &mut c, false));
+        assert_eq!(texts(&d), ["Text:Above", &format!("Text:{line}")]);
+        assert_eq!(chosen_tile(&d, c), Some((0, sb - 1)));
+    }
+
+    /// A line of files alone pasted (a tile copied, [`tile_markdown`]) goes
+    /// in as files picked do: a row of its own after the caret's line, never
+    /// among its words, the caret's words as they were; on an empty line,
+    /// that line; on a line of tiles, joined on. Copied among other blocks,
+    /// it is a block of the Markdown, and its paste brings the tiles back.
+    #[test]
+    fn a_line_of_files_pasted_is_a_row_of_its_own() {
+        let a = "[a.pdf](attachments/a.pdf)";
+        let (mut d, mut c) = para("Words here", 5);
+        let (done, md, same) = undone(&mut d, &mut c, |d, c| paste(d, c, a));
+        assert!(done && same);
+        assert_eq!(md.trim_end(), format!("Words here\n\n{a}"));
+        assert_eq!(c.head, end(&d, Slot::block(d.blocks()[1].id)), "the caret after it");
+        assert_eq!(tiles(&d, c.head.slot).len(), 1);
+        // With its line's end, and a copy's from the tile's own Markdown.
+        let tile = tile_markdown(&d, c).unwrap();
+        assert_eq!(tile, a);
+        let (mut d, mut c) = para("More", 2);
+        assert!(paste(&mut d, &mut c, &format!("{tile}\n")));
+        assert_eq!(texts(&d), ["Text:More", &format!("Text:{a}")]);
+        // On an empty line: there. On a line of tiles: joined on.
+        let mut d = doc(vec![Block::text("")]);
+        let mut c = at(&d, 0, 0);
+        assert!(paste(&mut d, &mut c, a));
+        assert_eq!(texts(&d), [format!("Text:{a}")]);
+        assert!(paste(&mut d, &mut c, "[b c.zip](attachments/b%20c.zip)"));
+        assert_eq!(texts(&d), [format!("Text:{a} [b c.zip](attachments/b%20c.zip)")]);
+        // A link among words is words, pasted among words.
+        let (mut d, mut c) = para("Words", 5);
+        assert!(paste(&mut d, &mut c, &format!(" see {a}")));
+        assert_eq!(texts(&d), [format!("Text:Words see {a}")]);
+        // A copy over a paragraph, a line of files and another: its own
+        // block, and pasted mid-paragraph, the tiles back on their row,
+        // the words after the caret under it.
+        let d0 = doc(vec![Block::text("One"), Block::text(a), Block::text("Two")]);
+        let all = Caret { anchor: start(Slot::block(d0.blocks()[0].id)), head: Pos { slot: Slot::block(d0.blocks()[1].id), byte: a.len() } };
+        let copied = copy(&d0, all).unwrap();
+        assert_eq!(copied.trim_end(), format!("One\n\n{a}"));
+        let (mut d, mut c) = para("Head tail", 5);
+        assert!(paste(&mut d, &mut c, &copied));
+        assert_eq!(texts(&d), ["Text:Head ", "Text:One", &format!("Text:{a}"), "Text:tail"]);
+        assert_eq!(tiles(&d, Slot::block(d.blocks()[2].id)).len(), 1);
+    }
+
+    /// The file tools' tile: the one chosen, else the one the caret is
+    /// beside; removed with its space, or, the line's only one, the line.
+    #[test]
+    fn the_file_tools_act_on_the_tile_chosen_or_beside() {
+        let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+        let ea = line.find(' ').unwrap();
+        let d = doc(vec![Block::text(line), Block::text("Below")]);
+        let s = Slot::block(d.blocks()[0].id);
+        let name = |c: Caret| tile_at(&d, c).map(|f| f.name);
+        let p = |byte| Pos { slot: s, byte };
+        assert_eq!(name(Caret::at(p(0))).as_deref(), Some("a.pdf"));
+        assert_eq!(name(Caret::at(p(ea))).as_deref(), Some("a.pdf"), "after the first");
+        assert_eq!(name(Caret::at(p(ea + 1))).as_deref(), Some("b.zip"), "before the second");
+        assert_eq!(name(Caret::at(p(line.len()))).as_deref(), Some("b.zip"));
+        assert_eq!(name(Caret { anchor: p(line.len()), head: p(ea + 1) }).as_deref(), Some("b.zip"), "chosen");
+        assert_eq!(name(Caret::at(start(Slot::block(d.blocks()[1].id)))), None);
+        let mut d1 = d.clone();
+        let mut c = Caret::at(p(ea));
+        assert!(remove_tile(&mut d1, &mut c));
+        assert_eq!(texts(&d1), ["Text:[b.zip](attachments/b.zip)", "Text:Below"]);
+        let mut c = Caret::at(Pos { slot: s, byte: 0 });
+        assert!(remove_tile(&mut d1, &mut c));
+        assert_eq!(texts(&d1), ["Text:Below"], "the last, its line with it");
     }
 
     #[test]

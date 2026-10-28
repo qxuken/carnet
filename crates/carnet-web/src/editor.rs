@@ -306,6 +306,10 @@ impl Editor {
         let moved = caret != self.caret;
         self.caret = caret;
         if changed {
+            // Words typed onto a line of their own (beside a line of files,
+            // a picture): that line's step, as the desktop's.
+            let after = self.caret.head.slot.block;
+            let block = if step == Step::Typing && after != block && !before.blocks.iter().any(|b| b.id == after) { after } else { block };
             self.history.record_at(step, block, before, now());
             self.doc.ensure_tail();
         } else {
@@ -786,6 +790,30 @@ impl Editor {
         self.edit(Step::Other, |d, c| page::insert_links(d, c, links))
     }
 
+    /// The tile the file tools act on, the one chosen or the one the caret
+    /// is beside ([`page::tile_at`]): its name, the address its link opens
+    /// and its kind (`PDF`).
+    pub fn tile_here(&self) -> Option<(String, String, String)> {
+        if !matches!(self.focus, Focus::Body) {
+            return None;
+        }
+        page::tile_at(&self.doc, self.caret).map(|f| (f.name, f.target, doc::file_kind(&f.path)))
+    }
+
+    /// That tile as a copy carries it: a line of files of its own, which a
+    /// paste puts in as a row of tiles ([`page::tile_markdown`]).
+    pub fn tile_copy(&self) -> Option<String> {
+        if !matches!(self.focus, Focus::Body) {
+            return None;
+        }
+        page::tile_markdown(&self.doc, self.caret)
+    }
+
+    /// That tile taken out of the note ([`page::remove_tile`]).
+    pub fn remove_tile(&mut self) -> bool {
+        matches!(self.focus, Focus::Body) && self.edit(Step::Other, page::remove_tile)
+    }
+
     // ------------------------------------------------------------ blocks
 
     /// What the caret is in, as the toolbar reads it (the desktop's
@@ -799,6 +827,10 @@ impl Editor {
         }
         if page::picture_at(&self.doc, self.caret).is_some() {
             return "picture";
+        }
+        // On a line of files, beside a tile or one chosen: its file's.
+        if page::tile_at(&self.doc, self.caret).is_some() {
+            return "file";
         }
         let (a, h) = (self.caret.anchor.slot, self.caret.head.slot);
         if h.cell.is_some() && a.block == h.block {
@@ -2372,8 +2404,8 @@ mod tests {
 
     /// As on the desktop: a tile is one letter to the caret. → chooses it,
     /// Backspace after it takes it whole with its space, a copy of it is
-    /// its Markdown, and words typed beside it make the line words again,
-    /// the link a link among them. A link to a file in a sentence is one.
+    /// its Markdown, and words typed beside it go on a line of their own,
+    /// the tiles left as they were. A link to a file in a sentence is one.
     #[test]
     fn a_tile_is_one_letter() {
         let line = "[report.pdf](attachments/report.pdf) [README](attachments/README)";
@@ -2390,9 +2422,51 @@ mod tests {
         assert_eq!(e.lines()[1].text, "[ [");
         e.select(1, 3, 1, 3);
         assert!(e.input(" and more"));
-        assert_eq!(e.lines()[1].text, "report.pdf README and more");
-        assert!(e.look(1).tiles.is_empty());
-        assert!(e.markdown().contains(&format!("{line} and more")));
+        assert_eq!(e.lines()[1].text, "[ [", "the tiles stay tiles");
+        assert_eq!(e.lines()[2].text, "and more", "the words on a line of their own");
+        assert!(e.markdown().contains(&format!("{line}\n\nand more\n")));
+    }
+
+    /// As on the desktop: a line of files keeps a row of its own. Typed
+    /// after its last tile, a letter starts a paragraph under it, and
+    /// before its first, one above; Enter at its end makes an empty line
+    /// under it; a space is nothing there; Backspace from the line under it
+    /// chooses its last tile. The toolbar's set there is the file's, and
+    /// its tools act on the tile chosen or beside the caret.
+    #[test]
+    fn a_line_of_files_keeps_a_row_of_its_own() {
+        let line = "[report.pdf](attachments/report.pdf) [README](attachments/README)";
+        let mut e = Editor::open(&format!("# T\n\n{line}\n"));
+        e.select(1, 3, 1, 3);
+        assert_eq!(e.kind_here(), "file");
+        assert_eq!(e.tile_here(), Some(("README".into(), "attachments/README".into(), "File".into())));
+        assert!(!e.input(" "), "a space is nothing there");
+        assert!(e.input("x"));
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nx\n"));
+        assert_eq!(e.caret_lc(), (2, 1, 2, 1));
+        assert_eq!(e.kind_here(), "words");
+        assert!(e.undo());
+        e.select(1, 0, 1, 0);
+        assert_eq!(e.tile_here().map(|t| t.0).as_deref(), Some("report.pdf"));
+        assert!(e.input("y"));
+        assert_eq!(e.markdown(), format!("# T\n\ny\n\n{line}\n"));
+        assert!(e.undo());
+        e.select(1, 3, 1, 3);
+        assert!(e.enter(false));
+        assert_eq!(e.lines().iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["T", "[ [", ""]);
+        assert_eq!(e.caret_lc(), (2, 0, 2, 0));
+        assert!(e.input("Below"));
+        e.select(2, 0, 2, 0);
+        assert!(e.backspace(false), "the caret moved");
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nBelow\n"), "the lines aren't joined");
+        assert_eq!(e.caret_lc(), (1, 3, 1, 2), "the last tile chosen");
+        assert_eq!(e.tile_copy().as_deref(), Some("[README](attachments/README)"));
+        // Its copy pasted in the middle of the words below: a row of its own.
+        e.select(2, 2, 2, 2);
+        assert!(e.paste("[README](attachments/README)"));
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nBelow\n\n[README](attachments/README)\n"));
+        assert!(e.remove_tile());
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nBelow\n"), "the last tile of its line, the line with it");
     }
 
     /// The finding on the desktop: a colour tried on a selection over
