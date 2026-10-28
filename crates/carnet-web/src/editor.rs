@@ -21,6 +21,7 @@ use carnet_core::doc::{self, Doc, Kind, ListStyle, Table};
 use carnet_core::history::{History, State, Step};
 use carnet_core::inline::{self, Style};
 use carnet_core::page::{self, Caret, PicDrop, Pos, Slot, TableOp, Typing};
+use carnet_core::slash;
 
 /// What stands for a divider, a picture or a table in CodeMirror's text:
 /// one letter, drawn as the thing itself.
@@ -60,6 +61,8 @@ pub struct Editor {
     /// The column last sorted by, and whether downwards: the same one
     /// again sorts the other way, as on the desktop.
     last_sort: Option<(u64, bool)>,
+    /// The line whose `/` menu Esc closed, until it stops being one.
+    slash_off: Option<u64>,
     lines: Vec<Line>,
 }
 
@@ -113,6 +116,7 @@ impl Editor {
             history: History::default(),
             typing: Typing::default(),
             last_sort: None,
+            slash_off: None,
             lines: Vec::new(),
         };
         e.relay();
@@ -295,11 +299,17 @@ impl Editor {
         let block = self.caret.head.slot.block;
         let mut caret = self.caret;
         let changed = f(&mut self.doc, &mut caret);
+        // Never between the two dashes of an em dash, whatever the edit.
+        let caret = page::settle(&self.doc, caret);
         // Some only move the caret (Enter down a table's column): that is
         // something done too, for the view to follow.
         let moved = caret != self.caret;
         self.caret = caret;
         if changed {
+            // Words typed onto a line of their own (beside a line of files,
+            // a picture): that line's step, as the desktop's.
+            let after = self.caret.head.slot.block;
+            let block = if step == Step::Typing && after != block && !before.blocks.iter().any(|b| b.id == after) { after } else { block };
             self.history.record_at(step, block, before, now());
             self.doc.ensure_tail();
         } else {
@@ -700,16 +710,28 @@ impl Editor {
     }
 
     /// A row or a column added after the caret's, or the caret's taken
-    /// out: `0` row, `1` column, `2` take the row out, `3` the column.
+    /// out: `0` row, `1` column, `2` take the row out, `3` the column;
+    /// `4` the header row; the caret's row moved `5` up or `6` down, its
+    /// column `7` left or `8` right.
     pub fn table_op(&mut self, op: u8) -> bool {
         let op = match op {
             0 => TableOp::AddRow,
             1 => TableOp::AddCol,
             2 => TableOp::DelRow,
             3 => TableOp::DelCol,
+            5 => TableOp::MoveRow { by: -1 },
+            6 => TableOp::MoveRow { by: 1 },
+            7 => TableOp::MoveCol { by: -1 },
+            8 => TableOp::MoveCol { by: 1 },
             _ => TableOp::Header,
         };
         self.edit(Step::Other, |d, c| page::table_op(d, c, op, false))
+    }
+
+    /// Which ways the caret's row and column can move: up, down, left,
+    /// right ([`page::table_moves`]).
+    pub fn table_moves(&self) -> [bool; 4] {
+        page::table_moves(&self.doc, self.caret)
     }
 
     /// The table sorted by the caret's column, A to Z; again, Z to A.
@@ -743,11 +765,11 @@ impl Editor {
     }
 
     /// A new table, three by three, below the caret's block (in place of
-    /// an empty paragraph), the caret in its first cell.
+    /// an empty paragraph), the caret in its first cell. From the title,
+    /// as the desktop's toolbar puts one in from off the page: at the
+    /// note's caret, where it was left.
     pub fn insert_table(&mut self) -> bool {
-        if !matches!(self.focus, Focus::Body) {
-            return false;
-        }
+        self.focus = Focus::Body;
         self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Table(Table::new(3, 3))))
     }
 
@@ -755,10 +777,197 @@ impl Editor {
     /// the caret carried on into what follows, as the desktop's toolbar
     /// puts one in.
     pub fn insert_divider(&mut self) -> bool {
+        self.focus = Focus::Body;
+        self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Divider))
+    }
+
+    /// Links to files, `(name, src)` as the note links them, put in at
+    /// the caret among its words, as the desktop puts in a document
+    /// picked or dropped ([`page::insert_links`]); where the caret can't
+    /// hold words, a paragraph of their own after its block.
+    pub fn insert_links(&mut self, links: &[(String, String)]) -> bool {
+        self.focus = Focus::Body;
+        self.edit(Step::Other, |d, c| page::insert_links(d, c, links))
+    }
+
+    /// The tile the file tools act on, the one chosen or the one the caret
+    /// is beside ([`page::tile_at`]): its name, the address its link opens
+    /// and its kind (`PDF`).
+    pub fn tile_here(&self) -> Option<(String, String, String)> {
+        if !matches!(self.focus, Focus::Body) {
+            return None;
+        }
+        page::tile_at(&self.doc, self.caret).map(|f| (f.name, f.target, doc::file_kind(&f.path)))
+    }
+
+    /// That tile as a copy carries it: a line of files of its own, which a
+    /// paste puts in as a row of tiles ([`page::tile_markdown`]).
+    pub fn tile_copy(&self) -> Option<String> {
+        if !matches!(self.focus, Focus::Body) {
+            return None;
+        }
+        page::tile_markdown(&self.doc, self.caret)
+    }
+
+    /// That tile taken out of the note ([`page::remove_tile`]).
+    pub fn remove_tile(&mut self) -> bool {
+        matches!(self.focus, Focus::Body) && self.edit(Step::Other, page::remove_tile)
+    }
+
+    // ------------------------------------------------------------ blocks
+
+    /// What the caret is in, as the toolbar reads it (the desktop's
+    /// `ToolSet`): `title`; `picture`, one picture alone; `table`, within
+    /// one table; and for what the caret touches, `words` (paragraphs,
+    /// headings, quotes), `list`, `code` or `divider`, all of one of them,
+    /// or `blocks`, a mix.
+    pub fn kind_here(&self) -> &'static str {
+        if !matches!(self.focus, Focus::Body) {
+            return "title";
+        }
+        if page::picture_at(&self.doc, self.caret).is_some() {
+            return "picture";
+        }
+        // On a line of files, beside a tile or one chosen: its file's.
+        if page::tile_at(&self.doc, self.caret).is_some() {
+            return "file";
+        }
+        let (a, h) = (self.caret.anchor.slot, self.caret.head.slot);
+        if h.cell.is_some() && a.block == h.block {
+            return "table";
+        }
+        let kinds: Vec<&Kind> = page::touched(&self.doc, self.caret).map(|i| &self.doc.blocks()[i].kind).collect();
+        let all = |f: fn(&Kind) -> bool| kinds.iter().all(|k| f(k));
+        if all(|k| matches!(k, Kind::Text(_) | Kind::Heading { .. } | Kind::Quote(_))) {
+            "words"
+        } else if all(|k| matches!(k, Kind::Item { .. })) {
+            "list"
+        } else if all(|k| matches!(k, Kind::Raw(_))) {
+            "code"
+        } else if all(|k| matches!(k, Kind::Divider)) {
+            "divider"
+        } else {
+            "blocks"
+        }
+    }
+
+    /// What the blocks the caret touches hold, for a mix's tools: 1 one
+    /// that turns into another kind, 2 a list item, 4 words to style (not
+    /// code's, a picture's or a divider's).
+    pub fn blocks_here(&self) -> u8 {
+        if !matches!(self.focus, Focus::Body) {
+            return 0;
+        }
+        let mut out = 0;
+        for i in page::touched(&self.doc, self.caret) {
+            let k = &self.doc.blocks()[i].kind;
+            if page::turned(k, page::TURN_TEXT).is_some() {
+                out |= 1;
+            }
+            if matches!(k, Kind::Item { .. }) {
+                out |= 2;
+            }
+            if !matches!(k, Kind::Raw(_) | Kind::Image { .. } | Kind::Divider) {
+                out |= 4;
+            }
+        }
+        out
+    }
+
+    /// The blocks the caret touches moved up (`by` < 0) or down past
+    /// their neighbour, the caret with them.
+    pub fn move_blocks(&mut self, by: i64) -> bool {
         if !matches!(self.focus, Focus::Body) {
             return false;
         }
-        self.edit(Step::Other, |d, c| page::insert_block(d, c, Kind::Divider))
+        self.edit(Step::Other, |d, c| page::move_blocks(d, *c, by))
+    }
+
+    /// The blocks the caret touches taken out.
+    pub fn remove_blocks(&mut self) -> bool {
+        if !matches!(self.focus, Focus::Body) {
+            return false;
+        }
+        self.edit(Step::Other, page::remove_block)
+    }
+
+    /// Whether the paragraphs the caret touches drop their first letter:
+    /// `None` with no paragraph among them (a heading, a quote), where
+    /// the tool is greyed.
+    pub fn initial_here(&self) -> Option<bool> {
+        matches!(self.focus, Focus::Body).then(|| page::initial_at(&self.doc, self.caret)).flatten()
+    }
+
+    /// Their first letters dropped, or back in the line.
+    pub fn toggle_initial(&mut self) -> bool {
+        if self.initial_here().is_none() {
+            return false;
+        }
+        self.edit(Step::Other, page::toggle_initial)
+    }
+
+    /// Whether the caret's item is a to-do, and ticked: the list's tick
+    /// tool (`None`: no to-do there, no tool).
+    pub fn tick_here(&self) -> Option<bool> {
+        if !matches!(self.focus, Focus::Body) {
+            return None;
+        }
+        match self.doc.get(self.caret.head.slot.block)?.kind {
+            Kind::Item { style: ListStyle::Todo, done, .. } => Some(done),
+            _ => None,
+        }
+    }
+
+    /// The caret's item ticked or unticked, Ctrl+Enter's (a bullet made a
+    /// to-do first, as [`page::toggle`] does).
+    pub fn tick(&mut self) -> bool {
+        let id = self.caret.head.slot.block;
+        if !matches!(self.focus, Focus::Body) || !matches!(self.doc.get(id).map(|b| &b.kind), Some(Kind::Item { .. })) {
+            return false;
+        }
+        self.edit(Step::Other, |d, _| page::toggle(d, id))
+    }
+
+    // ------------------------------------------------------------ the / menu
+
+    /// The `/` menu, when the caret ends a `/word` line it has not been
+    /// sent away from by Esc ([`slash::query`]): CodeMirror's line, the
+    /// word, and the commands it offers, in the order shown. A line that
+    /// is no longer a command forgets the Esc that closed it, as the
+    /// desktop's does.
+    pub fn slash_menu(&mut self) -> Option<(usize, String, Vec<usize>)> {
+        let found = matches!(self.focus, Focus::Body).then(|| slash::query(&self.doc, self.caret)).flatten();
+        let Some((block, word)) = found else {
+            self.slash_off = None;
+            return None;
+        };
+        if self.slash_off == Some(block) {
+            return None;
+        }
+        let shown = slash::matches(&word);
+        (!shown.is_empty()).then(|| (self.lc(self.caret.head).0, word, shown))
+    }
+
+    /// Esc on the `/` menu: closed for its line, until it stops being one.
+    pub fn slash_close(&mut self) -> bool {
+        match self.slash_menu() {
+            Some(_) => {
+                self.slash_off = slash::query(&self.doc, self.caret).map(|(b, _)| b);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `/` command `i` ([`slash::COMMANDS`]) made of the line it was typed
+    /// on, as one step of the history: a heading, a list, a quote, a
+    /// table, a divider, code; a picture's or a file's leaves the line
+    /// empty for what is picked to go in on.
+    pub fn run_slash(&mut self, i: usize) -> bool {
+        if self.slash_menu().is_none() {
+            return false;
+        }
+        self.edit(Step::Other, |d, c| slash::apply(d, c, i))
     }
 
     /// The address of the link the caret is in, as the link sheet shows
@@ -936,8 +1145,26 @@ impl Editor {
         }
         if let (Some(slot), true) = (l.slot, matches!(b.kind, Kind::Text(_) | Kind::Heading { .. } | Kind::Item { .. } | Kind::Quote(_))) {
             look.runs = self.runs(slot, l);
+            look.tiles = self.tiles(slot, l);
         }
         look
+    }
+
+    /// A line of file links' tiles, as the desktop draws them
+    /// ([`page::tiles`]): each where its one letter is in the line's words.
+    fn tiles(&self, slot: Slot, l: &Line) -> Vec<Tile> {
+        let tiles = page::tiles(&self.doc, slot);
+        if tiles.is_empty() {
+            return Vec::new();
+        }
+        let v = page::visible(&self.doc, slot);
+        tiles
+            .into_iter()
+            .filter_map(|f| {
+                let d = v.drawn(f.at.0).checked_sub(l.start).filter(|&d| d < l.text.len())?;
+                Some(Tile { at: byte_to_u16(&l.text, d), kind: doc::file_kind(&f.path), name: f.name, href: f.target })
+            })
+            .collect()
     }
 
     /// A numbered item's number, as the desktop counts: a run starts at
@@ -968,20 +1195,25 @@ impl Editor {
     /// A line's words in runs of one style: `(from, to)` in UTF-16 with
     /// the style, plain runs left out.
     fn runs(&self, slot: Slot, l: &Line) -> Runs {
-        let _r = page::reading(slot);
+        let _r = page::reading(&self.doc, slot);
         let t = page::text(&self.doc, slot);
         let v = page::visible(&self.doc, slot);
         let styles = inline::styles(t);
         let end = l.start + l.text.len();
         let mut out: Vec<(usize, usize, Style)> = Vec::new();
         let mut d = 0;
-        for &(f, to) in &v.runs {
-            for (k, s) in styles[f..to].iter().enumerate() {
+        for (f, to, dash) in v.stretches() {
+            // A `--` drawn as an em dash: its letter's three bytes, in the
+            // style of its dashes.
+            let drawn = if dash { inline::EM_DASH.len() } else { to - f };
+            for k in 0..drawn {
+                let s = &styles[if dash { f } else { f + k }];
                 let at = d + k;
                 if at < l.start || at >= end || l.text.as_bytes().get(at - l.start).is_none() {
                     continue;
                 }
-                let s = Style { marker: false, ..*s };
+                // A tile's letter is the tile's to draw (`tiles`).
+                let s = Style { marker: false, file: false, ..*s };
                 if s == Style::default() {
                     continue;
                 }
@@ -991,7 +1223,7 @@ impl Editor {
                     _ => out.push((a, b, s)),
                 }
             }
-            d += to - f;
+            d += drawn;
         }
         // Bytes to UTF-16 columns, each run on whole letters.
         out.into_iter()
@@ -1037,9 +1269,21 @@ pub struct CellPicture {
     pub wiki: bool,
 }
 
+/// A tile of a line of file links: where its one letter is (UTF-16), the
+/// file's name, the address its link opens, and its kind (`PDF`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tile {
+    pub at: usize,
+    pub name: String,
+    pub href: String,
+    pub kind: String,
+}
+
 /// How a line is drawn.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Look {
+    /// A line of file links alone: a tile for each ([`page::tiles`]).
+    pub tiles: Vec<Tile>,
     pub kind: &'static str,
     pub first: bool,
     pub indent: u8,
@@ -1132,6 +1376,51 @@ mod tests {
         assert!(e.look(1).runs.iter().any(|r| r.2.mark != 0 && (r.0, r.1) == (9, 13)));
         assert!(e.look(3).runs.iter().any(|r| r.2.ink != 0 && (r.0, r.1) == (2, 5)));
         assert_eq!(e.look(4).kind, "divider");
+    }
+
+    /// `--` is shown as an em dash, one letter of CodeMirror's text, as the
+    /// desktop draws it (`page::visible`); the Markdown keeps the dashes.
+    /// Typed, it becomes one; stepped onto it's whole; Backspace after it
+    /// takes both; a copy keeps them. Never in code; a run of three as it
+    /// is.
+    #[test]
+    fn two_dashes_are_shown_as_an_em_dash() {
+        let e = Editor::open("# T\n\nA **bold -- dash** and `c--d`.\n\n```\nx -- y\n```\n");
+        let lines: Vec<&str> = e.lines().iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(lines[..4], ["T", "A bold \u{2014} dash and c--d.", "x -- y", ""]);
+        // The dash is bold as its words are: columns 2 to 11, the dash one.
+        let bold: Vec<(usize, usize)> = e.look(1).runs.iter().filter(|r| r.2.bold).map(|r| (r.0, r.1)).collect();
+        assert_eq!(bold, [(2, 13)]);
+        // Typed: the second dash makes it one letter, the caret after it.
+        let mut e = Editor::open("# T\n\nx\n");
+        e.select(1, 1, 1, 1);
+        for ch in [" ", "-", "-", " ", "y"] {
+            e.input(ch);
+        }
+        assert_eq!(e.markdown(), "# T\n\nx -- y\n");
+        assert_eq!(e.lines()[1].text, "x \u{2014} y");
+        assert_eq!(e.caret_lc(), (1, 5, 1, 5));
+        // A place by its column: before the dash, after it.
+        e.select(1, 2, 1, 2);
+        e.input("[");
+        e.select(1, 4, 1, 4);
+        e.input("]");
+        assert_eq!(e.markdown(), "# T\n\nx [--] y\n");
+        e.undo();
+        e.undo();
+        // Selected, its copy keeps the dashes.
+        e.select(1, 2, 1, 3);
+        assert_eq!(e.copy().as_deref(), Some("--"));
+        // Backspace after it takes both dashes.
+        e.select(1, 3, 1, 3);
+        assert!(e.backspace(false));
+        assert_eq!(e.markdown(), "# T\n\nx  y\n");
+        assert_eq!(e.caret_lc(), (1, 2, 1, 2));
+        // A third dash after it is three dashes, shown as written.
+        let mut e = Editor::open("# T\n\nx --\n");
+        e.select(1, 3, 1, 3);
+        e.input("-");
+        assert_eq!((e.markdown().as_str(), e.lines()[1].text.as_str()), ("# T\n\nx ---\n", "x ---"));
     }
 
     /// A paragraph's dropped first letter is its first line's, as the
@@ -1557,6 +1846,25 @@ mod tests {
         assert!(e.markdown().contains("| Day | Miles |\n| --- | --- |\n| Fri | 30 |"), "{}", e.markdown());
     }
 
+    /// A row and a column moved, as the desktop moves them: the caret with
+    /// its words, the header on top, a column's alignment with it; one
+    /// undo each.
+    #[test]
+    fn a_tables_rows_and_columns_move() {
+        let mut e = Editor::open("# T\n\n| Day | Miles |\n| --- | --: |\n| Mon | 12 |\n| Tue | 30 |\n");
+        e.cell_select(1, 1, 1, 1, 1);
+        assert_eq!(e.table_moves(), [false, true, true, false]);
+        assert!(e.table_op(6));
+        assert_eq!(e.cell_caret(), Some((1, 2, 1, 1, 1)), "the caret with its words");
+        assert!(!e.table_op(6), "the bottom row goes no lower");
+        assert!(e.table_op(7));
+        assert!(e.markdown().contains("| Miles | Day |\n| --: | --- |\n| 30 | Tue |\n| 12 | Mon |"), "{}", e.markdown());
+        e.cell_select(1, 0, 0, 0, 0);
+        assert_eq!(e.table_moves(), [false, false, false, true], "the header neither up nor down");
+        assert!(e.undo());
+        assert!(e.markdown().contains("| Day | Miles |\n| --- | --: |\n| Tue | 30 |\n| Mon | 12 |"), "{}", e.markdown());
+    }
+
     /// The toolbar's divider, as the desktop's: between two paragraphs it
     /// makes no empty line, and the caret goes on into the next.
     #[test]
@@ -1906,6 +2214,276 @@ mod tests {
         assert!(e.markdown().contains("- [ ] milk"));
         assert!(e.redo());
         assert!(!e.markdown().contains("- [ ]"));
+    }
+
+    /// The commands a `/word` offers, by CodeMirror's line.
+    fn menu(e: &mut Editor) -> Option<(usize, Vec<&'static str>)> {
+        e.slash_menu().map(|(line, _, shown)| (line, shown.iter().map(|&i| slash::COMMANDS[i].name).collect()))
+    }
+
+    /// The `/` menu as the desktop's: on a line that is only `/` and a
+    /// word, the commands the word picks; a heading, a table made of the
+    /// line; never after words, nor in the title.
+    #[test]
+    fn a_slash_word_offers_the_desktops_menu() {
+        let mut e = Editor::open("# T\n\nIntro\n\n\n");
+        e.select(2, 0, 2, 0);
+        keys(&mut e, "/ta");
+        assert_eq!(menu(&mut e), Some((2, vec!["Table", "Checklist"])));
+        let table = slash::matches("ta")[0];
+        assert!(e.run_slash(table));
+        assert_eq!(e.look(2).kind, "table");
+        assert_eq!(e.cell_caret().map(|c| (c.0, c.1, c.2)), Some((2, 0, 0)), "in its first cell");
+        assert_eq!(menu(&mut e), None);
+        // A heading, on the line it was typed on.
+        let mut e = Editor::open("# T\n\nIntro\n\n\n");
+        e.select(2, 0, 2, 0);
+        keys(&mut e, "/H2");
+        assert!(e.run_slash(slash::matches("h2")[0]));
+        assert_eq!(e.look(2).kind, "h2");
+        assert_eq!(e.lines()[2].text, "");
+        assert_eq!(e.caret_lc(), (2, 0, 2, 0));
+        // After words, or with the caret inside the word: none.
+        let mut e = Editor::open("# T\n\nsee /ta\n\n/table\n");
+        e.select(1, 7, 1, 7);
+        assert_eq!(menu(&mut e), None);
+        e.select(2, 3, 2, 3);
+        assert_eq!(menu(&mut e), None);
+        e.select(2, 6, 2, 6);
+        assert!(menu(&mut e).is_some());
+        let mut e = Editor::open("# /ta\n\nwords\n");
+        e.select(0, 3, 0, 3);
+        assert_eq!(menu(&mut e), None, "the title");
+        assert!(!e.run_slash(7));
+    }
+
+    /// Esc closes the menu for its line, which then types on as words;
+    /// once the line is no longer a command, the menu comes back for it.
+    #[test]
+    fn esc_closes_the_slash_menu_for_its_line() {
+        let mut e = Editor::open("# T\n\n\n");
+        e.select(1, 0, 1, 0);
+        keys(&mut e, "/h");
+        assert!(e.slash_close());
+        assert_eq!(menu(&mut e), None);
+        keys(&mut e, "2");
+        assert_eq!(menu(&mut e), None, "still closed");
+        assert!(!e.run_slash(1));
+        e.select(1, 3, 1, 3);
+        e.backspace(false);
+        e.backspace(false);
+        e.backspace(false);
+        assert_eq!(menu(&mut e), None);
+        keys(&mut e, "/");
+        assert_eq!(menu(&mut e).map(|m| m.1.len()), Some(slash::COMMANDS.len()), "every command, for a bare slash");
+    }
+
+    /// Shift+Enter's line is the paragraph's (or the quote's), shown at
+    /// once with the caret on it, though nothing is after the break yet;
+    /// a line closing a bold word or a highlight leaves them behind; the
+    /// `/` menu is there on it, its choice the line alone.
+    #[test]
+    fn shift_enter_makes_a_line_that_offers_the_menu() {
+        for md in ["# T\n\nhello\n", "# T\n\n> hello\n", "# T\n\n**hello**\n", "# T\n\nOpen ==hello==\n"] {
+            let mut e = Editor::open(md);
+            let end = e.lines()[1].text.len();
+            e.select(1, end, 1, end);
+            let n = e.lines().len();
+            assert!(e.enter(true), "{md}");
+            assert_eq!(e.lines().len(), n + 1, "{md}: the new line there before a letter is typed");
+            assert_eq!(e.lines()[2].text, "", "{md}");
+            assert!(!e.look(2).first, "{md}: the same block");
+            assert_eq!(e.caret_lc(), (2, 0, 2, 0), "{md}: the caret on it");
+            assert_eq!(Editor::open(&e.markdown()).lines()[2].text, "", "{md}: written and read back as the empty line it is");
+            keys(&mut e, "/h2");
+            assert_eq!(e.look(2).runs, [], "{md}: plain");
+            assert_eq!(menu(&mut e), Some((2, vec!["Heading 2"])), "{md}");
+            assert!(e.run_slash(1));
+            assert_eq!(e.look(1).kind, if md.contains('>') { "quote" } else { "text" }, "{md}");
+            assert_eq!(e.look(2).kind, "h2", "{md}");
+            assert_eq!(e.caret_lc(), (2, 0, 2, 0), "{md}");
+        }
+        // A line ending in a hard break's marks the file gave it.
+        for md in ["# T\n\n/h2  \nmore\n", "# T\n\none\n/h2\\\nmore\n"] {
+            let mut e = Editor::open(md);
+            let n = e.lines().iter().position(|l| l.text == "/h2").unwrap();
+            e.select(n, 3, n, 3);
+            assert_eq!(menu(&mut e), Some((n, vec!["Heading 2"])), "{md}");
+        }
+    }
+
+    /// The toolbar's sets, as the desktop's `tool_set` reads the caret.
+    #[test]
+    fn what_the_caret_is_in_for_the_toolbar() {
+        let mut e = Editor::open("# T\n\nWords\n\n## Head\n\n- [ ] item\n\n```\ncode\n```\n\n---\n\n![](a.png)\n\n| A |\n| --- |\n| 1 |\n");
+        let at = |e: &mut Editor, l: usize, c: usize| {
+            e.select(l, c, l, c);
+            e.kind_here()
+        };
+        assert_eq!(at(&mut e, 0, 1), "title");
+        assert_eq!(at(&mut e, 1, 2), "words");
+        assert_eq!(at(&mut e, 2, 2), "words");
+        assert_eq!(at(&mut e, 3, 2), "list");
+        assert_eq!(at(&mut e, 4, 2), "code");
+        e.select(5, 0, 5, 1);
+        assert_eq!(e.kind_here(), "divider");
+        e.select(6, 0, 6, 1);
+        assert_eq!(e.kind_here(), "picture");
+        e.cell_select(7, 1, 0, 0, 0);
+        assert_eq!(e.kind_here(), "table");
+        e.select(1, 2, 2, 2);
+        assert_eq!(e.kind_here(), "words", "a paragraph and a heading");
+        e.select(2, 2, 3, 2);
+        assert_eq!(e.kind_here(), "blocks");
+        assert_eq!(e.blocks_here(), 7);
+        e.select(4, 1, 5, 1);
+        assert_eq!(e.blocks_here(), 1, "code and a divider: the divider to turn, nothing to style");
+        // A to-do's tick, and a paragraph's first letter.
+        e.select(3, 2, 3, 2);
+        assert_eq!(e.tick_here(), Some(false));
+        assert!(e.tick());
+        assert_eq!(e.tick_here(), Some(true));
+        assert!(e.markdown().contains("- [x] item"));
+        e.select(1, 0, 1, 0);
+        assert_eq!((e.tick_here(), e.initial_here()), (None, Some(false)));
+        assert!(e.toggle_initial());
+        assert_eq!(e.initial_here(), Some(true));
+        e.select(2, 0, 2, 0);
+        assert_eq!(e.initial_here(), None, "a heading's is greyed");
+        assert!(!e.toggle_initial());
+        // From the title, what to put in goes at the note's caret.
+        let mut e = Editor::open("# T\n\nIntro\n\nNext\n");
+        e.select(1, 5, 1, 5);
+        e.select(0, 1, 0, 1);
+        assert_eq!(e.kind_here(), "title");
+        assert!(e.insert_divider());
+        assert_eq!(e.markdown(), "# T\n\nIntro\n\n---\n\nNext\n");
+    }
+
+    /// The block's own moves, as the desktop's: up past its neighbour,
+    /// the caret with it; taken out; each one undo.
+    #[test]
+    fn a_block_moves_and_goes() {
+        let md = "# T\n\none\n\ntwo\n\nthree\n";
+        let mut e = Editor::open(md);
+        e.select(2, 1, 2, 1);
+        assert!(e.move_blocks(-1));
+        assert_eq!(e.markdown(), "# T\n\ntwo\n\none\n\nthree\n");
+        assert_eq!(e.caret_lc(), (1, 1, 1, 1));
+        assert!(!e.move_blocks(-1), "the first goes no higher");
+        assert!(e.remove_blocks());
+        assert_eq!(e.markdown(), "# T\n\none\n\nthree\n");
+        assert!(e.undo() && e.undo());
+        assert_eq!(e.markdown(), md);
+    }
+
+    /// A document picked goes in as a link on a line of its own after the
+    /// caret's, as the desktop puts one: drawn as a tile, one letter of
+    /// CodeMirror's words, where its tile goes. A second picked from
+    /// beside it joins it there.
+    #[test]
+    fn a_file_goes_in_on_a_line_of_its_own() {
+        let mut e = Editor::open("# T\n\nsee here\n");
+        e.select(1, 3, 1, 3);
+        assert!(e.insert_links(&[("plan.pdf".into(), "../attachments/plan.pdf".into())]));
+        assert_eq!(e.markdown(), "# T\n\nsee here\n\n[plan.pdf](../attachments/plan.pdf)\n");
+        assert_eq!(e.lines()[2].text, "[");
+        assert_eq!(e.caret_lc(), (2, 1, 2, 1));
+        assert!(e.insert_links(&[("a b.zip".into(), "../attachments/a b.zip".into())]));
+        assert_eq!(e.markdown(), "# T\n\nsee here\n\n[plan.pdf](../attachments/plan.pdf) [a b.zip](../attachments/a%20b.zip)\n");
+        let tiles = |e: &Editor| e.look(2).tiles.iter().map(|t| (t.at, t.name.clone(), t.href.clone(), t.kind.clone())).collect::<Vec<_>>();
+        assert_eq!(
+            tiles(&e),
+            [
+                (0, "plan.pdf".into(), "../attachments/plan.pdf".into(), "PDF".into()),
+                (2, "a b.zip".into(), "../attachments/a%20b.zip".into(), "ZIP".into())
+            ]
+        );
+        assert!(e.look(1).tiles.is_empty());
+    }
+
+    /// As on the desktop: a tile is one letter to the caret. → chooses it,
+    /// Backspace after it takes it whole with its space, a copy of it is
+    /// its Markdown, and words typed beside it go on a line of their own,
+    /// the tiles left as they were. A link to a file in a sentence is one.
+    #[test]
+    fn a_tile_is_one_letter() {
+        let line = "[report.pdf](attachments/report.pdf) [README](attachments/README)";
+        let mut e = Editor::open(&format!("# T\n\n{line}\n\nSee [report.pdf](attachments/report.pdf) here.\n"));
+        assert_eq!(e.lines()[1].text, "[ [");
+        assert_eq!(e.lines()[2].text, "See report.pdf here.");
+        assert!(e.look(2).tiles.is_empty());
+        e.select(1, 0, 1, 1);
+        assert_eq!(e.copy().as_deref(), Some("[report.pdf](attachments/report.pdf)"));
+        e.select(1, 3, 1, 3);
+        assert!(e.backspace(false));
+        assert_eq!(e.markdown(), "# T\n\n[report.pdf](attachments/report.pdf)\n\nSee [report.pdf](attachments/report.pdf) here.\n");
+        assert!(e.undo());
+        assert_eq!(e.lines()[1].text, "[ [");
+        e.select(1, 3, 1, 3);
+        assert!(e.input(" and more"));
+        assert_eq!(e.lines()[1].text, "[ [", "the tiles stay tiles");
+        assert_eq!(e.lines()[2].text, "and more", "the words on a line of their own");
+        assert!(e.markdown().contains(&format!("{line}\n\nand more\n")));
+    }
+
+    /// As on the desktop: a line of files keeps a row of its own. Typed
+    /// after its last tile, a letter starts a paragraph under it, and
+    /// before its first, one above; Enter at its end makes an empty line
+    /// under it; a space is nothing there; Backspace from the line under it
+    /// chooses its last tile. The toolbar's set there is the file's, and
+    /// its tools act on the tile chosen or beside the caret.
+    #[test]
+    fn a_line_of_files_keeps_a_row_of_its_own() {
+        let line = "[report.pdf](attachments/report.pdf) [README](attachments/README)";
+        let mut e = Editor::open(&format!("# T\n\n{line}\n"));
+        e.select(1, 3, 1, 3);
+        assert_eq!(e.kind_here(), "file");
+        assert_eq!(e.tile_here(), Some(("README".into(), "attachments/README".into(), "File".into())));
+        assert!(!e.input(" "), "a space is nothing there");
+        assert!(e.input("x"));
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nx\n"));
+        assert_eq!(e.caret_lc(), (2, 1, 2, 1));
+        assert_eq!(e.kind_here(), "words");
+        assert!(e.undo());
+        e.select(1, 0, 1, 0);
+        assert_eq!(e.tile_here().map(|t| t.0).as_deref(), Some("report.pdf"));
+        assert!(e.input("y"));
+        assert_eq!(e.markdown(), format!("# T\n\ny\n\n{line}\n"));
+        assert!(e.undo());
+        e.select(1, 3, 1, 3);
+        assert!(e.enter(false));
+        assert_eq!(e.lines().iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["T", "[ [", ""]);
+        assert_eq!(e.caret_lc(), (2, 0, 2, 0));
+        assert!(e.input("Below"));
+        e.select(2, 0, 2, 0);
+        assert!(e.backspace(false), "the caret moved");
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nBelow\n"), "the lines aren't joined");
+        assert_eq!(e.caret_lc(), (1, 3, 1, 2), "the last tile chosen");
+        assert_eq!(e.tile_copy().as_deref(), Some("[README](attachments/README)"));
+        // Its copy pasted in the middle of the words below: a row of its own.
+        e.select(2, 2, 2, 2);
+        assert!(e.paste("[README](attachments/README)"));
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nBelow\n\n[README](attachments/README)\n"));
+        assert!(e.remove_tile());
+        assert_eq!(e.markdown(), format!("# T\n\n{line}\n\nBelow\n"), "the last tile of its line, the line with it");
+    }
+
+    /// The finding on the desktop: a colour tried on a selection over
+    /// several blocks reached only one. Given, it reaches every one, and
+    /// the selection stays as it was.
+    #[test]
+    fn a_tint_reaches_every_block_of_the_selection() {
+        let mut e = Editor::open("# T\n\none two\n\n- three\n\nfour\n");
+        e.select(1, 4, 3, 2);
+        let before = e.caret_lc();
+        assert!(e.tint(false, inline::HIGHLIGHT));
+        assert_eq!(e.markdown(), "# T\n\none ==two==\n\n- ==three==\n\n==fo==ur\n");
+        assert_eq!(e.caret_lc(), before);
+        assert!(e.tint(true, 0xC0553FFF));
+        for n in 1..=3 {
+            assert!(e.look(n).runs.iter().any(|r| r.2.ink != 0 && r.2.mark != 0), "line {n}: {:?}", e.look(n).runs);
+        }
     }
 
     #[test]

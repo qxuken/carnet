@@ -366,6 +366,17 @@ const TRASH: &str = ".trash";
 /// back where it was, long after the notice that offered Undo has gone.
 const ORIGINS: &str = ".origins";
 
+/// The most a Markdown file brought in may hold ([`Store::import_note`]):
+/// a long book is a megabyte or two, so a file past this is not a note,
+/// and would only stall the page that opened it.
+pub const IMPORT_MOST: u64 = 8 << 20;
+
+/// Whether a file is Markdown by its name (`.md`, `.markdown`): a note,
+/// dropped on the window, rather than a file a note keeps.
+pub fn is_markdown(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+}
+
 /// A note or a folder in the trash, as the Deleted folder lists it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trashed {
@@ -386,8 +397,16 @@ pub struct Trashed {
 
 impl Store {
     pub fn open(dir: PathBuf) -> io::Result<Self> {
+        let replica = replica_dir(&dir);
+        Self::open_with(dir, replica)
+    }
+
+    /// [`open`](Store::open), the notes' history kept in `replica` (none,
+    /// with `None`) rather than in the app's data folder: the screenshots'
+    /// library, which leaves nothing behind there (shots.rs).
+    pub fn open_with(dir: PathBuf, replica: Option<PathBuf>) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
-        let (replica, replica_refused) = match replica_dir(&dir).map(|d| Replica::open(&d)) {
+        let (replica, replica_refused) = match replica.map(|d| Replica::open(&d)) {
             Some(Ok(r)) => (Some(r), None),
             Some(Err(e)) => (None, Newer::of(&e).map(Newer::to_string)),
             None => (None, None),
@@ -899,14 +918,14 @@ impl Store {
         Ok(relative(&self.folder_dir(folder), &path))
     }
 
-    /// Copies a picture from elsewhere into the attachments folder, under
-    /// its own name (or the first free one). Returns its `src`, as
-    /// `save_attachment` does.
+    /// Copies a picture or a document from elsewhere into the attachments
+    /// folder, under its own name (or the first free one), its kind kept,
+    /// or none ([`copy_in_file`](Self::copy_in_file)). Returns its `src`,
+    /// as `save_attachment` does.
     pub fn import_attachment(&self, folder: &str, from: &Path) -> io::Result<String> {
-        let to = self.copy_in(from, false)?;
+        let to = self.copy_in_file(from)?;
         Ok(relative(&self.folder_dir(folder), &to))
     }
-
     /// The files in an export's `Attachments` folders ([`picture_folders`](
     /// Self::picture_folders)) that notes link to move into the attachments
     /// folder, where pictures are kept and synced from, and the links follow
@@ -2269,8 +2288,9 @@ impl Store {
     /// (nobody wrote in it, so Deleted has nothing to give back), and out
     /// of the replica, so it is never sent. True if it went.
     pub fn drop_welcome(&mut self) -> io::Result<bool> {
-        let fresh = welcome().markdown();
-        let welcome = |n: &Note| !n.dirty && n.folder.is_empty() && n.path.is_some() && n.markdown() == fresh;
+        // As this Carnet makes it, or as one before it did.
+        let fresh = [welcome().markdown(), welcome_until_0_1_3().markdown()];
+        let welcome = |n: &Note| n.folder.is_empty() && fresh.iter().any(|f| untouched_welcome(n, f));
         let Some(i) = self.notes.iter().position(welcome) else { return Ok(false) };
         if self.notes.iter().enumerate().any(|(j, n)| j != i && !(n.is_blank() && n.path.is_none())) {
             return Ok(false);
@@ -2311,6 +2331,28 @@ impl Store {
         Ok(true)
     }
 
+    /// The welcome note asked for again (Settings, or Help on a Mac): the
+    /// one nobody has touched, wherever it is, if there is one, rather
+    /// than a second the same beside it; otherwise a fresh one at the top
+    /// level, saved and kept to send as any new note is, under the first
+    /// free name ("Welcome to Carnet 2" beside one written in). Untouched,
+    /// it is still the welcome [`drop_welcome`](Store::drop_welcome) lets
+    /// go of on joining an account with nothing else here. A failed save
+    /// leaves nothing behind. Its index.
+    pub fn add_welcome(&mut self) -> io::Result<usize> {
+        let fresh = welcome().markdown();
+        if let Some(i) = self.notes.iter().position(|n| untouched_welcome(n, &fresh)) {
+            return Ok(i);
+        }
+        self.notes.push(welcome());
+        let i = self.notes.len() - 1;
+        if let Err(e) = self.save(i, true) {
+            self.notes.pop();
+            return Err(e);
+        }
+        Ok(i)
+    }
+
     /// Brings a trashed file back as a note under its old name (or the
     /// first free one), in the folder it was in. Returns its index.
     pub fn restore(&mut self, from: &Path, name: &str, folder: &str) -> io::Result<usize> {
@@ -2336,6 +2378,110 @@ impl Store {
             self.save_pins()?;
         }
         Ok(self.notes.len() - 1)
+    }
+
+    /// The note whose file is at `path`, if one is.
+    pub fn note_of_file(&self, path: &Path) -> Option<usize> {
+        self.notes.iter().position(|n| n.path.as_deref().is_some_and(|p| same_path(p, path)))
+    }
+
+    /// Brings in a Markdown file from elsewhere (one dropped on the
+    /// window) as a note in `folder`: copied, never moved, under its own
+    /// name made plain, or the first one free there, as a `.md`. The
+    /// pictures and documents it links to by a path from beside it come
+    /// along into the attachments folder, as a paste's do, and its links
+    /// follow them; one not there, on the web, or in the notes folder
+    /// already (linked to where it is), stays as written. A file that
+    /// isn't UTF-8, or is too big to be a note ([`IMPORT_MOST`]), is left
+    /// where it is, and said why. Returns the note's index.
+    pub fn import_note(&mut self, folder: &str, from: &Path) -> io::Result<usize> {
+        let meta = fs::metadata(from)?;
+        if !meta.is_file() {
+            return Err(io::Error::other("it isn't a file"));
+        }
+        if meta.len() > IMPORT_MOST {
+            return Err(io::Error::other("it's too big to be a note"));
+        }
+        let text = String::from_utf8(fs::read(from)?)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "it isn't text Carnet can read (not UTF-8)"))?;
+        let to_dir = self.inside(self.folder_dir(folder))?;
+        let text = self.bring_linked(&text, from.parent().unwrap_or(Path::new("")), &to_dir);
+        fs::create_dir_all(&to_dir)?;
+        let to = self.inside(self.free_path(&plain(&stem_of(from)), None, folder))?;
+        // Born when the file was, so it sorts by Created as it was made.
+        write_made(&to, &text, meta.created().or_else(|_| meta.modified()).ok())?;
+        if !folder.is_empty() && !self.folders.iter().any(|f| f == folder) {
+            self.folders.push(folder.to_string());
+            self.folders.sort_by_key(|f| f.to_lowercase());
+        }
+        let (mut note, written) = Note::load_text(&to)?;
+        note.folder = folder.to_string();
+        self.notes.push(note);
+        self.track(self.notes.len() - 1, &written, Origin::Import);
+        Ok(self.notes.len() - 1)
+    }
+
+    /// `text`, a note's from the folder `from`, with the files its links
+    /// and Obsidian embeds name by a path from there — files of any kind,
+    /// but no other note — copied into the attachments folder (a link to
+    /// one that could run asks before it opens, as any does), and the
+    /// links rewritten to find them from
+    /// `to` (an embed by its path from the notes folder). The same file
+    /// named twice is copied once.
+    fn bring_linked(&mut self, text: &str, from: &Path, to: &Path) -> String {
+        let mut copied: HashMap<String, PathBuf> = HashMap::new();
+        // Where a target leads, if to a file worth bringing: brought (or
+        // where it is, when the notes folder has it already). A link to
+        // another note stays one: that note comes in on its own, or not.
+        let mut bring = |t: &str| -> Option<PathBuf> {
+            let p = from.join(decode_src(t));
+            if !is_relative(t) || on_network(&p) || !p.is_file() || is_markdown(&p) {
+                return None;
+            }
+            if within(&self.dir, &p) {
+                return Some(p);
+            }
+            let k = path_key(&p);
+            if let Some(done) = copied.get(&k) {
+                return Some(done.clone());
+            }
+            let done = self.copy_in_file(&p).ok()?;
+            copied.insert(k, done.clone());
+            Some(done)
+        };
+        let mut edits: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        for r in link_targets(text) {
+            if let Some(p) = bring(&text[r.clone()]) {
+                edits.push((r, encode_src(&relative(to, &p))));
+            }
+        }
+        for r in wiki_targets(text) {
+            if let Some(p) = bring(&text[r.clone()])
+                && let Some(k) = p.strip_prefix(&self.dir).ok().map(|p| p.to_string_lossy().replace('\\', "/"))
+                && !k.contains(['[', ']', '|', '#'])
+            {
+                edits.push((r, k));
+            }
+        }
+        if !copied.is_empty() {
+            self.index_files();
+        }
+        if edits.is_empty() {
+            return text.to_string();
+        }
+        edits.sort_by_key(|(r, _)| r.start);
+        let mut out = String::with_capacity(text.len());
+        let mut last = 0;
+        for (r, new) in edits {
+            if r.start < last {
+                continue;
+            }
+            out.push_str(&text[last..r.start]);
+            out.push_str(&new);
+            last = r.end;
+        }
+        out.push_str(&text[last..]);
+        out
     }
 
     /// Where the things in the trash came from, by their names there: the
@@ -3074,20 +3220,46 @@ pub fn epoch_time(secs: u64) -> Option<SystemTime> {
     (secs <= LAST).then(|| UNIX_EPOCH + Duration::from_secs(secs))
 }
 
-/// Whether a file a note links to is one to open in its own app: a
-/// document, a picture, a recording, a film. Anything else (a program, a
-/// script) is shown in its folder, never run from a link.
-pub fn opens_safely(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "pdf" | "txt" | "md" | "rtf" | "csv" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx"
-                | "pages" | "numbers" | "key" | "odt" | "ods" | "odp" | "ics" | "vcf"
-                | "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "heif" | "tif" | "tiff"
-                | "m4a" | "mp3" | "wav" | "aac" | "aiff" | "caf" | "flac" | "ogg"
-                | "mov" | "mp4" | "m4v" | "webm"
-        )
-    })
+/// Whether a file a note links to could run a program as it opens: one
+/// of the kinds that run, install or lead elsewhere
+/// ([`doc::could_run`]), or, on a Mac or Linux, one the system would run
+/// for its mode (a script with no kind, marked as a program). Its link
+/// asks before it opens; any other opens in its own app.
+pub fn could_run(path: &Path) -> bool {
+    doc::could_run(&file_name(path)) || runs_by_mode(path)
+}
+
+#[cfg(unix)]
+fn runs_by_mode(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn runs_by_mode(_: &Path) -> bool {
+    false
+}
+
+/// Opens a file in the notes folder in the system's own app for it. One
+/// with no kind (a `README`) has none: on a Mac it opens in the text
+/// editor (`open -t`), where `open` alone would find no app, or run it
+/// in Terminal were it a program; Windows asks which app (it runs nothing
+/// by a name without a kind); Linux's opener reads what's in it, and
+/// opens text as text.
+#[cfg(test)]
+pub fn open_file(path: &Path) -> io::Result<()> {
+    open_url(&path.to_string_lossy())
+}
+
+/// Opens a file in the notes folder in the system's own app for it.
+#[cfg(not(test))]
+pub fn open_file(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    if path.extension().is_none() {
+        std::process::Command::new("open").arg("-t").arg(path).spawn()?;
+        return Ok(());
+    }
+    open_url(&path.to_string_lossy())
 }
 
 /// A file system's error in plain words: what went wrong, without the
@@ -3123,56 +3295,59 @@ pub fn open_url(url: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Opens a web or mail address in the system's own app for it.
+/// Opens a web or mail address, or a file, in the system's own app for
+/// it: kui's `open_external`, the platform's own opener with no shell
+/// between.
 #[cfg(not(test))]
 pub fn open_url(url: &str) -> io::Result<()> {
-    use std::process::Command;
-    #[cfg(windows)]
-    Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()?;
-    #[cfg(target_os = "macos")]
-    Command::new("open").arg(url).spawn()?;
-    #[cfg(not(any(windows, target_os = "macos")))]
-    Command::new("xdg-open").arg(url).spawn()?;
-    Ok(())
+    kui_native::open_external(url).map_err(io::Error::other)
 }
+
 /// Opens the OS file manager on `path`: a file selected in its folder, or a
-/// folder itself. Linux file managers have no common "select this file",
-/// so there it opens the folder.
+/// folder itself (kui's `show_in_folder`). Linux file managers have no
+/// common "select this file", so there it opens the folder.
+#[cfg(not(test))]
 pub fn reveal(path: &Path) -> io::Result<()> {
-    use std::process::Command;
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // Explorer wants `/select,"C:\a b\c.md"` exactly; Rust's own
-        // quoting would wrap the whole argument and Explorer ignores it.
-        let arg = if path.is_dir() {
-            format!("\"{}\"", path.display())
-        } else {
-            format!("/select,\"{}\"", path.display())
-        };
-        Command::new("explorer").raw_arg(arg).spawn()?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut cmd = Command::new("open");
-        if !path.is_dir() {
-            cmd.arg("-R");
-        }
-        cmd.arg(path).spawn()?;
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let dir = if path.is_dir() {
-            path
-        } else {
-            path.parent().unwrap_or(path)
-        };
-        Command::new("xdg-open").arg(dir).spawn()?;
-    }
+    kui_native::show_in_folder(&path.to_string_lossy()).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test had the file manager show, in order: nothing is shown.
+    pub static REVEALED: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Shows `path` in its folder: in a test, kept in [`REVEALED`].
+#[cfg(test)]
+pub fn reveal(path: &Path) -> io::Result<()> {
+    REVEALED.with_borrow_mut(|r| r.push(path.to_path_buf()));
     Ok(())
 }
 
+/// `p` written whole, as this system writes a path: its own separators
+/// (a note's link joined to its folder keeps the link's `/`), and each
+/// `.` and `..` read, so it names the file from the top of its disk
+/// (`C:\Users\me\Documents\Carnet\attachments\plan.pdf`).
+pub fn native_path(p: &Path) -> PathBuf {
+    path_parts(p).iter().collect()
+}
+
+/// `n` is the welcome note as [`welcome`] makes it (`fresh`, its
+/// Markdown), saved, and nobody has written in it since.
+fn untouched_welcome(n: &Note, fresh: &str) -> bool {
+    !n.dirty && n.path.is_some() && n.markdown() == fresh
+}
+
+/// The welcome note (carnet-core's, the web's too), its shortcuts as this
+/// platform writes them (⌘B on a Mac).
 fn welcome() -> Note {
+    use carnet_core::welcome;
+    Note::new(welcome::TITLE, welcome::doc(|s| crate::keys::label(crate::keys::welcome_spec(s))))
+}
+
+/// The welcome note as Carnet 0.1.3 and before made it: one untouched is
+/// still this device's own to let go as it joins an account.
+fn welcome_until_0_1_3() -> Note {
     use crate::keys;
     let k = keys::label;
     let item = |style, indent, done, text: &str| {
@@ -3403,6 +3578,58 @@ mod tests {
         s.notes.push(Note::new("", Doc::new(vec![Block::text("")])));
         assert!(s.drop_welcome().unwrap());
         assert_eq!(s.notes.len(), 1, "the new note stays");
+        let _ = fs::remove_dir_all(&dir);
+
+        // One an older Carnet made, untouched, goes too.
+        let dir = temp_dir("welcome-older");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Welcome to Carnet.md"), welcome_until_0_1_3().markdown()).unwrap();
+        let mut s = Store::open(dir.clone()).unwrap();
+        assert_ne!(s.notes[0].markdown(), welcome().markdown(), "the older words");
+        assert!(s.drop_welcome().unwrap());
+        assert!(s.notes.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The welcome note asked for again: the untouched one, not a second
+    /// the same; written in, or gone to Deleted, a fresh one at the top
+    /// level under the next free name, saved and sent. The one added is
+    /// still a welcome a joining device lets go of when nothing else is
+    /// here, and the account's own keeps it from being put back twice.
+    #[test]
+    fn the_welcome_note_comes_again_when_asked_for() {
+        let dir = temp_dir("welcome-again");
+        let mut s = Store::open(dir.clone()).unwrap();
+        assert_eq!(s.add_welcome().unwrap(), 0, "untouched: that one");
+        assert_eq!(s.notes.len(), 1);
+        // Written in: a fresh one beside it, to be sent.
+        s.notes[0].doc.push(Block::text("mine now"));
+        s.notes[0].touch();
+        s.save(0, true).unwrap();
+        let _ = s.take_changed();
+        let i = s.add_welcome().unwrap();
+        assert_eq!((i, s.notes.len()), (1, 2));
+        assert_eq!(s.notes[i].title, "Welcome to Carnet");
+        assert!(s.notes[i].folder.is_empty(), "at the top level");
+        assert_eq!(s.notes[i].path.as_deref(), Some(dir.join("Welcome to Carnet 2.md").as_path()));
+        assert_eq!(fs::read_to_string(dir.join("Welcome to Carnet 2.md")).unwrap(), welcome().markdown());
+        let key = s.notes[i].key.expect("kept to send");
+        assert!(s.take_changed().contains(&key), "sent");
+        // Asked again: the fresh one, untouched, not a third.
+        assert_eq!(s.add_welcome().unwrap(), i);
+        assert_eq!(s.notes.len(), 2);
+        // Beside the one written in, it stays as a device joins; alone,
+        // it goes as the first would have.
+        assert!(!s.drop_welcome().unwrap());
+        s.trash(0).unwrap();
+        assert!(s.drop_welcome().unwrap());
+        assert!(s.notes.is_empty());
+        // Both in Deleted or gone: asked for, a fresh one all the same,
+        // under the first name again; and then the account has one.
+        let i = s.add_welcome().unwrap();
+        assert_eq!(s.notes[i].path.as_deref(), Some(dir.join("Welcome to Carnet.md").as_path()));
+        assert!(!s.welcome_unless_the_account_has_one().unwrap());
+        assert_eq!(s.notes.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -3951,6 +4178,67 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A Markdown file from elsewhere (dropped on the window) comes in as a
+    /// note: copied, under its own name or the next one free, the pictures
+    /// and files beside it that it links to, a script among them,
+    /// brought into the attachments folder (once, however often named)
+    /// and its links and embeds following them; a web picture and a
+    /// missing one stay as written. What isn't UTF-8, or is too big to be a note,
+    /// stays out, and nothing of it is left behind.
+    #[test]
+    fn a_markdown_file_from_elsewhere_comes_in_as_a_note() {
+        let (dir, out) = (temp_dir("import"), temp_dir("import-src"));
+        let mut s = Store::open(dir.clone()).unwrap();
+        fs::create_dir_all(out.join("img")).unwrap();
+        fs::write(out.join("img").join("Sea view.png"), "a sea").unwrap();
+        fs::write(out.join("leaf.png"), "a leaf").unwrap();
+        fs::write(out.join("Plan.pdf"), "%PDF").unwrap();
+        fs::write(out.join("run.sh"), "echo").unwrap();
+        let text = "# Trip\n\n![The sea](img/Sea%20view.png)\n\nAgain <img src=\"img/Sea view.png\" width=\"200\">\n\n[Plan](<Plan.pdf>), [run](run.sh), ![](https://example.com/x.png), ![](gone.png)\n\n![[leaf.png|300]]\n";
+        fs::write(out.join("Trip.md"), text).unwrap();
+        let work = s.create_folder("", "Work").unwrap();
+        fs::write(dir.join("Work").join("Trip.md"), "# Mine\n").unwrap();
+        s.rescan();
+        let before = s.notes.len();
+
+        let i = s.import_note(&work, &out.join("Trip.md")).unwrap();
+        assert_eq!((s.notes[i].title.as_str(), s.notes[i].folder.as_str()), ("Trip", "Work"));
+        assert_eq!(s.notes[i].path.as_deref(), Some(dir.join("Work").join("Trip 2.md").as_path()), "the name taken: the next one");
+        assert_eq!(fs::read_to_string(dir.join("Work").join("Trip.md")).unwrap(), "# Mine\n");
+        assert_eq!(
+            fs::read_to_string(dir.join("Work").join("Trip 2.md")).unwrap(),
+            "# Trip\n\n![The sea](../attachments/Sea-view.png)\n\nAgain <img src=\"../attachments/Sea-view.png\" width=\"200\">\n\n[Plan](<../attachments/Plan.pdf>), [run](../attachments/run.sh), ![](https://example.com/x.png), ![](gone.png)\n\n![[attachments/leaf.png|300]]\n"
+        );
+        let pics = dir.join(ATTACHMENTS);
+        assert_eq!(fs::read_to_string(pics.join("Sea-view.png")).unwrap(), "a sea");
+        assert!(pics.join("leaf.png").is_file() && pics.join("Plan.pdf").is_file() && pics.join("run.sh").is_file());
+        assert!(!pics.join("Sea-view-2.png").exists() && !pics.join("run.png").exists());
+        assert_eq!(fs::read_to_string(out.join("Trip.md")).unwrap(), text, "copied, not moved or changed");
+        assert!(out.join("img").join("Sea view.png").exists());
+        assert!(s.resolve("Work", "../attachments/Sea-view.png").unwrap().is_file());
+        assert!(s.notes[i].key.is_some(), "kept in the replica, to sync");
+
+        // `.markdown` too, a `.md` here; no heading, titled by its name.
+        fs::write(out.join("Ideas.markdown"), "just words\n").unwrap();
+        let j = s.import_note("", &out.join("Ideas.markdown")).unwrap();
+        assert_eq!(s.notes[j].title, "Ideas");
+        assert!(dir.join("Ideas.md").is_file());
+        assert!(is_markdown(Path::new("a.MD")) && is_markdown(Path::new("b.markdown")) && !is_markdown(Path::new("c.txt")));
+
+        // Not UTF-8, or too big: nothing comes in.
+        fs::write(out.join("Bad.md"), [0xff, 0xfe, b'x']).unwrap();
+        let e = s.import_note("", &out.join("Bad.md")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        assert!(plain_error(&e).contains("UTF-8"), "{e}");
+        fs::File::create(out.join("Big.md")).unwrap().set_len(IMPORT_MOST + 1).unwrap();
+        assert!(plain_error(&s.import_note("", &out.join("Big.md")).unwrap_err()).contains("too big"));
+        assert!(s.import_note("", &out.join("Nowhere.md")).is_err());
+        assert!(!dir.join("Bad.md").exists() && !dir.join("Big.md").exists());
+        assert_eq!(s.notes.len(), before + 2);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&out);
+    }
+
     /// An Obsidian vault's embeds, `![[photo.png]]`: the pictures they find
     /// by name join the attachments folder, and the embeds stay embeds,
     /// named by the pictures' new paths. One whose new name another embed
@@ -4078,7 +4366,7 @@ mod tests {
     }
 
     #[test]
-    fn a_link_to_a_file_beside_the_notes_opens_it_and_a_program_is_only_shown() {
+    fn a_link_to_a_file_beside_the_notes_opens_it_and_a_program_asks_first() {
         let dir = temp_dir("file-links");
         let s = Store::open(dir.clone()).unwrap();
         fs::create_dir_all(dir.join("attachments")).unwrap();
@@ -4086,15 +4374,25 @@ mod tests {
         fs::write(dir.join("attachments").join("Boarding pass.pdf"), "pdf").unwrap();
         fs::write(dir.join("attachments").join("run.command"), "#!/bin/sh").unwrap();
         let pdf = s.linked_file("Archive", "../attachments/Boarding%20pass.pdf").expect("found from a folder");
-        assert!(opens_safely(&pdf));
-        assert!(!opens_safely(&s.linked_file("", "attachments/run.command").unwrap()), "shown, not run");
-        // Nothing that runs, or opens as a page that could: whatever its
-        // case, and none without a kind.
-        for name in ["x.COMMAND", "x.sh", "x.app", "x.terminal", "x.tool", "x.jar", "x.exe", "x.bat", "x.ps1", "x.html", "x.svg", "x.webloc", "x.fileloc", "x.scpt", "x.pkg", "x.dmg", "x.docm", "x"] {
-            assert!(!opens_safely(Path::new(name)), "{name}");
+        assert!(!could_run(&pdf));
+        assert!(could_run(&s.linked_file("", "attachments/run.command").unwrap()), "asked about first");
+        // Whatever its case; and one with no kind, source code, a page,
+        // a note, opens without a word.
+        for name in ["x.COMMAND", "x.sh", "x.app", "x.terminal", "x.tool", "x.jar", "x.exe", "x.bat", "x.ps1", "x.webloc", "x.fileloc", "x.scpt", "x.pkg", "x.dmg", "x.py"] {
+            assert!(could_run(Path::new(name)), "{name}");
         }
-        for name in ["x.PDF", "x.png", "x.m4a", "x.mov", "x.md"] {
-            assert!(opens_safely(Path::new(name)), "{name}");
+        for name in ["x.PDF", "x.png", "x.m4a", "x.mov", "x.md", "README", "main.rs", "x.html", "x.svg", "x.docm", "x.txt"] {
+            assert!(!could_run(Path::new(name)), "{name}");
+        }
+        // On a Mac or Linux, a script with no kind marked as a program.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = dir.join("attachments").join("tool");
+            fs::write(&tool, "#!/bin/sh").unwrap();
+            assert!(!could_run(&tool));
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(could_run(&tool));
         }
         assert_eq!(s.linked_file("", "example.com"), None, "a web address");
         assert_eq!(s.linked_file("", "attachments/gone.pdf"), None);

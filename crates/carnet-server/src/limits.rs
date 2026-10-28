@@ -111,6 +111,22 @@ impl Limiter {
         }
     }
 
+    /// [`allow`](Limiter::allow), but a client it can't keep a bucket for
+    /// (it's full, with none full again to forget) is let through rather
+    /// than refused: for tries whose refusal would itself tell something.
+    pub fn allow_unless_full(&mut self, client: &str, now: f64) -> bool {
+        if self.buckets.len() >= self.max && !self.buckets.contains_key(client) {
+            if now - self.pruned >= 1.0 {
+                self.pruned = now;
+                self.prune(now);
+            }
+            if self.buckets.len() >= self.max {
+                return true;
+            }
+        }
+        self.allow(client, now)
+    }
+
     /// Buckets full again forgotten: a client not seen for a while costs
     /// nothing to keep.
     pub fn prune(&mut self, now: f64) {
@@ -215,13 +231,26 @@ pub fn client_of(peer: IpAddr, cf: Option<&str>, forwarded: Option<&str>, truste
     }
     let mut last = peer;
     for hop in forwarded.unwrap_or_default().rsplit(',') {
-        let Ok(ip) = hop.trim().parse::<IpAddr>() else { break };
+        let Some(ip) = hop_ip(hop) else { break };
         if !trusted_ip(ip) {
             return client(ip);
         }
         last = ip;
     }
     client(last)
+}
+
+/// The address an `X-Forwarded-For` hop names, as proxies write one:
+/// bare (`198.51.100.7`, `2001:db8::1`), bracketed (`[2001:db8::1]`), or
+/// with the port it came from (`198.51.100.7:51234`, `[2001:db8::1]:443`),
+/// which some load balancers add. Were a port read as no address, every
+/// client would count as the proxy, and share its limits.
+fn hop_ip(hop: &str) -> Option<IpAddr> {
+    let hop = hop.trim();
+    hop.parse::<IpAddr>()
+        .ok()
+        .or_else(|| hop.parse::<std::net::SocketAddr>().ok().map(|s| s.ip()))
+        .or_else(|| hop.strip_prefix('[')?.strip_suffix(']')?.parse().ok())
 }
 
 /// The client an address counts as: an IPv4 address itself (written as
@@ -263,6 +292,11 @@ mod tests {
         assert!(l.allow("c", 30.0), "a full bucket forgotten makes room");
         assert_eq!(l.len(), 2);
         assert!(!l.allow("d", 30.5));
+        // Where a refusal would tell something: full, a stranger is let
+        // through rather than refused; one it keeps is held to its bucket.
+        let mut quiet = Limiter::with_max(Rate { burst: 1.0, every: 10.0 }, 1);
+        assert!(quiet.allow_unless_full("a", 0.0) && !quiet.allow_unless_full("a", 0.0));
+        assert!(quiet.allow_unless_full("b", 0.0) && quiet.allow_unless_full("b", 0.0), "full: never refused");
         // Spoofed addresses, one each: never more than it keeps.
         let mut sockets = Limiter::with_max(SOCKETS, 100);
         let let_in = (0..1000u32).filter(|n| sockets.allow(&format!("10.0.{}.{}", n / 256, n % 256), 0.0)).count();
@@ -281,6 +315,12 @@ mod tests {
         // client wrote itself on the left is not believed.
         assert_eq!(client_of(ip("127.0.0.1"), None, Some("6.6.6.6, 198.51.100.7, 10.1.2.3"), &trusted, xff), ip("198.51.100.7"));
         assert_eq!(client_of(ip("127.0.0.1"), None, None, &trusted, xff), ip("127.0.0.1"), "no header: the proxy itself");
+        // A hop with its port, or bracketed, is still its address, not the
+        // proxy's.
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("198.51.100.7:51234"), &trusted, xff), ip("198.51.100.7"));
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("[2001:db8::1]:443, 10.1.2.3"), &trusted, xff), ip("2001:db8::"));
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("[2001:db8::1]"), &trusted, xff), ip("2001:db8::"));
+        assert_eq!(client_of(ip("127.0.0.1"), None, Some("nonsense"), &trusted, xff), ip("127.0.0.1"), "no address: the proxy itself");
         // Cloudflare's header, from a trusted peer, is ignored by
         // default: nginx or Caddy pass on what the client wrote.
         assert_eq!(client_of(ip("127.0.0.1"), Some("6.6.6.6"), None, &trusted, xff), ip("127.0.0.1"));

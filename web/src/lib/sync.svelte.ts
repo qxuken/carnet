@@ -2,7 +2,19 @@
 // that does everything else. Frames from the socket go into the wasm;
 // frames it has to send go out; what it keeps is kept, sealed.
 
-import init, { Join, Vault, app_version, code_from_link, invite_from, max_sealed, protocol, state_refusal } from '../wasm/carnet_web.js';
+import init, {
+  Join,
+  Vault,
+  app_version,
+  code_from_link,
+  import_most,
+  import_names,
+  invite_from,
+  is_picture_name,
+  max_sealed,
+  protocol,
+  state_refusal,
+} from '../wasm/carnet_web.js';
 import * as sealed from './sealed';
 import * as db from './db';
 import * as passkey from './passkey';
@@ -12,6 +24,7 @@ import { type Entry, Uploads } from './uploads';
 import { type Entry as Typed, Pending, replay } from './pending';
 import { linkAction, numbered, offlineStatus } from './words';
 import { pastedStem } from './stem';
+import { importedWords, isMarkdownName, notImportedWords, refusedWords, type Attached } from './files';
 
 export type Note = {
   key: string;
@@ -403,21 +416,154 @@ class Sync {
   /// A picture from this device put in for a note in `folder`: kept here
   /// (sealed, as fetched ones are), shown at once, sent to the server and
   /// then the vault. Its `src`, as the note links it.
-  async addPicture(folder: string, file: File): Promise<string> {
+  /// Named by `stem` (a file's own name, made plain), or else by when it
+  /// was put in, as a pasted one is.
+  async addPicture(folder: string, file: File, stem?: string): Promise<string> {
     if (!this.vault) throw new Error('not open');
     const { bytes, ext, type } = await pictureFile(file);
-    const path = this.vault.picture_free(pastedStem(new Date()), ext);
-    const id = this.vault.upload(path, bytes);
-    if (!id) throw new Error('That picture is over 32 MB, too big to sync.');
+    const path = stem ? this.vault.file_free(`${stem}.${ext}`) : this.vault.picture_free(pastedStem(new Date()), ext);
+    await this.putIn(path, bytes, 'That picture is over 32 MB, too big to sync.');
+    this.pictures.add(path, new Blob([bytes], { type }));
+    return fromFolder(folder, path);
+  }
+
+  /// A file of any other kind put in for a note in `folder`, as it is,
+  /// under its own name in the attachments folder (the desktop's
+  /// `import_attachment`): kept here, sent, then in the vault's files. Its
+  /// `src`, as the note links it.
+  async addFile(folder: string, file: File): Promise<string> {
+    if (!this.vault) throw new Error('not open');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const path = this.vault.file_free(file.name);
+    await this.putIn(path, bytes, `“${file.name}” is over 32 MB, too big to sync.`);
+    return fromFolder(folder, path);
+  }
+
+  /// `bytes` put in here at `path`: kept (sealed, as fetched ones are),
+  /// sent to the server and then the vault. Refused, with `tooBig`, past
+  /// what a file may be.
+  private async putIn(path: string, bytes: Uint8Array<ArrayBuffer>, tooBig: string) {
+    const v = this.vault;
+    if (!v) throw new Error('not open');
+    const id = v.upload(path, bytes);
+    if (!id) throw new Error(tooBig);
     // Kept as on its way before it's sent: a fast server's word that it's
     // in can come at once, and is kept after this.
-    const kept = this.vault.uploading().includes(id) ? this.uploads.add(path, id) : null;
+    const kept = v.uploading().includes(id) ? this.uploads.add(path, id) : null;
     this.flush();
     await sealed.put(FILE + id, bytes);
     await kept;
-    this.pictures.add(path, new Blob([bytes], { type }));
-    const depth = folder ? folder.split('/').length : 0;
-    return '../'.repeat(depth) + path;
+  }
+
+  /// Files put in a note in `folder`, as the desktop's paperclip, `/file`,
+  /// a drop or a paste put them: a picture (by its name, or its kind) as a
+  /// picture, any other file as it is, to link on a line of its own, each
+  /// under its own name. What went in, in order; what couldn't (too big to
+  /// sync, unreadable: a folder, say) is said, the first by name, and the
+  /// rest still go. What the editor's `/file` and paperclip call.
+  async attach(folder: string, files: Iterable<File>): Promise<Attached[]> {
+    const out: Attached[] = [];
+    const refused: [string, string][] = [];
+    for (const file of files) {
+      const stem = file.name.replace(/\.[^.]*$/, '') || file.name;
+      try {
+        if (is_picture_name(file.name) || (file.type.startsWith('image/') && !file.name.includes('.'))) {
+          out.push({ picture: true, name: file.name, src: await this.addPicture(folder, file, stem) });
+        } else {
+          out.push({ picture: false, name: file.name, src: await this.addFile(folder, file) });
+        }
+      } catch (e) {
+        refused.push([file.name, e instanceof Error ? e.message : String(e)]);
+      }
+    }
+    const said = refusedWords(refused);
+    if (said) this.say(said);
+    return out;
+  }
+
+  /// The file a link in a note in `folder` leads to (`href` as the page
+  /// shows it), as a path from the notes folder: one the vault names, or
+  /// one on its way there from here. None for any other link.
+  linkedFile(folder: string, href: string): string | undefined {
+    return this.vault?.linked_file(folder, href);
+  }
+
+  /// The file at `path` (from the notes folder), whole: kept here for
+  /// offline, or fetched, as a picture is.
+  async file(path: string): Promise<Blob> {
+    const url = await this.picture(path);
+    return (await fetch(url)).blob();
+  }
+
+  /// Markdown files dropped on the page, brought in as notes in `folder`
+  /// (the desktop's `import_notes`): each a copy under its own name, or
+  /// the next one free; the pictures and files dropped with them that
+  /// they link to by name put in, and their links rewritten to find them.
+  /// A link to a file not dropped stays as written: a browser hands the
+  /// page only what was dropped. What came is said; what couldn't (not
+  /// UTF-8, too big, empty) is said by name. The first note's key, to
+  /// open; none if none came.
+  async importNotes(folder: string, files: File[]): Promise<string | null> {
+    const v = this.vault;
+    if (!v) return null;
+    const notes = files.filter((f) => isMarkdownName(f.name));
+    const others = files.filter((f) => !isMarkdownName(f.name));
+    // The files any of the notes name, put in once each.
+    const brought = new Map<string, string>();
+    const failed: [string, string][] = [];
+    const read: [File, string][] = [];
+    for (const f of notes) {
+      if (f.size > import_most()) {
+        failed.push([f.name, 'it’s too big to be a note']);
+        continue;
+      }
+      try {
+        read.push([f, new TextDecoder('utf-8', { fatal: true }).decode(await f.arrayBuffer())]);
+      } catch {
+        failed.push([f.name, 'it isn’t text Carnet can read (not UTF-8)']);
+      }
+    }
+    const wanted = new Set(read.flatMap(([, text]) => import_names(text)));
+    for (const f of others) {
+      const name = f.name.toLowerCase();
+      if (!wanted.has(name) || brought.has(name)) continue;
+      if (this.vault !== v) return null;
+      try {
+        // As it is, as the desktop copies one a note brings: a photo too.
+        const path = v.file_free(f.name);
+        await this.putIn(path, new Uint8Array(await f.arrayBuffer()), `“${f.name}” is over 32 MB, too big to sync.`);
+        brought.set(name, path);
+      } catch (e) {
+        failed.push([f.name, e instanceof Error ? e.message : String(e)]);
+      }
+    }
+    if (this.vault !== v) return null;
+    const came: string[] = [];
+    for (const [f, text] of read) {
+      const names = [...brought.keys()];
+      try {
+        came.push(v.import_note(folder, f.name, text, names, names.map((n) => brought.get(n)!)));
+      } catch (e) {
+        failed.push([f.name, e instanceof Error ? e.message : String(e)]);
+      }
+    }
+    if (came.length) this.changed();
+    const titles = came.map((k) => this.notes.find((n) => n.key === k)?.title ?? 'Untitled');
+    const said = importedWords(titles, folder);
+    if (said) this.say(said);
+    const bad = notImportedWords(failed);
+    if (bad) this.error = bad;
+    return came[0] ?? null;
+  }
+
+  /// The welcome note, asked for again (Settings' last button): the one
+  /// nobody has written in, or a new one at the top, its shortcuts as this
+  /// browser's system writes them. Its key, to open.
+  addWelcome(): string | null {
+    if (!this.vault) return null;
+    const key = this.vault.add_welcome(/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent));
+    this.changed();
+    return key;
   }
 
   private connect() {
@@ -1448,22 +1594,35 @@ async function capped(res: Response, most: number): Promise<Uint8Array> {
   return out;
 }
 
+/// `path`, from the notes folder, as a note in `folder` links it.
+const fromFolder = (folder: string, path: string) => '../'.repeat(folder ? folder.split('/').length : 0) + path;
+
 /// What this browser is called: the name it was given, or its own.
 async function myName(): Promise<string> {
   const kept = await sealed.get(NAME);
   return kept ? new TextDecoder().decode(kept) : deviceName();
 }
 
-/// A picture file as the desktop takes it. PNG, GIF and WebP (a
+/// A picture file as the desktop takes it. PNG, GIF, WebP and SVG (a
 /// screenshot, a drawing) go as they are. A photo (JPEG, or an iPhone's
 /// HEIC) is drawn again: the right way up, at most `PHOTO` pixels on its
 /// long side, and with nothing the camera wrote in it, such as where it
 /// was taken.
 async function pictureFile(file: File): Promise<{ bytes: Uint8Array<ArrayBuffer>; ext: string; type: string }> {
-  const kept: Record<string, string> = { 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp' };
+  const kept: Record<string, string> = { 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/svg+xml': 'svg' };
   const ext = kept[file.type];
   if (ext) return { bytes: new Uint8Array(await file.arrayBuffer()), ext, type: file.type };
-  const img = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  let img: ImageBitmap;
+  try {
+    img = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch (e) {
+    // One this browser can't draw (an iPhone's HEIC outside Safari, a
+    // TIFF): as it is, as the desktop keeps one off a Mac, and shown
+    // where it can be (pictures.ts says where it can't).
+    const own = /\.([a-z0-9]+)$/i.exec(file.name)?.[1]?.toLowerCase();
+    if (!own) throw e;
+    return { bytes: new Uint8Array(await file.arrayBuffer()), ext: own, type: file.type };
+  }
   const k = Math.min(1, PHOTO / Math.max(img.width, img.height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(img.width * k);

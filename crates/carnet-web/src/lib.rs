@@ -3,6 +3,8 @@
 //! and bytes kept. web/ moves them over the WebSocket and into IndexedDB.
 
 pub mod editor;
+pub mod files;
+pub mod import;
 pub mod notes;
 pub mod relink;
 pub mod zip;
@@ -62,9 +64,9 @@ pub struct Join {
 
 #[wasm_bindgen]
 impl Join {
-    /// By a pairing code (`47-381095`).
+    /// By a pairing code (`4721-381095`).
     pub fn pair(code: &str) -> Result<Join, JsError> {
-        let code = PairCode::parse(code).ok_or_else(|| JsError::new("That isn't a code from another device: it looks like 47-381095"))?;
+        let code = PairCode::parse(code).ok_or_else(|| JsError::new("That isn't a code from another device: it looks like 4721-381095"))?;
         let device = WebRandom.bytes::<8>().to_vec();
         let key = DeviceKey::generate(&mut WebRandom);
         Ok(Join { way: Way::Pair(Joiner::new(code, device.clone(), key.clone())), device, key })
@@ -579,7 +581,7 @@ impl Vault {
     }
 
     /// What else happened since last asked, as JSON: `[{"devices":
-    /// [{id, name, seen, you, online}]} | {"code": "47-381095"} | {"paired":
+    /// [{id, name, seen, you, online}]} | {"code": "4721-381095"} | {"paired":
     /// id} | {"pairFailed": why} | {"recoverySet": true} | {"rekeyed":
     /// true} | {"removed": true, "account": bool} | {"invites": {owner,
     /// waiting: [{hash, until, code}], accounts: [{id, owner, made, seen,
@@ -863,7 +865,9 @@ impl PageEditor {
     /// [[at, src, alt, width, wk]] its pictures, each the letter at `at`
     /// of its words}]], hd: a table's first row its header, ini: a
     /// paragraph's first line whose first letter drops, 1, or 2 when the
-    /// letter has a colour of its own}]`. Flags: 1 bold, 2 italic, 4
+    /// letter has a colour of its own, tl: [[at, name, href, kind]] a line
+    /// of file links' tiles, each the letter at `at` of its words, as the
+    /// desktop draws them (`page::tiles`)}]`. Flags: 1 bold, 2 italic, 4
     /// struck, 8 code, 16 link, 32 a cell's picture, 64 underlined; colours 0xRRGGBBAA,
     /// a mark of 1 the plain highlighter.
     pub fn looks(&self) -> String {
@@ -916,8 +920,9 @@ impl PageEditor {
                         format!("[{}]", cells.join(","))
                     })
                     .collect();
+                let tiles: Vec<String> = l.tiles.iter().map(|t| format!("[{},{},{},{}]", t.at, json(&t.name), json(&t.href), json(&t.kind))).collect();
                 format!(
-                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}],"hd":{},"ini":{}}}"#,
+                    r#"{{"k":"{}","f":{},"i":{},"d":{},"n":{},"r":[{}],"src":{},"wk":{},"alt":{},"w":{},"fl":{},"cells":[{}],"hd":{},"ini":{},"tl":[{}]}}"#,
                     l.kind,
                     l.first,
                     l.indent,
@@ -931,7 +936,8 @@ impl PageEditor {
                     float_number(l.float),
                     cells.join(","),
                     l.head,
-                    l.initial
+                    l.initial,
+                    tiles.join(",")
                 )
             })
             .collect();
@@ -1050,9 +1056,16 @@ impl PageEditor {
     }
 
     /// 0 a row below, 1 a column after, 2 the row out, 3 the column out,
-    /// 4 the header row out, or back.
+    /// 4 the header row out, or back; the row moved 5 up or 6 down, the
+    /// column 7 left or 8 right.
     pub fn table_op(&mut self, op: u8) -> bool {
         self.e.table_op(op)
+    }
+
+    /// Which ways the caret's row and column can move: `[up, down, left,
+    /// right]`.
+    pub fn table_moves(&self) -> Vec<u8> {
+        self.e.table_moves().map(u8::from).to_vec()
     }
 
     /// Whether the caret's table has a header row.
@@ -1201,6 +1214,122 @@ fn float_number(f: carnet_core::doc::Float) -> u32 {
         carnet_core::doc::Float::Left => 1,
         carnet_core::doc::Float::Right => 2,
     }
+}
+
+/// What the caret is in, for the toolbar, and the `/` menu: the desktop's
+/// own rules ([`carnet_core::slash`]), the menu drawn by the page.
+#[wasm_bindgen]
+impl PageEditor {
+    /// What the caret is in, for the toolbar's tools: `title`, `picture`,
+    /// `table`, `words` (paragraphs, headings, quotes), `list`, `code`,
+    /// `divider`, or `blocks`, a selection over blocks of different kinds.
+    pub fn kind_here(&self) -> String {
+        self.e.kind_here().to_string()
+    }
+
+    /// What the caret's blocks hold, for a mix's tools: 1 one that turns
+    /// into another kind, 2 a list item, 4 words to style.
+    pub fn blocks_here(&self) -> u8 {
+        self.e.blocks_here()
+    }
+
+    /// The caret's blocks moved up (`by` < 0) or down past their neighbour.
+    pub fn move_blocks(&mut self, by: i32) -> bool {
+        self.e.move_blocks(i64::from(by))
+    }
+
+    /// The caret's blocks taken out.
+    pub fn remove_blocks(&mut self) -> bool {
+        self.e.remove_blocks()
+    }
+
+    /// The caret's paragraphs' first letters: 0 no paragraph there (the
+    /// tool greyed), 1 in the line, 2 dropped.
+    pub fn initial_here(&self) -> u8 {
+        self.e.initial_here().map_or(0, |on| 1 + u8::from(on))
+    }
+
+    pub fn toggle_initial(&mut self) -> bool {
+        self.e.toggle_initial()
+    }
+
+    /// The caret's to-do: 0 none there, 1 not done, 2 done.
+    pub fn tick_here(&self) -> u8 {
+        self.e.tick_here().map_or(0, |done| 1 + u8::from(done))
+    }
+
+    /// The caret's item ticked or unticked (Ctrl+Enter).
+    pub fn tick(&mut self) -> bool {
+        self.e.tick()
+    }
+
+    /// Links to files, each `names[i]` to `srcs[i]` as the note links it,
+    /// put in on a line of their own after the caret's (a document picked
+    /// or dropped), a tile each.
+    pub fn insert_links(&mut self, names: Vec<String>, srcs: Vec<String>) -> bool {
+        let links: Vec<(String, String)> = names.into_iter().zip(srcs).collect();
+        self.e.insert_links(&links)
+    }
+
+    /// The tile the file tools act on (the one chosen, or the one the
+    /// caret is beside), as JSON `[name, href, kind]`; none off a line of
+    /// files.
+    pub fn tile_here(&self) -> Option<String> {
+        self.e.tile_here().map(|(name, href, kind)| format!("[{},{},{}]", json(&name), json(&href), json(&kind)))
+    }
+
+    /// That tile's Markdown, a line of files of its own: what Copy puts on
+    /// the clipboard, which a paste puts in as a row of tiles.
+    pub fn tile_copy(&self) -> Option<String> {
+        self.e.tile_copy()
+    }
+
+    /// That tile taken out of the note, its line with it when it was the
+    /// last.
+    pub fn remove_tile(&mut self) -> bool {
+        self.e.remove_tile()
+    }
+
+    /// The `/` menu, while the caret ends a `/word` line, as JSON:
+    /// `{line: CodeMirror's line, word, shown: [index into
+    /// slash_commands(), in the order shown]}`; none otherwise.
+    pub fn slash(&mut self) -> Option<String> {
+        let (line, word, shown) = self.e.slash_menu()?;
+        let shown: Vec<String> = shown.iter().map(usize::to_string).collect();
+        Some(format!(r#"{{"line":{line},"word":{},"shown":[{}]}}"#, json(&word), shown.join(",")))
+    }
+
+    /// Esc on the `/` menu: closed for its line.
+    pub fn slash_close(&mut self) -> bool {
+        self.e.slash_close()
+    }
+
+    /// `/` command `i` made of its line.
+    pub fn run_slash(&mut self, i: u32) -> bool {
+        self.e.run_slash(i as usize)
+    }
+}
+
+/// The `/` menu's commands, in its order, as JSON: `[{name, hint, act}]`,
+/// `act` one of `turn`, `table`, `divider`, `code`, `picture`, `file`.
+#[wasm_bindgen]
+pub fn slash_commands() -> String {
+    use carnet_core::slash::{Action, COMMANDS};
+    let rows: Vec<String> = COMMANDS
+        .iter()
+        .map(|c| {
+            let act = match c.action {
+                Action::Turn(_) => "turn",
+                Action::Table => "table",
+                Action::Divider => "divider",
+                Action::Code => "code",
+                Action::Picture => "picture",
+                Action::File => "file",
+            };
+            format!(r#"{{"name":{},"hint":{},"act":"{act}"}}"#, json(c.name), json(c.hint))
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
 }
 
 /// How wide a picture `natural` pixels wide is drawn, as the desktop draws

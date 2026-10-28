@@ -31,6 +31,12 @@ pub enum Glyph {
     AddCol,
     DelRow,
     DelCol,
+    /// A table's row moved up or down, a column left or right: the frame
+    /// the adding and removing have, an arrow where their plus is.
+    RowUp,
+    RowDown,
+    ColLeft,
+    ColRight,
     /// A table's header row, there or not: the frame with its top band
     /// filled.
     TableHeader,
@@ -112,6 +118,15 @@ pub enum Glyph {
     EyeOff,
     /// A dropped first letter: a tall A, lines beside it and under it.
     Initial,
+    /// Open in its own app: an arrow out of the corner of a box.
+    External,
+    /// Copy: a sheet over another.
+    Copy,
+    /// Copy the path: the sheets, a slash on the one in front.
+    CopyPath,
+    /// Copy the file itself: the sheets, the one in front a page with its
+    /// corner folded.
+    CopyFile,
 }
 
 // The rounded frames several icons share, corners of radius 1.5.
@@ -122,6 +137,14 @@ const CLOUD: &str = "M7.5 18.5h9.5a3 3 0 1 0-.23-5.99a5 5 0 1 0-9.74-.98A3.5 3.5
 /// The cloud, struck through its middle: the stroke the same length past
 /// each side, the outline parted where it crosses.
 const CLOUD_OFF: &str = "M15.81 18.5H7.5A3.5 3.5 0 0 1 7.03 11.53A5 5 0 0 1 7.14 9.83M8.83 7.14A5 5 0 0 1 16.77 12.51A3 3 0 0 1 19.16 17.46M5.5 6L20 20.5";
+/// A sheet in front (x 8–19.5, y 8.5–20) and the edge of one behind it.
+const COPY: &str = "M9.5 8.5h8.5a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z \
+                    M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2";
+const COPY_PATH: &str = "M9.5 8.5h8.5a1.5 1.5 0 0 1 1.5 1.5v8.5a1.5 1.5 0 0 1-1.5 1.5H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z \
+                         M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2 M15.5 11.5l-3.5 6";
+/// The sheet in front as a page, its top right corner folded over.
+const COPY_FILE: &str = "M9.5 8.5h6l4 4v6a1.5 1.5 0 0 1-1.5 1.5H9.5A1.5 1.5 0 0 1 8 18.5V10a1.5 1.5 0 0 1 1.5-1.5z M15.5 8.5v4h4 \
+                         M15.5 8.5V6a1.5 1.5 0 0 0-1.5-1.5H6A1.5 1.5 0 0 0 4.5 6v8a1.5 1.5 0 0 0 1.5 1.5h2";
 const FRAME_COL: &str ="M5 3.5h6a1.5 1.5 0 0 1 1.5 1.5v14a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5V5A1.5 1.5 0 0 1 5 3.5z ";
 
 impl Glyph {
@@ -136,8 +159,8 @@ impl Glyph {
         match self {
             Glyph::Table | Glyph::TableHeader => FRAME_TABLE,
             Glyph::Picture => FRAME_PICTURE,
-            Glyph::AddRow | Glyph::DelRow => FRAME_ROW,
-            Glyph::AddCol | Glyph::DelCol => FRAME_COL,
+            Glyph::AddRow | Glyph::DelRow | Glyph::RowUp | Glyph::RowDown => FRAME_ROW,
+            Glyph::AddCol | Glyph::DelCol | Glyph::ColLeft | Glyph::ColRight => FRAME_COL,
             _ => "",
         }
     }
@@ -191,6 +214,10 @@ impl Glyph {
             DelRow => ("M3.5 8.8h17 M9.5 18h5", ""),
             AddCol => ("M8 3.5v17 M18 9.5v5 M15.5 12h5", ""),
             DelCol => ("M8 3.5v17 M15.5 12h5", ""),
+            RowUp => ("M3.5 8.8h17 M12 20.5v-5 M9.5 18l2.5-2.5 2.5 2.5", ""),
+            RowDown => ("M3.5 8.8h17 M12 15.5v5 M9.5 18l2.5 2.5 2.5-2.5", ""),
+            ColLeft => ("M8 3.5v17 M20.5 12h-5 M18 9.5l-2.5 2.5 2.5 2.5", ""),
+            ColRight => ("M8 3.5v17 M15.5 12h5 M18 9.5l2.5 2.5-2.5 2.5", ""),
             TableHeader => ("M3.5 10.5h17 M9.5 10.5v8", "M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v3.5h-17V7A1.5 1.5 0 0 1 5 5.5z"),
             Sort => ("M8 5v14 M4.5 15.5L8 19l3.5-3.5 M16 19V5 M12.5 8.5L16 5l3.5 3.5", ""),
             SortUp => ("M4 7h5 M4 12h8 M4 17h11 M18.5 19V5 M15.5 8l3-3 3 3", ""),
@@ -286,6 +313,13 @@ impl Glyph {
             ),
             Passkey => ("M5 16.5v-4.5a7 7 0 0 1 14 0v2 M8.5 19.5v-7.5a3.5 3.5 0 0 1 7 0v5 M12 12v8", ""),
             Initial => ("M3.5 14.5L7.25 4.5l3.75 10 M4.9 10.8h4.7 M14 5.5h6.5 M14 10h6.5 M14 14.5h6.5 M3.5 19h17", ""),
+            External => (
+                "M13.5 4.5h6v6 M19.5 4.5l-8.5 8.5 M17.5 13.5v4.5a1.5 1.5 0 0 1-1.5 1.5H6a1.5 1.5 0 0 1-1.5-1.5V8A1.5 1.5 0 0 1 6 6.5h4.5",
+                "",
+            ),
+            Copy => (COPY, ""),
+            CopyPath => (COPY_PATH, ""),
+            CopyFile => (COPY_FILE, ""),
             Link => (
                 "M10.5 13.5a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1 M13.5 10.5a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1",
                 "",
@@ -307,7 +341,7 @@ impl Glyph {
 type Outlines = (Option<Path>, Option<Path>);
 
 impl Glyph {
-    pub const ALL: [Glyph; 69] = [
+    pub const ALL: [Glyph; 77] = [
         Glyph::Text, Glyph::H1, Glyph::H2, Glyph::H3, Glyph::Bullets, Glyph::Numbers, Glyph::Todo, Glyph::Bold,
         Glyph::Italic, Glyph::Strike, Glyph::Underline, Glyph::Code, Glyph::Table, Glyph::Divider, Glyph::Picture, Glyph::AddRow,
         Glyph::AddCol, Glyph::DelRow, Glyph::DelCol, Glyph::Sort, Glyph::SortUp, Glyph::SortDown, Glyph::Outdent,
@@ -318,6 +352,8 @@ impl Glyph {
         Glyph::Download, Glyph::Layers, Glyph::Clock, Glyph::Warning, Glyph::Scan, Glyph::Device, Glyph::Key, Glyph::Edit, Glyph::Link,
         Glyph::Person, Glyph::Passkey, Glyph::Eye, Glyph::EyeOff, Glyph::Initial, Glyph::Cloud, Glyph::CloudOff,
         Glyph::TableHeader, Glyph::ChevronRight, Glyph::Attach,
+        Glyph::RowUp, Glyph::RowDown, Glyph::ColLeft, Glyph::ColRight, Glyph::External, Glyph::Copy, Glyph::CopyPath,
+        Glyph::CopyFile,
     ];
 
     /// The icon's file name: `h1`, `folder-plus`.
@@ -422,58 +458,15 @@ pub fn icon(ui: &mut Ui<'_>, g: Glyph, ink: Color, size: f32, filled: bool) {
 
 /// A divider's ornament as path data on a box in px at 16px text: its
 /// width and height, what is stroked and what is filled, and the stroke's
-/// width. Drawn, not typed: no font needs to have ⁂ or a fleuron.
+/// width. Drawn, not typed: no font needs to have a lozenge or a swung
+/// dash. The reader's own words or picture are drawn by the page; asked
+/// for here, they are the ornament they fall back to.
 fn ornament_parts(d: Divider) -> (f32, f32, String, String, f32) {
     let dot = |cx: f32, cy: f32, r: f32| format!("M{} {cy} A{r} {r} 0 1 0 {} {cy} A{r} {r} 0 1 0 {} {cy} Z ", cx - r, cx + r, cx - r);
-    // An asterisk: three strokes through its middle, six points.
-    let star = |cx: f32, cy: f32, r: f32| {
-        let (dx, dy) = (r * 0.866, r * 0.5);
-        format!(
-            "M{cx} {} L{cx} {} M{} {} L{} {} M{} {} L{} {} ",
-            cy - r,
-            cy + r,
-            cx - dx,
-            cy - dy,
-            cx + dx,
-            cy + dy,
-            cx - dx,
-            cy + dy,
-            cx + dx,
-            cy - dy
-        )
-    };
     match d {
+        Divider::Text | Divider::Picture => ornament_parts(Divider::FALLBACK),
         Divider::Dots => (33.0, 3.0, String::new(), [1.5, 16.5, 31.5].map(|x| dot(x, 1.5, 1.5)).concat(), 0.0),
         Divider::Line => (96.0, 2.0, "M0 1 L96 1".into(), String::new(), 1.0),
-        Divider::Stars => (44.0, 8.0, [4.0, 22.0, 40.0].map(|x| star(x, 4.0, 3.6)).concat(), String::new(), 1.3),
-        Divider::Asterism => (
-            19.0,
-            16.0,
-            [(9.5, 4.0), (4.0, 12.0), (15.0, 12.0)].map(|(x, y)| star(x, y, 3.4)).concat(),
-            String::new(),
-            1.2,
-        ),
-        // A swash each way from a small diamond, each ending in a curl.
-        Divider::Flourish => (
-            120.0,
-            20.0,
-            "M66 10 C74 4 82 4 88 10 C94 16 102 16 106 10 C108 7 105 4 102 6 \
-             M54 10 C46 4 38 4 32 10 C26 16 18 16 14 10 C12 7 15 4 18 6"
-                .into(),
-            "M60 6 L64 10 L60 14 L56 10 Z".into(),
-            1.3,
-        ),
-        // The hedera: a heart-shaped leaf pointing right, notched where
-        // its stem meets it, the stem curling back over it.
-        Divider::Fleuron => (
-            36.0,
-            22.0,
-            "M15 11 C10 11 6.5 10 5 7.2 C3.6 4.6 5.6 2 8.2 2.8 C10.2 3.4 10 6 7.9 6.1".into(),
-            "M15 11 C11.5 7 13 3 17.5 3.5 C23 4 28 7.5 33 11 C28 14.5 23 18 17.5 18.5 \
-             C13 19 11.5 15 15 11 Z"
-                .into(),
-            1.3,
-        ),
         // Lozenges, a little taller than wide, spaced as the dots are.
         Divider::Diamonds => (
             36.0,
@@ -503,6 +496,24 @@ fn ornament_parts(d: Divider) -> (f32, f32, String, String, f32) {
 /// A divider's ornament's width at 16px text.
 pub fn ornament_width(d: Divider) -> f32 {
     ornament_parts(d).0
+}
+
+/// A divider's ornament as an SVG file at its size at 16px text, in
+/// `ink`: the same outlines the page draws, round-capped as kui strokes
+/// them, for the web's dividers (`carnet --icons`).
+pub fn ornament_svg(d: Divider, ink: &str) -> String {
+    let (w, h, stroke, fill, sw) = ornament_parts(d);
+    let mut body = String::new();
+    if !fill.trim().is_empty() {
+        body.push_str(&format!("<path d=\"{}\" fill=\"{ink}\"/>", fill.trim()));
+    }
+    if !stroke.trim().is_empty() {
+        body.push_str(&format!(
+            "<path d=\"{}\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"{sw}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
+            stroke.trim()
+        ));
+    }
+    format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">{body}</svg>\n")
 }
 
 /// A divider's ornament in `ink`, at `k` times its size at 16px text.
@@ -547,6 +558,19 @@ mod tests {
                 assert!(!part.contains('\\'), "{d:?}: a stray backslash");
             }
             assert!(scaled(&s, 0.75).is_some() || scaled(&f, 0.75).is_some(), "{d:?} draws something");
+        }
+    }
+
+    /// The web draws its dividers from the files `carnet --icons` writes
+    /// (web/src/icons/ornament-*.svg, in the text's colour): the same
+    /// shapes as the page here, not ones drawn again by hand.
+    #[test]
+    fn the_webs_ornaments_are_these() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/src/icons");
+        for d in Divider::ALL.into_iter().filter(|d| !matches!(d, Divider::Text | Divider::Picture)) {
+            let file = dir.join(format!("ornament-{}.svg", d.key()));
+            let web = std::fs::read_to_string(&file).unwrap_or_default().replace("\r\n", "\n");
+            assert_eq!(web, ornament_svg(d, "currentColor"), "{}", file.display());
         }
     }
 

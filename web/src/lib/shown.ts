@@ -42,6 +42,9 @@ export class Shown {
   add(path: string, blob: Blob): string {
     const have = this.get(path);
     if (have) return have;
+    // A browser sniffs a photo's kind from its bytes, but shows an SVG
+    // only when told it is one. In an `<img>`, an SVG's scripts never run.
+    if (!blob.type && /\.svg$/i.test(path)) blob = new Blob([blob], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
     this.kept.set(path, { url, bytes: blob.size, used: Date.now() });
     this.later(2000);

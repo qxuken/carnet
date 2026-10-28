@@ -14,6 +14,7 @@ mod keys;
 mod look;
 mod oscursor;
 mod settings;
+mod shots;
 mod signup;
 mod slash;
 mod store;
@@ -34,19 +35,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(path, design::tokens_json())?;
         return Ok(());
     }
-    // `carnet --icons <dir>`: every icon as an SVG, for the reference.
+    // `carnet --icons <dir>`: every icon as an SVG, for the reference, and
+    // each divider's ornament (`ornament-dots.svg`), which the web draws
+    // its dividers from.
     if let Some(i) = args.iter().position(|a| a == "--icons") {
         let dir = std::path::PathBuf::from(args.get(i + 1).map_or("icons", String::as_str));
         std::fs::create_dir_all(&dir)?;
         for g in icons::Glyph::ALL {
             std::fs::write(dir.join(format!("{}.svg", g.slug())), g.svg("#2f2a27"))?;
         }
+        for d in settings::Divider::ALL.into_iter().filter(|d| !matches!(d, settings::Divider::Text | settings::Divider::Picture)) {
+            std::fs::write(dir.join(format!("ornament-{}.svg", d.key())), icons::ornament_svg(d, "#2f2a27"))?;
+        }
         return Ok(());
+    }
+    // `carnet --screenshots docs`: the README's pictures of the app, taken
+    // by the app with no window, over a demo library of its own.
+    if let Some(i) = args.iter().position(|a| a == "--screenshots") {
+        let dir = std::path::PathBuf::from(args.get(i + 1).map_or("screenshots", String::as_str));
+        return Ok(shots::run(&dir)?);
     }
     let settings = settings::Settings::load();
     // Asked of the system once, as the window opens: the blurred desktop
     // behind it where there is one, and the library drawn over that.
     let backdrop = if settings.translucent { kui_native::Backdrop::Blur } else { kui_native::Backdrop::Opaque };
+    let wheel = settings.wheel.feel();
     // The chosen folder may be on a drive that is not there today: then
     // the default folder opens, and says so, rather than nothing at all.
     let chosen = store::default_dir(settings.dir.as_deref());
@@ -73,6 +86,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .size(1100.0, 740.0)
         .min_size(360.0, 420.0)
         .backdrop(backdrop)
+        // The wheel as Settings has it (Carnet's own feel, further and
+        // softer than kui's, unless a preset is chosen), from the first
+        // frame; every window's, note windows' too. `KUI_WHEEL` still
+        // overrides it for comparing.
+        .wheel_feel(wheel)
         // The title bar's and the taskbar's on Windows, the window
         // manager's on X11; a Mac takes the bundle's `.icns` instead.
         // `assets/icon/render.sh` makes both from the SVG.

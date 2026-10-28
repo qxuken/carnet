@@ -101,7 +101,8 @@ impl Carnet {
         row(&mut rows, "viewport", format!("{:.0} × {:.0} at {:.2}x", v.w, v.h, ui.core().scale()));
         row(&mut rows, "rows drawn", format!("{} blocks, {} cells", self.row_rects.len(), self.cell_rects.len()));
         row(&mut rows, "text width", format!("{:.0}", self.text_w));
-        row(&mut rows, "strip", format!("{} tools in More, lights inset {:.0}", self.overflow.len(), self.lights));
+        let set = self.tool_set.map_or("none", |s| s.label());
+        row(&mut rows, "strip", format!("{set}, {} in More, lights inset {:.0}", self.overflow.len(), self.lights));
 
         head(&mut rows, "Settings");
         let s = &self.settings;

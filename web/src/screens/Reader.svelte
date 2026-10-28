@@ -1,7 +1,8 @@
 <script lang="ts">
   // A note, as the desktop shows it: its checkboxes live, its pictures
-  // fetched as they're needed. Edit opens it to write in (the editor's
-  // code comes only then). One in Deleted is read only, with the ways
+  // fetched as they're needed, a link to a file of its opening that file
+  // (open.svelte.ts). Edit opens it to write in (the editor's code comes
+  // only then). One in Deleted is read only, with the ways
   // out: Restore, or Delete forever (asked to be sure first).
   import { sync } from '../lib/sync.svelte';
   import Icon from '../lib/Icon.svelte';
@@ -10,6 +11,16 @@
   import { dropLetters } from '../lib/initial';
   import Menu from '../lib/Menu.svelte';
   import { moveItems, pin } from '../lib/noteMenu';
+  import { opener } from '../lib/open.svelte';
+
+  /// A file that isn't a picture, put in a note: kept beside the notes
+  /// and synced (`sync.attach`, which says why one isn't), its `src` as
+  /// the note links it.
+  async function attachFile(folder: string, file: File): Promise<string> {
+    const [kept] = await sync.attach(folder, [file]);
+    if (!kept) throw new Error(`Couldn’t keep ${file.name}`);
+    return kept.src;
+  }
 
   type Props = {
     key: string;
@@ -96,7 +107,13 @@
     if (t instanceof HTMLInputElement && t.dataset.task !== undefined) {
       e.preventDefault();
       if (!note?.trashed) sync.toggle(key, Number(t.dataset.task));
+      return;
     }
+    // A link to a file in the notes: opened from the vault (asked about
+    // first, one that could run), not followed to an address this site
+    // hasn't got.
+    const href = t.closest('a[href]')?.getAttribute('href');
+    if (href && e.button === 0 && opener.link(note?.folder ?? '', href)) e.preventDefault();
   }
 </script>
 
@@ -141,7 +158,7 @@
   {#if editing}
     <div class="note">
       {#await import('./Editor.svelte') then E}
-        <E.default {key} folder={note?.folder ?? ''} {fresh} />
+        <E.default {key} folder={note?.folder ?? ''} {fresh} addFile={attachFile} />
       {:catch}
         <p class="error">The editor couldn’t load. Check the connection and try again.</p>
       {/await}

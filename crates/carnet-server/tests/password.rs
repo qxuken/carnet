@@ -202,7 +202,8 @@ fn a_server_of_ones_own_takes_any_email() {
 /// Password sign-ins are counted by the email too, from any address: past
 /// twenty, the next is turned away and says so, its password not even
 /// tried, until a few minutes pass; then one more. An email nobody signs
-/// in as isn't counted. The account's devices, already in, never notice.
+/// in as is counted alike, so the refusal tells nothing of who has an
+/// account. The account's devices, already in, never notice.
 #[test]
 fn guesses_at_one_password_are_slowed_from_any_address() {
     use carnet_server::limits::{PASSWORD_TRIES, TOO_MANY_FOR_EMAIL};
@@ -238,10 +239,12 @@ fn guesses_at_one_password_are_slowed_from_any_address() {
         // The right password too, for now: turned away the same.
         let (c, _) = sign_in(&mut net, "ann@example.com", "correct horse battery", b"phone");
         assert!(net.denied.iter().any(|(d, why)| *d == c && why == TOO_MANY_FOR_EMAIL), "{:?}", net.denied);
-        // An email nobody signs in as: not counted.
-        for _ in 0..30 {
-            assert_ne!(guess(&mut net, "bob@example.com"), TOO_MANY_FOR_EMAIL);
+        // An email nobody signs in as: counted just the same, so the
+        // refusal says nothing of which emails have an account.
+        for i in 0..PASSWORD_TRIES.burst as usize {
+            assert_ne!(guess(&mut net, "bob@example.com"), TOO_MANY_FOR_EMAIL, "try {i}");
         }
+        assert_eq!(guess(&mut net, "bob@example.com"), TOO_MANY_FOR_EMAIL);
         // The device in syncs on.
         net.write(a, "still here\n");
         assert!(net.device(a).session.is_ready());

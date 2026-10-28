@@ -61,7 +61,7 @@ pub fn relinked(md: &str, from: &str, to: &str, files: &doc::Files) -> Option<St
 
 /// Whether `src` is a path from the note's folder: not a web address, the
 /// picture itself (`data:`), or a full path (`/…`, `\\…`, `C:…`).
-fn is_relative(src: &str) -> bool {
+pub(crate) fn is_relative(src: &str) -> bool {
     let b = src.as_bytes();
     let drive = b.len() > 1 && b[1] == b':' && b[0].is_ascii_alphabetic();
     !(src.contains("://") || src.starts_with("data:") || src.starts_with(['/', '\\']) || drive)
@@ -95,7 +95,7 @@ fn moved_src(from: &str, to: &str, src: &str) -> String {
 
 /// `%20` and friends back to their characters, as a link another editor
 /// wrote may have them (the desktop's `decode_src`).
-fn decode(src: &str) -> String {
+pub(crate) fn decode(src: &str) -> String {
     let b = src.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

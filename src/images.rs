@@ -83,13 +83,18 @@ pub struct Decoded {
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
+    /// The size it is laid out at, when it has more pixels than that: an
+    /// SVG drawn sharper than its own size, to stay sharp on a dense
+    /// screen and widened. `None` for a picture's own pixels.
+    pub shown: Option<(u32, u32)>,
 }
 
 /// What a reader found of a picture: its size, from the file's header,
-/// then its pixels, or why not.
+/// then its pixels, or why not, and how long reading it took in ms (none
+/// for pixels already in hand): a recording's `decode picture` track.
 enum Landed {
     Size(u32, u32),
-    Done(Result<Decoded, String>),
+    Done(Result<Decoded, String>, Option<f64>),
 }
 
 type Inbox = Arc<Mutex<Vec<(PathBuf, Landed)>>>;
@@ -105,13 +110,16 @@ struct Held {
     /// When it was last known on screen: the start of the frame after
     /// the last one that drew it.
     seen: Instant,
+    /// What its pixels cost, in bytes, once in hand: a drawing has more
+    /// of them than the size it's laid out at says.
+    pixels: u64,
 }
 
 impl Held {
     /// What its pixels cost, in bytes; nothing until they are in hand.
     fn bytes(&self) -> u64 {
         match self.entry {
-            Entry::Ready { w, h, .. } => u64::from(w) * u64::from(h) * 4,
+            Entry::Ready { .. } => self.pixels,
             _ => 0,
         }
     }
@@ -182,9 +190,11 @@ impl Images {
             let (w, h) = known.unwrap_or_else(|| size(path));
             let loading = Entry::Loading { w, h };
             self.hold(path, loading.clone());
+            let began = Instant::now();
             let r = decode(path);
+            let took = began.elapsed().as_secs_f64() * 1000.0;
             if let Ok(mut q) = self.inbox.lock() {
-                q.push((path.to_path_buf(), Landed::Done(r)));
+                q.push((path.to_path_buf(), Landed::Done(r, Some(took))));
             }
             return loading;
         };
@@ -208,7 +218,11 @@ impl Images {
     }
 
     fn hold(&mut self, path: &Path, entry: Entry) {
-        let held = Held { entry, drawn: self.frame, seen: self.at };
+        self.hold_with(path, entry, 0);
+    }
+
+    fn hold_with(&mut self, path: &Path, entry: Entry, pixels: u64) {
+        let held = Held { entry, drawn: self.frame, seen: self.at, pixels };
         self.entries.insert(path.to_path_buf(), held);
     }
 
@@ -222,7 +236,7 @@ impl Images {
         }
         self.hold(path, Entry::Loading { w: d.w, h: d.h });
         if let Ok(mut q) = self.inbox.lock() {
-            q.push((path.to_path_buf(), Landed::Done(Ok(fit(d)))));
+            q.push((path.to_path_buf(), Landed::Done(Ok(fit(d)), None)));
         }
     }
 
@@ -248,15 +262,20 @@ impl Images {
                     }
                     continue;
                 }
-                Landed::Done(r) => r,
+                Landed::Done(r, took) => {
+                    if let Some(ms) = took {
+                        core.perf_measure("decode picture", ms);
+                    }
+                    r
+                }
             };
-            let e = match r {
-                Ok(d) => Entry::Ready {
-                    id: core.resources.add_image(d.w, d.h, d.rgba),
-                    w: d.w,
-                    h: d.h,
-                },
-                Err(e) => Entry::Failed(e),
+            let (e, pixels) = match r {
+                Ok(d) => {
+                    let (w, h) = d.shown.unwrap_or((d.w, d.h));
+                    let pixels = u64::from(d.w) * u64::from(d.h) * 4;
+                    (Entry::Ready { id: core.resources.add_image(d.w, d.h, d.rgba), w, h }, pixels)
+                }
+                Err(e) => (Entry::Failed(e), 0),
             };
             match self.entries.get_mut(&path) {
                 Some(held) => {
@@ -264,9 +283,13 @@ impl Images {
                         core.remove_image(id);
                     }
                     held.entry = e;
+                    held.pixels = pixels;
                 }
-                None => self.hold(&path, e),
+                None => self.hold_with(&path, e, pixels),
             }
+        }
+        if landed {
+            core.perf_gauge("pictures held (bytes)", self.bytes() as f64);
         }
         landed
     }
@@ -430,7 +453,9 @@ fn readers(inbox: Inbox, waker: Waker) -> Queue {
                 if w > 0 && h > 0 {
                     land(Landed::Size(w, h));
                 }
-                land(Landed::Done(decode(&path)));
+                let began = Instant::now();
+                let r = decode(&path);
+                land(Landed::Done(r, Some(began.elapsed().as_secs_f64() * 1000.0)));
             }
         };
         let _ = std::thread::Builder::new().name(format!("carnet-picture-{i}")).spawn(read);
@@ -443,6 +468,9 @@ fn readers(inbox: Inbox, waker: Waker) -> Queue {
 fn size(path: &Path) -> (u32, u32) {
     if for_imageio(path) {
         return (0, 0);
+    }
+    if is_svg(path) {
+        return svg_tree(path, false).ok().map_or((0, 0), |t| natural(&t));
     }
     let fits = |(w, h): (u32, u32)| w <= MAX_PIXELS_SIDE && h <= MAX_PIXELS_SIDE && u64::from(w) * u64::from(h) * 4 <= MAX_ALLOC;
     image::image_dimensions(path).ok().filter(|&wh| fits(wh)).unwrap_or((0, 0))
@@ -462,6 +490,19 @@ fn for_imageio(path: &Path) -> bool {
 /// limits: one past them is [`TOO_BIG`]. HEIC, TIFF and AVIF are macOS's
 /// to read.
 pub fn decode(path: &Path) -> Result<Decoded, String> {
+    // A drawing: drawn twice its own size, so a dense screen and a wider
+    // picture stay sharp, and no smaller than `SVG_SIDE_LEAST` (an icon
+    // 24px across is widened as much as a photo), within `MAX_SIDE`;
+    // laid out at its own size.
+    if is_svg(path) {
+        let tree = svg_tree(path, true)?;
+        let (w, h) = natural(&tree);
+        let long = w.max(h) as f32;
+        let side = (2.0 * long).max(SVG_SIDE_LEAST as f32).min(MAX_SIDE as f32);
+        let mut d = draw(&tree, side / long)?;
+        d.shown = Some((w, h));
+        return Ok(d);
+    }
     if for_imageio(path) {
         #[cfg(target_os = "macos")]
         return crate::imageio::decode(path, MAX_SIDE);
@@ -496,6 +537,7 @@ pub fn decode(path: &Path) -> Result<Decoded, String> {
         w: rgba.width(),
         h: rgba.height(),
         rgba: rgba.into_raw(),
+        shown: None,
     })
 }
 
@@ -511,10 +553,90 @@ fn fit(d: Decoded) -> Decoded {
                 w: small.width(),
                 h: small.height(),
                 rgba: small.into_raw(),
+                shown: d.shown,
             }
         }
-        None => Decoded { w: 0, h: 0, rgba: Vec::new() },
+        None => Decoded { w: 0, h: 0, rgba: Vec::new(), shown: None },
     }
+}
+
+/// A picture written again at `to` as a PNG no wider than `most_w` and no
+/// taller than `most_h`, its shape and its transparency kept: a divider's
+/// picture is drawn a few lines tall, and a camera's photo kept whole for
+/// it took a second to decode and a frame to upload. Its size, as written.
+pub fn shrink_to_png(from: &Path, to: &Path, most_w: u32, most_h: u32) -> Result<(u32, u32), String> {
+    let d = if is_svg(from) { draw_svg(from, most_w, most_h)? } else { decode(from)? };
+    let img = image::RgbaImage::from_raw(d.w, d.h, d.rgba).ok_or_else(|| "no pixels".to_string())?;
+    let img = image::DynamicImage::ImageRgba8(img);
+    let img = if img.width() > most_w || img.height() > most_h { img.thumbnail(most_w, most_h) } else { img };
+    let rgba = img.to_rgba8();
+    let png = encode_png(rgba.width(), rgba.height(), rgba.as_raw())?;
+    std::fs::write(to, png).map_err(|e| e.to_string())?;
+    Ok((rgba.width(), rgba.height()))
+}
+
+/// Whether a file is an SVG drawing (or a gzipped one), by its extension:
+/// a note's picture may be (`.svg`, as carnet-core counts one), and a
+/// divider's, either.
+pub fn is_svg(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "svg" | "svgz"))
+}
+
+/// The fewest pixels a note's drawing is drawn at along its longer side,
+/// however small it says it is.
+const SVG_SIDE_LEAST: u32 = 1200;
+
+/// An SVG read, with nothing run (an SVG's scripts are never read): its
+/// text in the system's fonts, when it's to be drawn; just its size, not.
+fn svg_tree(path: &Path, fonts: bool) -> Result<resvg::usvg::Tree, String> {
+    use resvg::usvg;
+    let data = std::fs::read(path).map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { "not found".to_string() } else { e.to_string() })?;
+    let mut opt = usvg::Options::default();
+    if fonts {
+        opt.fontdb_mut().load_system_fonts();
+    }
+    let tree = usvg::Tree::from_data(&data, &opt).map_err(|_| "it isn't a drawing Carnet can read".to_string())?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return Err("it draws nothing".to_string());
+    }
+    Ok(tree)
+}
+
+/// A drawing's own size, in whole pixels.
+fn natural(tree: &resvg::usvg::Tree) -> (u32, u32) {
+    let s = tree.size();
+    ((s.width().round() as u32).max(1), (s.height().round() as u32).max(1))
+}
+
+/// An SVG drawn as RGBA as large as fits `most_w` × `most_h`, its shape
+/// kept: a drawing has no size of its own to be shrunk from, so it's drawn
+/// at the size it will be kept at, never blurred up from a small one. Its
+/// text in the system's fonts.
+fn draw_svg(path: &Path, most_w: u32, most_h: u32) -> Result<Decoded, String> {
+    let tree = svg_tree(path, true)?;
+    let size = tree.size();
+    draw(&tree, (most_w as f32 / size.width()).min(most_h as f32 / size.height()))
+}
+
+/// A drawing drawn at `k` times its own size, as RGBA.
+fn draw(tree: &resvg::usvg::Tree, k: f32) -> Result<Decoded, String> {
+    use resvg::tiny_skia;
+    let size = tree.size();
+    let (w, h) = (((size.width() * k).round() as u32).max(1), ((size.height() * k).round() as u32).max(1));
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).ok_or_else(|| "too big to draw".to_string())?;
+    resvg::render(tree, tiny_skia::Transform::from_scale(k, k), &mut pixmap.as_mut());
+    // tiny-skia's pixels are premultiplied; a PNG's aren't.
+    let mut rgba = pixmap.take();
+    for p in rgba.as_chunks_mut::<4>().0 {
+        let a = p[3] as u32;
+        if a > 0 && a < 255 {
+            for c in &mut p[..3] {
+                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    Ok(Decoded { w, h, rgba, shown: None })
 }
 
 /// RGBA as a PNG file's bytes.
@@ -540,7 +662,7 @@ pub fn is_image(path: &Path) -> bool {
             .is_some_and(|e| {
                 matches!(
                     e.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+                    "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg"
                 )
             })
 }
@@ -601,6 +723,47 @@ pub(crate) mod tests {
     #[test]
     fn elsewhere_a_heic_photo_says_where_it_shows() {
         assert_eq!(decode(&heic()).err().as_deref(), Some(HEIC_ELSEWHERE));
+    }
+
+    /// A drawing in a note: its size from the file before any pixels,
+    /// drawn sharper than that (twice, and 1200 at least along its long
+    /// side), laid out at its own size, and its pixels counted as they are
+    /// against the budget, not as its size says.
+    #[test]
+    fn a_drawing_is_laid_out_at_its_size_and_drawn_sharper() {
+        let dir = std::env::temp_dir().join(format!("carnet-images-svg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("logo.svg");
+        std::fs::write(
+            &path,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100"><rect width="200" height="100" fill="#336699"/><script>alert(1)</script></svg>"##,
+        )
+        .unwrap();
+        assert!(is_image(&path) && !is_image(&dir.join("logo.svgz")), "a note's picture; a gzipped one is a divider's only");
+        assert_eq!(size(&path), (400, 100));
+        let d = decode(&path).unwrap();
+        assert_eq!(((d.w, d.h), d.shown), ((1200, 300), Some((400, 100))));
+        let px = |x: u32, y: u32| &d.rgba[((y * d.w + x) * 4) as usize..][..4];
+        assert_eq!(px(300, 150), [0x33, 0x66, 0x99, 255], "the drawn half");
+        assert_eq!(px(900, 150)[3], 0, "the rest see-through");
+        // Big ones within MAX_SIDE; laid out as they say.
+        std::fs::write(&path, r#"<svg xmlns="http://www.w3.org/2000/svg" width="5000" height="1000"/>"#).unwrap();
+        let d = decode(&path).unwrap();
+        assert_eq!(((d.w, d.h), d.shown), ((2000, 400), Some((5000, 1000))));
+        assert_eq!(decode(&dir.join("gone.svg")).err().as_deref(), Some("not found"));
+        std::fs::write(&path, "not a drawing").unwrap();
+        assert_eq!(decode(&path).err().as_deref(), Some("it isn't a drawing Carnet can read"));
+        // In the cache: laid out at 400 × 100, counted at 1200 × 300.
+        std::fs::write(&path, r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100"><rect width="400" height="100" fill="#000"/></svg>"##).unwrap();
+        let mut core = Core::new();
+        let mut images = Images::default();
+        let t0 = Instant::now();
+        frame(&mut images, &mut core, t0, std::slice::from_ref(&path));
+        let e = frame(&mut images, &mut core, t0, std::slice::from_ref(&path));
+        assert!(matches!(e[0], Entry::Ready { w: 400, h: 100, .. }), "{e:?}");
+        assert_eq!(images.bytes(), 1200 * 300 * 4);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// `n` pictures of 100 × 50 in a folder of their own.

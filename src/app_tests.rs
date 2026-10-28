@@ -226,6 +226,89 @@ fn backspace_takes_empty_lines_and_then_a_table_and_undo_brings_it_back() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A table's row moves with Alt+Shift+↑↓ and its column with
+/// Ctrl+Alt+Shift+←→ (Alt+Shift+←→ still selects by word in a cell), or
+/// from the toolbar and the page's menu, which grey a move past the
+/// table's edge or the header; the caret goes with its words, and each
+/// move is one undo.
+#[test]
+fn a_tables_rows_and_columns_move_and_the_caret_with_them() {
+    // Wide, so the table's tools all show in the strip.
+    let (store, dir) = temp_store("table-move");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1800.0, 760.0).framing();
+    d.frame(&mut app);
+    app.new_note();
+    d.frame(&mut app);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    let table = Table::from_cells(vec![
+        vec!["Day".into(), "Miles".into()],
+        vec!["Mon".into(), "12".into()],
+        vec!["Tue".into(), "30".into()],
+    ]);
+    let (top, mon, day, miles) = (table.rows[0].id, table.rows[1].id, table.cols[0], table.cols[1]);
+    app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
+    let slot = Slot { block: blocks(&app)[0].id, cell: Some((mon, day)) };
+    app.caret = Caret::at(Pos { slot, byte: 2 });
+    d.frame(&mut app);
+    d.frame(&mut app);
+    let words = |app: &Carnet| {
+        let Kind::Table(t) = &blocks(app)[0].kind else { panic!() };
+        t.rows.iter().map(|r| r.cells.join(" ")).collect::<Vec<_>>()
+    };
+    let alt_shift = KeyMods { shift: true, ctrl: false, alt: true, super_key: false };
+    d.core.set_inspect(true);
+    let enabled = |d: &mut Drive, key: &str| {
+        let k = d.key_of(key).expect(key);
+        d.core.nodes().iter().any(|n| n.key == k && !n.flags.contains(&"disabled"))
+    };
+    let menu = |app: &Carnet, label: &str| app.page_menu().into_iter().find(|m| m.label == label).expect(label).enabled;
+    // Under the header, at the left: only down and right.
+    assert_eq!(app.table_moves(), [false, true, false, true]);
+    assert!(!enabled(&mut d, "t-rowup") && enabled(&mut d, "t-rowdown"));
+    assert!(!enabled(&mut d, "t-colleft") && enabled(&mut d, "t-colright"));
+    assert!(!menu(&app, "Move row up") && menu(&app, "Move column right"));
+    key_with(&mut app, &mut d, "down", alt_shift);
+    assert_eq!(words(&app), ["Day Miles", "Tue 30", "Mon 12"]);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 2 }), "the caret in its words");
+    assert!(enabled(&mut d, "t-rowup") && !enabled(&mut d, "t-rowdown"), "the bottom row");
+    // Alt+Shift+→ selects to the word's end, the columns where they were.
+    key_with(&mut app, &mut d, "right", alt_shift);
+    assert_eq!(words(&app), ["Day Miles", "Tue 30", "Mon 12"]);
+    assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (2, 3), "the word's end selected");
+    app.caret = Caret::at(Pos { slot, byte: 2 });
+    let ctrl_alt_shift = KeyMods { shift: true, ctrl: true, alt: true, super_key: false };
+    key_with(&mut app, &mut d, "right", ctrl_alt_shift);
+    assert_eq!(words(&app), ["Miles Day", "30 Tue", "12 Mon"]);
+    assert_eq!(app.caret, Caret::at(Pos { slot, byte: 2 }));
+    // From the toolbar and the menu.
+    let up = d.key_of("t-rowup").unwrap();
+    d.click_key(&mut app, up);
+    d.frame(&mut app);
+    assert_eq!(words(&app), ["Miles Day", "12 Mon", "30 Tue"]);
+    app.page_action("colleft");
+    d.frame(&mut app);
+    assert_eq!(words(&app), ["Day Miles", "Mon 12", "Tue 30"]);
+    // Up again from under the header: nothing, the header stays on top.
+    key_with(&mut app, &mut d, "up", alt_shift);
+    assert_eq!(words(&app)[0], "Day Miles");
+    // From the header, the row doesn't go down; its column does go.
+    app.caret = Caret::at(Pos { slot: Slot { cell: Some((top, miles)), ..slot }, byte: 0 });
+    d.frame(&mut app);
+    assert_eq!(app.table_moves(), [false, false, true, false]);
+    key_with(&mut app, &mut d, "down", alt_shift);
+    assert_eq!(words(&app)[0], "Day Miles", "the header stays the header");
+    // Each move one undo.
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(words(&app), ["Miles Day", "12 Mon", "30 Tue"]);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(words(&app), ["Miles Day", "30 Tue", "12 Mon"]);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_selection_runs_across_blocks_and_copies_as_markdown() {
     let (mut app, mut d, dir) = body("select");
@@ -998,19 +1081,84 @@ fn pictures_dropped_on_the_page_go_in_at_the_caret() {
     assert_eq!(srcs, ["attachments/Holiday-photo.png"]);
     assert!(dir.join("attachments").join("Holiday-photo.png").is_file());
     assert!(a.exists(), "copied, not moved");
-    // A document goes in as a link to its copy, under the picture; a
-    // script is left out, and said so.
-    assert!(texts(&app).iter().any(|t| t == "[notes.txt](attachments/notes.txt)"), "{:?}", texts(&app));
-    assert!(dir.join("attachments").join("notes.txt").is_file());
-    assert!(!dir.join("attachments").join("run.sh").exists() && !dir.join("attachments").join("run.png").exists());
-    assert!(app.notice.as_ref().is_some_and(|n| n.text.contains("isn't a picture or a document")), "{:?}", app.notice.as_ref().map(|n| &n.text));
+    // Any other file goes in as a link to its copy, under the picture: a
+    // document, and a script too (which asks before it opens).
+    assert!(texts(&app).iter().any(|t| t == "[notes.txt](attachments/notes.txt) [run.sh](attachments/run.sh)"), "{:?}", texts(&app));
+    assert!(dir.join("attachments").join("notes.txt").is_file() && dir.join("attachments").join("run.sh").is_file());
+    assert!(app.notice.is_none(), "nothing left out");
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
 }
 
-/// The toolbar's paperclip asks for any file; what comes back goes in at
-/// the caret: a picture as a picture, a document as a link among the
-/// words, set apart from them by a space.
+/// Markdown files dropped on the window come in as notes, never into the
+/// note open: on the page, into the folder the library shows, the first
+/// opened and chosen there; on a folder's row, into that folder, which
+/// the library then shows. Dropped with a picture, the picture goes into
+/// the note as ever, and that note stays open. One that can't come in
+/// is said, by name.
+#[test]
+fn markdown_files_dropped_on_the_window_come_in_as_notes() {
+    let (mut app, mut d, dir) = body("drop-md");
+    let outside = std::env::temp_dir().join(format!("carnet-drop-md-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let write = |name: &str, text: &[u8]| {
+        let p = outside.join(name);
+        std::fs::write(&p, text).unwrap();
+        p.display().to_string()
+    };
+    let drop = |app: &mut Carnet, d: &mut Drive, paths: Vec<String>, at: Vec2| {
+        d.input(app, InputEvent::DragFiles { paths: paths.clone(), at });
+        d.frame(app);
+        d.input(app, InputEvent::DropFiles { paths, at });
+        d.frame(app);
+    };
+    let notice = |app: &Carnet| app.notice.as_ref().map(|n| n.text.clone()).unwrap_or_default();
+    let title = |app: &Carnet| app.store.notes[app.current].title.clone();
+    let page = Vec2::new(600.0, 300.0);
+    let trip = write("Trip.md", b"# Trip\n\nTo the sea.\n");
+    drop(&mut app, &mut d, vec![trip.clone(), write("Ideas.markdown", b"Some ideas\n")], page);
+    assert_eq!(title(&app), "Trip", "the first opened");
+    assert!(app.doc().contains("to the sea"));
+    assert!(app.order.contains(&app.current), "and chosen in the library");
+    assert!(dir.join("Trip.md").is_file() && dir.join("Ideas.md").is_file());
+    assert!(outside.join("Trip.md").is_file(), "copied, not moved");
+    assert_eq!(notice(&app), "Imported 2 notes");
+
+    // On a folder's row: into it, and the library shows it.
+    app.store.create_folder("", "Work").unwrap();
+    app.store.create_folder("", "Home").unwrap();
+    app.show_folder(Some("Home".into()));
+    d_frame_twice(&mut app, &mut d);
+    let work = app.folder_rects.iter().find(|(f, _)| f == "Work").map(|(_, r)| r.center()).expect("Work's row");
+    drop(&mut app, &mut d, vec![trip], work);
+    assert_eq!((title(&app), app.store.notes[app.current].folder.as_str()), ("Trip".to_string(), "Work"));
+    assert_eq!(app.folder.as_deref(), Some("Work"));
+    assert!(dir.join("Work/Trip.md").is_file());
+    assert_eq!(notice(&app), "Imported \u{201c}Trip\u{201d} into \u{201c}Work\u{201d}");
+
+    // With a picture, on the page: the picture into the note open, which
+    // stays; the note into the folder shown.
+    let pic = png_file(&outside, "Shell.png").display().to_string();
+    drop(&mut app, &mut d, vec![pic, write("Later.md", b"# Later\n")], page);
+    assert_eq!(title(&app), "Trip");
+    assert_eq!(image_blocks(&app), ["../attachments/Shell.png"]);
+    assert!(dir.join("Work/Later.md").is_file());
+    assert_eq!(notice(&app), "Imported \u{201c}Later\u{201d} into \u{201c}Work\u{201d}");
+
+    // Not text: left out, and said.
+    drop(&mut app, &mut d, vec![write("Bad.md", &[0xff, 0xfe, b'x'])], page);
+    assert_eq!(app.error.as_deref(), Some("Couldn't import \u{201c}Bad.md\u{201d}: it isn't text Carnet can read (not UTF-8)"));
+    assert!(!dir.join("Work/Bad.md").exists());
+    assert_eq!(title(&app), "Trip");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// The toolbar's paperclip asks for any file; what comes back goes in
+/// where the caret is: a picture as a picture, a document as a link on a
+/// line of its own after the caret's, drawn as a tile, never among the
+/// words.
 #[test]
 fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
     let (mut app, mut d, dir) = body("paperclip");
@@ -1039,14 +1187,567 @@ fn the_paperclip_adds_pictures_and_documents_at_the_caret() {
     std::fs::write(&pdf, b"%PDF-1.4").unwrap();
     app.insert_files(std::slice::from_ref(&pdf));
     d.frame(&mut app);
-    assert_eq!(texts(&app)[0], "See the [Trip plan (v2).pdf](attachments/Trip-plan-%28v2%29.pdf) plan", "{:?}", texts(&app));
+    assert_eq!(texts(&app), ["See the plan", "[Trip plan (v2).pdf](attachments/Trip-plan-%28v2%29.pdf)"], "{:?}", texts(&app));
     assert_eq!(std::fs::read(dir.join("attachments/Trip-plan-(v2).pdf")).unwrap(), b"%PDF-1.4");
-    // The link reads as one, and opens the copy.
-    assert_eq!(drawn_text(&app, &d, app.caret.head.slot), "See the Trip plan (v2).pdf plan");
-    let (_, _, url) = page::link_at(app.doc(), page::Caret::at(page::Pos { byte: 10, ..app.caret.head })).expect("a link");
+    // A tile, which opens the copy.
+    d.frame(&mut app);
+    assert_eq!(app.cell_pieces.get(&app.caret.head.slot).map(|p| p.len()), Some(1), "a tile");
+    let (_, _, url) = page::link_at(app.doc(), app.caret).expect("a link");
     assert_eq!(app.store.linked_file("", &url).as_deref(), Some(dir.join("attachments/Trip-plan-(v2).pdf").as_path()));
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(outside);
+}
+
+/// The finding: a `README` and a `.rs` file were refused, as nothing but
+/// a PDF, a sheet or a recording was taken; then so was a program. Any
+/// file goes in as a link now, one with no kind keeping none, a Markdown
+/// file picked among them (dropped, it comes in as a note), a program, a
+/// script and a shortcut as well; only a folder is left out.
+#[test]
+fn any_file_is_linked() {
+    let (mut app, mut d, dir) = body("any-file");
+    let outside = std::env::temp_dir().join(format!("carnet-any-file-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(outside.join("src")).unwrap();
+    let names = ["README", "main.rs", "Plan.md", "setup.exe", "fix.py", "Home.lnk"];
+    let mut picked: Vec<std::path::PathBuf> = names.iter().map(|n| outside.join(n)).collect();
+    for f in &picked {
+        std::fs::write(f, b"x").unwrap();
+    }
+    picked.push(outside.join("src"));
+    app.insert_files(&picked);
+    d.frame(&mut app);
+    let links: Vec<String> = names.iter().map(|n| format!("[{n}](attachments/{n})")).collect();
+    assert_eq!(texts(&app)[0], links.join(" "));
+    for kept in names {
+        assert!(dir.join("attachments").join(kept).is_file(), "{kept}");
+    }
+    assert!(app.store.notes.iter().all(|n| n.title != "Plan"), "a file, not a note");
+    assert_eq!(app.notice.as_ref().map(|n| n.text.as_str()), Some("Left out a folder: only files go in"));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// An SVG picked, dropped or pasted goes in as a picture, not a link: drawn
+/// on the page at its own size, as a photo is, and kept as the SVG it is.
+#[test]
+fn an_svg_goes_in_as_a_picture() {
+    let (mut app, mut d, dir) = body("svg-picture");
+    let outside = std::env::temp_dir().join(format!("carnet-svg-picture-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let picked = outside.join("logo.svg");
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="120"><circle cx="60" cy="60" r="50" fill="#c0553f"/></svg>"##;
+    std::fs::write(&picked, svg).unwrap();
+    app.insert_files(std::slice::from_ref(&picked));
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    let kept = dir.join("attachments/logo.svg");
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), svg, "kept as it is");
+    let md = app.store.notes[app.current].markdown();
+    assert!(md.contains("![](attachments/logo.svg)") && !md.contains("[logo.svg]("), "a picture, not a link: {md:?}");
+    assert!(app.notice.is_none() && app.error.is_none(), "{:?} {:?}", app.notice.as_ref().map(|n| &n.text), app.error);
+    assert!(matches!(app.images.get(&kept), crate::images::Entry::Ready { w: 300, h: 120, .. }), "drawn, at its own size");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// Tile `k` of the line of files in `slot`, as last laid out.
+fn tile_rect(app: &Carnet, d: &Drive, slot: Slot, k: usize) -> kui_native::Rect {
+    let p = app.cell_pieces.get(&slot).expect("a line of tiles")[k];
+    assert!(p.file, "a tile");
+    d.core.layout_of(p.key).expect("laid out")
+}
+
+/// A press on the middle of tile `k` of the line of files in `slot`, keys
+/// `mods` held.
+fn click_tile(app: &mut Carnet, d: &mut Drive, slot: Slot, k: usize, mods: KeyMods) {
+    let r = tile_rect(app, d, slot, k);
+    d.input(app, InputEvent::Modifiers(mods));
+    d.click(app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    d.input(app, InputEvent::Modifiers(KeyMods::NONE));
+    d.frame(app);
+    d.frame(app);
+}
+
+/// A tile opens its file in its own app, as a link to it does: a
+/// `README`, source code, a PDF at once. One that could run (a program, a
+/// script, a shortcut) asks first, naming it: Cancel (or Enter, which is
+/// on it, or Esc) opens nothing, Open anyway opens it.
+#[test]
+fn a_link_to_a_file_that_could_run_asks_before_it_opens() {
+    let (mut app, mut d, dir) = body("open-ask");
+    d.core.set_inspect(true);
+    let outside = std::env::temp_dir().join(format!("carnet-open-ask-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let names = ["README", "main.rs", "setup.exe", "fix.py"];
+    let picked: Vec<std::path::PathBuf> = names.iter().map(|n| outside.join(n)).collect();
+    for f in &picked {
+        std::fs::write(f, b"x").unwrap();
+    }
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let slot = app.caret.head.slot;
+    assert_eq!(app.cell_pieces.get(&slot).map(|p| p.len()), Some(4), "four tiles");
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    let ctrl_click = |app: &mut Carnet, d: &mut Drive, name: &str| {
+        let k = names.iter().position(|n| *n == name).unwrap();
+        click_tile(app, d, slot, k, CTRL);
+    };
+    let file = |n: &str| dir.join("attachments").join(n);
+    opened();
+    for n in ["README", "main.rs"] {
+        ctrl_click(&mut app, &mut d, n);
+        assert_eq!(opened(), [file(n)], "{n} opens at once");
+        assert!(app.open_ask.is_none());
+    }
+    // A program: asked about, by name, and nothing opens yet.
+    ctrl_click(&mut app, &mut d, "setup.exe");
+    assert_eq!(opened(), Vec::<std::path::PathBuf>::new());
+    assert!(app.open_ask.is_some());
+    assert!(drawn(&mut d, &mut app, "Open \u{201c}setup.exe\u{201d}?") && drawn(&mut d, &mut app, super::open_view::OPEN_ASK_WHY));
+    let cancel = d.key_named("Cancel").expect("Cancel");
+    d.click_key(&mut app, cancel);
+    d.frame(&mut app);
+    assert!(app.open_ask.is_none() && opened().is_empty(), "Cancel opens nothing");
+    // Enter is on Cancel; Esc is Cancel too.
+    ctrl_click(&mut app, &mut d, "setup.exe");
+    let before = texts(&app);
+    key(&mut app, &mut d, "enter");
+    assert!(app.open_ask.is_none() && opened().is_empty(), "Enter cancels");
+    assert_eq!(texts(&app), before, "and types nothing");
+    ctrl_click(&mut app, &mut d, "fix.py");
+    assert!(app.open_ask.is_some(), "a script asks too");
+    key(&mut app, &mut d, "escape");
+    assert!(app.open_ask.is_none() && opened().is_empty(), "Esc cancels");
+    // Open anyway: it opens.
+    ctrl_click(&mut app, &mut d, "setup.exe");
+    let anyway = d.key_named("Open anyway").expect("Open anyway");
+    d.click_key(&mut app, anyway);
+    d.frame(&mut app);
+    assert_eq!(opened(), [file("setup.exe")]);
+    assert!(app.open_ask.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+
+/// `/file` asks for files as the paperclip does, of any kind, and what
+/// comes goes in on the line it was typed on, which it leaves empty.
+#[test]
+fn slash_file_asks_for_files_and_links_them_on_its_line() {
+    let (mut app, mut d, dir) = body("slash-file");
+    type_in(&mut app, &mut d, "Intro");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "/file");
+    d.frame(&mut app);
+    assert!(app.slash_now().is_some_and(|(_, shown)| crate::slash::COMMANDS[shown[0]].name == "File"), "offered first");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app), ["Intro", ""], "the line left empty for the files");
+    d.frame(&mut app);
+    let asked = d.core.take_file_requests();
+    assert_eq!(asked.len(), 1, "one dialog");
+    assert!(asked[0].filters.is_empty(), "any file: {:?}", asked[0].filters);
+    let outside = std::env::temp_dir().join(format!("carnet-slash-file-src-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let pdf = outside.join("Tickets.pdf");
+    std::fs::write(&pdf, b"%PDF-1.4").unwrap();
+    app.insert_files(std::slice::from_ref(&pdf));
+    d.frame(&mut app);
+    assert_eq!(texts(&app), ["Intro", "[Tickets.pdf](attachments/Tickets.pdf)"]);
+    assert!(dir.join("attachments/Tickets.pdf").is_file());
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// Files outside the notes for a test: each name, written with `len`
+/// bytes, in a folder of its own.
+fn files_outside(name: &str, files: &[(&str, usize)]) -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+    let outside = std::env::temp_dir().join(format!("carnet-{name}-src-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let paths = files
+        .iter()
+        .map(|(n, len)| {
+            let p = outside.join(n);
+            std::fs::write(&p, vec![b'x'; *len]).unwrap();
+            p
+        })
+        .collect();
+    (outside, paths)
+}
+
+/// A README and a PDF picked together go in as one line of their own
+/// after the caret's, never among its words, and the page draws it as two
+/// tiles side by side: a card each, the tile's width whatever the name, a
+/// paperclip, the file's name, and its kind and size from the file. The
+/// Markdown stays the links.
+#[test]
+fn picked_files_are_one_line_of_tiles() {
+    let (mut app, mut d, dir) = body("tiles");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "Trip notes");
+    key(&mut app, &mut d, "left");
+    let (outside, picked) = files_outside("tiles", &[("README", 12), ("Trip plan, final and signed by everyone.pdf", 1200)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let line = "[README](attachments/README) [Trip plan, final and signed by everyone.pdf](attachments/Trip-plan,-final-and-signed-by-everyone.pdf)";
+    assert_eq!(texts(&app), ["Trip notes", line], "{:?}", texts(&app));
+    let slot = app.caret.head.slot;
+    assert_eq!(app.caret, page::Caret::at(page::end(app.doc(), slot)), "the caret after the last");
+    let (a, b) = (tile_rect(&app, &d, slot, 0), tile_rect(&app, &d, slot, 1));
+    assert_eq!((a.w, b.w), (super::page_view::TILE_W, super::page_view::TILE_W), "the tile's width, whatever the name");
+    assert!((a.y - b.y).abs() < 0.5 && b.x > a.x + a.w, "side by side: {a:?} {b:?}");
+    let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+    for words in ["README", "File \u{b7} 12 bytes", "Trip plan, final and signed by everyone.pdf", "PDF \u{b7} 1.2 KB"] {
+        assert!(shown(&d, words), "{words}");
+    }
+    // The name cut short in its tile.
+    let name = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Trip plan, final and signed by everyone.pdf")).unwrap().rect;
+    assert!(name.x + name.w <= b.x + b.w, "{name:?} in {b:?}");
+    // A paragraph's words beside it are words, as ever.
+    assert!(!app.cell_pieces.contains_key(&page::Slot::block(blocks(&app)[0].id)));
+    assert_eq!(app.store.notes[app.current].markdown().trim_end().rsplit("\n\n").next(), Some(line));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A tile is its link all over. A plain click (links opening on ⌘-click)
+/// chooses it, its ring on; a ⌘-click opens its file, as the settings say
+/// a link opens; with links opening on a click, a click does. One that
+/// could run asks first. Its menu is its link's, and Show in folder.
+#[test]
+fn a_tile_opens_as_its_link_does() {
+    let (mut app, mut d, dir) = body("tile-open");
+    d.core.set_inspect(true);
+    let (outside, picked) = files_outside("tile-open", &[("report.pdf", 8), ("setup.exe", 8)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let slot = app.caret.head.slot;
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    opened();
+    let line = texts(&app)[0].clone();
+    let ea = line.find(' ').unwrap();
+    click_tile(&mut app, &mut d, slot, 0, KeyMods::NONE);
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((0, ea)), "chosen");
+    assert!(opened().is_empty(), "a plain click doesn't open it");
+    click_tile(&mut app, &mut d, slot, 0, CTRL);
+    assert_eq!(opened(), [dir.join("attachments/report.pdf")]);
+    click_tile(&mut app, &mut d, slot, 1, CTRL);
+    assert!(opened().is_empty() && app.open_ask.is_some(), "a program asks first");
+    key(&mut app, &mut d, "escape");
+    assert!(app.open_ask.is_none());
+    app.settings.link_open = page::LinkOpen::Click;
+    click_tile(&mut app, &mut d, slot, 0, KeyMods::NONE);
+    assert_eq!(opened(), [dir.join("attachments/report.pdf")], "a click, links opening on one");
+    app.settings.link_open = page::LinkOpen::ModClick;
+    // Right-click: its link's menu, and where it is.
+    let r = tile_rect(&app, &d, slot, 1);
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(r.x + r.w / 2.0, r.y + r.h / 2.0)));
+    d.input(&mut app, InputEvent::MouseDown { button: kui_native::MouseButton::Secondary, clicks: 1 });
+    d.input(&mut app, InputEvent::MouseUp { button: kui_native::MouseButton::Secondary });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((ea + 1, line.len())), "chosen by the right-click");
+    let menu: Vec<String> = app.page_menu().iter().map(|i| i.label.clone()).collect();
+    for want in ["Open link", "Copy", "Copy path", "Remove link", super::reveal_label()] {
+        assert!(menu.iter().any(|m| m == want), "{want} in {menu:?}");
+    }
+    assert!(!menu.iter().any(|m| m == "Copy link address"), "{menu:?}");
+    app.page_action("copy-tile");
+    assert_eq!(app.clip_out.as_ref().map(|c| c.0.as_str()), Some("[setup.exe](attachments/setup.exe)"));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A tile is one unit to the keys, as a picture among a cell's words is:
+/// ← chooses it, then is past it, the caret drawn at its edge; ↑ from
+/// the line below comes onto the line of tiles; Backspace takes a tile
+/// whole, its link and the space before it, and Undo brings it back; a
+/// selection over one copies its Markdown; and words typed beside them
+/// go on a line of their own, the tiles as they were.
+#[test]
+fn a_tile_is_one_unit_to_the_keys() {
+    let (mut app, mut d, dir) = body("tile-keys");
+    d.core.set_inspect(true);
+    let (outside, picked) = files_outside("tile-keys", &[("a.pdf", 8), ("b.zip", 8)]);
+    app.insert_files(&picked);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "Below");
+    d_frame_twice(&mut app, &mut d);
+    let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+    assert_eq!(texts(&app), [line, "Below"]);
+    let slot = page::Slot::block(blocks(&app)[0].id);
+    let (ea, sb) = (line.find(' ').unwrap(), line.find(' ').unwrap() + 1);
+    // ↑ from below: onto the tiles' line.
+    key(&mut app, &mut d, "up");
+    assert_eq!(app.caret.head.slot, slot);
+    key(&mut app, &mut d, "end");
+    assert_eq!(app.caret, page::Caret::at(page::Pos { slot, byte: line.len() }));
+    // Where the caret is drawn: at the edge of the tile beside it.
+    let (a, b) = (tile_rect(&app, &d, slot, 0), tile_rect(&app, &d, slot, 1));
+    let at = |byte| app.rect_at(&d.core, slot, byte).unwrap().x;
+    assert_eq!((at(0), at(ea), at(sb), at(line.len())), (a.x, a.x + a.w, b.x, b.x + b.w));
+    key(&mut app, &mut d, "left");
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((sb, line.len())), "chosen first");
+    key(&mut app, &mut d, "left");
+    assert_eq!(app.caret, page::Caret::at(page::Pos { slot, byte: sb }), "then before it");
+    key(&mut app, &mut d, "left");
+    assert_eq!(app.caret.head.byte, ea, "over the space");
+    // A selection over it: its Markdown.
+    key_with(&mut app, &mut d, "left", SHIFT);
+    assert_eq!(page::copy(app.doc(), app.caret).as_deref(), Some("[a.pdf](attachments/a.pdf)"));
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("[a.pdf](attachments/a.pdf)"));
+    // Backspace with it chosen: gone, its space too; Undo, back.
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app), ["[b.zip](attachments/b.zip)", "Below"]);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app), [line, "Below"]);
+    // Delete before the second: it goes.
+    app.caret = page::Caret::at(page::Pos { slot, byte: sb });
+    key(&mut app, &mut d, "delete");
+    assert_eq!(texts(&app)[0], "[a.pdf](attachments/a.pdf)");
+    key_with(&mut app, &mut d, "z", CTRL);
+    // Words typed at the end: a paragraph of their own after the tiles,
+    // the space before them nothing; the tiles stay tiles.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    type_in(&mut app, &mut d, " to read");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app), [line, "to read", "Below"]);
+    assert_eq!(app.cell_pieces.get(&slot).map(Vec::len), Some(2), "still two tiles");
+    assert_eq!(app.caret.head.slot, page::Slot::block(blocks(&app)[1].id), "the caret on the new line");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A line of files keeps a row of its own, as a picture on its own line
+/// does: a letter typed after its last tile starts a paragraph under it,
+/// one typed before its first a paragraph above it; Enter at its end, an
+/// empty line under it, the caret there; a space is nothing there; and
+/// Backspace from the line under it chooses its last tile, never joining
+/// the two. Each one undo.
+#[test]
+fn a_line_of_files_keeps_a_row_of_its_own() {
+    let (mut app, mut d, dir) = body("tile-row");
+    d.core.set_inspect(true);
+    let (outside, picked) = files_outside("tile-row", &[("a.pdf", 8), ("b.zip", 8)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let line = "[a.pdf](attachments/a.pdf) [b.zip](attachments/b.zip)";
+    assert_eq!(texts(&app), [line]);
+    let slot = page::Slot::block(blocks(&app)[0].id);
+    // After the last tile: a letter starts a paragraph under the line.
+    type_in(&mut app, &mut d, "N");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app), [line, "N"]);
+    type_in(&mut app, &mut d, "otes");
+    assert_eq!(texts(&app), [line, "Notes"], "then the words go on there");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app), [line], "undone");
+    // Before the first: a paragraph above it.
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    type_in(&mut app, &mut d, "Files:");
+    assert_eq!(texts(&app), ["Files:", line]);
+    // A space beside the tiles: nothing.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    type_in(&mut app, &mut d, " ");
+    assert_eq!(texts(&app), ["Files:", line]);
+    // Enter at its end: an empty line under it, the caret there.
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app), ["Files:", line, ""]);
+    assert_eq!(app.caret.head.slot, page::Slot::block(blocks(&app)[2].id));
+    type_in(&mut app, &mut d, "After");
+    d_frame_twice(&mut app, &mut d);
+    // Backspace at the start of the line under it: its last tile chosen,
+    // the lines apart; again, the tile goes.
+    app.caret = page::Caret::at(page::start(page::Slot::block(blocks(&app)[2].id)));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app), ["Files:", line, "After"]);
+    let sb = line.find(' ').unwrap() + 1;
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((sb, line.len())));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app), ["Files:", "[a.pdf](attachments/a.pdf)", "After"]);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.cell_pieces.get(&slot).map(Vec::len), Some(1), "a tile still");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A tile's own tools, on the toolbar while one is chosen or the caret is
+/// beside it ("File tools"): Open (a program asked about first), Show in
+/// folder, Copy, which a paste anywhere in a note puts in as a line of
+/// files of its own, Copy path, the file's full path as this computer
+/// writes one, and Remove; and the line's moves. Its menu has the same,
+/// and no "Copy link address".
+#[test]
+fn a_tile_has_tools_of_its_own() {
+    let (mut app, mut d, dir) = body("tile-tools");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "Intro words");
+    let (outside, picked) = files_outside("tile-tools", &[("report.pdf", 8), ("setup.exe", 8)]);
+    app.insert_files(&picked);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "Middle of the note");
+    d_frame_twice(&mut app, &mut d);
+    let line = "[report.pdf](attachments/report.pdf) [setup.exe](attachments/setup.exe)";
+    assert_eq!(texts(&app), ["Intro words", line, "Middle of the note"]);
+    let slot = page::Slot::block(blocks(&app)[1].id);
+    let ea = line.find(' ').unwrap();
+    // A click on the first chooses it: the file's tools.
+    click_tile(&mut app, &mut d, slot, 0, KeyMods::NONE);
+    assert_eq!(page::chosen_tile(app.doc(), app.caret), Some((0, ea)));
+    assert_eq!(app.tool_set, Some(chrome::ToolSet::File));
+    for k in ["t-fopen", "t-freveal", "t-fcopy", "t-fpath", "t-fremove", "t-up", "t-down", "t-attach"] {
+        assert!(d.key_of(k).is_some(), "the file's tools have {k}");
+    }
+    for k in ["t-text", "t-h1", "t-bold", "t-color", "t-del", "t-inline"] {
+        assert!(d.key_of(k).is_none(), "no {k} for a file");
+    }
+    let named = |d: &mut Drive, s: &str| d.core.access_tree().nodes.iter().any(|n| n.name.as_deref() == Some(s));
+    assert!(named(&mut d, "File tools"), "a screen reader hears what they are for");
+    // The caret beside the second, nothing chosen: its file's still.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.tool_set, Some(chrome::ToolSet::File));
+    assert_eq!(page::tile_at(app.doc(), app.caret).map(|f| f.name).as_deref(), Some("setup.exe"));
+    // Open: a program asks first; a PDF opens.
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    opened();
+    let press = |app: &mut Carnet, d: &mut Drive, k: &str| {
+        let key = d.key_of(k).unwrap_or_else(|| panic!("{k}"));
+        d.click_key(app, key);
+        d.frame(app);
+        d.frame(app);
+    };
+    press(&mut app, &mut d, "t-fopen");
+    assert!(opened().is_empty() && app.open_ask.is_some(), "setup.exe asks first");
+    key(&mut app, &mut d, "escape");
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fopen");
+    assert_eq!(opened(), [dir.join("attachments/report.pdf")]);
+    // Show in folder: the file, shown where it is.
+    store::REVEALED.with_borrow_mut(std::mem::take);
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-freveal");
+    assert_eq!(store::REVEALED.with_borrow_mut(std::mem::take), [dir.join("attachments/report.pdf")]);
+    // Copy path: the whole path, as this computer writes it.
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fpath");
+    let path = copied(&mut d).expect("a path copied");
+    assert_eq!(std::path::Path::new(&path), store::native_path(&dir.join("attachments").join("report.pdf")));
+    assert!(std::path::Path::new(&path).is_absolute() && std::path::Path::new(&path).is_file(), "{path}");
+    if cfg!(windows) {
+        assert!(!path.contains('/'), "Windows' own separators: {path}");
+    }
+    // Copy, then a paste in the middle of a paragraph: a second line of
+    // files, a row of its own after that paragraph, the words as they were.
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fcopy");
+    let md = copied(&mut d).expect("the tile copied");
+    assert_eq!(md, "[report.pdf](attachments/report.pdf)");
+    let middle = page::Slot::block(blocks(&app)[2].id);
+    app.caret = page::Caret::at(page::Pos { slot: middle, byte: 6 });
+    d.input(&mut app, InputEvent::Paste { text: md.clone(), marks: Default::default() });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app), ["Intro words", line, "Middle of the note", "[report.pdf](attachments/report.pdf)"]);
+    let pasted = page::Slot::block(blocks(&app)[3].id);
+    assert_eq!(app.cell_pieces.get(&pasted).map(Vec::len), Some(1), "drawn as a tile, on its own row");
+    // A copy over the words and a line of files: pasted, the tiles back.
+    let all = page::Caret { anchor: page::start(page::Slot::block(blocks(&app)[0].id)), head: page::end(app.doc(), slot) };
+    let both = page::copy(app.doc(), all).unwrap();
+    app.caret = page::Caret::at(page::end(app.doc(), pasted));
+    key(&mut app, &mut d, "enter");
+    d.input(&mut app, InputEvent::Paste { text: both, marks: Default::default() });
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(texts(&app)[4..], ["Intro words".to_string(), line.to_string()], "{:?}", texts(&app));
+    assert_eq!(app.cell_pieces.get(&page::Slot::block(blocks(&app)[5].id)).map(Vec::len), Some(2));
+    // Remove: that tile goes, with its space; Undo brings it back.
+    app.caret = page::Caret::at(page::Pos { slot, byte: line.len() });
+    d_frame_twice(&mut app, &mut d);
+    press(&mut app, &mut d, "t-fremove");
+    assert_eq!(texts(&app)[1], "[report.pdf](attachments/report.pdf)");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(texts(&app)[1], line);
+    // The menu: Copy, Copy file and Copy path, never "Copy link address",
+    // nor a second Copy; Show in folder, Remove link and Open link as they
+    // were.
+    app.caret = page::Caret { anchor: page::Pos { slot, byte: 0 }, head: page::Pos { slot, byte: ea } };
+    let menu: Vec<String> = app.page_menu().iter().map(|i| i.label.clone()).collect();
+    for want in ["Open link", "Copy", "Copy file", "Copy path", "Remove link", super::reveal_label(), "Paste"] {
+        assert!(menu.iter().any(|m| m == want), "{want} in {menu:?}");
+    }
+    assert!(!menu.iter().any(|m| m == "Copy link address"), "{menu:?}");
+    assert_eq!(menu.iter().filter(|m| *m == "Copy").count(), 1, "{menu:?}");
+    // A file, not words: none of the styles, turns or inserts.
+    for not in ["Bold", "Link\u{2026}", "Edit link\u{2026}", "Highlight", "Change case", "Heading", "Insert table"] {
+        assert!(!menu.iter().any(|m| m == not), "{not} in {menu:?}");
+    }
+    app.page_action("copy-path-file");
+    assert_eq!(app.clip_out.as_ref().map(|c| std::path::PathBuf::from(&c.0)), Some(store::native_path(&dir.join("attachments/report.pdf"))));
+    // Copy file: the file itself, its whole path, as a file manager copies
+    // one (a headless run keeps the paths as its clipboard's text).
+    d_frame_twice(&mut app, &mut d);
+    let _ = d.core.take_menu_actions();
+    press(&mut app, &mut d, "t-fclip");
+    let files = d.core.take_menu_actions().into_iter().find_map(|a| match a {
+        kui_native::MenuAction::SetClipboardFiles { paths } => Some(paths),
+        _ => None,
+    });
+    let want = store::native_path(&dir.join("attachments").join("report.pdf")).display().to_string();
+    assert_eq!(files.map(|p| p.into_iter().map(|p| p.to_string()).collect::<Vec<_>>()), Some(vec![want]));
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A line of files copied from a note in one folder and pasted into a
+/// note in another reaches the same files: its links are made from there.
+#[test]
+fn a_line_of_files_pasted_in_another_folder_still_reaches_its_files() {
+    let (mut app, mut d, dir) = body("tile-folders");
+    let (outside, picked) = files_outside("tile-folders", &[("plan.pdf", 8)]);
+    app.insert_files(&picked);
+    d_frame_twice(&mut app, &mut d);
+    let slot = page::Slot::block(blocks(&app)[0].id);
+    app.caret = page::Caret::at(page::Pos { slot, byte: 0 });
+    app.file_tool(chrome::FILE_COPY);
+    d.frame(&mut app);
+    let md = copied(&mut d).expect("copied");
+    assert_eq!(md, "[plan.pdf](attachments/plan.pdf)");
+    // Into a note in Work.
+    app.store.notes[app.current].folder = "Work".into();
+    std::fs::create_dir_all(dir.join("Work")).unwrap();
+    app.caret = page::Caret::at(page::end(app.doc(), slot));
+    d.input(&mut app, InputEvent::Paste { text: md, marks: Default::default() });
+    d.frame(&mut app);
+    assert_eq!(texts(&app), ["[plan.pdf](attachments/plan.pdf) [plan.pdf](../attachments/plan.pdf)"]);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
+/// A link to a file among a sentence's words is a link there: drawn as
+/// its words, opened as a link is. A tile is only for a line of files.
+#[test]
+fn a_file_link_in_a_sentence_stays_a_link() {
+    let (mut app, mut d, dir) = body("tile-sentence");
+    d.core.set_inspect(true);
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/a.pdf"), b"x").unwrap();
+    type_in(&mut app, &mut d, "See [a.pdf](attachments/a.pdf) first");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "**[a.pdf](attachments/a.pdf)**");
+    d_frame_twice(&mut app, &mut d);
+    let ids: Vec<Slot> = blocks(&app).iter().take(2).map(|b| page::Slot::block(b.id)).collect();
+    assert_eq!(drawn_text(&app, &d, ids[0]), "See a.pdf first");
+    assert_eq!(drawn_text(&app, &d, ids[1]), "a.pdf", "styled, it's words");
+    assert!(ids.iter().all(|s| !app.cell_pieces.contains_key(s)));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// Shift+F3 goes round the cases of the word the caret is in, as Word's
@@ -2079,6 +2780,72 @@ fn marks_are_never_drawn_and_the_caret_moves_by_the_words() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `--` typed is drawn as an em dash, one letter, while the file keeps the
+/// two dashes: the arrows step over it whole, a click on it puts the caret
+/// before or after it, a selection of it copies `--`, and Backspace after
+/// it takes both dashes.
+#[test]
+fn two_dashes_typed_are_drawn_as_an_em_dash() {
+    let (mut app, mut d, dir) = body("em-dash");
+    d.core.set_inspect(true);
+    for ch in "a -- b".chars() {
+        type_in(&mut app, &mut d, &ch.to_string());
+    }
+    let first = app.caret.head.slot;
+    d.frame(&mut app);
+    assert_eq!(texts(&app)[0], "a -- b", "the text keeps both dashes");
+    assert_eq!(drawn_text(&app, &d, first), "a \u{2014} b");
+    app.save_current();
+    let md = std::fs::read_to_string(app.store.notes[app.current].path.clone().unwrap()).unwrap();
+    assert!(md.contains("a -- b") && !md.contains('\u{2014}'), "{md}");
+    // ← and → step over it as one letter.
+    let em = carnet_core::inline::EM_DASH.len();
+    key(&mut app, &mut d, "end");
+    let mut places = vec![drawn_caret(&app)];
+    for _ in 0..5 {
+        key(&mut app, &mut d, "left");
+        places.push(drawn_caret(&app));
+    }
+    assert_eq!(places, [4 + em, 3 + em, 2 + em, 2, 1, 0]);
+    let mut bytes = Vec::new();
+    for _ in 0..5 {
+        key(&mut app, &mut d, "right");
+        bytes.push(app.caret.head.byte);
+    }
+    assert_eq!(bytes, [1, 2, 4, 5, 6], "never between the dashes");
+    // A click on either side of the dash: before it or after it.
+    for (at, byte) in [(2, 2), (2 + em, 4), (3 + em, 5)] {
+        click_drawn(&mut app, &mut d, first, at);
+        assert_eq!((app.caret.head.slot, app.caret.head.byte), (first, byte), "a click at {at}");
+    }
+    let k = *app.slot_keys.get(&first).unwrap();
+    let (a, b) = (d.core.caret_rect(k, 2).unwrap(), d.core.caret_rect(k, 2 + em).unwrap());
+    assert!(b.x > a.x, "the dash is drawn one letter wide: {a:?} {b:?}");
+    for (x, byte) in [(a.x + (b.x - a.x) * 0.25, 2), (a.x + (b.x - a.x) * 0.75, 4)] {
+        d.click(&mut app, x, a.y + a.h / 2.0);
+        d.frame(&mut app);
+        d.frame(&mut app);
+        assert_eq!(app.caret.head.byte, byte, "a click {:.0}% into the dash", (x - a.x) / (b.x - a.x) * 100.0);
+    }
+    // Selected with Shift+→ from before it: a copy keeps the dashes.
+    click_drawn(&mut app, &mut d, first, 2);
+    key_with(&mut app, &mut d, "right", SHIFT);
+    assert_eq!((app.caret.anchor.byte, app.caret.head.byte), (2, 4));
+    key_with(&mut app, &mut d, "c", CTRL);
+    assert_eq!(copied(&mut d).as_deref(), Some("--"));
+    // Backspace after it takes both dashes.
+    click_drawn(&mut app, &mut d, first, 2 + em);
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(texts(&app)[0], "a  b");
+    assert_eq!(drawn_caret(&app), 2);
+    // In code it stays as written.
+    key(&mut app, &mut d, "end");
+    type_in(&mut app, &mut d, " `c--d`");
+    d.frame(&mut app);
+    assert_eq!(drawn_text(&app, &d, first), "a  b c--d");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn a_style_with_nothing_selected_is_for_what_is_typed_next() {
     let (mut app, mut d, dir) = body("pending");
@@ -2428,7 +3195,7 @@ fn the_colour_picker_colours_the_selection() {
     d.frame(&mut app);
     assert_eq!(texts(&app)[0], "<span style=\"color: #C0553F\">red</span> words");
     assert!(app.tint_open.is_some(), "the picker stays, for the other colour");
-    assert_eq!(app.settings.colors.first(), Some(&0xc0553fff), "and the colour is a recent one");
+    assert!(d.key_named("Recent").is_none(), "and no row of colours given lately");
     key(&mut app, &mut d, "escape");
     assert!(app.tint_open.is_none(), "Esc puts it away");
     assert!(page_focused(&app, &d), "the page keeps the keyboard");
@@ -2750,6 +3517,151 @@ fn a_selected_picture_has_its_place_in_the_toolbar() {
     d.click_key(&mut app, tool);
     d.frame(&mut app);
     assert!(blocks(&app).iter().any(|b| matches!(b.kind, Kind::Image { float: Float::None, .. })));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The toolbar shows the tools for what the caret is in, and only those:
+/// walked through a paragraph, a list's items, a table's cell, code and a
+/// picture, each set has its own, and another's are not there at all —
+/// not greyed. What applies but can't act now (a row's move up from under
+/// the header) is greyed. Arrowing along the table changes nothing.
+#[test]
+fn the_toolbar_shows_the_tools_for_what_the_caret_is_in() {
+    // Wide, so every set shows whole and nothing is in More.
+    let (store, dir) = temp_store("tool-sets");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1800.0, 760.0).framing();
+    d.frame(&mut app);
+    app.new_note();
+    d.frame(&mut app);
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    let table = Table::from_cells(vec![
+        vec!["Day".into(), "Miles".into()],
+        vec!["Mon".into(), "12".into()],
+        vec!["Tue".into(), "30".into()],
+    ]);
+    let (mon, day) = (table.rows[1].id, table.cols[0]);
+    let picture = Kind::Image { src: "nowhere.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false };
+    app.store.notes[app.current].doc = Doc::new(vec![
+        Block::text("Words"),
+        Block::new(Kind::item(ListStyle::Bullet, 0, "one")),
+        Block::new(Kind::item(ListStyle::Todo, 0, "two")),
+        Block::new(Kind::Table(table)),
+        Block::new(Kind::Raw("```\nlet x = 1;\n```".into())),
+        Block::new(picture),
+        Block::text(""),
+    ]);
+    let ids: Vec<u64> = blocks(&app).iter().map(|b| b.id).collect();
+    d.core.set_inspect(true);
+    let enabled = |d: &mut Drive, key: &str| {
+        let k = d.key_of(key).expect(key);
+        d.core.nodes().iter().any(|n| n.key == k && !n.flags.contains(&"disabled"))
+    };
+    // The caret to `c`, and the strip drawn for it.
+    let go = |app: &mut Carnet, d: &mut Drive, c: Caret| {
+        app.caret = c;
+        d.frame(app);
+        d.frame(app);
+    };
+    let check = |d: &mut Drive, app: &Carnet, set: chrome::ToolSet, shown: &[&str], absent: &[&str]| {
+        assert_eq!(app.tool_set, Some(set));
+        assert!(app.overflow.is_empty(), "{set:?}: nothing folded into More");
+        for k in shown {
+            assert!(d.key_of(k).is_some(), "{set:?} shows {k}");
+        }
+        for k in absent {
+            assert!(d.key_of(k).is_none(), "{set:?} has no {k}, greyed or not");
+        }
+    };
+
+    // A paragraph: what it becomes, its styles, what to put in, its moves.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[0]), byte: 2 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Words,
+        &["t-text", "t-h1", "t-h2", "t-h3", "t-bullet", "t-todo", "t-quote", "t-initial", "t-bold", "t-code", "t-mark", "t-color", "t-table", "t-rule", "t-attach", "t-up", "t-down", "t-del"],
+        &["t-out", "t-in", "t-tick", "t-addrow", "t-rowup", "t-sort", "t-inline", "t-left"],
+    );
+    assert!(enabled(&mut d, "t-initial"), "a paragraph's first letter drops");
+
+    // A bullet: a list's kinds and back to text, in and out; no headings.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[1]), byte: 1 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::List,
+        &["t-text", "t-bullet", "t-number", "t-todo", "t-out", "t-in", "t-bold", "t-color", "t-table", "t-attach", "t-up", "t-del"],
+        &["t-h1", "t-h2", "t-h3", "t-quote", "t-initial", "t-tick", "t-addrow", "t-inline"],
+    );
+    // A to-do: its tick too.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[2]), byte: 1 }));
+    check(&mut d, &app, chrome::ToolSet::List, &["t-todo", "t-out", "t-in", "t-tick"], &["t-h1", "t-initial"]);
+    let tick = d.key_of("t-tick").unwrap();
+    d.click_key(&mut app, tick);
+    d.frame(&mut app);
+    assert!(matches!(blocks(&app)[2].kind, Kind::Item { done: true, .. }), "ticked from the toolbar");
+
+    // A table's cell: its rows and columns, the styles, a picture; nothing
+    // a block becomes, nor a table or a divider to put in it.
+    let cell = Slot { block: ids[3], cell: Some((mon, day)) };
+    go(&mut app, &mut d, Caret::at(Pos { slot: cell, byte: 1 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Table,
+        &["t-addrow", "t-addcol", "t-delrow", "t-delcol", "t-rowup", "t-rowdown", "t-colleft", "t-colright", "t-header", "t-sort", "t-del", "t-bold", "t-color", "t-attach"],
+        &["t-text", "t-h1", "t-bullet", "t-todo", "t-quote", "t-initial", "t-out", "t-in", "t-table", "t-rule", "t-up", "t-down", "t-inline"],
+    );
+    assert!(!enabled(&mut d, "t-rowup") && enabled(&mut d, "t-rowdown"), "greyed under the header, not gone");
+    // Along the row and down the column: the same set, nothing moving.
+    let since = app.tool_set_at;
+    key(&mut app, &mut d, "tab");
+    key(&mut app, &mut d, "down");
+    assert!(app.caret.head.slot.cell.is_some(), "still in the table");
+    assert_eq!((app.tool_set, app.tool_set_at), (Some(chrome::ToolSet::Table), since), "no change, no motion");
+
+    // Code: its moves and what to put in after it; no styles.
+    go(&mut app, &mut d, Caret::at(Pos { slot: Slot::block(ids[4]), byte: 5 }));
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Code,
+        &["t-up", "t-down", "t-del", "t-table", "t-rule", "t-attach"],
+        &["t-text", "t-h1", "t-bullet", "t-initial", "t-bold", "t-code", "t-mark", "t-color", "t-out", "t-addrow", "t-inline"],
+    );
+
+    // A picture: where it sits, as it always had.
+    let chosen = page::select_blocks(app.doc(), 5, 5);
+    go(&mut app, &mut d, chosen);
+    check(
+        &mut d,
+        &app,
+        chrome::ToolSet::Picture,
+        &["t-inline", "t-left", "t-right", "t-up", "t-down", "t-del", "t-table", "t-attach"],
+        &["t-text", "t-h1", "t-bold", "t-color", "t-out", "t-addrow", "t-initial"],
+    );
+
+    // The title: only what goes in at the page's caret.
+    app.focus(Field::Title);
+    d.frame(&mut app);
+    d.frame(&mut app);
+    check(&mut d, &app, chrome::ToolSet::Away, &["t-table", "t-rule", "t-attach", "t-pin", "t-trash"], &["t-text", "t-bold", "t-up", "t-addrow", "t-inline"]);
+
+    // Narrow, in the table: what doesn't fit is in More, and it is the
+    // table's set there too.
+    let mut narrow = Drive::new(Core::new(), 620.0, 600.0).framing();
+    narrow.core.set_inspect(true);
+    app.edit_at(Pos { slot: cell, byte: 1 });
+    for _ in 0..3 {
+        narrow.frame(&mut app);
+    }
+    assert_eq!(app.tool_set, Some(chrome::ToolSet::Table));
+    assert!(narrow.key_of("t-more").is_some() && narrow.key_of("t-addrow").is_some(), "the table's first tools, then More");
+    let menu: Vec<String> = app.tools_menu().iter().map(|m| m.label.clone()).filter(|l| !l.is_empty()).collect();
+    assert!(menu.iter().any(|l| l == "Add pictures or files"), "{menu:?}");
+    assert!(!menu.iter().any(|l| l == "Heading 1" || l == "Move up" || l == "Divider"), "{menu:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -3188,6 +4100,99 @@ fn a_colour_and_a_highlight_go_on_together_from_the_toolbar() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The welcome note's "Words" and the two paragraphs under it, selected
+/// from the heading's start to the second one's end, are drawn one way
+/// while the highlighter's picker is open, whatever the pointer is on:
+/// their words chosen line by line, as any chosen words are, and no
+/// block on a wash the row's width (which was swapped for the words'
+/// own as soon as a highlight or a colour cut them). Resting on a swatch
+/// shows its name and changes nothing. One picked goes on all three
+/// blocks' words, and the three stay selected whole, drawn as before; its
+/// marks went inside the selection's ends. Picked again, it comes off,
+/// and nothing has moved.
+#[test]
+fn a_selection_across_blocks_is_drawn_one_way_while_a_highlight_is_picked() {
+    let (mut app, mut d, dir) = body("tint-across");
+    d.core.set_inspect(true);
+    let welcome = app.store.notes.iter().find(|n| n.title == "Welcome to Carnet").unwrap().doc.clone();
+    let i = welcome.blocks().iter().position(|b| matches!(&b.kind, Kind::Heading { text, .. } if text == "Words")).unwrap();
+    let under = welcome.blocks()[i + 2].id;
+    app.edit(Step::Other, |doc, c| {
+        *doc = welcome.clone();
+        *c = Caret::at(page::start(Slot::block(doc.blocks()[i].id)));
+        true
+    });
+    settle(&mut app, &mut d);
+    // By Shift+arrows: down into the second paragraph, then to its end.
+    while app.caret.head.slot != Slot::block(under) {
+        key_with(&mut app, &mut d, "down", SHIFT);
+    }
+    key_with(&mut app, &mut d, "end", SHIFT);
+    assert_eq!(app.caret.head, page::end(app.doc(), Slot::block(under)));
+    // The three in the middle of the page, clear of its foot, where an
+    // edit brings the caret's line a little further in.
+    settle(&mut app, &mut d);
+    let scroller = app.scroll_key.unwrap();
+    let off = d.core.scroll_geometry(scroller).unwrap().offset.y;
+    d.core.set_scroll(scroller, Vec2::new(0.0, off + 160.0));
+    settle(&mut app, &mut d);
+    settle(&mut app, &mut d);
+    let three: Vec<usize> = page::spanned(app.doc(), app.caret).collect();
+    let words = |app: &Carnet| three.iter().map(|&i| texts(app)[i].clone()).collect::<Vec<_>>();
+    let plain = words(&app);
+    // Any wash a node wears (a block's row wore one, covered whole), and
+    // the blocks the selection covers whole; chosen words wear theirs on
+    // their spans.
+    let drawn = |app: &Carnet, d: &Drive| {
+        let sel = d.core.theme().selection;
+        let washes: Vec<Rect> = d.core.nodes().iter().filter(|n| n.bg == sel && n.rect.w > 0.0).map(|n| n.rect).collect();
+        let mut whole: Vec<u64> = page::coverage(app.doc(), app.caret).whole.into_iter().collect();
+        whole.sort_unstable();
+        (washes, whole)
+    };
+    let rest = drawn(&app, &d);
+    assert_eq!((rest.0.len(), rest.1.len()), (0, 3), "no block washed, the three whole: {rest:?}");
+    let same = |app: &mut Carnet, d: &mut Drive, what: &str| {
+        for _ in 0..3 {
+            d.advance(0.2);
+            d.frame(app);
+        }
+        assert_eq!(drawn(app, d), rest, "{what}: drawn as before");
+    };
+    let r = d.core.nodes().iter().find(|n| n.label.as_deref() == Some("t-mark")).map(|n| n.rect).unwrap();
+    d.click(&mut app, r.x + r.w / 2.0, r.y + r.h / 2.0);
+    assert_eq!(app.tint_open.map(|t| t.0), Some(false), "the highlighter's picker");
+    same(&mut app, &mut d, "the picker open");
+    let swatch = |d: &mut Drive, name: &str| {
+        let k = d.key_named(name).expect(name);
+        d.rect_of(k).unwrap().center()
+    };
+    for name in ["Yellow", "Green"] {
+        let at = swatch(&mut d, name);
+        d.move_to(&mut app, at.x, at.y);
+        same(&mut app, &mut d, &format!("on {name}"));
+        assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some(name)), "its name shown");
+        assert_eq!(words(&app), plain, "on {name}: the note as it was");
+        d.move_to(&mut app, r.x + r.w / 2.0, 700.0);
+        same(&mut app, &mut d, &format!("off {name}"));
+    }
+    // Picked: on every block's words, the three still whole.
+    let at = swatch(&mut d, "Yellow");
+    d.click(&mut app, at.x, at.y);
+    same(&mut app, &mut d, "Yellow picked");
+    let marked = words(&app);
+    assert!(marked.iter().all(|w| w.starts_with("<mark style=\"background: #F8EBA6CC\">") && w.ends_with("</mark>")), "{marked:?}");
+    d.move_to(&mut app, r.x + r.w / 2.0, 700.0);
+    same(&mut app, &mut d, "off it, picked");
+    // Again: off every block's words.
+    d.click(&mut app, at.x, at.y);
+    same(&mut app, &mut d, "Yellow taken off");
+    assert_eq!(words(&app), plain);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_library_hides_and_comes_back() {
     let (mut app, mut d, dir) = body("sidebar");
@@ -3487,6 +4492,83 @@ fn the_application_menu_is_the_macs_own() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Settings' last line, quiet and faint: the welcome note again. The
+/// first written in, a fresh one comes beside it at the top level, opened
+/// and chosen in the library (every note shown, the folder it was on let
+/// go), Settings closed. From the keyboard, a second time: that one,
+/// untouched, not a third. On a Mac, Help ▸ Getting Started Note.
+#[test]
+fn the_welcome_note_comes_again_from_settings_and_the_help_menu() {
+    let (mut app, mut d, dir) = fresh_mac("welcome-again");
+    let first = app.store.notes.iter().position(|n| n.title == "Welcome to Carnet").expect("the welcome");
+    app.store.notes[first].doc.push(Block::text("mine now"));
+    app.store.notes[first].touch();
+    app.store.save(first, true).unwrap();
+    let first = app.store.notes[first].id;
+    let work = app.store.create_folder("", "Work").unwrap();
+    app.show_folder(Some(work));
+    app.on_plain(Msg::ShowSettings);
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    // A button, named for a reader, in the faintest ink that reads.
+    let k = d.key_named("Add the getting-started note").expect("the line, by its name");
+    assert_eq!(d.key_of("add-welcome"), Some(k));
+    let node = d.core.nodes().into_iter().find(|n| n.key == k).unwrap();
+    assert_eq!(node.role, Some(Role::Button));
+    assert!(node.flags.contains(&"click"), "{:?}", node.flags);
+    // Its faint word reads on the page, and on its well under the pointer
+    // and pressed, in every palette.
+    for p in crate::design::Palette::ALL {
+        for dark in [false, true] {
+            let c = crate::design::Colors::of(p, dark);
+            for (on, k) in [("page", 0.0), ("hover", 0.03), ("pressed", 0.04)] {
+                let ratio = crate::design::contrast(c.faint, c.page.mix(c.ink, k));
+                assert!(ratio >= 3.0, "{} {}: {ratio} on the {on}", p.name(), if dark { "dark" } else { "light" });
+            }
+        }
+    }
+    // Last of all: scrolled to, and clicked.
+    for _ in 0..60 {
+        if d.rect_of(k).is_some_and(|r| r.y > 60.0 && r.y + r.h < 740.0) {
+            break;
+        }
+        d.wheel(&mut app, 700.0, 400.0, 0.0, -240.0);
+        d.frame(&mut app);
+    }
+    let at = d.rect_of(k).expect("in the window").center();
+    d.click(&mut app, at.x, at.y);
+    d_frame_twice(&mut app, &mut d);
+    assert!(!app.settings_open);
+    let added = app.current;
+    let note = &app.store.notes[added];
+    assert_eq!((note.title.as_str(), note.folder.as_str()), ("Welcome to Carnet", ""));
+    assert_eq!(note.path.as_deref(), Some(dir.join("Welcome to Carnet 2.md").as_path()), "beside the first, saved");
+    assert_eq!(app.store.notes.len(), 2, "the first, and it");
+    assert_eq!(app.folder, None, "every note shown");
+    assert!(app.order.contains(&added), "its card in the library");
+    // From the keyboard, again: the same one, untouched, not a third.
+    app.on_plain(Msg::ShowSettings);
+    d_frame_twice(&mut app, &mut d);
+    let k = d.key_of("add-welcome").unwrap();
+    d.focus(&mut app, k);
+    d.frame(&mut app);
+    assert_eq!(d.core.focus(), Some(k), "in the Tab ring");
+    key(&mut app, &mut d, "enter");
+    assert!(!app.settings_open);
+    assert_eq!(app.current, added);
+    assert_eq!(app.store.notes.len(), 2);
+    // Help ▸ Getting Started Note, from the first: the same one opens.
+    let i = app.store.notes.iter().position(|n| n.id == first).unwrap();
+    app.on_plain(Msg::OpenNote { note: i as u64 });
+    d.frame(&mut app);
+    choose(&mut app, &mut d, "Help", "Getting Started Note");
+    assert_eq!(app.current, added);
+    assert_eq!(app.store.notes.len(), 2);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn the_apps_chords_reach_it_from_the_title_and_the_search() {
     let (mut app, mut d, dir) = fresh("field-chords");
@@ -3567,10 +4649,11 @@ fn down_from_the_title_is_the_note() {
 fn a_colour_stays_its_colour_on_a_highlight_in_either_theme() {
     use crate::design::tint::{wash, HUES};
     for dark in [false, true] {
-        let (page, fg) = if dark { (Color::hex(0x1f1b18ff), Color::hex(0xefe6dcff)) } else { (Color::hex(0xfcfaf7ff), Color::hex(0x2f2a27ff)) };
+        let linen = crate::design::Colors::of(crate::design::Palette::Linen, dark);
+        let (page, fg) = (linen.page, linen.ink);
         for ink in &HUES {
             for mark in &HUES {
-                let c = crate::design::tint::ink((ink.ink << 8) | 0xff, dark);
+                let c = crate::design::tint::ink((ink.ink << 8) | 0xff, dark, page);
                 let w = wash(mark.wash, dark, page);
                 assert!(crate::design::contrast(c, w) >= 3.5 || !dark, "{} on {}: readable in the dark", ink.name, mark.name);
                 assert_eq!(super::page_view::words_ink(Some(c), fg, Some(w), page), c, "{} on {} ({})", ink.name, mark.name, if dark { "dark" } else { "light" });
@@ -3579,8 +4662,16 @@ fn a_colour_stays_its_colour_on_a_highlight_in_either_theme() {
     }
     // Black words on a dark page still give way; plain words on a wash
     // read.
-    let page = Color::hex(0x1f1b18ff);
-    assert_ne!(super::page_view::words_ink(Some(Color::hex(0x000000ff)), Color::hex(0xefe6dcff), None, page), Color::hex(0x000000ff));
+    let linen = crate::design::Colors::of(crate::design::Palette::Linen, true);
+    let (page, fg) = (linen.page, linen.ink);
+    let black = crate::design::tint::ink(0x000000ff, true, page);
+    assert_ne!(super::page_view::words_ink(Some(black), fg, None, page), black);
+    // A colour from another app, too deep for the dark, is lightened
+    // until it reads; on paper it is as written.
+    let blue = crate::design::tint::ink(0x1f3a93ff, true, page);
+    assert!(crate::design::contrast(blue, page) >= 4.5, "{blue:?}");
+    assert_eq!(super::page_view::words_ink(Some(blue), fg, None, page), blue);
+    assert_eq!(crate::design::tint::ink(0x1f3a93ff, false, page), Color::hex(0x1f3a93ff));
 }
 
 #[test]
@@ -4197,14 +5288,15 @@ fn a_folders_chevron_folds_its_subfolders_away_and_back() {
     assert!(chevron(&mut d, &mut app, "A").is_some());
     assert_eq!(heard_open(&mut d, "A"), Some(true), "a reader hears it open");
     assert_eq!(heard_open(&mut d, "B"), None);
+    let (before, fold) = (d.core.focus(), chevron(&mut d, &mut app, "A"));
     click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
     assert_eq!(rows_drawn(&app), ["A", "B"]);
     assert_eq!(folded(&app), ["A"]);
     assert_eq!(app.folder.as_deref(), Some("B"), "the chevron only folds: the folder shown stays");
     assert!(app.folder_rects.iter().all(|(f, _)| !f.starts_with("A/")), "nor rows for a drag");
     assert_eq!(heard_open(&mut d, "A"), Some(false), "and shut now");
-    // The keyboard is not held in the chevron.
-    assert!(d.core.focus().is_none_or(|k| k == Key::ROOT), "{:?}", d.core.focus());
+    // The keyboard is not held in the chevron: it stays where it was.
+    assert!(d.core.focus() == before && d.core.focus() != fold, "{:?}", d.core.focus());
     click_chevron(&mut app, &mut d, "A", KeyMods::NONE);
     assert_eq!(rows_drawn(&app), ["A", "A/Sub", "A/Sub/Deep", "B"]);
     assert!(folded(&app).is_empty());
@@ -6794,6 +7886,58 @@ fn two_apps_sync_through_a_server() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// Changes waiting since before Settings opened are said from its first
+/// frame: the line isn't held back a moment again on each open, which
+/// added a row to the Sync card a moment in and moved the page under it.
+#[test]
+fn a_wait_already_long_is_said_as_settings_opens() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-wait-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    let until = |what: &str, a: &mut Carnet, d: &mut Drive, done: &dyn Fn(&Carnet) -> bool| {
+        let t0 = Instant::now();
+        while !done(a) {
+            assert!(t0.elapsed() < Duration::from_secs(15), "timed out: {what}");
+            d.frame(a);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let (mut a, mut d, dir) = fresh("wait-said");
+    a.sync_server = origin.clone();
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("online", &mut a, &mut d, &|x| x.sync.status == crate::sync::Status::Online && x.sync.caught_up());
+    // The server gone: a change made now waits.
+    let _ = stop.send(());
+    let _ = rt.block_on(served);
+    until("offline", &mut a, &mut d, &|x| matches!(x.sync.status, crate::sync::Status::Offline(_)));
+    let i = a.current;
+    a.store.notes[i].doc.push(Block::text("written while the server is away"));
+    a.store.notes[i].touch();
+    a.store.save(i, true).unwrap();
+    until("waiting", &mut a, &mut d, &|x| x.sync.waiting() > 0);
+    for _ in 0..4 {
+        d.advance(0.5);
+        d.frame(&mut a);
+    }
+    a.on_plain(Msg::ShowSettings);
+    d.frame(&mut a);
+    let line = crate::app::settings_view::waiting_words(a.sync.waiting(), a.sync.files_waiting());
+    assert!(drawn(&mut d, &mut a, &line), "said from the first frame: {line}");
+    drop(a);
+    remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
 /// The server's owner invites someone from Settings: the code shown, the
 /// invite waiting; they make an account with it, which isn't the owner's;
 /// the owner sees it, and removes it (asked twice), and their app is told.
@@ -6838,6 +7982,18 @@ fn the_owner_invites_someone_and_removes_their_account() {
     let code = a.sync.invite.clone().expect("the code shown");
     assert!(drawn(&mut da, &mut a, &code), "the code, big");
     assert!(drawn(&mut da, &mut a, "Not used yet \u{b7} good for 7 more days"));
+    // Settings closed and opened again: the invites are asked afresh, the
+    // last list shown till the answer, so the card keeps its rows and
+    // grows no "Delete the account" for a frame (the page jumped).
+    a.on_plain(Msg::ShowSettings);
+    da.frame(&mut a);
+    a.on_plain(Msg::ShowSettings);
+    for _ in 0..3 {
+        da.frame(&mut a);
+        assert!(a.sync.invites.as_ref().is_some_and(|i| i.owner && i.waiting.len() == 1), "kept while asked again");
+        assert!(drawn(&mut da, &mut a, "Invite someone") && drawn(&mut da, &mut a, "Not used yet \u{b7} good for 7 more days"));
+        assert!(!drawn(&mut da, &mut a, "Delete the account"), "the owner's card, not another account's");
+    }
     // Waiting, its code is words to select, and a Copy beside it.
     let nodes = da.core.nodes();
     let selectable = |key: Key| {
@@ -7425,6 +8581,156 @@ fn another_devices_own_picture_says_it_is_on_that_device() {
     let _ = std::fs::remove_dir_all(&data);
 }
 
+/// With sync on, a tile for the user's own file that isn't here (one in
+/// a folder's own `attachments`, not Carnet's, which doesn't sync) says
+/// it's on another device, as a picture's card does; one of Carnet's own
+/// that is nowhere says it isn't found, as it does with sync off.
+#[test]
+fn a_tile_for_a_file_not_here_says_where_it_is() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-tile-elsewhere-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    let (store, dir) = temp_store("tile-elsewhere");
+    drop(store);
+    std::fs::create_dir_all(dir.join("Home")).unwrap();
+    std::fs::write(dir.join("Home/Weekend.md"), "# Weekend\n\n[plan.pdf](attachments/plan.pdf)\n\n[gone.pdf](../attachments/gone.pdf)\n\nAfter\n").unwrap();
+    let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.frame(&mut app);
+    let count = |d: &Drive, s: &str| d.core.nodes().iter().filter(|n| n.text.as_deref() == Some(s)).count();
+    let i = app.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    app.open(i);
+    d.core.set_inspect(true);
+    for _ in 0..6 {
+        d.frame(&mut app);
+    }
+    assert_eq!(count(&d, super::page_view::FILE_MISSING), 2, "sync off: this is the only device");
+    assert_eq!(count(&d, super::page_view::ELSEWHERE), 0);
+    let tiled = |app: &Carnet| blocks(app).iter().filter(|b| app.cell_pieces.get(&page::Slot::block(b.id)).is_some_and(|p| p.iter().all(|p| p.file))).count();
+    assert_eq!(tiled(&app), 2, "each a tile");
+    assert!(count(&d, "plan.pdf") >= 1 && count(&d, "gone.pdf") >= 1, "named");
+
+    app.sync_server = origin.clone();
+    app.sync_code = invite.text();
+    app.on_plain(Msg::SyncStart);
+    let t0 = Instant::now();
+    while app.sync.status != crate::sync::Status::Online {
+        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: online");
+        d.frame(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let i = app.store.notes.iter().position(|n| n.title == "Weekend").unwrap();
+    app.open(i);
+    let t0 = Instant::now();
+    while count(&d, super::page_view::ELSEWHERE) == 0 {
+        assert!(t0.elapsed() < Duration::from_secs(15), "timed out: on another device");
+        d.frame(&mut app);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let tiles = page::tiles(app.doc(), page::Slot::block(blocks(&app)[0].id));
+    assert_eq!(app.file_state(&tiles[0]).map_err(|e| e.1), Err(super::page_view::ELSEWHERE), "the user's, on the device that has it");
+    let tiles = page::tiles(app.doc(), page::Slot::block(blocks(&app)[1].id));
+    assert_eq!(app.file_state(&tiles[0]).map_err(|e| e.1), Err(super::page_view::FILE_MISSING), "Carnet's own, missing, as before");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop(app);
+    remove_test_dir(dir);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// A note come from another device while a file it keeps is still on its
+/// way: its tile says it's downloading, then, once it has come, its kind
+/// and size, and a click opens it.
+#[test]
+fn a_tile_for_a_file_on_its_way_says_so_then_opens() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-tile-coming-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    #[allow(clippy::type_complexity)]
+    let until = |what: &str, apps: &mut [(&mut Carnet, &mut Drive)], done: &dyn Fn(&mut [(&mut Carnet, &mut Drive)]) -> bool| {
+        let t0 = Instant::now();
+        while !done(apps) {
+            assert!(t0.elapsed() < Duration::from_secs(20), "timed out: {what}");
+            for (app, d) in apps.iter_mut() {
+                d.frame(&mut **app);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    let shown = |d: &Drive, s: &str| d.core.nodes().iter().any(|n| n.text.as_deref() == Some(s));
+
+    // A: a note keeping a PDF, on the server.
+    let (mut a, mut da, dir_a) = fresh("tile-coming-a");
+    a.sync_server = origin.clone();
+    a.sync_how = 0;
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    until("A online", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.status == crate::sync::Status::Online);
+    type_in(&mut a, &mut da, "Harbour");
+    let (outside, picked) = files_outside("tile-coming", &[("tides.pdf", 8)]);
+    a.insert_files(&picked);
+    a.save_current();
+    until("A's file on the server", &mut [(&mut a, &mut da)], &|x| {
+        x[0].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty()) && x[0].0.sync.files_waiting() == 0
+    });
+    a.on_plain(Msg::SyncPair);
+    until("a code", &mut [(&mut a, &mut da)], &|x| x[0].0.sync.code.is_some());
+
+    // B comes in, its files held on the way.
+    let (mut b, mut db, dir_b) = fresh("tile-coming-b");
+    b.sync.hold_fetches = true;
+    b.sync_server = origin.clone();
+    b.sync_code = a.sync.code.clone().unwrap();
+    b.on_plain(Msg::SyncStart);
+    until("B has the note, its file asked for", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| {
+        x[1].0.store.notes.iter().any(|n| n.title == "Harbour") && x[1].0.store.replica.as_ref().is_some_and(|r| !r.vault().files().is_empty())
+    });
+    let i = b.store.notes.iter().position(|n| n.title == "Harbour").unwrap();
+    b.open(i);
+    db.core.set_inspect(true);
+    until("B says it's on its way", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, super::page_view::DOWNLOADING));
+    let slot = blocks(&b).iter().map(|bl| page::Slot::block(bl.id)).find(|s| !page::tiles(b.doc(), *s).is_empty()).expect("a line of tiles");
+    let tiles = page::tiles(b.doc(), slot);
+    assert_eq!(tiles.len(), 1, "{:?}", texts(&b));
+    assert_eq!(b.file_state(&tiles[0]).map_err(|e| e.1), Err(super::page_view::DOWNLOADING));
+    assert!(shown(&db, "tides.pdf") && !shown(&db, super::page_view::FILE_MISSING));
+
+    // Let through: its kind and size, and it opens.
+    b.sync.hold_fetches = false;
+    until("B has the file", &mut [(&mut a, &mut da), (&mut b, &mut db)], &|x| shown(x[1].1, "PDF \u{b7} 8 bytes"));
+    let opened = || store::OPENED.with_borrow_mut(std::mem::take).into_iter().map(std::path::PathBuf::from).collect::<Vec<_>>();
+    opened();
+    click_tile(&mut b, &mut db, slot, 0, CTRL);
+    assert_eq!(opened().len(), 1, "opened");
+
+    let _ = stop.send(());
+    rt.block_on(served).unwrap().unwrap();
+    drop((a, b));
+    remove_test_dir(dir_a);
+    remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+    let _ = std::fs::remove_dir_all(outside);
+}
+
 /// A device joining an account lets its untouched welcome note go, and
 /// once the account's notes are all here, puts it back only if the
 /// account has none of its own: the account has one welcome note, never
@@ -7956,18 +9262,256 @@ fn the_page_follows_the_text_size_down_to_12px() {
     let (item12, rule12) = (row(&app, 0), row(&app, 1));
     assert!(rule12.h < rule16.h * 0.85, "the divider's room shrinks: {} → {}", rule16.h, rule12.h);
     assert!(item12.h < item16.h * 0.85, "and a list item's: {} → {}", item16.h, item12.h);
-    // Each way of drawing a divider, and a dropped first letter, draw.
+    // Each way of drawing a divider, and a dropped first letter, draw:
+    // words of your own not typed yet as the dots; a picture of your own,
+    // none picked, asked for and not chosen until it is.
     app.page_action("initial");
     for to in 0..crate::settings::Divider::ALL.len() as u64 {
         app.on_settings(Msg::SetDivider { to });
         d_frame_twice(&mut app, &mut d);
         assert!(row(&app, 1).h > 10.0);
     }
-    assert_eq!(app.settings.divider, crate::settings::Divider::Wave);
+    assert_eq!(app.settings.divider, crate::settings::Divider::Text);
     assert!(blocks(&app)[2].initial);
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+use super::page_view::DividerLook;
+
+/// A note with a divider between two paragraphs, its settings kept in a
+/// folder of their own (where a divider's picture is copied to).
+fn divided(name: &str) -> (Carnet, Drive, std::path::PathBuf, std::path::PathBuf) {
+    let (mut app, mut d, dir) = body(name);
+    let config = dir.with_extension("config");
+    let _ = std::fs::remove_dir_all(&config);
+    app.settings.file = Some(config.join("settings.txt"));
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "above");
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "---");
+    type_in(&mut app, &mut d, "below");
+    assert!(matches!(blocks(&app)[1].kind, Kind::Divider));
+    (app, d, dir, config)
+}
+
+/// A settings file from when there were nine ways to draw a divider:
+/// one of the four gone opens as the nearest still offered, and the page
+/// draws it, the note's `---` as it was.
+#[test]
+fn a_settings_file_naming_a_divider_gone_still_opens() {
+    use crate::settings::Divider;
+    let (store, dir) = temp_store("divider-old");
+    let old = Settings::parse("theme = light\ndivider = flourish\nsize = 18\n");
+    assert_eq!((old.divider, old.size), (Divider::Wave, 18));
+    let mut app = Carnet::with_settings(store, old);
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    app.new_note();
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "---");
+    type_in(&mut app, &mut d, "after");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(Divider::Wave));
+    for (word, now) in [("stars", Divider::Dots), ("asterism", Divider::Dots), ("fleuron", Divider::Lozenge)] {
+        app.settings = Settings::parse(&format!("divider = {word}\n"));
+        d_frame_twice(&mut app, &mut d);
+        assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(now), "{word}");
+    }
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Words of your own for dividers: chosen in Settings, typed in the field
+/// that opens under the choices (the keyboard already in it), written to
+/// the settings file as they are typed and read back at the next start;
+/// drawn where the note's divider is, the note still saying `---`.
+#[test]
+fn a_dividers_own_words_are_typed_in_settings_and_kept_in_the_file() {
+    use crate::settings::Divider;
+    let (mut app, mut d, dir, config) = divided("divider-words");
+    app.on_settings(Msg::ShowSettings);
+    d_frame_twice(&mut app, &mut d);
+    // The choices in the list's order, the words' among them.
+    let at = Divider::ALL.iter().position(|d| *d == Divider::Text).unwrap();
+    let tile = |d: &mut Drive| {
+        let list = d.key_of("dividers").expect("the dividers' choices");
+        d.core.nodes().iter().filter(|n| n.parent == Some(list)).nth(at).map(|n| n.key).expect("the words' choice")
+    };
+    for _ in 0..20 {
+        let k = tile(&mut d);
+        if d.rect_of(k).is_some_and(|r| r.y > 60.0 && r.y < 500.0) {
+            break;
+        }
+        d.wheel(&mut app, 700.0, 400.0, 0.0, -120.0);
+        d.frame(&mut app);
+    }
+    let k = tile(&mut d);
+    d.click_key(&mut app, k);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.divider, Divider::Text);
+    let focused = d.core.focus().and_then(|k| app.fields.get(&k)).copied();
+    assert_eq!(focused, Some(Field::DividerText), "the keyboard where the words go");
+    d.text(&mut app, "~ \u{2726} ~");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.divider_text, "~ \u{2726} ~");
+    let text = std::fs::read_to_string(config.join("settings.txt")).unwrap();
+    assert!(text.contains("\ndivider = text\n") && text.contains("\ndivider_text = ~ \u{2726} ~\n"), "{text}");
+    // Back on the page: the words where the divider is.
+    app.on_settings(Msg::ShowSettings);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Words("~ \u{2726} ~".into()));
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("~ \u{2726} ~")), "drawn on the page");
+    assert!(app.note().markdown().contains("\n---\n"), "the file says ---");
+    // The next start: read back.
+    let back = Settings { file: Some(config.join("settings.txt")), ..Settings::parse(&text) };
+    assert_eq!((back.divider, back.divider_text.as_str()), (Divider::Text, "~ \u{2726} ~"));
+    // Emptied: the dots again, the choice kept.
+    app.set_divider_text("");
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(Divider::Dots));
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
+}
+
+/// A picture of your own for dividers: asked for when chosen with none
+/// picked, copied beside the settings file once picked, so the one picked
+/// can go; drawn a line tall, its shape kept, never wider than the text.
+/// Another picked, the last copy goes. The copy gone too, by the next
+/// start: drawn as the dots, and Settings says why.
+#[test]
+fn a_dividers_picture_is_kept_beside_the_settings_and_falls_back_when_gone() {
+    use crate::settings::Divider;
+    let (mut app, mut d, dir, config) = divided("divider-picture");
+    let at = Divider::ALL.iter().position(|d| *d == Divider::Picture).unwrap() as u64;
+    app.on_settings(Msg::SetDivider { to: at });
+    assert!(app.pick_divider_picture, "a picture asked for");
+    assert_eq!(app.settings.divider, Divider::Dots, "not chosen until there is one");
+    d.frame(&mut app);
+    assert!(!app.pick_divider_picture);
+    // A wide one, 400 × 40, from somewhere else.
+    let picked = dir.with_extension("picked.png");
+    std::fs::write(&picked, crate::images::encode_png(400, 40, &vec![200; 400 * 40 * 4]).unwrap()).unwrap();
+    app.set_divider_picture(&picked);
+    assert_eq!(app.settings.divider, Divider::Picture);
+    let kept = app.settings.divider_picture_file().expect("kept");
+    assert!(kept.starts_with(&config) && kept.exists(), "{kept:?}");
+    std::fs::remove_file(&picked).unwrap();
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    assert!(matches!(app.divider_look(1.0, 600.0), DividerLook::Picture(Some(_), w, h) if (w, h) == (280.0, 28.0)), "{:?}", app.divider_look(1.0, 600.0));
+    assert!(matches!(app.divider_look(1.0, 100.0), DividerLook::Picture(Some(_), w, h) if (w, h) == (100.0, 10.0)), "narrowed to the room");
+    assert!(matches!(app.divider_look(1.5, 600.0), DividerLook::Picture(Some(_), _, 42.0)), "with the text's size");
+    // Another: the first copy goes.
+    let second = dir.with_extension("second.png");
+    std::fs::write(&second, crate::images::encode_png(20, 20, &[90; 20 * 20 * 4]).unwrap()).unwrap();
+    app.set_divider_picture(&second);
+    let kept2 = app.settings.divider_picture_file().unwrap();
+    assert!(kept2 != kept && kept2.exists() && !kept.exists());
+    assert!(second.exists(), "the reader's own picture stays where it was");
+    // Its copy gone; the next start.
+    std::fs::remove_file(&kept2).unwrap();
+    let text = std::fs::read_to_string(config.join("settings.txt")).unwrap();
+    let store = Store::open(dir.clone()).unwrap();
+    let mut app = Carnet::with_settings(store, Settings { file: Some(config.join("settings.txt")), ..Settings::parse(&text) });
+    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    d.core.set_inspect(true);
+    app.settings_open = true;
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.divider, Divider::Picture, "still chosen");
+    assert_eq!(app.divider_look(1.0, 600.0), DividerLook::Ornament(Divider::Dots));
+    let said = d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with("The picture isn't shown (not found)")));
+    assert!(said, "Settings says why");
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_file(second);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
+}
+
+/// A divider's picture is kept no bigger than a divider can use, as a PNG
+/// with its transparency: a big one picked is made small, its shape kept;
+/// and a whole one an older Carnet kept is made small as the app opens,
+/// the whole one let go.
+#[test]
+fn a_dividers_picture_is_kept_small_and_clear() {
+    use crate::settings::Divider;
+    let (mut app, _d, dir, config) = divided("divider-small");
+    // 4000 × 600, its left half see-through.
+    let (w, h) = (4000u32, 600u32);
+    let rgba: Vec<u8> = (0..w * h).flat_map(|i| if i % w < w / 2 { [0, 0, 0, 0] } else { [200, 80, 40, 255] }).collect();
+    let picked = dir.with_extension("big.png");
+    std::fs::write(&picked, crate::images::encode_png(w, h, &rgba).unwrap()).unwrap();
+    app.set_divider_picture(&picked);
+    assert_eq!(app.settings.divider, Divider::Picture);
+    let kept = app.settings.divider_picture_file().expect("kept");
+    assert_eq!(kept.extension().and_then(|e| e.to_str()), Some("png"));
+    let small = image::open(&kept).unwrap().to_rgba8();
+    assert_eq!((small.width(), small.height()), (1120, 168), "within 1800 × 168, its shape kept");
+    assert_eq!(small.get_pixel(10, 84).0[3], 0, "still see-through on the left");
+    assert_eq!(small.get_pixel(1100, 84).0[3], 255);
+    // An older Carnet's whole copy, beside the settings: made small as
+    // the app opens.
+    let whole = config.join("divider-1.png");
+    std::fs::write(&whole, crate::images::encode_png(w, h, &rgba).unwrap()).unwrap();
+    let settings = Settings { file: Some(config.join("settings.txt")), divider: Divider::Picture, divider_picture: Some("divider-1.png".into()), ..Settings::default() };
+    let app = Carnet::with_settings(Store::open(dir.clone()).unwrap(), settings);
+    let now = app.settings.divider_picture_file().unwrap();
+    assert!(now != whole && !whole.exists(), "the whole one let go");
+    assert_eq!(image::image_dimensions(&now).unwrap(), (1120, 168));
+    assert!(std::fs::read_to_string(config.join("settings.txt")).unwrap().contains(&format!("divider_picture = {}", now.file_name().unwrap().to_string_lossy())));
+    let _ = std::fs::remove_file(picked);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
+}
+
+/// An SVG picked for dividers is drawn once into the PNG a divider shows,
+/// as large as one is kept, its shape and its see-through parts kept, and
+/// is drawn on the page like any picture.
+#[test]
+fn an_svg_divider_is_drawn_into_a_png_when_picked() {
+    use crate::settings::Divider;
+    let (mut app, mut d, dir, config) = divided("divider-svg");
+    // 400 × 100: see-through but for a solid bar and a half-clear dot.
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="100" viewBox="0 0 400 100">
+        <rect x="0" y="40" width="160" height="20" fill="#c0553f"/>
+        <circle cx="300" cy="50" r="40" fill="#336699" fill-opacity="0.5"/>
+    </svg>"##;
+    let picked = dir.with_extension("ornament.svg");
+    std::fs::write(&picked, svg).unwrap();
+    app.set_divider_picture(&picked);
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert_eq!(app.settings.divider, Divider::Picture);
+    let kept = app.settings.divider_picture_file().expect("kept");
+    assert_eq!(kept.extension().and_then(|e| e.to_str()), Some("png"));
+    let png = image::open(&kept).unwrap().to_rgba8();
+    // 4:1 within 1800 × 168: drawn 672 × 168, not 400 × 100 blown up.
+    assert_eq!((png.width(), png.height()), (672, 168));
+    let k = 168.0 / 100.0;
+    let at = |x: f32, y: f32| png.get_pixel((x * k) as u32, (y * k) as u32).0;
+    assert_eq!(at(80.0, 50.0), [0xc0, 0x55, 0x3f, 255], "the bar, solid and its own colour");
+    assert_eq!(at(80.0, 10.0)[3], 0, "clear around it");
+    let dot = at(300.0, 50.0);
+    assert!((120..=135).contains(&dot[3]) && (0x30..=0x36).contains(&dot[0]) && (0x96..=0x9c).contains(&dot[2]), "half clear, its colour not darkened: {dot:?}");
+    d_frame_twice(&mut app, &mut d);
+    d_frame_twice(&mut app, &mut d);
+    assert!(matches!(app.divider_look(1.0, 600.0), DividerLook::Picture(Some(_), w, h) if (w, h) == (112.0, 28.0)), "{:?}", app.divider_look(1.0, 600.0));
+    // Not an SVG at all: said, and the divider as it was.
+    let bad = dir.with_extension("bad.svg");
+    std::fs::write(&bad, "not a drawing").unwrap();
+    app.set_divider_picture(&bad);
+    assert!(app.error.as_deref().is_some_and(|e| e.ends_with(".bad.svg for dividers: it isn't a drawing Carnet can read")), "{:?}", app.error);
+    assert_eq!(app.settings.divider_picture_file().as_deref(), Some(kept.as_path()));
+    let _ = std::fs::remove_file(picked);
+    let _ = std::fs::remove_file(bad);
+    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(config);
 }
 
 #[test]
@@ -8005,6 +9549,45 @@ fn a_window_360_wide_holds_the_note_the_list_and_the_settings() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A recording (the devtools' Perf tab, `KUI_PERF_TRACE`) names Carnet's
+/// own work: the library, the toolbar and the page drawn, its jobs (sync,
+/// the folder watch, the autosave), a picture's decode timed on its
+/// reader, what the pictures held come to, and the moments a note opened
+/// or was saved.
+#[test]
+fn a_recording_names_carnets_own_work() {
+    let (mut app, mut d, dir) = body("perf-names");
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    std::fs::write(dir.join("attachments/dot.png"), crate::images::encode_png(4, 4, &[90; 64]).unwrap()).unwrap();
+    d.core.set_perf_recording(true);
+    type_in(&mut app, &mut d, "words");
+    let i = app.current;
+    app.store.notes[i].doc.push(Block::new(Kind::Image { src: "attachments/dot.png".into(), alt: String::new(), width: None, float: Float::None, wiki: false }));
+    app.store.notes[i].touch();
+    app.last_edit = Instant::now() - SAVE_AFTER;
+    for _ in 0..4 {
+        d.advance(0.1);
+        d.frame(&mut app);
+    }
+    let other = app.order.iter().copied().find(|&n| n != app.current).expect("another note");
+    app.open(other);
+    d.advance(0.1);
+    d.frame(&mut app);
+    d.core.set_perf_recording(false);
+    let trace = d.core.perf_trace();
+    let has = |s: &str| trace.windows(s.len()).any(|w| w == s.as_bytes());
+    for name in ["library", "toolbar", "page", "sync", "folder watch", "autosave", "pictures handed over", "decode picture", "pictures held (bytes)", "note saved", "note opened"] {
+        assert!(has(name), "the recording names {name:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A selection held at the page's foot scrolls it by kui's edge-scroll
+/// feel: on with the pointer still, faster the longer it's held, within a
+/// cap, slower at once when the pointer eases back; and a pointer pinned
+/// at a full-screen window's own edge, inside the page, scrolls it as
+/// fast as one past it, where the old rate, set by the distance past the
+/// page's edge, barely moved it.
 #[test]
 fn a_selection_held_past_the_page_edge_scrolls_it() {
     let (mut app, mut d, dir) = body("drag-scroll");
@@ -8038,9 +9621,19 @@ fn a_selection_held_past_the_page_edge_scrolls_it() {
         offsets.push(d.core.scroll_offset(key).y);
     }
     assert!(offsets[29] > offsets[5] + 50.0, "it goes on scrolling with the pointer still: {offsets:?}");
-    // 40px past the edge (64 into the band): about 640 px a second.
-    let per_frame = (offsets[29] - offsets[9]) / 20.0;
-    assert!((6.0..16.0).contains(&per_frame), "{per_frame} px a frame");
+    // Held, it speeds up; within kui's cap of 3000 px a second.
+    let (early, late) = (offsets[5] - offsets[1], offsets[29] - offsets[25]);
+    assert!(late > early * 1.5, "faster the longer it's held: {early} then {late} px in 4 frames");
+    assert!(late / 4.0 <= 3000.0 / 60.0 + 1.0, "{} px a frame", late / 4.0);
+    // Eased back toward the words by more than a few px: slower at once.
+    let inside = Vec2::new(from.x, page_rect.y + page_rect.h - 50.0);
+    d.input(&mut app, InputEvent::CursorMoved(inside));
+    let at = d.core.scroll_offset(key).y;
+    d.advance(1.0 / 60.0);
+    d.frame(&mut app);
+    d.advance(1.0 / 60.0);
+    d.frame(&mut app);
+    assert!(d.core.scroll_offset(key).y - at < late / 2.0, "slowed when eased back");
     let head = app.doc().index_of(app.caret.head.slot.block).unwrap();
     assert!(head > 10, "the selection follows the words under the pointer: block {head}");
     assert_eq!(page::ordered(app.doc(), app.caret).0.slot.block, app.doc().blocks()[0].id, "from where it began");
@@ -8053,6 +9646,31 @@ fn a_selection_held_past_the_page_edge_scrolls_it() {
         d.frame(&mut app);
     }
     assert!((d.core.scroll_offset(key).y - stopped).abs() < 0.5, "and stops when let go");
+    // Full screen: the pointer can go no further than the window's own
+    // edge, a pixel inside the page, and that is all the way in.
+    d.core.set_scroll(key, Vec2::new(0.0, 0.0));
+    for _ in 0..5 {
+        d.advance(0.05);
+        d.frame(&mut app);
+    }
+    let first = app.row_rects[0].1;
+    let from = Vec2::new(first.x + 20.0, first.y + first.h / 2.0);
+    let pinned = Vec2::new(from.x, d.viewport.h - 1.0);
+    assert!(pinned.y < page_rect.y + page_rect.h, "inside the page");
+    d.input(&mut app, InputEvent::CursorMoved(from));
+    d.input(&mut app, InputEvent::mouse_down(1));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(from.x + 8.0, from.y + 8.0)));
+    d.input(&mut app, InputEvent::CursorMoved(pinned));
+    d.frame(&mut app);
+    let at = d.core.scroll_offset(key).y;
+    for _ in 0..60 {
+        d.advance(1.0 / 60.0);
+        d.frame(&mut app);
+    }
+    let second = d.core.scroll_offset(key).y - at;
+    assert!(second > 600.0, "a second pinned at the window's edge: {second} px");
+    d.input(&mut app, InputEvent::mouse_up());
+    d.frame(&mut app);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -8655,6 +10273,31 @@ fn the_date_shown_can_be_when_the_note_was_made() {
     remove_test_dir(dir);
 }
 
+/// The wheel is Carnet's own feel until Settings' Advanced card picks one
+/// of kui's presets, which the window takes the next frame; it's kept in
+/// the file, and a reset of the look leaves it.
+#[test]
+fn the_wheel_is_carnets_until_a_preset_is_picked() {
+    let (store, dir) = temp_store("wheel");
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 4000.0).framing();
+    d_frame_twice(&mut app, &mut d);
+    let carnet = kui_native::WheelFeel { line_px: 60.0, response: 0.5, kick: 0.2 };
+    assert_eq!(d.core.wheel_feel(), carnet, "Carnet's own from the first frame");
+    app.settings_open = true;
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    let brisk = d.key_named("Brisk").expect("the preset in Advanced");
+    d.click_key(&mut app, brisk);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.settings.wheel, crate::settings::Wheel::Brisk);
+    assert_eq!(d.core.wheel_feel(), kui_native::WheelFeel::BRISK, "taken at once");
+    assert!(app.settings.to_text().contains("\nwheel = brisk\n"));
+    app.settings.reset_look();
+    assert_eq!(app.settings.wheel, crate::settings::Wheel::Brisk, "not a look");
+    remove_test_dir(dir);
+}
+
 /// Reset puts the Appearance and Writing cards back as they first were,
 /// asked first; the library and the notes folder stay.
 #[test]
@@ -9114,6 +10757,118 @@ fn a_hard_line_break_is_one_break_on_the_page() {
     }
 }
 
+/// The finding: Shift+Enter made no new line until a letter was typed on
+/// it, the caret staying at the end of the line above. The line is there
+/// at once, the caret at its start; `/` on it offers the blocks, and the
+/// one chosen takes that line alone. Saved before anything is typed on
+/// it, the break reads back as it was.
+#[test]
+fn shift_enter_opens_its_line_at_once() {
+    let (mut app, mut d, dir) = body("shift-enter");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "hello");
+    let slot = app.caret.head.slot;
+    let first = app.rect_at(&d.core, slot, 0).unwrap();
+    key_with(&mut app, &mut d, "enter", SHIFT);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!((page::text(app.doc(), slot), app.caret.head.byte), ("hello\n", 6));
+    let r = app.rect_at(&d.core, slot, 6).unwrap();
+    assert!(r.y >= first.y + first.h - 0.5 && (r.x - first.x).abs() < 0.5, "on a line of its own, at its start: {r:?} under {first:?}");
+    app.save_current();
+    let path = app.store.notes[app.current].path.clone().unwrap();
+    let md = std::fs::read_to_string(&path).unwrap();
+    let (_, back) = carnet_core::doc::from_markdown(&md);
+    assert_eq!(back.blocks()[0].text_ref(), Some("hello\n"), "{md:?}");
+
+    type_in(&mut app, &mut d, "/");
+    d.frame(&mut app);
+    assert!(app.slash_now().is_some(), "{:?}", texts(&app));
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("Heading 1")), "the menu shows");
+    type_in(&mut app, &mut d, "h2");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(texts(&app)[0], "hello");
+    assert!(matches!(&blocks(&app)[1].kind, Kind::Heading { level: 2, text } if text.is_empty()), "{:?}", texts(&app));
+    // Mid-sentence it is a slash.
+    type_in(&mut app, &mut d, "either/or");
+    d.frame(&mut app);
+    assert!(app.slash_now().is_none());
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The finding, in a note of the user's: a line ending highlighted and in
+/// a hard break's two spaces, `Open <mark …>terminal</mark>  `, and `/` on
+/// a new line under it offered nothing. Enter took the spaces down to the
+/// new paragraph, the caret before them; Shift+Enter broke the line
+/// inside the highlight. Either way the new line now starts clean, the
+/// menu shows on it, and the file keeps the line above as it was.
+#[test]
+fn a_slash_on_the_line_after_a_highlight_offers_the_blocks() {
+    let line = "Open <mark style=\"background: #E2D5F0CC\">terminal</mark>  ";
+    let rest = "- Navigate to vpn folder   \n\n```\n$ z vpn\n```\n\n- To start connection  \n";
+    let md = format!("# vpn\n\n{line}\n\n{rest}");
+    for (n, mods) in [KeyMods::NONE, SHIFT].into_iter().enumerate() {
+        let (store, dir) = temp_store(&format!("slash-after-mark-{n}"));
+        drop(store);
+        std::fs::write(dir.join("vpn.md"), &md).unwrap();
+        let mut app = Carnet::new(Store::open(dir.clone()).unwrap());
+        let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+        d.core.set_inspect(true);
+        d.frame(&mut app);
+        let i = app.store.notes.iter().position(|n| n.title == "vpn").unwrap();
+        app.open(i);
+        for _ in 0..4 {
+            d.frame(&mut app);
+        }
+        let written = |app: &mut Carnet| {
+            app.save_current();
+            std::fs::read_to_string(dir.join("vpn.md")).unwrap()
+        };
+        // On the page, not the note's line in the list.
+        let keys: Vec<Key> = app.slot_keys.values().copied().collect();
+        let para = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Open terminal") && keys.contains(&n.key)).expect("the line, its marks hidden").rect;
+        d.click(&mut app, para.x + 10.0, para.y + 6.0);
+        d_frame_twice(&mut app, &mut d);
+        key(&mut app, &mut d, "end");
+        let above = app.caret.head.slot;
+        let end = app.rect_at(&d.core, above, app.caret.head.byte).unwrap();
+        key_with(&mut app, &mut d, "enter", mods);
+        d_frame_twice(&mut app, &mut d);
+        if mods.shift {
+            assert_eq!(page::text(app.doc(), above), format!("{line}\n"), "the break after the spaces");
+        } else {
+            assert_eq!(texts(&app)[..3], [line, "", "[ ]Navigate to vpn folder   "], "the spaces stay above");
+        }
+        // An empty paragraph's caret is its line's start, unmeasured.
+        let k = app.slot_keys.get(&app.caret.head.slot).copied().unwrap();
+        let line_of = d.core.nodes().iter().find(|n| n.key == k).map(|n| n.rect);
+        let r = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).or(line_of).unwrap();
+        assert!(r.y >= end.y + end.h - 0.5, "the caret on the new line: {r:?} under {end:?}");
+        let file = written(&mut app);
+        if mods.shift {
+            // The break with nothing after it yet: a line of a backslash,
+            // read back as the empty line it is.
+            assert_eq!(file, format!("# vpn\n\n{line}\n\\\n\n{rest}"));
+            let (_, back) = carnet_core::doc::from_markdown(&file);
+            assert_eq!(back.blocks()[0].text_ref(), Some(format!("{line}\n").as_str()));
+        } else {
+            assert!(file.starts_with(&format!("# vpn\n\n{line}\n\n")), "{file:?}");
+        }
+        type_in(&mut app, &mut d, "/");
+        d.frame(&mut app);
+        assert!(app.slash_now().is_some(), "{mods:?}: {:?}", texts(&app));
+        assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("Table")), "the menu shows");
+        type_in(&mut app, &mut d, "code");
+        key(&mut app, &mut d, "enter");
+        assert_eq!(texts(&app)[0], line, "{mods:?}: the line above as it was");
+        assert!(matches!(&blocks(&app)[1].kind, Kind::Raw(r) if r.starts_with("```")), "{:?}", texts(&app));
+        let w = d.warnings();
+        assert!(w.is_empty(), "{w:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A picture that's the user's own file, beside the note: drawn faint with
 /// a mark, and selected, a bar that says so. Moved into Carnet, it's in
 /// the attachments folder and the note shows it there; the notice's Undo
@@ -9451,7 +11206,7 @@ fn a_picture_in_a_cell_is_drawn_in_it_and_taken_whole() {
     let png = crate::images::encode_png(800, 400, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 800, h: 400, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 800, h: 400, rgba, shown: None });
     let pic = "![|left|9000](attachments/wide.png)";
     let table = Table::from_cells(vec![vec!["img1".into(), "img2".into()], vec![format!("{pic}Words"), String::new()]]);
     app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
@@ -9512,7 +11267,7 @@ fn a_picture_is_carried_into_a_cell_and_out_again() {
     let png = crate::images::encode_png(200, 100, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba, shown: None });
     let pic = Block::new(Kind::Image { src: "attachments/wide.png".into(), alt: String::new(), width: Some(150), float: Float::Right, wiki: false });
     let id = pic.id;
     let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec!["x".into(), "y".into()]]);
@@ -9618,7 +11373,7 @@ fn a_chosen_cell_picture_shows_its_ring_and_no_caret() {
     let png = crate::images::encode_png(200, 100, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba, shown: None });
     let pic = "![|60](attachments/wide.png)";
     let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec![format!("x{pic}"), String::new()]]);
     app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("")]);
@@ -9678,7 +11433,7 @@ fn a_click_on_a_cell_picture_draws_its_ring_at_once() {
     let png = crate::images::encode_png(200, 100, &rgba).unwrap();
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     std::fs::write(dir.join("attachments/wide.png"), png).unwrap();
-    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba });
+    app.images.preload(&dir.join("attachments/wide.png"), crate::images::Decoded { w: 200, h: 100, rgba, shown: None });
     let pic = "![](attachments/wide.png)";
     let table = Table::from_cells(vec![vec!["A".into(), "B".into()], vec![format!("x{pic}"), String::new()]]);
     app.store.notes[app.current].doc = Doc::new(vec![Block::new(Kind::Table(table)), Block::text("after")]);
@@ -10456,5 +12211,450 @@ fn a_tools_hint_fades_with_the_toolbar() {
     assert!(!hint(&d), "gone with the toolbar");
     let said = d.core.access_tree().nodes.iter().find(|n| n.key == bold.0).and_then(|n| n.description.clone());
     assert!(said.as_deref().is_some_and(|s| s.starts_with("Bold")), "{said:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+
+/// The open note's title.
+fn open_title(app: &Carnet) -> String {
+    app.store.notes[app.current].title.clone()
+}
+
+/// The library's notes, by title, in its order.
+fn shown_titles(app: &Carnet) -> Vec<String> {
+    app.order.iter().map(|&i| app.store.notes[i].title.clone()).collect()
+}
+
+/// Note `title` opened, the caret at the start of its body.
+fn open_named(app: &mut Carnet, d: &mut Drive, title: &str) {
+    let i = app.store.notes.iter().position(|n| n.title == title).unwrap();
+    app.open(i);
+    app.edit_at(page::first(app.doc()));
+    d_frame_twice(app, d);
+}
+
+/// Ctrl+Tab opens the next note the library shows — the folder's only,
+/// pinned first — and goes round from the last to the first; ⇧ goes
+/// back. From the title too, which keeps its words, and where Tab still
+/// walks on. ⌥⌘↓ goes down the same list, and stops at its ends. Not
+/// from the settings.
+#[test]
+fn ctrl_tab_goes_round_the_notes_a_folder_shows() {
+    let (mut app, mut d, dir) = library("ctrl-tab-folder", &[("Work/Alpha", "1"), ("Work/Bravo", "2"), ("Work/Charlie", "3"), ("Loose", "4")]);
+    app.on_settings(Msg::SetSort { to: 1 });
+    let charlie = app.store.notes.iter().position(|n| n.title == "Charlie").unwrap();
+    app.pin(charlie);
+    app.show_folder(Some("Work".into()));
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(shown_titles(&app), ["Charlie", "Alpha", "Bravo"]);
+    open_named(&mut app, &mut d, "Charlie");
+    let in_title = |app: &Carnet, d: &Drive| d.core.focus().and_then(|k| app.fields.get(&k)).copied() == Some(Field::Title);
+    app.focus(Field::Title);
+    d_frame_twice(&mut app, &mut d);
+    assert!(in_title(&app, &d));
+    key(&mut app, &mut d, "tab");
+    d.frame(&mut app);
+    assert!(!in_title(&app, &d), "Tab walks on from the title");
+    app.focus(Field::Title);
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    d.frame(&mut app);
+    assert_eq!(open_title(&app), "Alpha");
+    assert_eq!(app.store.notes[charlie].title, "Charlie", "no tab typed in the title");
+    assert!(page_focused(&app, &d), "the keyboard in the note come to");
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Bravo");
+    // Past the last: the first again, and back.
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Charlie");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Bravo");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Charlie");
+    // The arrows stop at the first.
+    key_with(&mut app, &mut d, "up", CTRL_ALT);
+    assert_eq!(open_title(&app), "Charlie");
+    key_with(&mut app, &mut d, "down", CTRL_ALT);
+    assert_eq!(open_title(&app), "Alpha");
+    assert!(app.store.notes.iter().all(|n| !n.markdown().contains('\t')));
+    // The settings are no note of the list's.
+    key_with(&mut app, &mut d, ",", CTRL);
+    d.frame(&mut app);
+    assert!(app.settings_open);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert!(app.settings_open, "the settings stay");
+    assert_eq!(open_title(&app), "Alpha");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+Tab from the search goes round what it found, from every folder,
+/// and the search keeps what was typed in it.
+#[test]
+fn ctrl_tab_goes_round_what_the_search_found() {
+    let (mut app, mut d, dir) = library(
+        "ctrl-tab-search",
+        &[("Alpha", "apple pie"), ("Bravo", "banana"), ("Work/Charlie", "apple cider"), ("Delta", "apple tart")],
+    );
+    app.on_settings(Msg::SetSort { to: 1 });
+    open_named(&mut app, &mut d, "Alpha");
+    let k = *app.fields.iter().find(|(_, f)| **f == Field::Search).unwrap().0;
+    d.focus(&mut app, k);
+    d.text(&mut app, "apple");
+    d.frame(&mut app);
+    assert_eq!(shown_titles(&app), ["Alpha", "Charlie", "Delta"]);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    d.frame(&mut app);
+    assert_eq!(open_title(&app), "Charlie");
+    assert_eq!(app.query, "apple");
+    assert_eq!(d.core.edit_text(k).as_deref(), Some("apple"), "no tab typed in the search");
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Delta");
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Alpha", "round to the first, past what wasn't found");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Delta");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+Tab wins over Tab's own work: from a table's cell, a list's item
+/// or a code block it is the next note, and the note left is as it was —
+/// no cell moved to, nothing indented, no tab typed.
+#[test]
+fn ctrl_tab_from_a_cell_a_list_or_code_changes_only_the_note() {
+    let (mut app, mut d, dir) = library(
+        "ctrl-tab-blocks",
+        &[("Alpha", "| a | b |\n|---|---|\n| c | d |"), ("Bravo", "- one\n- two"), ("Charlie", "```\ncode\n```")],
+    );
+    app.on_settings(Msg::SetSort { to: 1 });
+    let all = |app: &Carnet| -> Vec<String> {
+        ["Alpha", "Bravo", "Charlie"].iter().map(|t| app.store.notes.iter().find(|n| n.title == *t).unwrap().markdown()).collect()
+    };
+    let before = all(&app);
+    open_named(&mut app, &mut d, "Alpha");
+    let Kind::Table(t) = &blocks(&app)[0].kind else { panic!("{:?}", texts(&app)) };
+    let cell = Slot { block: blocks(&app)[0].id, cell: Some((t.rows[1].id, t.cols[0])) };
+    app.edit_at(Pos { slot: cell, byte: 1 });
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Bravo", "from the cell");
+    assert!(page_focused(&app, &d));
+    let two = blocks(&app)[1].id;
+    app.edit_at(Pos { slot: Slot::block(two), byte: 1 });
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(open_title(&app), "Charlie", "from the item");
+    assert!(matches!(&blocks(&app)[0].kind, Kind::Raw(r) if r.starts_with("```")), "{:?}", texts(&app));
+    let code = blocks(&app)[0].id;
+    app.edit_at(Pos { slot: Slot::block(code), byte: 5 });
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(open_title(&app), "Bravo", "back from the code");
+    assert!(blocks(&app).iter().all(|b| !matches!(b.kind, Kind::Item { indent: 1.., .. })), "{:?}", texts(&app));
+    assert_eq!(all(&app), before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// While the library shows what was deleted, Ctrl+Tab goes round that,
+/// each to read in turn; the note open behind stays as it was.
+#[test]
+fn ctrl_tab_in_deleted_goes_round_the_trash() {
+    let (mut app, mut d, dir) = library("ctrl-tab-trash", &[("Alpha", "1"), ("Bravo", "2"), ("Charlie", "3")]);
+    open_named(&mut app, &mut d, "Alpha");
+    for t in ["Bravo", "Charlie"] {
+        let i = app.store.notes.iter().position(|n| n.title == t).unwrap();
+        app.delete_note_at(i);
+    }
+    app.on_plain(Msg::ShowDeleted);
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.deleted);
+    assert_eq!(app.trash.len(), 2);
+    let reading = |app: &Carnet| app.peek.as_ref().map(|p| p.path.clone());
+    let trashed = |app: &Carnet, i: usize| Some(app.trash[i].path.clone());
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(reading(&app), trashed(&app, 0));
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(reading(&app), trashed(&app, 1));
+    key_with(&mut app, &mut d, "tab", CTRL);
+    assert_eq!(reading(&app), trashed(&app, 0), "round to the first");
+    key_with(&mut app, &mut d, "tab", CTRL_SHIFT);
+    assert_eq!(reading(&app), trashed(&app, 1));
+    assert_eq!(open_title(&app), "Alpha");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The finding: a note with a picture at its left edge and a list and
+/// code beside it, opened again from another note's card, drew the
+/// picture at once and the blocks beside it below it, out of sight, until
+/// something else drew the page a second or so later. Beside it from the
+/// first frame back, at either edge, the picture still in hand or read
+/// from its file again; and opened the first time, beside it within the
+/// frames the page asks for.
+#[test]
+fn the_blocks_beside_a_picture_are_beside_it_from_the_first_frame_back() {
+    for (edge, fresh) in [("left", false), ("right", false), ("left", true), ("right", true)] {
+        let note = format!(
+            "## Sign in\n\n- open it\n\n![shot|{edge}|300](attachments/shot.png)\n\n- the address\n\n```\nhttps://vault.example\n```\n\n\
+             - the login\n\n```\nme\n```\n\n- the password\n\n```\nsecret\n```\n\n## After\n\n- one\n- two"
+        );
+        let (mut app, mut d, dir) = library(&format!("beside-back-{edge}-{fresh}"), &[("Vault", &note), ("Other", "words")]);
+        let rgba: Vec<u8> = (0..400 * 300).flat_map(|_| [94u8, 124, 164, 255]).collect();
+        let png = crate::images::encode_png(400, 300, &rgba).unwrap();
+        std::fs::create_dir_all(dir.join("attachments")).unwrap();
+        std::fs::write(dir.join("attachments").join("shot.png"), png).unwrap();
+        app.store.index_files();
+        app.images.retry_failed();
+        let case = format!("{edge}{}", if fresh { ", read again" } else { "" });
+        // The picture, and the blocks after it at its side, from its top.
+        let beside = |d: &Drive, when: &str| {
+            let nodes = d.core.nodes();
+            let pic = nodes.iter().find(|n| n.label.as_deref() == Some("pictures")).map(|n| n.rect);
+            let pic = pic.unwrap_or_else(|| panic!("{case}, {when}: no picture"));
+            assert!(pic.h > 200.0, "{case}, {when}: the picture drawn, {pic:?}");
+            for words in ["the address", "https://vault.example", "the login"] {
+                let r = nodes.iter().find(|n| n.text.as_deref() == Some(words)).map(|n| n.rect);
+                let r = r.unwrap_or_else(|| panic!("{case}, {when}: {words:?} not drawn"));
+                let side = if edge == "left" { r.x >= pic.x + pic.w } else { r.x + r.w <= pic.x };
+                assert!(side && r.y < pic.y + pic.h, "{case}, {when}: {words:?} at {r:?}, not beside the picture at {pic:?}");
+            }
+            let first = nodes.iter().find(|n| n.text.as_deref() == Some("the address")).unwrap().rect;
+            assert!(first.y < pic.y + 40.0, "{case}, {when}: the first at the picture's top, {first:?} by {pic:?}");
+        };
+        // Opened the first time: only the frames the app asks for.
+        let i = app.store.notes.iter().position(|n| n.title == "Vault").unwrap();
+        app.open(i);
+        d.frame(&mut app);
+        for _ in 0..12 {
+            if !d.core.owed().requested {
+                break;
+            }
+            d.advance(0.02);
+            d.frame(&mut app);
+        }
+        beside(&d, "opened");
+        open_named(&mut app, &mut d, "Other");
+        for _ in 0..4 {
+            d.frame(&mut app);
+        }
+        if fresh {
+            // Let go while away: read from its file again on the way back.
+            app.images = Default::default();
+        }
+        // Its card pressed again.
+        let i = app.store.notes.iter().position(|n| n.title == "Vault").unwrap();
+        app.open(i);
+        for when in ["the first frame back", "the second", "the third"] {
+            d.advance(0.02);
+            d.frame(&mut app);
+            beside(&d, when);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+// ------------------------------------------------------------ note windows
+
+/// A note "Plans" with the caret in its body after "draft", and the
+/// welcome note behind it.
+fn plans(name: &str) -> (Carnet, Drive, std::path::PathBuf) {
+    let (mut app, mut d, dir) = fresh(name);
+    d.text(&mut app, "Plans");
+    d.frame(&mut app);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "draft");
+    app.save_current();
+    (app, d, dir)
+}
+
+/// The window the main window's frame just opened, as the runner opens
+/// it: a core of its own in the main window's session, its frames and
+/// events the app's under its window's id.
+fn opened_window(app: &mut Carnet, d: &mut Drive) -> (Drive, kui_native::WindowId) {
+    d.frame(app);
+    let id = d
+        .core
+        .take_window_commands()
+        .into_iter()
+        .find_map(|c| match c {
+            kui_native::WindowCommand::Open { id, .. } => Some(id),
+            _ => None,
+        })
+        .expect("a window opened");
+    let mut core = Core::new_in(d.core.session());
+    core.env.window.id = id;
+    let mut w = Drive::new(core, 820.0, 740.0).framing();
+    w.frame(app);
+    w.frame(app);
+    (w, id)
+}
+
+/// The note window's editor, put by while the main window's is in place.
+fn window_caret(app: &Carnet) -> Caret {
+    app.windows[0].ed.caret
+}
+
+/// Ctrl+Shift+O, or "Open in new window" on a note's card: the note in a
+/// window of its own, named for it, with the toolbar and the page and
+/// nothing of the library's. The library's keys there are the main
+/// window's (a new note opens in it), and the next note is nothing there.
+#[test]
+fn a_note_opens_in_a_window_of_its_own() {
+    let (mut app, mut d, dir) = plans("window-open");
+    let plans = app.store.notes[app.current].id;
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    assert_eq!(app.windows.iter().map(|w| w.note).collect::<Vec<_>>(), [plans]);
+    let (mut w, _) = opened_window(&mut app, &mut d);
+    assert_eq!(w.core.window_title(), Some("Plans"));
+    assert!(w.key_of("t-bold").is_some() && w.key_of("t-trash").is_some(), "the toolbar");
+    assert!(w.key_of("t-sidebar").is_none() && w.key_of("t-zen").is_none(), "nothing of the library's");
+    assert!(w.key_of("t-addrow").is_none() && w.key_of("t-out").is_none(), "a paragraph's tools, not a table's or a list's");
+    assert!(w.texts_under("body").iter().any(|t| t == "draft"), "{:?}", w.texts_under("body"));
+    assert!(!w.core.nodes().iter().any(|n| n.text.as_deref() == Some("Welcome to Carnet")), "no list of notes");
+    assert!(w.core.focus().is_some() && w.core.focus() == app.windows[0].ed.page_key, "the page has the keyboard");
+    // Renamed in the main window: the window's title follows.
+    let title = d.key_of("title").unwrap();
+    d.focus(&mut app, title);
+    d.key(&mut app, "end", KeyMods::NONE);
+    d.text(&mut app, " for May");
+    w.frame(&mut app);
+    assert_eq!(w.core.window_title(), Some("Plans for May"));
+    // The next note and Ctrl+Tab are nothing there; Ctrl+N is a new note
+    // in the main window.
+    key_with(&mut app, &mut w, "down", KeyMods { alt: true, ..CTRL });
+    key_with(&mut app, &mut w, "tab", CTRL);
+    w.key(&mut app, "n", CTRL);
+    w.frame(&mut app);
+    assert_eq!(app.windows[0].ed.current, app.store.notes.iter().position(|n| n.id == plans).unwrap());
+    assert_eq!(w.core.window_title(), Some("Plans for May"));
+    assert_ne!(app.store.notes[app.current].id, plans, "the main window has the new note");
+    assert!(app.store.notes[app.current].title.is_empty());
+    assert!(w.warnings().is_empty() && d.warnings().is_empty());
+
+    // From the welcome note's card: a second window, for it.
+    d.frame(&mut app);
+    let row = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Welcome to Carnet")).map(|n| n.rect).expect("its card");
+    d.button_click(&mut app, row.center().x, row.center().y, kui_native::MouseButton::Secondary);
+    d.frame(&mut app);
+    let item = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Open in new window")).map(|n| n.rect.center()).expect("the card's menu");
+    d.click(&mut app, item.x, item.y);
+    let welcome = app.store.notes.iter().find(|n| n.title == "Welcome to Carnet").unwrap().id;
+    assert_eq!(app.windows.iter().map(|w| w.note).collect::<Vec<_>>(), [plans, welcome]);
+    let (w2, _) = opened_window(&mut app, &mut d);
+    assert_eq!(w2.core.window_title(), Some("Welcome to Carnet"));
+    // Asked again: no third window, the one there brought forward.
+    app.open_in_window(welcome);
+    d.frame(&mut app);
+    assert_eq!(app.windows.len(), 2);
+    assert!(d.core.take_window_commands().iter().any(|c| matches!(c, kui_native::WindowCommand::Focus(_))));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The page's menu opens its note in a window too; one open in both is
+/// one note. What is typed in the window is in the main window at once,
+/// and back; each window's caret stays with its words through what the
+/// other typed, and undo in either takes back the last edit to the note.
+#[test]
+fn a_note_open_in_two_windows_is_one_note() {
+    let (mut app, mut d, dir) = plans("window-both");
+    app.page_action("window");
+    let (mut w, _) = opened_window(&mut app, &mut d);
+    // The window's caret is at the note's start, the main window's after
+    // "draft".
+    assert_eq!(window_caret(&app).head.byte, 0);
+    assert_eq!(app.caret.head.byte, 5);
+    type_in(&mut app, &mut w, "First ");
+    assert_eq!(texts(&app)[0], "First draft", "in the main window at once");
+    assert_eq!(app.caret.head.byte, 11, "its caret carried along with \"draft\"");
+    d.frame(&mut app);
+    assert!(d.texts_under("body").iter().any(|t| t == "First draft"));
+    type_in(&mut app, &mut d, "!");
+    assert_eq!(texts(&app)[0], "First draft!");
+    assert_eq!(window_caret(&app).head.byte, 6, "the window's caret where it was, before \"draft\"");
+    w.frame(&mut app);
+    assert!(w.texts_under("body").iter().any(|t| t == "First draft!"));
+    // A selection in the window survives a line taken from under it.
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "second line");
+    key_with(&mut app, &mut w, "end", SHIFT);
+    let c = window_caret(&app);
+    assert_eq!((c.anchor.byte, c.head.byte), (6, 12));
+    key_with(&mut app, &mut d, "a", CTRL);
+    key_with(&mut app, &mut d, "a", CTRL);
+    key(&mut app, &mut d, "backspace");
+    w.frame(&mut app);
+    let c = window_caret(&app);
+    let doc = &app.store.notes[app.current].doc;
+    assert_eq!(page::fix(doc, c), c, "a caret that stands in the note");
+    // Undo in the window takes back the main window's last edit.
+    key_with(&mut app, &mut w, "z", CTRL);
+    assert!(texts(&app).contains(&"second line".to_string()), "{:?}", texts(&app));
+    assert!(w.warnings().is_empty() && d.warnings().is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+W closes the note window it is pressed in, saving what was typed
+/// there, and never the main window; the window can be opened again.
+#[test]
+fn ctrl_w_closes_the_note_window() {
+    let (mut app, mut d, dir) = plans("window-close");
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (mut w, id) = opened_window(&mut app, &mut d);
+    type_in(&mut app, &mut w, "Kept. ");
+    key_with(&mut app, &mut w, "w", CTRL);
+    assert!(app.windows.is_empty());
+    d.frame(&mut app);
+    let closed: Vec<_> = d.core.take_window_commands().into_iter().filter(|c| matches!(c, kui_native::WindowCommand::Close(_))).collect();
+    assert_eq!(closed, [kui_native::WindowCommand::Close(id)], "that window, not the main one");
+    let path = app.store.notes[app.current].path.clone().unwrap();
+    assert!(std::fs::read_to_string(path).unwrap().contains("Kept. draft"), "saved as it closed");
+    // Its close button, or the OS: the same.
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (_w, id) = opened_window(&mut app, &mut d);
+    assert_eq!(app.windows.len(), 1);
+    d.core.window_closed(id);
+    for ev in d.core.take_pending_events() {
+        app.on_event(ev);
+    }
+    assert!(app.windows.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Its note moved to Deleted — from the window's own toolbar, or from the
+/// main window — the window closes, and the main window says so with its
+/// Undo. A change another app makes to the note draws it again.
+#[test]
+fn trashing_its_note_closes_the_window() {
+    let (mut app, mut d, dir) = plans("window-trash");
+    let plans = app.store.notes[app.current].id;
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (mut w, id) = opened_window(&mut app, &mut d);
+    // Changed in another app: the window is drawn again, and shows it.
+    let path = app.store.notes[app.current].path.clone().unwrap();
+    std::fs::write(&path, "# Plans\n\nredrafted\n").unwrap();
+    app.rescan();
+    d.frame(&mut app);
+    assert!(d.core.take_window_commands().contains(&kui_native::WindowCommand::Redraw(id)));
+    w.frame(&mut app);
+    assert!(w.texts_under("body").iter().any(|t| t == "redrafted"), "{:?}", w.texts_under("body"));
+    let trash = w.key_of("t-trash").unwrap();
+    w.click_key(&mut app, trash);
+    assert!(app.windows.is_empty());
+    assert!(!app.store.notes.iter().any(|n| n.id == plans));
+    let notice = app.notice.as_ref().expect("said in the main window");
+    assert!(notice.text.contains("Plans") && notice.undo.is_some(), "{}", notice.text);
+    d.frame(&mut app);
+    assert!(d.core.take_window_commands().contains(&kui_native::WindowCommand::Close(id)));
+    // Undo brings it back; opened again and moved to Deleted from the
+    // main window, its window closes too.
+    app.notice_undo();
+    let i = app.store.notes.iter().position(|n| n.title == "Plans").expect("back");
+    app.open(i);
+    d.frame(&mut app);
+    key_with(&mut app, &mut d, "o", CTRL_SHIFT);
+    let (_w, _) = opened_window(&mut app, &mut d);
+    assert_eq!(app.windows.len(), 1);
+    let trash = d.key_of("t-trash").unwrap();
+    d.click_key(&mut app, trash);
+    assert!(app.windows.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }

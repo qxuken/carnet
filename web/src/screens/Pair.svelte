@@ -364,7 +364,7 @@
         {:else if step === 'passkey'}
           <!-- Nothing to type: the browser asks. -->
         {:else}
-          <input bind:value={code} use:focused placeholder={sentTo ? 'K7QF-2M9D-XW4H-P3TA' : '47-381095'} aria-label="Code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" />
+          <input bind:value={code} use:focused placeholder={sentTo ? 'K7QF-2M9D-XW4H-P3TA' : '4721-381095'} aria-label="Code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" />
         {/if}
         <button class="main" disabled={sync.joining || (step === 'password' ? !email.trim() || !password : step !== 'passkey' && !code.trim())}>
           {#if step === 'passkey'}<Icon name="passkey" size={18} />{/if}

@@ -51,6 +51,10 @@ impl Carnet {
         // take the process's, which is the binary's lower-case one.
         let role = |r: MenuRole, label: &str| MenuItem { label: label.into(), ..MenuItem::role(r) };
         let note = &self.store.notes[self.current];
+        // A note's own window: the rows that would show it another note,
+        // or are the library's to show, are greyed (its new note, search
+        // and Settings are the main window's, which comes forward).
+        let main = self.note_window.is_none();
 
         let app = BarMenu::new(
             "Carnet",
@@ -71,6 +75,7 @@ impl Carnet {
             vec![
                 key("New Note", keys::NEW_NOTE),
                 key("New Folder", keys::NEW_FOLDER),
+                key("Open Note in New Window", keys::NEW_WINDOW).enabled(main && self.peek.is_none()),
                 MenuItem::separator(),
                 key("Save", keys::SAVE),
                 act("Copy Note as Markdown", "copy-note"),
@@ -84,6 +89,10 @@ impl Carnet {
         );
         // A row for the note's blocks: greyed off the page.
         let page = |label: &str, spec: &str| key(label, spec).enabled(on_page);
+        // A row for the table the caret is in: greyed elsewhere, so its
+        // key (Option+Shift+↑, say) is the page's own there.
+        let in_table = on_page && self.caret.head.slot.cell.is_some();
+        let table = |label: &str, spec: &str| key(label, spec).enabled(in_table);
         let edit = BarMenu::new(
             "Edit",
             vec![
@@ -128,6 +137,10 @@ impl Carnet {
                 MenuItem::separator(),
                 page("Move Block Up", keys::MOVE_UP),
                 page("Move Block Down", keys::MOVE_DOWN),
+                table("Move Row Up", keys::ROW_UP),
+                table("Move Row Down", keys::ROW_DOWN),
+                table("Move Column Left", keys::COL_LEFT),
+                table("Move Column Right", keys::COL_RIGHT),
                 page("Tick or Untick", keys::TICK),
             ],
         );
@@ -135,16 +148,16 @@ impl Carnet {
         let view = BarMenu::new(
             "View",
             vec![
-                key(if self.side_shown() { "Hide Notes" } else { "Show Notes" }, keys::SIDEBAR),
-                key("Zen Mode", keys::ZEN).checked(self.zen),
-                act("Note History", "history").checked(self.versions.is_some()),
+                key(if self.side_shown() { "Hide Notes" } else { "Show Notes" }, keys::SIDEBAR).enabled(main),
+                key("Zen Mode", keys::ZEN).checked(self.zen).enabled(main),
+                act("Note History", "history").checked(self.versions.is_some()).enabled(main),
                 MenuItem::separator(),
                 act("Focus", "focus").checked(s.focus),
                 act("Typewriter", "typewriter").checked(s.typewriter),
                 act("Toolbar Fades While Typing", "fade-tools").checked(s.fade_tools),
                 MenuItem::separator(),
-                key("Previous Note", keys::PREVIOUS_NOTE),
-                key("Next Note", keys::NEXT_NOTE),
+                key("Previous Note", keys::PREVIOUS_NOTE).enabled(main),
+                key("Next Note", keys::NEXT_NOTE).enabled(main),
             ],
         );
         // Titled "Window", kui registers it as the platform's: AppKit adds
@@ -154,17 +167,27 @@ impl Carnet {
             "Window",
             vec![act("Minimize", "minimize").accel("mod+m"), act("Zoom", "zoom")],
         );
-        MenuBar::new(vec![app, file, edit, format, view, window]).on_menu(Msg::Chose)
+        // Last, where a Mac app's help is: the welcome note again.
+        let help = BarMenu::new("Help", vec![act("Getting Started Note", "welcome")]);
+        MenuBar::new(vec![app, file, edit, format, view, window, help]).on_menu(Msg::Chose)
     }
 
     /// A row of the bar the app runs itself chosen. (A row that is its key
     /// posts nothing: kui plays the key.)
-    pub(super) fn on_bar(&mut self, what: &str) {
+    pub(super) fn on_bar(&mut self, what: &str, here: WindowId) {
         match what {
-            "close" => self.window_cmd = Some(WindowCommand::Close(WindowId::MAIN)),
-            "minimize" => self.window_cmd = Some(WindowCommand::Minimize(WindowId::MAIN)),
-            "zoom" => self.window_cmd = Some(WindowCommand::ToggleMaximize(WindowId::MAIN)),
+            // Close Window closes the window whose bar it is: a note's own,
+            // or the main one, which quits.
+            "close" => match self.note_window {
+                Some(note) => self.close_window(note),
+                None => self.window_cmd = Some(WindowCommand::Close(WindowId::MAIN)),
+            },
+            "minimize" => self.window_cmd = Some(WindowCommand::Minimize(here)),
+            "zoom" => self.window_cmd = Some(WindowCommand::ToggleMaximize(here)),
             "copy-note" => self.on_plain(Msg::CopyText { what: 1 }),
+            // The welcome note opens in the main window.
+            "welcome" if self.note_window.is_some() => self.to_main = Some(Msg::AddWelcome),
+            "history" if self.note_window.is_some() => {}
             "history" if self.versions.is_some() => self.close_history(),
             "history" => self.show_history(),
             "reveal-note" => {
@@ -177,6 +200,7 @@ impl Carnet {
             "focus" => self.on_settings(Msg::SetFocus { to: u64::from(!self.settings.focus) }),
             "typewriter" => self.on_settings(Msg::SetTypewriter { to: u64::from(!self.settings.typewriter) }),
             "fade-tools" => self.on_settings(Msg::SetToolbar { to: u64::from(!self.settings.fade_tools) }),
+            "welcome" => self.add_welcome(),
             _ => {}
         }
     }

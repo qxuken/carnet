@@ -55,6 +55,9 @@ const openTab = (url: string) => void window.open(url, '_blank', 'noopener,noref
 
 type Press = { url: string; x: number; y: number; sel: EditorSelection };
 
+/// The tile a press is on (page.ts `FileTile`), if it's on one.
+export const tileOf = (target: EventTarget | null) => (target instanceof Element ? target.closest<HTMLElement>('.cm-file') : null);
+
 /// What a press does to the link under it (`url`, or none), the
 /// settings opening links `how`, `clicks` in a row: opens it now, once
 /// let go, nothing of its own (`null`: what a press does anywhere), or
@@ -99,8 +102,11 @@ export function linkOpening(pe: PageEditor, open: (url: string) => void = openTa
       }
 
       /// The address a press at a point, on `target`, would open: a link's
-      /// words drawn there, the page saying which and whether it may.
+      /// words drawn there, the page saying which and whether it may; or a
+      /// tile's (page.ts `FileTile`), a link all over.
       linkAt(x: number, y: number, target: EventTarget | null): string | null {
+        const tile = tileOf(target);
+        if (tile) return tile.dataset.href ?? null;
         if (!(target instanceof Element) || !target.closest('.cm-l')) return null;
         const pos = this.view.posAtCoords({ x, y });
         if (pos == null) return null;
@@ -121,6 +127,16 @@ export function linkOpening(pe: PageEditor, open: (url: string) => void = openTa
           return;
         }
         if (does === 'release' && url) this.press = { url, x: e.clientX, y: e.clientY, sel: this.view.state.selection };
+        // A press on a tile that doesn't open it chooses it, whole, as on
+        // the desktop: its one letter selected.
+        const tile = tileOf(e.target);
+        if (tile && !e.shiftKey) {
+          e.preventDefault();
+          e.stopPropagation();
+          const at = this.view.posAtDOM(tile);
+          this.view.focus();
+          this.view.dispatch({ selection: { anchor: at, head: at + 1 }, userEvent: 'select.pointer' });
+        }
       };
 
       /// Let go where it was pressed: the link opens, and the caret goes

@@ -280,7 +280,7 @@ pub const KEYS_IN_FILE: &str = "This computer has no keychain running, so sync's
 #[derive(Clone, Debug, PartialEq)]
 pub enum How {
     /// A code, told apart by its shape: an invite (`K7QF-2M9D-XW4H-P3TA`)
-    /// makes a new account; a pairing code (`47-381095`), from a device
+    /// makes a new account; a pairing code (`4721-381095`), from a device
     /// already in, joins its account.
     Code(String),
     /// The recovery words.
@@ -461,6 +461,10 @@ pub struct Sync {
     /// Settings shows them: list them when they aren't.
     pub want_invites: bool,
     asked_invites: bool,
+    /// The invites to be asked for again, though listed: Settings opened.
+    /// The last list stays shown till the answer, as the devices' does,
+    /// so the card doesn't lose its rows and grow them back.
+    invites_due: bool,
     /// The invite just made, shown until put away.
     pub invite: Option<String>,
     /// The server's rooms and log, as last inspected (§9).
@@ -551,6 +555,7 @@ impl Sync {
             invites: None,
             want_invites: false,
             asked_invites: false,
+            invites_due: false,
             invite: None,
             inspection: None,
             inspected_at: None,
@@ -726,7 +731,7 @@ impl Sync {
                 (None, Some(_)) => Starter::Enroll(Enroller::new(code.trim(), device.clone(), key.clone(), &mut OsRandom)),
                 (None, None) => {
                     return self.error = Some(
-                        "That isn't a code: an invite looks like K7QF-2M9D-XW4H-P3TA, and one from another device like 47-381095".into(),
+                        "That isn't a code: an invite looks like K7QF-2M9D-XW4H-P3TA, and one from another device like 4721-381095".into(),
                     );
                 }
             },
@@ -931,6 +936,12 @@ impl Sync {
     /// fresh while it stays open, docs/SYNC.md §7.)
     pub fn devices_again(&mut self) {
         self.devices_due = true;
+    }
+
+    /// Settings opened: the invites and the server's accounts asked for
+    /// again, the list shown meanwhile, as the devices are.
+    pub fn invites_again(&mut self) {
+        self.invites_due = true;
     }
 
     pub fn poke(&mut self) {
@@ -1425,9 +1436,10 @@ impl Sync {
                     }
                     self.devices_due = false;
                 }
-                if self.want_invites && self.invites.is_none() && !self.asked_invites && session.is_ready() {
+                if self.want_invites && (self.invites.is_none() || self.invites_due) && !self.asked_invites && session.is_ready() {
                     session.list_invites();
                     self.asked_invites = true;
+                    self.invites_due = false;
                 }
                 // The notes on the server: asked when the inspector opens,
                 // and again once the account's notes have changed since and

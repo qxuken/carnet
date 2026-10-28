@@ -179,19 +179,44 @@ impl Store {
     /// `link`, the same file under a second name where the system allows
     /// (what a move does before the old name goes).
     pub fn copy_in(&self, from: &Path, link: bool) -> io::Result<PathBuf> {
-        let dir = self.dir.join(ATTACHMENTS);
-        fs::create_dir_all(&dir)?;
-        let stem = slug(&stem_of(from)).replace(' ', "-");
-        // A picture's or a document's own kind, or none: never a name
-        // that would open as something else, or run.
+        // A picture's own kind, or another that opens to be read, or a
+        // picture's: a picture is never named as one that could run.
         let ext = from
             .extension()
             .and_then(|e| e.to_str())
             .map(str::to_lowercase)
-            .filter(|e| doc::is_picture_name(&format!("x.{e}")) || doc::is_document_name(&format!("x.{e}")));
-        let to = free_file(&dir, &stem, ext.as_deref().unwrap_or("png"));
+            .filter(|e| !e.is_empty() && !doc::could_run(&format!("x.{e}")));
+        self.copy_in_as(from, link, ext.as_deref().unwrap_or("png"))
+    }
+
+    /// A file of any kind from elsewhere (a picture, a PDF, a `README`, a
+    /// program) copied in under its own name made plain, its kind kept,
+    /// lowercase, or none for one with none.
+    pub fn copy_in_file(&self, from: &Path) -> io::Result<PathBuf> {
+        let ext = from.extension().and_then(|e| e.to_str()).map(str::to_lowercase).unwrap_or_default();
+        self.copy_in_as(from, false, &ext)
+    }
+
+    fn copy_in_as(&self, from: &Path, link: bool, ext: &str) -> io::Result<PathBuf> {
+        let dir = self.dir.join(ATTACHMENTS);
+        fs::create_dir_all(&dir)?;
+        let stem = slug(&stem_of(from)).replace(' ', "-");
+        let to = free_file(&dir, &stem, ext);
         if !(link && fs::hard_link(from, &to).is_ok()) {
             fs::copy(from, &to)?;
+            // A copy is a file to open, whatever the one it came from
+            // was: on a Mac or Linux, not a program by its mode (a
+            // `README` that ran). A second name for the user's own file
+            // is that file, left as it is.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = fs::metadata(&to) {
+                    let mut mode = meta.permissions();
+                    mode.set_mode(mode.mode() & !0o111);
+                    let _ = fs::set_permissions(&to, mode);
+                }
+            }
         }
         Ok(to)
     }
@@ -455,9 +480,8 @@ impl Store {
         let low = |p: &str| p.to_lowercase();
         let mut used: HashSet<String> = self.files_in_use().iter().chain(busy).map(|p| low(p)).collect();
         // The swept ones keep their place in the trash, and aren't here.
-        // Only what syncs (pictures, and documents, which `used` has when
-        // a note links to them): a file of another kind is no one's to
-        // judge, and stays.
+        // What syncs: every file there, a picture a note shows or any
+        // other it links to in `used`.
         let mut unshown: Vec<(String, PathBuf)> = self
             .attachments()
             .into_iter()
@@ -674,25 +698,61 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    /// Only a picture is taken in: whatever else a note names keeps its
-    /// own kind out of the attachments folder.
+    /// A picture taken in keeps its kind, a picture's or another that
+    /// opens to be read; with none, or one that could run, it's named a
+    /// picture.
     #[test]
     fn a_copy_in_is_named_as_a_picture() {
         let dir = temp_dir("copy-in-kind");
         let s = Store::open(dir.clone()).unwrap();
-        // A document keeps its kind too; a page or a macro's sheet doesn't.
+        // A document keeps its kind too (a page, source code, a macro's
+        // sheet); a program's doesn't.
         for (name, kind) in [
             ("photo.JPG", "jpg"),
             ("id_rsa", "png"),
             ("run.command", "png"),
             ("x.webp", "webp"),
             ("Report.PDF", "pdf"),
-            ("page.html", "png"),
-            ("sums.xlsm", "png"),
+            ("page.html", "html"),
+            ("sums.xlsm", "xlsm"),
+            ("main.RS", "rs"),
         ] {
             fs::write(dir.join(name), b"x").unwrap();
             let to = s.copy_in(&dir.join(name), false).unwrap();
             assert_eq!(to.extension().and_then(|e| e.to_str()), Some(kind), "{name}");
+        }
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A file copied in keeps its kind, whatever it is, and one with none
+    /// keeps none (a `README` is no picture); a copy never runs for its
+    /// mode.
+    #[test]
+    fn a_file_copied_in_keeps_its_kind_or_none() {
+        let dir = temp_dir("copy-in-file");
+        let s = Store::open(dir.clone()).unwrap();
+        for (name, to) in [
+            ("README", "README"),
+            ("Makefile", "Makefile"),
+            ("main.rs", "main.rs"),
+            ("Trip plan.pdf", "Trip-plan.pdf"),
+            ("README", "README-2"),
+            ("Setup.EXE", "Setup.exe"),
+            ("Report.lnk", "Report.lnk"),
+        ] {
+            fs::write(dir.join(name), b"x").unwrap();
+            let got = s.copy_in_file(&dir.join(name)).unwrap();
+            assert_eq!(got, dir.join(ATTACHMENTS).join(to), "{name}");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tool = dir.join("tool");
+            fs::write(&tool, b"#!/bin/sh\n").unwrap();
+            fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+            let got = s.copy_in_file(&tool).unwrap();
+            assert_eq!(fs::metadata(&got).unwrap().permissions().mode() & 0o777, 0o644);
         }
         let _ = fs::remove_dir_all(dir.with_extension("replica"));
         let _ = fs::remove_dir_all(&dir);
@@ -730,27 +790,31 @@ mod tests {
         assert!(dir.join("attachments/pasted.png").exists());
     }
 
-    /// A document in the attachments folder (one the paperclip put there,
-    /// or an export gathered) a note links to is in use, as a picture it
+    /// A file in the attachments folder (one the paperclip put there, or
+    /// an export gathered) a note links to is in use, as a picture it
     /// shows is, and stays; one no note links to is swept as an unshown
-    /// picture is. A file of another kind is never swept. (A linked one
-    /// used to go to the trash a week after it came.)
+    /// picture is, whatever its kind: a PDF, one with none, source code,
+    /// a script. (A linked one used to go to the trash a week after it
+    /// came.)
     #[test]
-    fn a_document_is_swept_only_when_no_note_links_to_it() {
+    fn a_file_is_swept_only_when_no_note_links_to_it() {
         let dir = temp_dir("sweep-docs");
         let mut s = Store::open(dir.clone()).unwrap();
         fs::create_dir_all(dir.join(ATTACHMENTS)).unwrap();
-        for f in ["report.pdf", "old.pdf", "pasted.png", "tool.sh"] {
+        for f in ["report.pdf", "old.pdf", "pasted.png", "tool.sh", "README", "old.rs", "setup.exe"] {
             fs::write(dir.join(ATTACHMENTS).join(f), b"x").unwrap();
         }
-        note(&mut s, "", "Trip", "See [report.pdf](attachments/report.pdf).");
+        note(&mut s, "", "Trip", "See [report.pdf](attachments/report.pdf), [README](attachments/README) and [setup](attachments/setup.exe).");
         let t0 = SystemTime::now();
         let none = BTreeSet::new();
         assert!(s.sweep_files(&none, t0).unwrap().is_empty());
-        let swept = s.sweep_files(&none, t0 + 15 * DAY).unwrap();
-        assert_eq!(swept, ["attachments/old.pdf", "attachments/pasted.png"], "the unlinked document and the unshown picture");
-        assert!(dir.join("attachments/report.pdf").is_file(), "the linked document stays");
-        assert!(dir.join("attachments/tool.sh").is_file(), "no kind of Carnet's: never touched");
+        // In the folder's order, which is the system's: sorted to compare.
+        let mut swept = s.sweep_files(&none, t0 + 15 * DAY).unwrap();
+        swept.sort();
+        assert_eq!(swept, ["attachments/old.pdf", "attachments/old.rs", "attachments/pasted.png", "attachments/tool.sh"], "the unlinked files and the unshown picture");
+        for kept in ["report.pdf", "README", "setup.exe"] {
+            assert!(dir.join(ATTACHMENTS).join(kept).is_file(), "the linked {kept} stays");
+        }
         let _ = fs::remove_dir_all(dir.with_extension("replica"));
         let _ = fs::remove_dir_all(&dir);
     }

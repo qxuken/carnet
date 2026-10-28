@@ -39,14 +39,28 @@ pub const OUTDENT: &str = "shift+tab";
 pub const DUPLICATE: &str = "mod+d";
 pub const REMOVE: &str = "mod+shift+k";
 pub const TICK: &str = "mod+enter";
+// In a table's cell, the block's move with Shift: its row; with the chord
+// too, its column — Alt+Shift+←→ is selecting by word, Option+Shift on a
+// Mac, and stays that in a cell.
+pub const ROW_UP: &str = "alt+shift+up";
+pub const ROW_DOWN: &str = "alt+shift+down";
+pub const COL_LEFT: &str = "mod+alt+shift+left";
+pub const COL_RIGHT: &str = "mod+alt+shift+right";
 // Moving around.
 pub const TOP: &str = "mod+up";
 pub const BOTTOM: &str = "mod+down";
 pub const PREVIOUS_NOTE: &str = "mod+alt+up";
 pub const NEXT_NOTE: &str = "mod+alt+down";
+/// The next note shown, round the list as a browser's tabs go: Control
+/// on a Mac too (`ctrl` is Control everywhere, `⌃⇥`), since ⌘Tab is the
+/// system's.
+pub const CYCLE_NEXT: &str = "ctrl+tab";
+pub const CYCLE_PREVIOUS: &str = "ctrl+shift+tab";
 // Notes.
 pub const NEW_NOTE: &str = "mod+n";
 pub const NEW_FOLDER: &str = "mod+shift+n";
+/// The open note in a window of its own: the toolbar and the page.
+pub const NEW_WINDOW: &str = "mod+shift+o";
 /// On a folder in the list, or the one shown after a click on it.
 pub const RENAME_FOLDER: &str = "f2";
 pub const SEARCH: &str = "mod+f";
@@ -61,13 +75,16 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 45] = [
+pub const ALL: [(&str, &str); 52] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
+    ("Open the note in a new window", NEW_WINDOW),
     ("Rename folder", RENAME_FOLDER),
     ("Search", SEARCH),
     ("Previous note", PREVIOUS_NOTE),
     ("Next note", NEXT_NOTE),
+    ("Next note, round the list", CYCLE_NEXT),
+    ("Previous note, round the list", CYCLE_PREVIOUS),
     ("Pin or unpin", PIN),
     ("Move note to Deleted", TRASH),
     ("Settings", SETTINGS),
@@ -95,6 +112,10 @@ pub const ALL: [(&str, &str); 45] = [
     ("Duplicate block", DUPLICATE),
     ("Remove block", REMOVE),
     ("Table", TABLE),
+    ("Move table row up", ROW_UP),
+    ("Move table row down", ROW_DOWN),
+    ("Move table column left", COL_LEFT),
+    ("Move table column right", COL_RIGHT),
     ("Divider", DIVIDER),
     ("Bold", BOLD),
     ("Italic", ITALIC),
@@ -108,6 +129,35 @@ pub const ALL: [(&str, &str); 45] = [
     ("Picture left of the text", FLOAT_LEFT),
     ("Picture right of the text", FLOAT_RIGHT),
 ];
+
+/// The keys of a shortcut the welcome note names (carnet-core's
+/// `welcome::Shortcut`), from this table: what the note says is what the
+/// app does.
+pub fn welcome_spec(s: carnet_core::welcome::Shortcut) -> &'static str {
+    use carnet_core::welcome::Shortcut as S;
+    match s {
+        S::Bold => BOLD,
+        S::Italic => ITALIC,
+        S::Highlight => HIGHLIGHT,
+        S::Link => LINK,
+        S::ChangeCase => CHANGE_CASE,
+        S::Top => TOP,
+        S::Bottom => BOTTOM,
+        S::MoveUp => MOVE_UP,
+        S::MoveDown => MOVE_DOWN,
+        S::RowUp => ROW_UP,
+        S::RowDown => ROW_DOWN,
+        S::ColLeft => COL_LEFT,
+        S::ColRight => COL_RIGHT,
+        S::Copy => "mod+c",
+        S::Undo => UNDO,
+        S::Paste => PASTE,
+        S::NewNote => NEW_NOTE,
+        S::NewFolder => NEW_FOLDER,
+        S::Search => SEARCH,
+        S::Settings => SETTINGS,
+    }
+}
 
 /// A shortcut as this platform writes it.
 pub fn label(spec: &str) -> String {
@@ -149,5 +199,25 @@ mod tests {
             }
         }
         assert!(hint("Bold", BOLD).ends_with('B'));
+        // Control on every platform, a Mac's too: never ⌘Tab, the system's
+        // app switcher.
+        for spec in [CYCLE_NEXT, CYCLE_PREVIOUS] {
+            let a = Accel::parse(spec).unwrap();
+            assert!(a.code == KeyCode::Tab && a.mods.ctrl && !a.mods.super_key, "{spec}");
+        }
+        let shown = if cfg!(target_os = "macos") { "\u{2303}\u{21e7}\u{21e5}" } else { "Ctrl+Shift+Tab" };
+        assert_eq!(label(CYCLE_PREVIOUS), shown);
+    }
+
+    /// The welcome note the web makes names the desktop's keys, written
+    /// as kui writes them: carnet-core's spelling of each is this table's,
+    /// and its labels are kui's, on this platform.
+    #[test]
+    fn the_welcome_notes_keys_are_the_apps() {
+        use carnet_core::welcome::{self, Shortcut};
+        for s in Shortcut::ALL {
+            assert_eq!(s.spec(), welcome_spec(s), "{s:?}");
+            assert_eq!(welcome::label(s.spec(), cfg!(target_os = "macos")), label(s.spec()), "{s:?}");
+        }
     }
 }

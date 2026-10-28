@@ -81,21 +81,34 @@ export const theme = EditorView.theme({
   '.cm-u.cm-s': { textDecorationLine: 'underline line-through' },
   '.cm-l.cm-u': { textUnderlineOffset: 'auto' },
   '.cm-marked': { borderRadius: '3px' },
-  // A divider as the desktop draws it by default (settings `divider =
-  // dots`): three dots 3px round, 15px apart, faint, with the desktop's
-  // space round them (styles.css `hr` the same). Its line is the words'
-  // height, the dots at its middle: the line's own half is part of it.
+  // A line of files alone (page.ts `FileTile`; styles.css `.file-tile`
+  // draws each): the tiles' rows apart, as the reader's `p.files` has them.
+  '.cm-files': { lineHeight: '58px' },
+  '.cm-files .file-tile': { lineHeight: '20px' },
+  '.cm-files .file-tile .kind': { lineHeight: '17px' },
+  // Chosen: its ring, not the selection's wash over it.
+  '&.cm-focused .cm-files ::selection, .cm-files ::selection': { backgroundColor: 'transparent !important' },
+  // A divider as the desktop draws it, in the way this browser chose
+  // (lib/divider.ts's `--divider-*` on the root, which the reader's `hr`
+  // reads too, styles.css): a line tall, centred, never wider than the
+  // text, with the desktop's space round it. The line is the words'
+  // height, the ornament at its middle: an ornament the faint ink seen
+  // through its outlines, the reader's own words in the page's face, cut
+  // short where too wide, or their picture as it is.
   '.cm-divider': { textAlign: 'center', paddingTop: '14px !important', paddingBottom: '4px' },
   '.cm-rule': {
-    display: 'inline-block', width: '33px', height: '3px', verticalAlign: 'middle', color: 'var(--faint)',
-    background: 'radial-gradient(circle at 1.5px 1.5px, currentColor 1.1px, transparent 1.6px) 0 0 / 15px 3px repeat-x',
+    display: 'inline-block', width: 'min(var(--divider-w), 100%)', height: '27px', verticalAlign: 'top', color: 'var(--faint)',
+    overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', textIndent: '0',
+    background: 'var(--divider-image) center / contain no-repeat var(--divider-ink)',
+    WebkitMask: 'var(--divider-mask) center / contain no-repeat', mask: 'var(--divider-mask) center / contain no-repeat',
   },
+  '.cm-rule::after': { content: 'var(--divider-words)' },
   // A divider selected whole (page.ts `ruleChosen`), as the desktop
-  // draws it however it was come to: the dots in the accent on the
-  // selection's wash, as wide as the text (a table's width) and a band
-  // round the dots — the line's own height, not the space above it
-  // (`.cm-divider`'s padding; none after pictures at an edge). Under the
-  // dots, inside the line.
+  // draws it however it was come to: the ornament (or the words) in the
+  // accent on the selection's wash, as wide as the text (a table's width)
+  // and a band round the ornament — the line's own height, not the space
+  // above it (`.cm-divider`'s padding; none after pictures at an edge).
+  // Under the ornament, inside the line.
   '.cm-rule-on': { position: 'relative', isolation: 'isolate' },
   '.cm-rule-on::after': {
     content: "''", position: 'absolute', left: '0', right: '0', top: '14px', bottom: '4px', zIndex: '-1',

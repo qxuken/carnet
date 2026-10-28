@@ -170,6 +170,56 @@ impl Table {
         true
     }
 
+    /// Where row `at` goes moved `by` (−1 up, 1 down), if it can: among
+    /// the plain rows only. The header stays the top row — it is what the
+    /// file writes above the `---` line, put there or taken away by
+    /// [`Table::set_header`], not a row among the others — so a plain row
+    /// never goes above it, nor the header below the first plain row.
+    fn row_to(&self, at: usize, by: isize) -> Option<usize> {
+        let to = at.checked_add_signed(by)?;
+        (by != 0 && at >= self.body() && to >= self.body() && at < self.rows.len() && to < self.rows.len()).then_some(to)
+    }
+
+    /// Whether row `at` can move `by`: not past the table's edge, nor
+    /// past the header.
+    pub fn can_move_row(&self, at: usize, by: isize) -> bool {
+        self.row_to(at, by).is_some()
+    }
+
+    /// Row `at` moved `by` (−1 up, 1 down), its cells and its id going
+    /// with it, so a caret in it stays in its words. True when it moved.
+    pub fn move_row(&mut self, at: usize, by: isize) -> bool {
+        let Some(to) = self.row_to(at, by) else { return false };
+        let row = self.rows.remove(at);
+        self.rows.insert(to, row);
+        true
+    }
+
+    /// Whether column `at` can move `by` (−1 left, 1 right): any column
+    /// can, but not past the table's edge.
+    pub fn can_move_col(&self, at: usize, by: isize) -> bool {
+        at.checked_add_signed(by).is_some_and(|to| by != 0 && at < self.width() && to < self.width())
+    }
+
+    /// Column `at` moved `by` (−1 left, 1 right): its id, its alignment and
+    /// its cell in every row, the header's too, go together. True when it
+    /// moved.
+    pub fn move_col(&mut self, at: usize, by: isize) -> bool {
+        if !self.can_move_col(at, by) {
+            return false;
+        }
+        let to = at.wrapping_add_signed(by);
+        let id = self.cols.remove(at);
+        self.cols.insert(to, id);
+        let align = self.aligns.remove(at);
+        self.aligns.insert(to, align);
+        for row in &mut self.rows {
+            let cell = row.cells.remove(at);
+            row.cells.insert(to, cell);
+        }
+        true
+    }
+
     /// Sorts the body rows (never the header) by column `col`, numbers
     /// numerically, empty cells last. Returns whether anything moved.
     pub fn sort_by(&mut self, col: usize, descending: bool) -> bool {
@@ -926,23 +976,65 @@ pub fn is_picture_name(name: &str) -> bool {
     has_extension(name, &PICTURE_EXTENSIONS)
 }
 
-/// The extensions of the files besides pictures a note keeps with it and
-/// links to, lowercase: documents, sheets, slides, sound and film, each
-/// opened from its link by an app of its own (the app's `opens_safely`).
-/// Nothing a system runs or a browser scripts (a program, a script,
-/// `.html`), none of Office's kinds that can carry macros (`.doc`,
-/// `.docm`, `.xlsm`), no bundle that is a folder (`.pages`), nothing that
-/// changes something as it opens (`.ics`), and no `.md`, which the notes
-/// folder would read as a note.
-const DOCUMENT_EXTENSIONS: [&str; 22] = [
-    "pdf", "txt", "csv", "rtf", "docx", "xlsx", "pptx", "odt", "ods", "odp", "m4a", "mp3", "wav", "aac", "aiff", "caf", "flac", "ogg",
-    "mov", "mp4", "m4v", "webm",
+/// The kinds of file that do something else than open when opened with a
+/// double-click, lowercase: a program, an installer, a script a system
+/// runs, a disk image or a package (what's in it slips past the mark of
+/// where it came from), an add-in or a setting that installs itself, and
+/// a shortcut that leads somewhere else (a site, a share, another file,
+/// another machine). By the system that runs each, though every one is
+/// asked about on all of them: a note goes to every device.
+///
+/// Source code opens to be read, but not a script an interpreter, once
+/// installed, runs from a double-click: Python's launcher a `.py` (on
+/// Windows and on macOS), Ruby's an `.rb`, Git Bash an `.sh`, Windows
+/// Script Host a `.js`. A page (`.html`, `.svg`, `.xml`) opens in a
+/// browser, which keeps its scripts to it, as it does a site's a link in
+/// a note could open as well. So does one of Office's that can carry
+/// macros (`.docm`, `.xlsm`): Office runs none as it opens, and none at
+/// all in one from elsewhere. An Office add-in runs.
+const COULD_RUN: &[&str] = &[
+    // Windows: programs and installers, and what Windows Script Host,
+    // PowerShell, the Control Panel, the console and help run.
+    "exe", "com", "scr", "pif", "cpl", "msc", "msi", "msp", "mst", "msu", "msix", "msixbundle", "appx", "appxbundle",
+    "appinstaller", "application", "appref-ms", "xbap", "gadget", "hta", "chm", "hlp", "bat", "cmd", "btm", "vbs", "vbe",
+    "js", "jse", "ws", "wsf", "wsh", "wsc", "sct", "ps1", "ps1xml", "ps2", "ps2xml", "psc1", "psc2", "psd1", "psm1",
+    "pssc", "msh", "msh1", "msh2", "mshxml", "msh1xml", "msh2xml", "reg", "inf", "ins", "isp", "diagcab", "diagcfg",
+    "diagpkg", "printerexport", "theme", "themepack", "deskthemepack", "iso", "img", "vhd", "vhdx",
+    // Windows: add-ins Office, Access and Visual Studio load as they open.
+    "xll", "xla", "xlam", "ppa", "ppam", "wll", "vsto", "vsix", "ade", "adp", "accda", "accde", "accdr", "mda", "mde",
+    // Windows: shortcuts, to a file, a site, a share, a search, another
+    // machine (Remote Desktop's, Citrix's) or a sheet's data elsewhere.
+    "lnk", "url", "website", "scf", "library-ms", "searchconnector-ms", "search-ms", "settingcontent-ms", "shb", "shs",
+    "xnk", "glk", "rdp", "ica", "iqy", "dqy", "oqy", "rqy",
+    // Scripts their interpreter runs from a double-click, and Java's.
+    "py", "pyw", "pyz", "pyzw", "pyc", "pyo", "pl", "rb", "rbw", "tcl", "ahk", "au3", "sh", "bash", "csh", "ksh", "zsh",
+    "jar", "jnlp",
+    // macOS: apps, what Terminal and Automator run, installers and disk
+    // images, what installs itself (a preference pane, a profile), and
+    // the Finder's shortcuts.
+    "app", "command", "tool", "terminal", "workflow", "action", "scpt", "scptd", "applescript", "pkg", "mpkg", "dmg",
+    "osax", "prefpane", "saver", "wdgt", "qlgenerator", "mdimporter", "kext", "mobileconfig", "webloc", "inetloc",
+    "fileloc", "afploc", "ftploc", "mailloc",
+    // Linux: launchers, programs and installers.
+    "desktop", "run", "bin", "appimage", "deb", "rpm", "snap", "flatpak", "flatpakref", "flatpakrepo",
+    // Anywhere: phones' apps, and what a browser or an office suite
+    // installs.
+    "apk", "xapk", "ipa", "xpi", "oxt",
 ];
 
-/// Whether a file name or path names a document a note may keep and link
-/// to ([`DOCUMENT_EXTENSIONS`]), by its extension.
-pub fn is_document_name(name: &str) -> bool {
-    has_extension(name, &DOCUMENT_EXTENSIONS)
+/// Whether a file name or path names one that could run, install or lead
+/// elsewhere as it opens ([`COULD_RUN`]), by its kind, the part of its
+/// name after the last dot, in any case: a note keeps it as any file,
+/// and asks before it opens. What has no kind (`README`, `Makefile`) is
+/// none by its name. Read as Windows reads a name: the dots and spaces it
+/// ends in are no part of it (`run.exe.` runs), and a kind in braces is a
+/// shell object's (`x.{…}`).
+pub fn could_run(name: &str) -> bool {
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name).trim_end_matches(['.', ' ']);
+    name.rsplit_once('.').is_some_and(|(_, kind)| {
+        let kind = kind.to_ascii_lowercase();
+        kind.starts_with('{') || COULD_RUN.contains(&kind.as_str())
+    })
 }
 
 fn has_extension(name: &str, of: &[&str]) -> bool {
@@ -1415,15 +1507,15 @@ pub fn find_picture(folder: &str, src: &str, wiki: bool, files: &Files) -> Optio
     top.or(here)
 }
 
-/// The pictures a note in `folder` shows, and the documents it links to
-/// ([`document_paths`]), as paths from the notes folder: what keeps a
+/// The pictures a note in `folder` shows, and the other files it links to
+/// ([`linked_paths`]), as paths from the notes folder: what keeps a
 /// file wanted — a picture on a line of its own, and one among a table
 /// cell's words. A line that only looks like one (in a code block, say)
 /// counts too: a file kept by mistake costs little, one lost is gone.
 /// `files` is where an Obsidian embed's picture is looked for
 /// ([`find_picture`]).
 pub fn file_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
-    let mut out = document_paths(folder, md, files);
+    let mut out = linked_paths(folder, md, files);
     for line in md.lines() {
         match image_line(line) {
             Some(Kind::Image { src, wiki, .. }) => out.extend(find_picture(folder, &src, wiki, files)),
@@ -1438,12 +1530,14 @@ pub fn file_paths(folder: &str, md: &str, files: &Files) -> std::collections::BT
     out
 }
 
-/// The documents ([`is_document_name`]) a note in `folder` links to, as
-/// paths from the notes folder: `[…](report.pdf)`, `[…](<a b.pdf>)` and
-/// an Obsidian `[[report.pdf]]`, its `%` escapes read. Only by a
-/// document's name, so a link to a note or a page is none; one in code
-/// counts too, as for pictures.
-pub fn document_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
+/// The files besides pictures a note in `folder` links to, as paths from
+/// the notes folder: `[…](report.pdf)`, `[…](<a b.pdf>)`, `[…](README)`,
+/// `[…](setup.exe)` and an Obsidian `[[report.pdf]]`, its `%` escapes
+/// read. A file of any kind, but not a place in the note (`#…`); a
+/// picture is the pictures' to judge ([`file_paths`]), and an Obsidian
+/// link with no kind (`[[Other note]]`) is to a note. One in code counts
+/// too, as for pictures.
+pub fn linked_paths(folder: &str, md: &str, files: &Files) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     let b = md.as_bytes();
     let mut i = 0;
@@ -1483,7 +1577,7 @@ pub fn document_paths(folder: &str, md: &str, files: &Files) -> std::collections
                 }
             }
         };
-        if let Some(t) = target.map(percent_decoded).filter(|t| is_document_name(t)) {
+        if let Some(t) = target.map(percent_decoded).filter(|t| !t.starts_with('#') && linked_file(t)) {
             out.extend(resolve_picture(folder, &t));
         }
         i = (start + read).min(b.len());
@@ -1493,7 +1587,7 @@ pub fn document_paths(folder: &str, md: &str, files: &Files) -> std::collections
         let start = i + at + 2;
         let Some(len) = md[start..].find(['|', ']', '[', '\n']) else { break };
         let t = md[start..start + len].trim();
-        if is_document_name(t) {
+        if linked_file(t) && t.rsplit('/').next().is_some_and(|n| n.contains('.')) {
             out.extend(find_picture(folder, t, true, files));
         }
         i = start + len;
@@ -1501,9 +1595,82 @@ pub fn document_paths(folder: &str, md: &str, files: &Files) -> std::collections
     out
 }
 
+/// A link's target, by its name a file (it has one) and not a picture.
+fn linked_file(target: &str) -> bool {
+    !target.rsplit(['/', '\\']).next().unwrap_or(target).trim_end_matches(['.', ' ']).is_empty() && !is_picture_name(target)
+}
+
+/// A link to a file the note keeps, on a line of them alone, which the
+/// page draws as a tile ([`file_line`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLink {
+    /// Where it is in the text, `[` to its closing `)`.
+    pub at: (usize, usize),
+    /// Its words: the file's name, as the link shows it.
+    pub name: String,
+    /// Its address as written, `<…>` and any title taken off.
+    pub target: String,
+    /// The address with its `%` escapes read: the file's path from the
+    /// note's folder.
+    pub path: String,
+}
+
+/// Whether a link's address (its `%` escapes read) is to a file the note
+/// keeps in Carnet's attachments folder, as [`linked_paths`] reads a
+/// file's: a path, not a web address nor anything else with a scheme
+/// (`mailto:`, `data:`), not a place in the note (`#…`) nor one from the
+/// top of the disk (`/…`, `C:\…`), each part a plain name
+/// ([`crate::name::is_plain_name`]), and the first past any `..` the
+/// attachments folder (`attachments/report.pdf`, from a folder
+/// `../attachments/report.pdf`), where every file put in a note goes (a
+/// link to another note, or to a file kept anywhere else, is a link). A
+/// file of any kind, a Markdown file picked among them too, but not a
+/// picture, which is the pictures' to draw.
+pub fn is_file_target(path: &str) -> bool {
+    let t = path.trim();
+    if t.is_empty() || t.starts_with(['#', '/', '\\']) || t.contains("://") {
+        return false;
+    }
+    let scheme = t.split_once(':').is_some_and(|(s, _)| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)));
+    let parts = t.split(['/', '\\']).all(|p| matches!(p, "" | "." | "..") || crate::name::is_plain_name(p));
+    let mut named = t.split(['/', '\\']).filter(|p| !matches!(*p, "" | "." | ".."));
+    let kept = named.next().is_some_and(|p| p.eq_ignore_ascii_case("attachments")) && named.next().is_some();
+    !scheme && parts && kept && linked_file(t)
+}
+
+/// A line of the page's that is links to files the note keeps and nothing
+/// else ([`is_file_target`]): `[a.pdf](attachments/a.pdf)`, or several
+/// with whitespace between, as files put in are written. Each link's
+/// words plain (no style, nor a mark but a backslash's, which makes it a
+/// letter) and on one line. `None` for any other: a file link among other
+/// words is a link among words, and so is one styled, or beside a
+/// picture's link or a web address. What it holds is the page's to say
+/// (a paragraph's or a list item's words; a heading, a quote or a cell is
+/// words whatever they are): this reads the text alone.
+pub fn file_line(text: &str) -> Option<Vec<FileLink>> {
+    inline::file_line(text)
+}
+
+/// Whether a block of `kind` draws a line of file links alone as tiles
+/// ([`file_line`]): a paragraph, and a list item (a checklist's too); a
+/// heading, a quote, a table's cell or code never.
+pub fn draws_tiles(kind: &Kind) -> bool {
+    matches!(kind, Kind::Text(_) | Kind::Item { .. })
+}
+
+/// What a tile says a file is, by its name: its kind in capitals (`PDF`,
+/// `DOCX`), or `File` for a name with none (`README`).
+pub fn file_kind(name: &str) -> String {
+    let name = name.rsplit(['/', '\\']).next().unwrap_or(name).trim_end_matches(['.', ' ']);
+    match name.rsplit_once('.') {
+        Some((stem, kind)) if !stem.is_empty() && !kind.is_empty() && kind.len() <= 10 && kind.chars().all(char::is_alphanumeric) => kind.to_uppercase(),
+        _ => "File".to_string(),
+    }
+}
+
 /// `%` escapes read back (`%20` a space, `%28` a parenthesis); one that
 /// isn't two hex digits, or that makes no UTF-8, kept as written.
-fn percent_decoded(s: &str) -> String {
+pub(crate) fn percent_decoded(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -1986,33 +2153,60 @@ mod tests {
 
     use super::*;
 
-    /// A document is one that opens in an app of its own and never runs:
-    /// by its extension, any case, never a bare name nor a page, a
-    /// script, a note or a sheet that carries macros.
+    /// What could run as it opens is known by its kind, the part after its
+    /// name's last dot, in any case, as Windows reads the name: a program,
+    /// an installer, a script an interpreter runs, a shortcut, on any
+    /// system, however it's dressed. One with no kind, source code, a
+    /// note, a page and a sheet that carries macros open to be read.
     #[test]
-    fn documents_are_named_by_kinds_that_never_run() {
-        for ok in ["report.pdf", "attachments/Notes.TXT", "a/b/sums.xlsx", "talk.m4a", "film.mov"] {
-            assert!(is_document_name(ok), "{ok}");
+    fn what_could_run_is_known_by_its_kind() {
+        for reads in [
+            "report.pdf", "attachments/Notes.TXT", "a/b/sums.xlsx", "talk.m4a", "film.mov", "README", "attachments/LICENSE",
+            "Makefile", "main.rs", "lib.C", "Cargo.toml", "data.json", "note.md", "page.html", "logo.svg", "feed.xml",
+            "sums.xlsm", "old.doc", "photo.png", "archive.tar.gz", "invoice.exe.pdf", ".gitignore", "v1.2 notes", "README.",
+            "", "attachments/",
+        ] {
+            assert!(!could_run(reads), "{reads}");
         }
-        for no in ["page.html", "logo.svg", "run.sh", "setup.exe", "Tool.app", "sums.xlsm", "old.doc", "note.md", "readme", ".pdf", "photo.png"] {
-            assert!(!is_document_name(no), "{no}");
+        for runs in [
+            "setup.exe", "SETUP.EXE", "Setup.Exe", "invoice.pdf.exe", "attachments/a b/run.bat", "a\\b\\run.cmd", "x.ps1",
+            "x.vbs", "x.js", "x.hta", "x.msi", "x.scr", "x.jar", "x.reg", "x.chm", "Report.lnk", "site.URL", "x.scf",
+            "x.library-ms", "x.xll", "x.theme", "x.iso", "run.sh", "x.py", "x.rb", "Tool.app", "Run.Command", "x.pkg",
+            "x.dmg", "x.workflow", "x.scpt", "x.webloc", "x.fileloc", "x.mobileconfig", "x.desktop", "x.AppImage", "x.deb",
+            "x.rpm", "x.run", "x.apk", "x.{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "run.exe.", "run.exe . ", ".exe",
+        ] {
+            assert!(could_run(runs), "{runs}");
         }
     }
 
-    /// A document a note links to is wanted as a picture it shows is:
-    /// by a path (escapes read, `<…>`, a title after it), from the
-    /// note's folder, or an Obsidian link found by its name. A link to a
-    /// page, a note or a program is no document.
+    /// A file a note links to is wanted as a picture it shows is: by a
+    /// path (escapes read, `<…>`, a title after it), from the note's
+    /// folder, or an Obsidian link found by its name; one with no kind,
+    /// source code and a program too. A link to a site, a place in the
+    /// note or an Obsidian note is to no file.
     #[test]
-    fn the_documents_a_note_links_to_are_in_use() {
+    fn the_files_a_note_links_to_are_in_use() {
         let md = "See [the plan](../attachments/Trip-plan-%28v2%29.pdf \"v2\") and [notes](<../attachments/a b.txt>).\n\
                   ![](../attachments/p.png)\n\
-                  And [[talk.m4a]], [[Other note]], [x](https://example.com/a.pdf), [y](run.sh)";
+                  And [[talk.m4a]], [[Other note]], [x](https://example.com/a.pdf), [y](../attachments/run.sh), [z](#plan)\n\
+                  With [README](../attachments/README) and [the code](../attachments/main.rs)";
         let files = Files::new(["attachments/talk.m4a"]);
-        let found: Vec<String> = document_paths("Trips", md, &files).into_iter().collect();
-        assert_eq!(found, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/talk.m4a"]);
+        let found: Vec<String> = linked_paths("Trips", md, &files).into_iter().collect();
+        assert_eq!(
+            found,
+            [
+                "attachments/README", "attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/main.rs", "attachments/run.sh",
+                "attachments/talk.m4a"
+            ]
+        );
         let all: Vec<String> = file_paths("Trips", md, &files).into_iter().collect();
-        assert_eq!(all, ["attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/p.png", "attachments/talk.m4a"]);
+        assert_eq!(
+            all,
+            [
+                "attachments/README", "attachments/Trip-plan-(v2).pdf", "attachments/a b.txt", "attachments/main.rs", "attachments/p.png",
+                "attachments/run.sh", "attachments/talk.m4a"
+            ]
+        );
         assert_eq!(percent_decoded("a%20b%2"), "a b%2");
     }
 

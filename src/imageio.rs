@@ -119,6 +119,6 @@ pub fn decode(path: &Path, max: u32) -> Result<Decoded, String> {
                 }
             }
         }
-        Ok(Decoded { w: w as u32, h: h as u32, rgba })
+        Ok(Decoded { w: w as u32, h: h as u32, rgba, shown: None })
     }
 }

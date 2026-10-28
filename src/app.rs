@@ -9,6 +9,7 @@
 //! take empty ones, and one undo history cover every change.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use kui_native::widgets;
@@ -45,6 +46,10 @@ mod devtools_view;
 mod menu_view;
 #[path = "app_pick.rs"]
 mod pick_view;
+#[path = "app_open.rs"]
+mod open_view;
+#[path = "app_window.rs"]
+mod window_view;
 use pick_view::Pick;
 use chrome::ago;
 
@@ -115,6 +120,11 @@ pub enum Msg {
     AddCol,
     DelRow,
     DelCol,
+    /// The caret's table row up (`by` −1) or down (1), past the next; the
+    /// header stays on top.
+    MoveRow { by: i64 },
+    /// The caret's table column left (`by` −1) or right (1).
+    MoveCol { by: i64 },
     /// The table's header row taken away, or put back.
     TableHeader,
     Sort,
@@ -166,6 +176,8 @@ pub enum Msg {
     SetTypewriter { to: u64 },
     /// How links open: `page::LinkOpen::ALL`'s index.
     SetLinkOpen { to: u64 },
+    /// How a wheel's notch scrolls: an index into `settings::Wheel::ALL`.
+    SetWheel { to: u64 },
     /// Shows the library beside the page, or hides it.
     ToggleSidebar,
     /// The library shows the Deleted folder: what is in the trash.
@@ -285,9 +297,17 @@ pub enum Msg {
     /// The link editor's buttons: 0 done, 1 open, 2 remove the link.
     LinkAct { what: u64 },
     CloseLink,
+    /// A link to a file that could run, asked about: opened anyway, or
+    /// not (Cancel, Esc, a press outside the question).
+    OpenAnyway,
+    OpenCancel,
     /// The selected picture beside the words (1 left, 2 right) or on its
     /// own line (0).
     Float { to: u64 },
+    /// A file's tool on its tile, the one chosen or beside the caret
+    /// (app_chrome.rs `FILE_*`): open, show in folder, copy, copy path,
+    /// remove.
+    FileTool { what: u64 },
     /// The selected picture, the user's own file, taken into the
     /// attachments folder: moved (0), every note following it, or copied
     /// (1), for this note alone.
@@ -296,6 +316,8 @@ pub enum Msg {
     SetSize { by: i64 },
     /// How dividers are drawn: `settings::Divider::ALL[to]`.
     SetDivider { to: u64 },
+    /// Asks for a picture to draw dividers as.
+    PickDividerPicture,
     /// How tall the dropped letter is: `to + 2` lines.
     SetInitialLines { to: u64 },
     /// The dropped letter's ink: 0 the accent's, 1 the text's.
@@ -311,6 +333,8 @@ pub enum Msg {
     ResetDir,
     /// Shows the notes folder in the file manager.
     ShowDir,
+    /// The welcome note again, opened: Settings' last line.
+    AddWelcome,
     /// Runs `slash::COMMANDS[index]` on the `/word` line.
     Slash { index: u64 },
     /// A picture pressed and maybe dragged to another place.
@@ -353,6 +377,9 @@ pub enum Msg {
     Chose,
     /// The window gained the keyboard, or lost it, to another app.
     WindowFocus,
+    /// Note `note`'s own window opened, or closed: Mod+W, its close
+    /// button, the OS.
+    NoteWindow { note: u64 },
     /// Files dragged over the window, or let go on it.
     FilesOver,
     /// The folder dialog's answer, and the pictures dialog's.
@@ -360,6 +387,8 @@ pub enum Msg {
     PickedPictures,
     /// The paperclip's dialog's answer: pictures and documents.
     PickedFiles,
+    /// The answer of the dialog for a divider's picture.
+    PickedDividerPicture,
 }
 
 /// `Msg::SelectFolder`'s every note, and `Msg::SetFont`'s default face:
@@ -440,6 +469,8 @@ pub enum Field {
     /// Settings → Sync: the account's password being set.
     PasswordEmail,
     PasswordNew,
+    /// Settings → Dividers: the words a divider is drawn as.
+    DividerText,
 }
 
 impl Field {
@@ -546,13 +577,16 @@ pub struct Peek {
 /// A press on the page, until it is let go.
 /// A piece of a table cell that has pictures among its words: a stretch
 /// of its words (`from..to` of its text), or a picture (its Markdown), and
-/// the node it was drawn in — the words' text, the picture's box.
+/// the node it was drawn in — the words' text, the picture's box. Or a
+/// tile of a line of file links (`file`, a `picture` too: one letter to
+/// the caret), its card.
 #[derive(Clone, Copy, Debug)]
 pub struct Piece {
     pub from: usize,
     pub to: usize,
     pub key: Key,
     pub picture: bool,
+    pub file: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -627,6 +661,9 @@ pub struct Carnet {
     pub writing: Typing,
     /// The link editor: what it edits and where it hangs.
     pub link_edit: Option<LinkEdit>,
+    /// A file a link leads to that could run a program: asked about
+    /// before it opens (`store::could_run`).
+    pub open_ask: Option<std::path::PathBuf>,
     /// Where the page's menu last opened.
     menu_at: Vec2,
     /// Each table cell's box as the last frame laid it out: what a click is
@@ -681,9 +718,16 @@ pub struct Carnet {
     blur: bool,
     /// Text to put on the clipboard on the next frame, and its HTML.
     clip_out: Option<(String, Option<String>)>,
+    /// The Markdown Carnet last put on the clipboard, and the folder of the
+    /// note it came from: a line of files pasted into a note in another
+    /// folder has its links made from there (`pasted_here`).
+    clip_md: Option<(String, String)>,
     /// A picture to put on the clipboard on the next frame: its size and
     /// straight RGBA.
     picture_out: Option<(u32, u32, Vec<u8>)>,
+    /// Files to put on the clipboard on the next frame, as a file
+    /// manager's Copy does.
+    files_out: Option<Vec<String>>,
     /// A context menu to open on the next frame: the node it is about,
     /// where, and what.
     pending_menu: Option<(Key, Vec2, MenuFor)>,
@@ -776,6 +820,8 @@ pub struct Carnet {
     pick_pictures: bool,
     /// Ask for pictures and documents on the next frame (the paperclip).
     pick_files: bool,
+    /// Ask for a picture to draw dividers as on the next frame.
+    pick_divider_picture: bool,
     /// Files being dragged over the window, until they drop or leave.
     file_drag: Option<FileDrag>,
     /// Where dropped pictures would go: before this block (the page's
@@ -783,6 +829,14 @@ pub struct Carnet {
     pub drop_index: Option<usize>,
     /// The library's cards as last laid out: what a dragged file hovers.
     card_rects: Vec<(usize, Rect)>,
+    /// Moments for a recording's timeline (`perf_mark`) — a note opened,
+    /// saved, the folder read again — noted where they happen, which has
+    /// no core to hand, and put on it by the next frame.
+    marks: Vec<&'static str>,
+    /// Their nodes, as last drawn: a card a click gave the keyboard to is
+    /// the list holding it, as the window was before kui let a click
+    /// focus what it lands on.
+    card_keys: Vec<Key>,
     /// The page's scroller as last laid out: its edges scroll a drag.
     page_rect: Option<Rect>,
     /// The page's scroller, as last declared (the body's key sink is
@@ -813,6 +867,13 @@ pub struct Carnet {
     /// Each floated picture's row as last drawn: where the blocks beside
     /// it end, and how many frames running that changed.
     float_ends: HashMap<u64, (usize, u8)>,
+    /// Each block's row by the block's id: the key it was last drawn
+    /// under, and where it was last laid out. What the blocks beside a
+    /// picture are measured by — read from the last frame's layout by the
+    /// key the row had there, beside a picture or not, and kept across
+    /// notes, so a note opened again has its pictures' rows from the
+    /// first frame as they were left.
+    row_seen: HashMap<u64, (Key, Option<Rect>)>,
     /// A note's card or a folder's row being carried to a folder.
     row_drag: Option<RowDrag>,
     /// The library's edge being dragged: where the drag began and the
@@ -833,6 +894,11 @@ pub struct Carnet {
     overflow: Vec<chrome::ToolDef>,
     /// The More button, and where its menu opens.
     more: Option<(Key, Vec2)>,
+    /// The tools the strip showed last, for what the caret was in, and
+    /// when that last changed: for a moment after, the tools that stay
+    /// slide to their new places and those that come fade in.
+    tool_set: Option<chrome::ToolSet>,
+    tool_set_at: f64,
     /// Debug information: kui's frame-time graph (Shift+F12, or five
     /// quick clicks on the Settings page's title, so a release build has
     /// it too); and, while it shows, F12's devtools in a release build.
@@ -936,6 +1002,179 @@ pub struct Carnet {
     /// gone again, untouched, once the account's notes come.
     sync_stand_in: Option<u64>,
 
+    /// The notes open in windows of their own, each with its editor put
+    /// by while another window is drawn or answered.
+    pub windows: Vec<NoteWindow>,
+    /// The note window being drawn or answered, by its note: `None` for
+    /// the main window, whose editor is the one in place between turns.
+    pub note_window: Option<u64>,
+    /// Asked of a note window that is the main window's to do (a new
+    /// note, the search, Settings): done there once the note window's
+    /// turn is over, and the main window brought forward.
+    to_main: Option<Msg>,
+    /// A note window to bring forward on the next frame: one asked for
+    /// that was open already.
+    raise: Option<u64>,
+}
+
+/// A note in a window of its own: the toolbar and the page, nothing of the
+/// library's (app_window.rs).
+pub struct NoteWindow {
+    pub note: u64,
+    pub ed: Editor,
+}
+
+impl NoteWindow {
+    /// What the window is declared as, from frame to frame.
+    pub fn name(&self) -> String {
+        window_name(self.note)
+    }
+}
+
+/// The name a note's window is declared under.
+fn window_name(note: u64) -> String {
+    format!("note-{note}")
+}
+
+/// Declares [`Editor`], what each window that edits a note keeps of its
+/// own, and `Carnet::swap_fields`, which trades it for the one in place.
+/// Each is a field of `Carnet`'s too, read and written there as it always
+/// was; a window's turn trades them in and back out (`Carnet::in_window`).
+/// A field left off this list is the whole app's, the same in every
+/// window: the store, the settings, sync, the library.
+macro_rules! editor {
+    ($($field:ident: $ty:ty $(= $init:expr)?,)*) => {
+        /// One window's editor of a note, put by while another window's
+        /// turn runs: its caret and selection, its scroll and layout, what
+        /// it has open (the `/` menu, the link editor, the colour picker)
+        /// and what it is to do on its next frame.
+        pub struct Editor {
+            /// The note it shows, by id: found again by that as notes come
+            /// and go while it is put by.
+            note: u64,
+            /// The note's blocks as it last saw them: what its caret is
+            /// carried from through what changed meanwhile (`page::follow`).
+            seen: Vec<Rc<Block>>,
+            $($field: $ty,)*
+        }
+
+        impl Default for Editor {
+            fn default() -> Self {
+                Self { note: 0, seen: Vec::new(), $($field: editor!(@init $($init)?),)* }
+            }
+        }
+
+        impl Carnet {
+            fn swap_fields(&mut self, ed: &mut Editor) {
+                $(std::mem::swap(&mut self.$field, &mut ed.$field);)*
+            }
+        }
+    };
+    (@init) => { Default::default() };
+    (@init $init:expr) => { $init };
+}
+
+editor! {
+    current: usize,
+    caret: Caret = Caret::at(page::start(Slot::block(0))),
+    editing: bool,
+    focus_req: Option<Field>,
+    fields: HashMap<Key, Field>,
+    page_key: Option<Key>,
+    focus_page: bool,
+    slot_keys: HashMap<Slot, Key>,
+    shown: HashMap<Slot, carnet_core::inline::Visible>,
+    tint_open: Option<(bool, Vec2)>,
+    tint_anchor: [Option<Vec2>; 2],
+    tint_from: Option<usize>,
+    writing: Typing,
+    link_edit: Option<LinkEdit>,
+    open_ask: Option<std::path::PathBuf>,
+    menu_at: Vec2 = Vec2::new(0.0, 0.0),
+    cell_rects: HashMap<Slot, Rect>,
+    cell_pieces: HashMap<Slot, Vec<Piece>>,
+    drawn: HashMap<Slot, u64>,
+    goal_x: Option<f32>,
+    drag: Option<Drag>,
+    drag_at: Option<(Vec2, Vec2, f64)>,
+    row_rects: Vec<(u64, Rect)>,
+    preedit: Option<String>,
+    reveal: bool,
+    paste_pending: bool,
+    last_sort: Option<(u64, bool)>,
+    words: (u64, u64, usize) = (u64::MAX, 0, 0),
+    todos: Option<(usize, usize)>,
+    styler: Styler,
+    last_focus: Option<Key>,
+    title_focused: bool,
+    notice: Option<Notice>,
+    notice_keys: Vec<Key>,
+    say: Option<String>,
+    step: Option<bool>,
+    blur: bool,
+    clip_out: Option<(String, Option<String>)>,
+    picture_out: Option<(u32, u32, Vec<u8>)>,
+    files_out: Option<Vec<String>>,
+    pending_menu: Option<(Key, Vec2, MenuFor)>,
+    list_view: bool,
+    settings_open: bool,
+    text_w: f32 = 600.0,
+    initial: HashSet<Slot>,
+    lights: f32,
+    view_w: f32 = f32::INFINITY,
+    view_resized: bool,
+    menu_open: bool,
+    refocus: bool,
+    slash_sel: usize,
+    slash_word: String,
+    slash_off: Option<u64>,
+    pick_pictures: bool,
+    pick_files: bool,
+    file_drag: Option<FileDrag>,
+    drop_index: Option<usize>,
+    page_rect: Option<Rect>,
+    scroll_key: Option<Key>,
+    resizing: Option<Resize>,
+    pic_w: HashMap<u64, (f32, f32, f32, f32)>,
+    pic_rows: HashMap<u64, (u64, f32, f32)>,
+    float_row: u64,
+    link_press: Option<LinkPress>,
+    link_opened: bool,
+    float_count: usize,
+    float_room: f32,
+    float_ends: HashMap<u64, (usize, u8)>,
+    row_seen: HashMap<u64, (Key, Option<Rect>)>,
+    pic_drag: Option<PicDrag>,
+    overflow: Vec<chrome::ToolDef>,
+    more: Option<(Key, Vec2)>,
+    tool_set: Option<chrome::ToolSet>,
+    tool_set_at: f64 = f64::NEG_INFINITY,
+    typing: bool,
+    typed_at: f64,
+    typing_cursor: Option<Option<Vec2>>,
+    caret_fresh: bool,
+    reveal_wait: u8,
+    zen: bool,
+    title_to: Option<Option<f32>>,
+    search_active: bool,
+    window_cmd: Option<kui_native::WindowCommand>,
+    versions: Option<Versions>,
+    peek: Option<Peek>,
+}
+
+impl Editor {
+    /// A new window's editor of `note`: the caret at its start, the page
+    /// to take the keyboard as the window opens.
+    fn of(note: &Note) -> Self {
+        Self {
+            note: note.id,
+            seen: note.doc.snapshot(),
+            caret: Caret::at(page::first(&note.doc)),
+            editing: true,
+            focus_page: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// A folder being named — a new one, or one renamed: the folder it goes
@@ -1085,6 +1324,7 @@ impl Carnet {
             tint_from: None,
             writing: Typing::default(),
             link_edit: None,
+            open_ask: None,
             menu_at: Vec2::new(0.0, 0.0),
             cell_rects: HashMap::new(),
             cell_pieces: HashMap::new(),
@@ -1110,7 +1350,9 @@ impl Carnet {
             step: None,
             blur: false,
             clip_out: None,
+            clip_md: None,
             picture_out: None,
+            files_out: None,
             pending_menu: None,
             list_view: false,
             folder: None,
@@ -1149,9 +1391,12 @@ impl Carnet {
             slash_off: None,
             pick_pictures: false,
             pick_files: false,
+            pick_divider_picture: false,
             file_drag: None,
             drop_index: None,
             card_rects: Vec::new(),
+            card_keys: Vec::new(),
+            marks: Vec::new(),
             page_rect: None,
             scroll_key: None,
             resizing: None,
@@ -1163,6 +1408,7 @@ impl Carnet {
             float_count: 0,
             float_room: 0.0,
             float_ends: HashMap::new(),
+            row_seen: HashMap::new(),
             row_drag: None,
             library_from: None,
             edge_hover: None,
@@ -1171,6 +1417,8 @@ impl Carnet {
             folder_rects: Vec::new(),
             overflow: Vec::new(),
             more: None,
+            tool_set: None,
+            tool_set_at: f64::NEG_INFINITY,
             hud: false,
             title_clicks: (0, Instant::now()),
             typing: false,
@@ -1212,6 +1460,10 @@ impl Carnet {
             sync_inspect_armed: None,
             sync_inspect_open: None,
             sync_stand_in: None,
+            windows: Vec::new(),
+            note_window: None,
+            to_main: None,
+            raise: None,
         };
         if app.store.notes.is_empty() {
             app.store.notes.push(blank_note());
@@ -1226,6 +1478,7 @@ impl Carnet {
         app.current = app.order.first().copied().unwrap_or(0);
         app.caret = Caret::at(page::first(app.doc()));
         app.gather_pictures();
+        app.shrink_divider_picture();
         // The notes open all the same; their history waits for an update.
         if app.error.is_none() {
             app.error = app.store.replica_refused.clone();
@@ -1509,11 +1762,11 @@ impl Carnet {
         (self.view_w - PAGE_MIN).floor().clamp(lo, hi)
     }
 
-    /// The library beside the page: as the settings say, and never in zen.
-    /// A note's history takes its place, and shows whatever they say: it
-    /// is read nowhere else.
+    /// The library beside the page: as the settings say, and never in zen
+    /// or a note's own window. A note's history takes its place, and shows
+    /// whatever they say: it is read nowhere else.
     pub(super) fn side_shown(&self) -> bool {
-        (self.settings.sidebar && !self.zen) || self.versions.is_some()
+        self.note_window.is_none() && ((self.settings.sidebar && !self.zen) || self.versions.is_some())
     }
 
     /// Focus — the blocks not being written step back — as the settings
@@ -1560,7 +1813,8 @@ impl Carnet {
         let block = self.caret.head.slot.block;
         let mut caret = self.caret;
         let changed = f(&mut self.store.notes[self.current].doc, &mut caret);
-        self.caret = caret;
+        // Never between the two dashes of an em dash, whatever the edit.
+        self.caret = page::settle(self.doc(), caret);
         if step != Step::Typing {
             self.writing.moved();
         }
@@ -1569,6 +1823,11 @@ impl Carnet {
             if self.notice.as_ref().is_some_and(|n| n.undo.as_ref().is_some_and(Undo::is_edit)) {
                 self.notice = None;
             }
+            // Words typed onto a line of their own (beside a line of
+            // files, a picture): that line's step, so the rest of the
+            // word typed there is the same one undo.
+            let after = self.caret.head.slot.block;
+            let block = if step == Step::Typing && after != block && !before.blocks.iter().any(|b| b.id == after) { after } else { block };
             self.histories.entry(id).or_default().record(step, block, before);
             self.edited();
         } else {
@@ -1652,6 +1911,7 @@ impl Carnet {
         }
         // Not renamed while the title is being typed.
         let rename = !self.title_focused;
+        self.marks.push("note saved");
         match self.store.save(i, rename) {
             Ok(Saved::Merged) => {
                 self.error = None;
@@ -1684,7 +1944,7 @@ impl Carnet {
     /// changed it: without the window having to come to the front.
     fn watch_tick(&mut self) {
         if self.watch.as_ref().is_none_or(|w| w.dir() != self.store.dir) {
-            let waker = self.waker.clone();
+            let waker = self.waker.as_ref().map(|w| w.named("folder watch"));
             self.watch = Some(crate::watch::Watch::start(self.store.dir.clone(), move || {
                 if let Some(w) = &waker {
                     w.wake();
@@ -1700,6 +1960,7 @@ impl Carnet {
     /// note is followed by id; if it went, the first in the list opens.
     fn rescan(&mut self) {
         self.rescans += 1;
+        self.marks.push("folder rescanned");
         let open = self.store.notes.get(self.current).map(|n| n.id);
         // Each note as it is before: one reread from disk comes back
         // with its `rev` moved on.
@@ -1750,7 +2011,9 @@ impl Carnet {
     fn leave_current(&mut self) {
         let i = self.current;
         let n = &self.store.notes[i];
-        if n.is_blank() && n.path.is_none() && self.store.notes.len() > 1 {
+        // One open in a window of its own is that window's still.
+        let shown = self.windows.iter().any(|w| w.note == n.id);
+        if n.is_blank() && n.path.is_none() && self.store.notes.len() > 1 && !shown {
             self.store.notes.remove(i);
             self.order.retain(|&j| j != i);
             for j in &mut self.order {
@@ -1766,7 +2029,12 @@ impl Carnet {
         self.save_current();
     }
 
-    fn open(&mut self, note: usize) {
+    pub(crate) fn open(&mut self, note: usize) {
+        // A note's own window keeps to it.
+        if self.note_window.is_some() {
+            return;
+        }
+        self.marks.push("note opened");
         self.folders_clicked = false;
         // Another note (⌥⌘↓ comes from the keyboard): not being written yet.
         self.typing = false;
@@ -1819,6 +2087,26 @@ impl Carnet {
         self.query.clear();
         self.reorder();
         self.focus(Field::Title);
+    }
+
+    /// The welcome note again, from Settings or the Mac's Help menu: the
+    /// store's untouched one, or a fresh one at the top level, opened, and
+    /// its card chosen in the library, every note shown so it is there.
+    pub(super) fn add_welcome(&mut self) {
+        match self.store.add_welcome() {
+            Ok(i) => {
+                let id = self.store.notes[i].id;
+                self.close_history();
+                self.deleted = false;
+                self.close_peek();
+                self.query.clear();
+                self.folder = None;
+                self.reorder();
+                let i = self.store.notes.iter().position(|n| n.id == id).unwrap_or(i);
+                self.open(i);
+            }
+            Err(e) => self.error = Some(format!("Couldn't add the welcome note: {e}")),
+        }
     }
 
     /// Moves note `i` to the trash. Deleting the open note opens the one
@@ -2168,9 +2456,11 @@ impl Carnet {
         // The devices name who made each version, too.
         self.sync.want_devices = self.settings_open || self.versions.is_some();
         // Invites are used elsewhere: asked afresh each time Settings opens;
-        // the devices too, so who's online is as of now.
+        // the devices too, so who's online is as of now. Both lists stay
+        // shown till the answer: emptied, the Sync card lost its invite
+        // rows for a moment and grew them back, and the page jumped.
         if self.settings_open && !self.sync.want_invites {
-            self.sync.invites = None;
+            self.sync.invites_again();
             self.sync.devices_again();
         }
         self.sync.want_invites = self.settings_open;
@@ -2319,10 +2609,11 @@ impl Carnet {
         vec![item("Restore", "restore"), item("Delete Forever\u{2026}", "forever"), item(reveal_label(), "reveal")]
     }
 
-    /// What a menu row asked for: a context menu's, or the bar's.
-    fn on_act(&mut self, act: Act) {
+    /// What a menu row chosen in window `here` asked for: a context
+    /// menu's, or the bar's.
+    fn on_act(&mut self, act: Act, here: kui_native::WindowId) {
         let (id, what) = match act {
-            Act::App { what } => return self.on_bar(&what),
+            Act::App { what } => return self.on_bar(&what, here),
             // A tool from the More menu.
             Act::Tool { at } => {
                 if let Some(msg) = self.overflow.get(at as usize).map(|d| d.msg.clone()) {
@@ -2367,6 +2658,7 @@ impl Carnet {
         let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { return };
         match what.as_str() {
             "open" => self.open(i),
+            "window" => self.open_in_window(id),
             "history" => {
                 self.open(i);
                 self.show_history();
@@ -2566,21 +2858,35 @@ impl Carnet {
         self.writing = writing;
     }
 
-    /// Opens the note above (`up`) or below the open one in the library.
-    fn step_note(&mut self, up: bool) {
-        let Some(pos) = self.order.iter().position(|&i| i == self.current) else {
-            if let Some(&first) = self.order.first() {
-                self.open(first);
-            }
+    /// Opens the note above (`up`) or below the open one in the library,
+    /// of the ones it shows as it shows them: the folder's, or a search's
+    /// from every folder, pinned first (`reorder`) — or, while it shows
+    /// what was deleted, the deleted thing above or below, to read. With
+    /// `wrap` (Ctrl+Tab, as a browser's tabs go) the last goes on to the
+    /// first and the first back to the last; without (⌥⌘↓, as ↓ does on
+    /// the cards) an end is where it stops. From a note the list doesn't
+    /// show — new in another folder, or not what is searched for — the
+    /// list's first, or its last going back round.
+    fn step_note(&mut self, up: bool, wrap: bool) {
+        // Not in a note's own window: it keeps to its note.
+        if self.note_window.is_some() {
             return;
-        };
-        let next = if up { pos.checked_sub(1) } else { Some(pos + 1) };
-        if let Some(&i) = next.and_then(|p| self.order.get(p)) {
-            self.open(i);
-            self.focus_page = true;
-            self.editing = true;
-            self.say = Some(self.store.notes[self.current].display_title().to_string());
         }
+        let (len, at) = if self.deleted {
+            (self.trash.len(), self.peek_index())
+        } else {
+            (self.order.len(), self.order.iter().position(|&i| i == self.current))
+        };
+        let Some(to) = step_in(len, at, up, wrap) else { return };
+        if self.deleted {
+            self.open_deleted(to);
+            self.say = self.peek.as_ref().map(|p| p.title.clone());
+            return;
+        }
+        self.open(self.order[to]);
+        self.focus_page = true;
+        self.editing = true;
+        self.say = Some(self.store.notes[self.current].display_title().to_string());
     }
 
     /// Moves note `i` into folder `to` ("" for the top level). A note the
@@ -3165,6 +3471,7 @@ impl Carnet {
         };
         let mut items = vec![
             item("Open", "open"),
+            item("Open in new window", "window").accel(crate::keys::NEW_WINDOW),
             // Every version it has been, kept by the replica.
             item("History", "history").enabled(note.key.is_some()),
             item(if note.pinned { "Unpin" } else { "Pin to top" }, "pin").accel(crate::keys::PIN),
@@ -3314,11 +3621,14 @@ impl Carnet {
                 | Msg::AddCol
                 | Msg::DelRow
                 | Msg::DelCol
+                | Msg::MoveRow { .. }
+                | Msg::MoveCol { .. }
                 | Msg::TableHeader
                 | Msg::Sort
                 | Msg::Tint { .. }
                 | Msg::TintMenu { .. }
                 | Msg::Float { .. }
+                | Msg::FileTool { .. }
                 | Msg::IntoCarnet { .. }
                 | Msg::LinkAct { .. }
                 | Msg::CloseLink
@@ -3331,6 +3641,7 @@ impl Carnet {
             Msg::RootKey | Msg::Page | Msg::PageDrag | Msg::SettingsTitle => {}
             Msg::OpenNote { note } => self.open(note as usize),
             Msg::NewNote => self.new_note(),
+            Msg::AddWelcome => self.add_welcome(),
             Msg::ToggleZen => {
                 self.zen = !self.zen;
                 self.focus_page = true;
@@ -3394,6 +3705,12 @@ impl Carnet {
             }
             Msg::DelCol => {
                 self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::DelCol, false));
+            }
+            Msg::MoveRow { by } => {
+                self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::MoveRow { by: by as isize }, false));
+            }
+            Msg::MoveCol { by } => {
+                self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::MoveCol { by: by as isize }, false));
             }
             Msg::TableHeader => {
                 self.edit(Step::Other, |d, c| page::table_op(d, c, TableOp::Header, false));
@@ -3685,16 +4002,6 @@ impl Carnet {
                 } else {
                     self.edit(Step::Other, |d, c| page::tint(d, c, ink, color));
                 }
-                // The picker's "recent" row: the newest first, ten at most.
-                if color > carnet_core::inline::HIGHLIGHT {
-                    let recent = &mut self.settings.colors;
-                    recent.retain(|&c| c != color);
-                    recent.insert(0, color);
-                    recent.truncate(10);
-                    if let Err(e) = self.settings.save() {
-                        self.error = Some(format!("Couldn't save the settings: {e}"));
-                    }
-                }
             }
             Msg::TintMenu { ink } => {
                 let ink = ink == 1;
@@ -3713,6 +4020,12 @@ impl Carnet {
                 self.link_edit = None;
                 self.focus_page = true;
             }
+            Msg::OpenAnyway => {
+                if let Some(path) = self.open_ask.take() {
+                    self.open_file(&path);
+                }
+            }
+            Msg::OpenCancel => self.open_ask = None,
             Msg::IntoCarnet { copy } => self.take_in_picture(copy == 1),
             Msg::Float { to } => {
                 if let Some((id, _, _)) = self.picture_here() {
@@ -3724,6 +4037,7 @@ impl Carnet {
                     self.edit(Step::Other, |d, _| page::set_image_float(d, id, to));
                 }
             }
+            Msg::FileTool { what } => self.file_tool(what),
             Msg::Slash { index } => self.run_slash(index as usize),
             Msg::FoldFolder { index } => {
                 if let Some(f) = self.fold_target(index) {
@@ -3741,10 +4055,12 @@ impl Carnet {
             | Msg::DeletedMenu { .. }
             | Msg::Chose
             | Msg::WindowFocus
+            | Msg::NoteWindow { .. }
             | Msg::FilesOver
             | Msg::PickedDir
             | Msg::PickedPictures
-            | Msg::PickedFiles => {}
+            | Msg::PickedFiles
+            | Msg::PickedDividerPicture => {}
             Msg::ToolsMenu => {
                 if let Some((k, at)) = self.more {
                     self.pending_menu = Some((k, at, MenuFor::Tools));
@@ -3776,9 +4092,11 @@ impl Carnet {
             | Msg::SetFocus { .. }
             | Msg::SetTypewriter { .. }
             | Msg::SetLinkOpen { .. }
+            | Msg::SetWheel { .. }
             | Msg::ToggleSidebar
             | Msg::SetSize { .. }
             | Msg::SetDivider { .. }
+            | Msg::PickDividerPicture
             | Msg::SetInitialLines { .. }
             | Msg::SetInitialColor { .. }
             | Msg::FontMenu { .. }
@@ -3805,11 +4123,12 @@ impl Carnet {
         if let Some(p) = crate::oscursor::over_window(ui.core().scale()) {
             drag.at = Some(p);
         }
-        ui.request_frame();
+        ui.request_frame_for("file drag");
         let Some(at) = drag.at else { return };
         let inside = |r: &Rect| at.x >= r.x && at.x <= r.x + r.w && at.y >= r.y && at.y <= r.y + r.h;
-        // Resting on a card.
-        let card = self.card_rects.iter().find(|(_, r)| inside(r)).map(|(n, _)| *n);
+        // Resting on a card (of the main window's library).
+        let cards = if self.note_window.is_none() { self.card_rects.as_slice() } else { &[] };
+        let card = cards.iter().find(|(_, r)| inside(r)).map(|(n, _)| *n);
         let open_now = match (card, drag.card) {
             (Some(n), Some((m, since))) if n == m => since.elapsed() >= SPRING && n != self.current,
             (Some(n), _) => {
@@ -3864,6 +4183,7 @@ impl Carnet {
             Some(p) => format!("file:///{}", p.display().to_string().replace('\\', "/").trim_start_matches('/')),
             None => src.to_string(),
         });
+        self.clip_md = Some((md.clone(), folder.to_string()));
         self.clip_out = Some((md, Some(html)));
     }
 
@@ -3911,6 +4231,14 @@ impl Carnet {
     /// A key no sink took: the window's Tab ring, and the app's chords.
     /// Also what a menu bar row plays back while the page lacks the
     /// keyboard.
+    /// The keyboard on nothing in particular, as a click on a note's card
+    /// or a folder leaves it: on the window, or on the card the click
+    /// focused (kui gives a click's keyboard to what it lands on, where it
+    /// left it with the window), the list's arrows the window's.
+    fn keyboard_on_the_list(&self, focus: Option<Key>) -> bool {
+        focus.is_none_or(|f| f == Key::ROOT || self.card_keys.contains(&f))
+    }
+
     pub(super) fn root_press(&mut self, k: kui_native::KeyPress, core: &mut Core) {
         if self.debug_key(&k, core) {
             return;
@@ -3929,7 +4257,7 @@ impl Carnet {
         // ← and → fold and unfold it.
         if matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right)
             && self.folders_clicked
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
         {
             let row = if self.deleted {
                 FolderRow::Deleted
@@ -3946,7 +4274,7 @@ impl Carnet {
         if matches!(k.code, KeyCode::Up | KeyCode::Down)
             && self.cards_clicked
             && !(m.ctrl || m.super_key || m.alt)
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
         {
             let up = k.code == KeyCode::Up;
             if m.shift {
@@ -3973,7 +4301,7 @@ impl Carnet {
             && !(m.ctrl || m.super_key || m.alt || m.shift)
             && (self.cards_clicked || self.folders_clicked)
             && self.picked.len() > 1
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
         {
             self.trash_picked();
             return;
@@ -3985,7 +4313,7 @@ impl Carnet {
             && !(m.ctrl || m.alt || m.shift)
             && self.folders_clicked
             && !self.deleted
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
             && let Some(f) = self.folder.clone()
         {
             self.folder_row_key(&FolderRow::Folder(f), &k);
@@ -3996,12 +4324,14 @@ impl Carnet {
         // the folder shown is renamed, as Finder's selected one is.
         if k.code == KeyCode::F(2)
             && !(m.ctrl || m.super_key || m.alt || m.shift)
-            && core.focus().is_none_or(|f| f == Key::ROOT)
+            && self.keyboard_on_the_list(core.focus())
             && let Some(f) = self.folder.clone()
         {
             self.start_rename(&f);
             return;
         }
+        // Tab walks the ring: from the title and the search too, whose Tab
+        // comes here so that Ctrl+Tab can.
         if k.code == KeyCode::Tab && !(m.ctrl || m.super_key || m.alt) {
             self.step = Some(!m.shift);
             return;
@@ -4055,9 +4385,20 @@ impl Carnet {
     /// key was one.
     fn chord(&mut self, k: &kui_native::KeyPress) -> bool {
         let (shift, alt) = (k.mods.shift, k.mods.alt);
+        if let Some(note) = self.note_window
+            && self.note_window_chord(note, k)
+        {
+            return true;
+        }
         match crate::keys::chord_code(k) {
-            KeyCode::Up | KeyCode::Down if alt => self.step_note(crate::keys::chord_code(k) == KeyCode::Up),
+            KeyCode::Up | KeyCode::Down if alt => self.step_note(crate::keys::chord_code(k) == KeyCode::Up, false),
+            // Round the notes shown, as a browser's tabs go: Control on a
+            // Mac too, whose ⌘Tab is the system's. Not from the settings,
+            // which are not among them.
+            KeyCode::Tab if k.mods.ctrl && !alt && !self.settings_open => self.step_note(shift, true),
             KeyCode::Char('n') if shift => self.on_plain(Msg::NewFolder),
+            // The open note in a window of its own; not a deleted one read.
+            KeyCode::Char('o') if shift && !alt && self.peek.is_none() => self.open_in_window(self.store.notes[self.current].id),
             KeyCode::Char('p') if shift => self.pin(self.current),
             // What is chosen in the library, or the open note.
             KeyCode::Backspace | KeyCode::Delete if shift && self.picked.len() > 1 => self.trash_picked(),
@@ -4183,6 +4524,7 @@ impl Carnet {
                     *password = text;
                 }
             }
+            Field::DividerText => self.set_divider_text(&text),
         }
     }
 
@@ -4228,6 +4570,8 @@ impl Carnet {
                 }
             }
             Field::Font => self.apply_typed_font(),
+            // The words are kept as they are typed: Enter is done with them.
+            Field::DividerText => self.blur = true,
         }
     }
 
@@ -4261,20 +4605,32 @@ impl Carnet {
             }
             DropPhase::Drop => {
                 let paths: Vec<std::path::PathBuf> = d.paths.iter().map(std::path::PathBuf::from).collect();
-                // On a card: into that note, at its end, whether it opened
-                // while the files rested there or not.
-                let card = self.file_drag.as_ref().and_then(|d| d.card).map(|(n, _)| n);
-                if let Some(n) = card {
-                    self.open(n);
-                    self.drop_index = Some(self.doc().len());
-                } else if let Some(cell) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y)) {
-                    // On a table's cell: into it, at its end.
-                    self.caret = Caret::at(page::end(self.doc(), cell));
-                    self.drop_index = None;
+                // Markdown files are notes of their own: brought in beside
+                // the others, never put in the note open. Alone, the first
+                // opens; with pictures, the note they went into stays.
+                let (notes, paths): (Vec<_>, Vec<_>) = paths.into_iter().partition(|p| store::is_markdown(p));
+                let folder = self.drop_folder(self.file_drag.as_ref().and_then(|d| d.at));
+                if !paths.is_empty() {
+                    // On a card: into that note, at its end, whether it
+                    // opened while the files rested there or not.
+                    let card = self.file_drag.as_ref().and_then(|d| d.card).map(|(n, _)| n);
+                    if let Some(n) = card {
+                        self.open(n);
+                        self.drop_index = Some(self.doc().len());
+                    } else if let Some(cell) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y)) {
+                        // On a table's cell: into it, at its end.
+                        self.caret = Caret::at(page::end(self.doc(), cell));
+                        self.drop_index = None;
+                    }
+                    let at = self.drop_index.take();
+                    self.file_drag = None;
+                    self.insert_files_at(&paths, at);
                 }
-                let at = self.drop_index.take();
                 self.file_drag = None;
-                self.insert_files_at(&paths, at);
+                self.drop_index = None;
+                if !notes.is_empty() {
+                    self.import_notes(&notes, &folder, paths.is_empty());
+                }
             }
             DropPhase::Enter | DropPhase::Move => {
                 let drag = self.file_drag.get_or_insert(FileDrag { at: None, card: None });
@@ -4283,6 +4639,91 @@ impl Carnet {
                 }
             }
         }
+    }
+
+    /// Whether `at` is over the library: its pane beside the page, or,
+    /// on a narrow window showing the list, anywhere.
+    fn over_library(&self, at: Vec2) -> bool {
+        if self.view_w < self.library_least() + PAGE_MIN {
+            return self.list_view && !self.settings_open;
+        }
+        at.x < self.side_w(false)
+    }
+
+    /// Where Markdown files dropped at `at` go: into the folder whose row
+    /// they were let go over (All notes': the top level), else the folder
+    /// the library shows, as a new note does.
+    fn drop_folder(&self, at: Option<Vec2>) -> String {
+        let inside = |p: Vec2, r: &Rect| p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+        let row = at
+            .filter(|&p| self.over_library(p))
+            .and_then(|p| self.folder_rects.iter().find(|(_, r)| inside(p, r)))
+            .map(|(f, _)| f.clone());
+        row.unwrap_or_else(|| self.folder.clone().unwrap_or_default())
+    }
+
+    /// Markdown files brought in as notes in `folder`, each a copy
+    /// ([`Store::import_note`]). With `open`, the first is opened and
+    /// chosen in the library, which shows its folder if it showed another.
+    /// One already a note here is that note, not a second copy of it. What
+    /// couldn't come in is said, the first of them by name.
+    fn import_notes(&mut self, paths: &[std::path::PathBuf], folder: &str, open: bool) {
+        let mut first = None;
+        let mut came: Vec<u64> = Vec::new();
+        let mut failed: Vec<(String, std::io::Error)> = Vec::new();
+        for p in paths {
+            let i = match self.store.note_of_file(p) {
+                Some(i) => i,
+                None => match self.store.import_note(folder, p) {
+                    Ok(i) => {
+                        came.push(self.store.notes[i].id);
+                        i
+                    }
+                    Err(e) => {
+                        let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
+                        failed.push((name, e));
+                        continue;
+                    }
+                },
+            };
+            first.get_or_insert(self.store.notes[i].id);
+        }
+        if let (true, Some(id)) = (open, first) {
+            self.close_peek();
+            self.deleted = false;
+            self.query.clear();
+            let at = self.store.notes.iter().find(|n| n.id == id).map(|n| n.folder.clone()).unwrap_or_default();
+            if self.folder.as_ref().is_some_and(|f| *f != at) {
+                self.folder = (!at.is_empty()).then_some(at);
+            }
+            self.reorder();
+            if let Some(i) = self.store.notes.iter().position(|n| n.id == id) {
+                self.open(i);
+            }
+        } else {
+            self.reorder();
+        }
+        // Said once it is open: a notice goes with the note it came on.
+        match came.as_slice() {
+            [] => {}
+            [id] => {
+                let title = self.store.notes.iter().find(|n| n.id == *id).map_or("", |n| n.display_title()).to_string();
+                self.notify(format!("Imported \u{201c}{title}\u{201d}{}", Self::into_words(folder)), None);
+            }
+            all => self.notify(format!("Imported {} notes{}", all.len(), Self::into_words(folder)), None),
+        }
+        if let Some((name, e)) = failed.first() {
+            let more = match failed.len() {
+                1 => String::new(),
+                n => format!(" (and {} more)", n - 1),
+            };
+            self.error = Some(format!("Couldn't import \u{201c}{name}\u{201d}{more}: {}", store::plain_error(e)));
+        }
+    }
+
+    /// " into “Work”", for a folder; nothing for the top level.
+    fn into_words(folder: &str) -> String {
+        if folder.is_empty() { String::new() } else { format!(" into \u{201c}{}\u{201d}", folder_name(folder)) }
     }
 
     /// Back from another app: catch up with what it did to the folder.
@@ -4384,6 +4825,21 @@ fn inside(folder: &str) -> String {
     if folder.is_empty() { String::new() } else { format!("{folder}/") }
 }
 
+/// Where a step from row `at` of a list of `len` comes to: the next, or
+/// the one before going `up`, round to the other end with `wrap`; from
+/// outside the list its first, or its last going back round. `None` for
+/// an end without `wrap`, an empty list, or a step round to where it was.
+fn step_in(len: usize, at: Option<usize>, up: bool, wrap: bool) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    let to = match at {
+        None if up && wrap => Some(last),
+        None => Some(0),
+        Some(p) if up => p.checked_sub(1).or(wrap.then_some(last)),
+        Some(p) => (p < last).then_some(p + 1).or(wrap.then_some(0)),
+    };
+    to.filter(|&to| Some(to) != at)
+}
+
 fn reveal_label() -> &'static str {
     if cfg!(target_os = "macos") {
         "Reveal in Finder"
@@ -4427,6 +4883,12 @@ impl Carnet {
             None => base.into(),
         }
     }
+
+    /// Whether a picture asked for is still being read: what a screenshot
+    /// waits out (shots.rs).
+    pub(crate) fn pictures_loading(&self) -> bool {
+        self.images.counts().0 > 0
+    }
 }
 
 /// `s` with its first letter down: a label in the middle of a line.
@@ -4442,29 +4904,134 @@ fn blank_note() -> Note {
 impl App for Carnet {
     fn setup(&mut self, waker: Waker) {
         self.waker = Some(waker.clone());
-        let wake = waker.clone();
+        // Each thread wakes the window under its own name, so a recording
+        // (the devtools' Perf tab, `KUI_PERF_TRACE`) says which woke it.
+        let wake = waker.named("sync");
         self.sync.set_wake(move || wake.wake());
-        let wake = waker.clone();
+        let wake = waker.named("signup");
         self.signup.set_wake(move || wake.wake());
-        let wake = waker.clone();
+        let wake = waker.named("server check");
         self.connect.set_wake(move || wake.wake());
-        let wake = waker.clone();
+        let wake = waker.named("update check");
         self.updates.set_wake(move || wake.wake());
-        self.images.set_waker(waker);
+        self.images.set_waker(waker.named("pictures"));
     }
 
+    /// The main window's frame, or a note window's as that window's own
+    /// (app_window.rs).
     fn view(&mut self, ui: &mut Ui<'_>) {
+        // The wheel as Settings has it, in this window: taken the frame
+        // it's chosen, unless `KUI_WHEEL` asks for another to compare.
+        let feel = self.settings.wheel.feel();
+        if ui.core().wheel_feel() != feel && std::env::var_os("KUI_WHEEL").is_none() {
+            ui.core().set_wheel_feel(feel);
+        }
+        if ui.env().window.id == kui_native::WindowId::MAIN {
+            // Sync's waiting line keeps time while Settings is shut too, so
+            // a wait that began before it opened is said from its first
+            // frame: held back a moment on each open, the line came in a
+            // moment late, a row more, and the page moved under it.
+            if !self.settings_open {
+                let waiting = (self.sync.waiting(), self.sync.files_waiting());
+                self.wait_line.said(ui.now(), waiting != (0, 0));
+            }
+            // Dividers drawn as a picture: it's asked for from the first
+            // frame, decoded while the reader is still at the top, and held,
+            // not first read when a divider scrolls into view.
+            if self.settings.divider == crate::settings::Divider::Picture
+                && let Some(p) = self.settings.divider_picture_file()
+            {
+                self.images.get(&p);
+            }
+            return self.window_view(ui);
+        }
+        let name = ui.window_name();
+        if let Some(i) = self.windows.iter().position(|w| *w.name() == *name) {
+            self.in_window(i, |app| app.window_view(ui));
+        }
+    }
+
+    /// Every event arrives as a message the view declared, the event's
+    /// data beside it, from the window whose core is lent with it: the
+    /// main window's answered as it always was, a note window's as that
+    /// window's own.
+    fn on_event_with(&mut self, ev: UiEvent, core: &mut Core) {
+        if self.note_window_closed(&ev) {
+            return;
+        }
+        if core.env.window.id == kui_native::WindowId::MAIN {
+            self.on_window_event(ev, core);
+        } else {
+            self.note_window_event(ev, core);
+        }
+    }
+
+    /// An event from a window already gone: only a note window's closing
+    /// is (whichever core noticed it, it may be the window's own).
+    fn on_event(&mut self, ev: UiEvent) {
+        self.note_window_closed(&ev);
+    }
+
+    fn teardown(&mut self) {
+        self.title_focused = false;
+        self.save_current();
+        if self.store.save_all().is_err() {
+            // The last chance: whatever would not save goes to a file of
+            // its own, so nothing typed is lost with the window.
+            for i in 0..self.store.notes.len() {
+                if self.store.notes[i].dirty && !self.store.notes[i].is_blank() {
+                    let _ = self.store.rescue(i);
+                }
+            }
+        }
+    }
+}
+
+impl Carnet {
+    /// A note window closed under the app (its close button, the OS):
+    /// forgotten, so it is not declared again. True if `ev` was about a
+    /// note window's opening or closing.
+    fn note_window_closed(&mut self, ev: &UiEvent) -> bool {
+        let (Some(Msg::NoteWindow { note }), Event::Window(w)) = ev.split::<Msg>() else { return false };
+        if w.phase == WindowPhase::Closed {
+            self.close_window(note);
+        }
+        true
+    }
+
+    /// One window's frame: the main window's, or a note window's with its
+    /// editor in place. What is the whole app's — catching up with what
+    /// another app did to the folder, sync's steps, the update check, the
+    /// sweep, Settings' dialogs — is the main window's alone.
+    fn window_view(&mut self, ui: &mut Ui<'_>) {
+        let main = self.note_window.is_none();
+        // Each of the frame's own jobs a span of its own, read in the
+        // devtools' Perf tab or a `KUI_PERF_TRACE` (nothing is timed while
+        // nobody records).
+        macro_rules! timed {
+            ($name:literal, $work:expr) => {{
+                let s = ui.core().span_begin($name);
+                let r = $work;
+                ui.core().span_end(s);
+                r
+            }};
+        }
         // Autosave once typing has paused.
         if self.store.notes[self.current].dirty && self.last_edit.elapsed() >= SAVE_AFTER {
-            self.save_current();
+            timed!("autosave", self.save_current());
         }
-        self.watch_tick();
-        self.sync_tick();
-        self.connect_tick();
-        self.updates_tick();
-        if self.joined_said && !self.settings_open {
-            self.joined_said = false;
-            self.sync.joined = None;
+        for m in self.marks.drain(..) {
+            ui.core().perf_mark(m);
+        }
+        if main {
+            timed!("folder watch", self.watch_tick());
+            timed!("sync", self.sync_tick());
+            timed!("server check", self.connect_tick());
+            timed!("update check", self.updates_tick());
+            if self.joined_said && !self.settings_open {
+                self.joined_said = false;
+                self.sync.joined = None;
+            }
         }
         // A notice lasts a while, then goes; Undo lasts as long as it shows.
         // Its while starts again as long as the pointer is on it, on its way
@@ -4505,23 +5072,25 @@ impl App for Carnet {
         if let Some(n) = &self.notice {
             due.push(NOTICE_FOR.saturating_sub(n.at.elapsed()));
         }
-        // A change elsewhere, waiting for typing to pause.
-        if self.watch.as_ref().is_some_and(crate::watch::Watch::pending) {
-            due.push(WATCH_QUIET.saturating_sub(self.last_edit.elapsed()));
-        }
-        // The pictures no note shows, now and then.
-        if Instant::now() >= self.next_sweep {
-            self.sweep_files();
-        }
-        due.push(self.next_sweep.saturating_duration_since(Instant::now()));
-        // Sync's turn after what happened: the notes' places and pictures
-        // to the vault (a first login, a picture beside a note), the notes
-        // on the server asked again; and the inspector's "Checked …" kept
-        // true while it shows.
-        due.extend(self.sync.due());
-        due.extend(self.updates.due(self.settings.check_updates, Instant::now()));
-        if self.settings_open && self.sync_inspector && self.sync.inspected_at.is_some() {
-            due.push(INSPECTED_EVERY);
+        if main {
+            // A change elsewhere, waiting for typing to pause.
+            if self.watch.as_ref().is_some_and(crate::watch::Watch::pending) {
+                due.push(WATCH_QUIET.saturating_sub(self.last_edit.elapsed()));
+            }
+            // The pictures no note shows, now and then.
+            if Instant::now() >= self.next_sweep {
+                self.sweep_files();
+            }
+            due.push(self.next_sweep.saturating_duration_since(Instant::now()));
+            // Sync's turn after what happened: the notes' places and pictures
+            // to the vault (a first login, a picture beside a note), the notes
+            // on the server asked again; and the inspector's "Checked …" kept
+            // true while it shows.
+            due.extend(self.sync.due());
+            due.extend(self.updates.due(self.settings.check_updates, Instant::now()));
+            if self.settings_open && self.sync_inspector && self.sync.inspected_at.is_some() {
+                due.push(INSPECTED_EVERY);
+            }
         }
         if let Some(wait) = due.into_iter().min() {
             let wait = if wait.is_zero() { RETRY_AFTER } else { wait };
@@ -4546,18 +5115,22 @@ impl App for Carnet {
         if let Some((w, h, rgba)) = self.picture_out.take() {
             ui.set_clipboard_image(w, h, rgba);
         }
+        if let Some(paths) = self.files_out.take() {
+            ui.set_clipboard_files(paths);
+        }
         // Pictures the last frame didn't draw may go; a frame is asked
         // for when the next could, should nothing else draw one.
-        if let Some(wait) = self.images.sweep(ui.core(), std::time::Instant::now()) {
+        if let Some(wait) = timed!("pictures let go", self.images.sweep(ui.core(), std::time::Instant::now())) {
             ui.request_frame_at(ui.now() + wait.as_secs_f64());
         }
-        if self.images.pump(ui.core()) {
+        if timed!("pictures handed over", self.images.pump(ui.core())) {
             self.reveal = self.reveal || self.editing;
         }
-        if let Some(dir) = self.dir_change.take() {
+        // Settings' asks are the main window's.
+        if main && let Some(dir) = self.dir_change.take() {
             self.change_dir(dir, ui.core());
         }
-        if std::mem::take(&mut self.pick_dir) {
+        if main && std::mem::take(&mut self.pick_dir) {
             let start = self.store.dir.display().to_string();
             ui.request_files(
                 kui_native::FileDialog::folder()
@@ -4571,7 +5144,7 @@ impl App for Carnet {
                 kui_native::FileDialog::open()
                     .multiple()
                     .title("Choose pictures")
-                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp"])
+                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"])
                     .tag(Msg::PickedPictures),
             );
         }
@@ -4581,6 +5154,14 @@ impl App for Carnet {
                     .multiple()
                     .title("Add pictures or files")
                     .tag(Msg::PickedFiles),
+            );
+        }
+        if main && std::mem::take(&mut self.pick_divider_picture) {
+            ui.request_files(
+                kui_native::FileDialog::open()
+                    .title("Choose a picture for dividers")
+                    .filter("Pictures", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "svgz"])
+                    .tag(Msg::PickedDividerPicture),
             );
         }
         // Asked on every frame the answer is outstanding: the core queues
@@ -4619,7 +5200,7 @@ impl App for Carnet {
         }
         if focused != self.last_focus {
             // The keyboard went somewhere: no longer the folders' arrows.
-            if focused.is_some_and(|f| f != Key::ROOT) {
+            if main && !self.keyboard_on_the_list(focused) {
                 self.folders_clicked = false;
                 self.cards_clicked = false;
             }
@@ -4627,6 +5208,7 @@ impl App for Carnet {
             // folder is made, if it has a name, and where the click went
             // stays shown. Escape has already dropped it (`cancel`).
             if let Some(prev) = self.last_focus
+                && main
                 && self.naming.as_ref().is_some_and(|n| n.key == Some(prev))
             {
                 self.finish_naming(true, false);
@@ -4655,7 +5237,9 @@ impl App for Carnet {
             ui.core().declare_menu_bar(bar);
         }
         self.fields.clear();
-        self.forget_passwords();
+        if main {
+            self.forget_passwords();
+        }
         self.caret = page::fix(self.doc(), self.caret);
         self.follow_pointer(ui);
         let mut l = self.styler.look(ui, &self.settings);
@@ -4680,6 +5264,10 @@ impl App for Carnet {
         let vw = ui.viewport().w;
         self.view_resized = vw != self.view_w;
         self.view_w = vw;
+        if !main {
+            return self.note_window_frame(ui, &l);
+        }
+        self.declare_windows(ui);
         // Wide: the library beside the note. Narrow: one or the other —
         // the list, until a note is chosen; the note, with a way back.
         // Narrow by the library's least width, not its own: a library
@@ -4709,17 +5297,17 @@ impl App for Carnet {
             return;
         }
         if !narrow {
-            self.library_pane(ui, &l);
+            ui.span("library", |ui| self.library_pane(ui, &l));
         }
         let main_w = vw - self.side_w(narrow);
         ui.with(
             NodeSpec::column().grow_width().grow_height().bg(l.t.bg),
             |ui| {
                 if self.settings_open {
-                    self.settings_page(ui, &l, narrow, main_w);
+                    ui.span("settings", |ui| self.settings_page(ui, &l, narrow, main_w));
                 } else {
-                    self.strip(ui, &l, narrow);
-                    self.page(ui, &l, main_w);
+                    ui.span("toolbar", |ui| self.strip(ui, &l, narrow));
+                    ui.span("page", |ui| self.page(ui, &l, main_w));
                     // The words scrolling up under the strip fade out
                     // rather than being cut at its edge. Paint only: a
                     // press here is the page's. Clear of the library's
@@ -4739,6 +5327,7 @@ impl App for Carnet {
         if !self.settings_open {
             self.tint_picker(ui, &l);
             self.link_editor(ui, &l);
+            self.open_question(ui, &l);
         }
         self.note_ghost(ui, &l);
         if self.hud {
@@ -4749,13 +5338,13 @@ impl App for Carnet {
         }
     }
 
-    /// Every event arrives as a message the view declared, the event's
-    /// data beside it; one that carries none of Carnet's (a `layout`) is
-    /// not the app's to answer. What the core reports rather than a press
-    /// on a control — a field's words, a menu, the window, files — is
-    /// answered here and leaves typing and the colour picker as they are;
-    /// the rest is `on_msg`'s.
-    fn on_event_with(&mut self, ev: UiEvent, core: &mut Core) {
+    /// One window's event: a message its view declared, the event's data
+    /// beside it; one that carries none of Carnet's (a `layout`) is not
+    /// the app's to answer. What the core reports rather than a press on a
+    /// control — a field's words, a menu, the window, files — is answered
+    /// here and leaves typing and the colour picker as they are; the rest
+    /// is `on_msg`'s.
+    fn on_window_event(&mut self, ev: UiEvent, core: &mut Core) {
         let (Some(msg), event) = ev.split::<Msg>() else { return };
         match (msg, event) {
             (Msg::Edited { field }, Event::EditChange(c)) => self.on_field_changed(field, c.text),
@@ -4780,7 +5369,7 @@ impl App for Carnet {
             }
             (Msg::Chose, Event::Menu(c)) => {
                 if let Ok(act) = Act::try_from(&c.item) {
-                    self.on_act(act);
+                    self.on_act(act, core.env.window.id);
                 }
             }
             // The folder dialog's answer, and the pictures dialog's.
@@ -4793,6 +5382,11 @@ impl App for Carnet {
                 let files: Vec<_> = paths.iter().map(std::path::PathBuf::from).collect();
                 self.insert_files(&files);
             }
+            (Msg::PickedDividerPicture, Event::Files(paths)) => {
+                if let Some(p) = paths.first() {
+                    self.set_divider_picture(std::path::Path::new(p));
+                }
+            }
             (Msg::FilesOver, Event::Drop(d)) => self.files_over(d),
             (Msg::WindowFocus, Event::Window(w)) => self.window_focus(w.phase == WindowPhase::Focused, core),
             // A modal put away (Esc, or a press outside it): the link
@@ -4802,6 +5396,9 @@ impl App for Carnet {
                     self.focus_page = true;
                 }
             }
+            // And the question before a file that could run opens: as
+            // Cancel.
+            (Msg::OpenCancel, Event::Dismiss(_)) => self.open_ask = None,
             // Their data unread (a core this one does not follow): nothing
             // to answer, and nothing for `on_msg` to put away.
             (
@@ -4812,27 +5409,15 @@ impl App for Carnet {
                 | Msg::DeletedMenu { .. }
                 | Msg::Chose
                 | Msg::WindowFocus
+                | Msg::NoteWindow { .. }
                 | Msg::FilesOver
                 | Msg::PickedDir
                 | Msg::PickedPictures
-                | Msg::PickedFiles,
+                | Msg::PickedFiles
+                | Msg::PickedDividerPicture,
                 _,
             ) => {}
             (msg, event) => self.on_msg(msg, event, ev.key, core),
-        }
-    }
-
-    fn teardown(&mut self) {
-        self.title_focused = false;
-        self.save_current();
-        if self.store.save_all().is_err() {
-            // The last chance: whatever would not save goes to a file of
-            // its own, so nothing typed is lost with the window.
-            for i in 0..self.store.notes.len() {
-                if self.store.notes[i].dirty && !self.store.notes[i].is_blank() {
-                    let _ = self.store.rescue(i);
-                }
-            }
         }
     }
 }

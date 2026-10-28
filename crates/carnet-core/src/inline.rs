@@ -28,35 +28,63 @@
 //! an edit takes it whole. Elsewhere a picture is a block of its own
 //! (`doc::Kind::Image`), and the same marks are the `!` and link they
 //! look like.
+//!
+//! A paragraph's (or a list item's) words that are links to files the
+//! note keeps and nothing else (`[a.pdf](attachments/a.pdf) [b.zip](…)`,
+//! [`doc::file_line`]) are drawn as a tile each: read so only while a
+//! [`file_text`] lives, as the page reads such a block. Each link's `[`
+//! is then its one word, drawn as the tile, and the rest its marks, as a
+//! cell's picture is; any other line, or a file link among other words,
+//! is the link it looks like.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
-use crate::doc::{self, CellPicture};
+use crate::doc::{self, CellPicture, FileLink};
 
 thread_local! {
     /// Whether the text being read is a table cell's: see [`CellText`].
     static IN_CELL: Cell<bool> = const { Cell::new(false) };
+    /// Whether a line of file links alone is read as tiles: see
+    /// [`file_text`].
+    static FILES: Cell<bool> = const { Cell::new(false) };
 }
 
 /// While it lives, text is read as a table's cell has it, a picture among
 /// its words read as one (or, made with `false`, as any other text: a
-/// paragraph in the same edit). Dropped, reading is as it was.
+/// paragraph in the same edit); or (made by [`file_text`]) as a block
+/// whose line of file links is tiles. Dropped, reading is as it was.
 #[must_use]
 pub struct CellText {
-    was: bool,
+    was: (bool, bool),
 }
 
 /// Text read as a table's cell (`true`) or as any other text has it,
 /// until what this gives is dropped.
 pub fn cell_text(on: bool) -> CellText {
-    CellText { was: IN_CELL.replace(on) }
+    CellText { was: (IN_CELL.replace(on), FILES.replace(false)) }
+}
+
+/// Text read as a paragraph's or a list item's: a line of links to files
+/// the note keeps, and nothing else, a tile for each ([`doc::file_line`]),
+/// its `[` the one word and the rest marks, so the caret steps over it
+/// whole and an edit takes it whole. Until what this gives is dropped.
+pub fn file_text() -> CellText {
+    CellText { was: (IN_CELL.replace(false), FILES.replace(true)) }
 }
 
 impl Drop for CellText {
     fn drop(&mut self) {
-        IN_CELL.set(self.was);
+        IN_CELL.set(self.was.0);
+        FILES.set(self.was.1);
     }
+}
+
+/// The file links of a line drawn as tiles, as the text is read now
+/// (under a [`file_text`]): each its place, its words and its address.
+/// Empty for any other line, or read otherwise.
+pub fn tiles(text: &str) -> Vec<FileLink> {
+    read(text).files
 }
 
 /// The pictures among a cell's words, as the cell's editor reads them: not
@@ -84,6 +112,9 @@ pub struct Style {
     /// A picture among a cell's words: its `!`, the one word it has,
     /// drawn as the picture ([`cell_pictures`] says which).
     pub picture: bool,
+    /// A link to a file on a line of them alone, read as tiles: its `[`,
+    /// the one word it has, drawn as the tile ([`tiles`] says which).
+    pub file: bool,
 }
 
 /// The plain highlighter, `==…==` or a `<mark>` with no colour: the
@@ -106,6 +137,9 @@ pub enum Kind {
     /// A picture among a cell's words: nothing opens it, its `!` is its
     /// word, and the rest its closing marks.
     Picture,
+    /// A link to a file drawn as a tile ([`file_text`]): its `[` is its
+    /// word, and the rest its closing marks, as a cell's picture.
+    File,
     /// A line break written as Markdown's hard one: two spaces or more, or
     /// a backslash, at the end of a line that goes on. They are its
     /// opening marks, its `\n` its one word, and nothing closes it; so the
@@ -129,7 +163,7 @@ impl Kind {
             Kind::Strike => ("~~", "~~"),
             Kind::Underline => ("<u>", "</u>"),
             Kind::Code => ("`", "`"),
-            Kind::Link | Kind::Tint | Kind::Picture | Kind::Break => ("", ""),
+            Kind::Link | Kind::Tint | Kind::Picture | Kind::File | Kind::Break => ("", ""),
         }
     }
 
@@ -144,6 +178,7 @@ impl Kind {
             Kind::Link => s.link,
             Kind::Tint => s.ink != 0 || s.mark != 0,
             Kind::Picture => s.picture,
+            Kind::File => s.file,
             Kind::Break => false,
         }
     }
@@ -173,8 +208,12 @@ struct Read {
     tints: Vec<Tint>,
     pairs: Vec<Pair>,
     pictures: Vec<CellPicture>,
+    /// A line of file links read as tiles: each link ([`tiles`]).
+    files: Vec<FileLink>,
     /// The marks of every line break ([`breaks`]).
     breaks: Vec<(usize, usize)>,
+    /// Each `--` drawn as an em dash ([`dashes`]).
+    dashes: Vec<(usize, usize)>,
 }
 
 /// The line as runs of one style each: `(start, end, style)`, in order,
@@ -656,7 +695,195 @@ fn read_counting(text: &str, count: Count) -> Read {
             };
         }
     }
-    Read { styles: st, tints: found, pairs, pictures, breaks }
+    let dashes = dashes_of(text, &st, &quiet);
+    let mut r = Read { styles: st, tints: found, pairs, pictures, files: Vec::new(), breaks, dashes };
+    if FILES.get() && !IN_CELL.get() {
+        tile_files(text, &mut r);
+    }
+    r
+}
+
+/// The file links of a line that is nothing else ([`doc::file_line`]),
+/// as `r` read it as any other text: `None` for any other line. Only
+/// links written `[words](address)`, each to a file the note keeps
+/// ([`doc::is_file_target`]), its words plain (a backslash before a mark
+/// aside: the mark is a letter) and on one line, with nothing but
+/// whitespace (and the line breaks it makes) before, between and after.
+fn file_links_of(text: &str, r: &Read) -> Option<Vec<FileLink>> {
+    if text.trim().is_empty() {
+        return None;
+    }
+    let b = text.as_bytes();
+    let mut links: Vec<&Pair> = Vec::new();
+    for p in &r.pairs {
+        match p.kind {
+            Kind::Link if p.open.1 == p.open.0 + 1 && b[p.open.0] == b'[' => links.push(p),
+            Kind::Break => {}
+            _ => return None,
+        }
+    }
+    links.sort_by_key(|p| p.open.0);
+    let gap = |g: &str| g.replace("\\\n", "\n").chars().all(char::is_whitespace);
+    let plain = Style { link: true, ..Style::default() };
+    let mut out = Vec::new();
+    let mut last = 0;
+    for p in links {
+        if !gap(&text[last..p.open.0]) {
+            return None;
+        }
+        let words = &text[p.open.1..p.close.0];
+        if words.contains('\n') {
+            return None;
+        }
+        let mut name = String::new();
+        for (k, ch) in words.char_indices() {
+            let s = r.styles[p.open.1 + k];
+            match (s.marker, ch) {
+                (true, '\\') => {}
+                (false, _) if s == plain => name.push(ch),
+                _ => return None,
+            }
+        }
+        // Inside the brackets: `<…>`, or the address with any title after.
+        let raw = text[p.close.0 + 2..p.close.1 - 1].trim();
+        let target = match raw.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+            Some(t) => t,
+            None => raw.find(" \"").or_else(|| raw.find(" '")).map_or(raw, |s| raw[..s].trim_end()),
+        };
+        let path = doc::percent_decoded(target);
+        if name.trim().is_empty() || !doc::is_file_target(&path) {
+            return None;
+        }
+        out.push(FileLink { at: (p.open.0, p.close.1), name, target: target.to_string(), path });
+        last = p.close.1;
+    }
+    (!out.is_empty() && gap(&text[last..])).then_some(out)
+}
+
+/// A line of file links read as tiles: each link's `[` its one word (a
+/// [`Style::file`]), the rest its marks, its pair a [`Kind::File`]'s.
+fn tile_files(text: &str, r: &mut Read) {
+    let Some(files) = file_links_of(text, r) else { return };
+    r.pairs.retain(|p| p.kind != Kind::Link);
+    for f in &files {
+        let (a, e) = f.at;
+        r.styles[a] = Style { file: true, ..Style::default() };
+        r.styles[a + 1..e].fill(Style { marker: true, ..Style::default() });
+        r.pairs.push(Pair { kind: Kind::File, open: (a, a), close: (a + 1, e) });
+    }
+    // A name's `--` is no dash drawn: the tile is drawn, not its words.
+    r.dashes.retain(|d| !files.iter().any(|f| f.at.0 <= d.0 && d.1 <= f.at.1));
+    r.files = files;
+}
+
+/// The file links of `text` if it is a line of them alone, read as any
+/// other text ([`doc::file_line`]).
+pub(crate) fn file_line(text: &str) -> Option<Vec<FileLink>> {
+    let _plain = cell_text(false);
+    file_links_of(text, &read(text))
+}
+
+/// What a `--` is drawn as.
+pub const EM_DASH: &str = "\u{2014}";
+
+/// Each `--` of `text` drawn as an em dash (`—`), `(start, end)` in the
+/// source, in order. Only drawn: the file keeps the two dashes, as a
+/// divider is drawn as an ornament and kept as `---`. A run of exactly two
+/// among the words: none in code, an address, a mark or an HTML tag or
+/// comment the page shows as written (`<div class="a--b">`, `<!-- … -->`),
+/// nor where either dash is escaped (`\--`, `-\-`, both kept as written);
+/// a run of three or more is kept as written too (`---`, `----`), as it
+/// reads as neither a dash nor a divider in a line, and so is an arrow
+/// (`-->`, `<--`).
+pub fn dashes(text: &str) -> Vec<(usize, usize)> {
+    if !text.contains("--") {
+        return Vec::new();
+    }
+    read(text).dashes
+}
+
+fn dashes_of(text: &str, st: &[Style], quiet: &[bool]) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    if !text.contains("--") {
+        return out;
+    }
+    let tags = shown_tags(text, quiet);
+    let mut t = 0;
+    let mut i = 0;
+    while let Some(k) = text[i..].find('-') {
+        let at = i + k;
+        let n = run_len(b, at, b'-');
+        i = at + n;
+        // An arrow, `-->` or `<--`, is kept as written.
+        let arrow = (at > 0 && b[at - 1] == b'<') || b.get(at + 2) == Some(&b'>');
+        if n != 2 || arrow || (at..at + 2).any(|j| quiet[j] || st[j].marker) {
+            continue;
+        }
+        while t < tags.len() && tags[t].1 <= at {
+            t += 1;
+        }
+        if tags.get(t).is_some_and(|&(s, _)| s <= at) {
+            continue;
+        }
+        out.push((at, at + 2));
+    }
+    out
+}
+
+/// HTML the page shows as written, as `(start, end)` in order: a tag of no
+/// style Carnet reads (`<div …>`, `</p>`), from its `<` to its `>`, and a
+/// comment, `<!--` to `-->`. Outside code and the marks already read.
+fn shown_tags(text: &str, quiet: &[bool]) -> Vec<(usize, usize)> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    // Where the next `>` is, from each byte: one walk back along the line.
+    let mut next_gt = vec![usize::MAX; b.len() + 1];
+    for k in (0..b.len()).rev() {
+        next_gt[k] = if b[k] == b'>' { k } else { next_gt[k + 1] };
+    }
+    let mut comments = true;
+    let mut i = 0;
+    while let Some(k) = text[i..].find('<') {
+        let at = i + k;
+        i = at + 1;
+        if quiet[at] {
+            continue;
+        }
+        if comments && text[at..].starts_with("<!--") {
+            match text[at + 4..].find("-->") {
+                Some(e) => {
+                    let end = at + 4 + e + 3;
+                    out.push((at, end));
+                    i = end;
+                }
+                // None closes: nor will any after it.
+                None => comments = false,
+            }
+            continue;
+        }
+        let opens = b.get(at + 1).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'/' || c == b'!' || c == b'?');
+        let end = next_gt[at + 1];
+        if opens && end != usize::MAX {
+            out.push((at, end + 1));
+            i = end + 1;
+        }
+    }
+    out
+}
+
+/// Words `a..b` of `text` as they are drawn: each of `dashes` wholly in
+/// them an em dash ([`dashes`]).
+pub fn dashed(text: &str, (a, b): (usize, usize), dashes: &[(usize, usize)]) -> String {
+    let mut out = String::with_capacity(b - a);
+    let mut at = a;
+    for &(s, e) in dashes.iter().filter(|&&(s, e)| a <= s && e <= b) {
+        out.push_str(&text[at..s]);
+        out.push_str(EM_DASH);
+        at = e;
+    }
+    out.push_str(&text[at..b]);
+    out
 }
 
 /// The marks of each hard line break in `text`, outside code (`quiet`):
@@ -1226,12 +1453,84 @@ pub struct Visible {
     /// The source's ranges that are words, in order.
     pub runs: Vec<(usize, usize)>,
     /// A cell's pictures, in the source: each one word, its `!`, and
-    /// the caret after it past all of it.
+    /// the caret after it past all of it. A line's tiles too ([`tiles`]),
+    /// each one word, its `[`.
     pub atoms: Vec<(usize, usize)>,
+    /// Each `--` drawn as one letter, an em dash ([`dashes`]), in the
+    /// source: the caret steps over it whole, never between its dashes,
+    /// and an edit takes both. Only in [`Visible::page`]'s.
+    pub dashes: Vec<(usize, usize)>,
+}
+
+/// A stretch of the words: where it is in the source, and whether it is a
+/// `--` drawn as an em dash.
+#[derive(Clone, Copy)]
+struct Piece {
+    from: usize,
+    to: usize,
+    dash: bool,
+}
+
+impl Piece {
+    /// How long it is drawn.
+    fn len(&self) -> usize {
+        if self.dash { EM_DASH.len() } else { self.to - self.from }
+    }
+}
+
+/// [`Visible`]'s words stretch by stretch ([`Piece`]).
+struct Pieces<'a> {
+    runs: &'a [(usize, usize)],
+    dashes: &'a [(usize, usize)],
+    /// The run under way, and where in the source it has got to.
+    r: usize,
+    at: usize,
+    /// The first dash not yet passed.
+    k: usize,
+}
+
+impl Iterator for Pieces<'_> {
+    type Item = Piece;
+
+    fn next(&mut self) -> Option<Piece> {
+        loop {
+            let &(f, to) = self.runs.get(self.r)?;
+            let at = self.at.max(f);
+            if at >= to {
+                self.r += 1;
+                continue;
+            }
+            while self.dashes.get(self.k).is_some_and(|d| d.0 < at) {
+                self.k += 1;
+            }
+            let piece = match self.dashes.get(self.k) {
+                Some(&(s, e)) if e <= to && s == at => {
+                    self.k += 1;
+                    Piece { from: s, to: e, dash: true }
+                }
+                Some(&(s, e)) if e <= to => Piece { from: at, to: s, dash: false },
+                _ => Piece { from: at, to, dash: false },
+            };
+            self.at = piece.to;
+            return Some(piece);
+        }
+    }
 }
 
 impl Visible {
+    /// The words, marks left out. Each `--` as its two dashes: what an
+    /// edit reads the words as ([`Visible::page`] for what is drawn).
     pub fn of(text: &str) -> Self {
+        Self::read(text, false)
+    }
+
+    /// The words as the page draws them: [`Visible::of`], each `--` an em
+    /// dash ([`dashes`]).
+    pub fn page(text: &str) -> Self {
+        Self::read(text, true)
+    }
+
+    fn read(text: &str, dashed: bool) -> Self {
         let r = read(text);
         let mut runs: Vec<(usize, usize)> = Vec::new();
         for (a, b, s) in runs_of(&r.styles) {
@@ -1243,82 +1542,112 @@ impl Visible {
                 _ => runs.push((a, b)),
             }
         }
-        let atoms = r.pictures.iter().map(|p| p.at).collect();
-        Self { len: text.len(), runs, atoms }
+        let atoms = r.pictures.iter().map(|p| p.at).chain(r.files.iter().map(|f| f.at)).collect();
+        let dashes = if dashed { r.dashes } else { Vec::new() };
+        Self { len: text.len(), runs, atoms, dashes }
     }
 
     /// Every byte a word: code, kept as written.
     pub fn all(text: &str) -> Self {
         let runs = if text.is_empty() { Vec::new() } else { vec![(0, text.len())] };
-        Self { len: text.len(), runs, atoms: Vec::new() }
+        Self { len: text.len(), runs, atoms: Vec::new(), dashes: Vec::new() }
     }
 
+    /// The words in stretches, in order: each run of them, cut round the
+    /// dashes in it, each dash a stretch of its own.
+    fn pieces(&self) -> Pieces<'_> {
+        Pieces { runs: &self.runs, dashes: &self.dashes, r: 0, at: 0, k: 0 }
+    }
 
     /// How long the words are.
     pub fn drawn_len(&self) -> usize {
-        self.runs.iter().map(|(a, b)| b - a).sum()
+        self.pieces().map(|p| p.len()).sum()
     }
 
     /// The words alone.
     pub fn text(&self, source: &str) -> String {
-        self.runs.iter().map(|&(a, b)| &source[a..b]).collect()
+        self.pieces().map(|p| if p.dash { EM_DASH } else { &source[p.from..p.to] }).collect()
+    }
+
+    /// The words stretch by stretch, in order: `(from, to, dash)` in the
+    /// source, each `--` drawn as an em dash one of its own (`dash`),
+    /// drawn [`EM_DASH`]`.len()` bytes long.
+    pub fn stretches(&self) -> Vec<(usize, usize, bool)> {
+        self.pieces().map(|p| (p.from, p.to, p.dash)).collect()
     }
 
     /// Where source byte `b` is in the words: past the marks before it.
+    /// Between a dash's two dashes is past it.
     pub fn drawn(&self, b: usize) -> usize {
         let mut out = 0;
-        for &(f, to) in &self.runs {
-            if b <= f {
+        for p in self.pieces() {
+            if b <= p.from {
                 break;
             }
-            out += b.min(to) - f;
+            out += if p.dash { p.len() } else { b.min(p.to) - p.from };
         }
         out
     }
 
-    /// The source byte of word byte `d` itself (the end, past them all).
+    /// The source byte of word byte `d` itself (the end, past them all);
+    /// in a dash, its first.
     pub fn source(&self, d: usize) -> usize {
         let mut left = d;
-        for &(f, to) in &self.runs {
-            if left < to - f {
-                return f + left;
+        for p in self.pieces() {
+            if left < p.len() {
+                return if p.dash { p.from } else { p.from + left };
             }
-            left -= to - f;
+            left -= p.len();
         }
         self.len
     }
 
     /// The source ranges that hold words `a..b`, one per stretch of
     /// words between marks: each can be wrapped in a new pair of tags
-    /// that nests inside whatever marks are around it.
+    /// that nests inside whatever marks are around it. A dash is held
+    /// whole.
     pub fn spans(&self, a: usize, b: usize) -> Vec<(usize, usize)> {
-        let mut out = Vec::new();
+        let mut out: Vec<(usize, usize)> = Vec::new();
         let mut d = 0;
-        for &(f, to) in &self.runs {
-            let (lo, hi) = (a.max(d), b.min(d + to - f));
+        for p in self.pieces() {
+            let (lo, hi) = (a.max(d), b.min(d + p.len()));
             if lo < hi {
-                out.push((f + lo - d, f + hi - d));
+                let r = if p.dash { (p.from, p.to) } else { (p.from + lo - d, p.from + hi - d) };
+                match out.last_mut() {
+                    Some(last) if last.1 == r.0 => last.1 = r.1,
+                    _ => out.push(r),
+                }
             }
-            d += to - f;
+            d += p.len();
         }
         out
+    }
+
+    /// Byte `b` of the source, out from between a dash's two dashes to
+    /// past it: where the caret drawn after the dash is.
+    pub fn settle(&self, b: usize) -> usize {
+        self.dashes.iter().find(|&&(s, e)| s < b && b < e).map_or(b, |d| d.1)
     }
 
     /// Where the caret goes for place `d` in the words: right after the
     /// letter before it, inside that letter's marks, so typing carries its
     /// style on; at the very start, before the first letter, inside its.
+    /// In a dash, after it.
     pub fn at(&self, d: usize) -> usize {
         if d == 0 {
             return self.runs.first().map_or(0, |r| r.0);
         }
         let mut left = d;
-        for &(f, to) in &self.runs {
-            if left <= to - f {
+        for p in self.pieces() {
+            if left <= p.len() {
+                if p.dash {
+                    return p.to;
+                }
                 // After a picture's `!`: past the rest of it.
-                let b = f + left;
+                let b = p.from + left;
                 return self.atoms.iter().find(|a| a.0 + 1 == b).map_or(b, |a| a.1);
             }
-            left -= to - f;
+            left -= p.len();
         }
         self.len
     }
@@ -1382,7 +1711,7 @@ fn cut_keeping(text: &str, a: usize, b: usize, keep: Option<Kind>) -> (String, u
         // Code is never kept whole around a change: its words are literal,
         // so a style goes outside it, not as marks inside; nor a picture,
         // whose one word is never parted from its marks.
-        if keep.is_some_and(|k| k != p.kind) && !matches!(p.kind, Kind::Code | Kind::Picture) && o1 <= a && b <= c0 {
+        if keep.is_some_and(|k| k != p.kind) && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::File) && o1 <= a && b <= c0 {
             continue;
         }
         let mut at = vec![o1, c0];
@@ -1479,7 +1808,7 @@ pub fn merge(text: &str) -> String {
             opening.entry(q.open.0).or_default().push(q);
         }
         for p in &ps {
-            if matches!(p.kind, Kind::Link | Kind::Code | Kind::Picture | Kind::Break) {
+            if matches!(p.kind, Kind::Link | Kind::Code | Kind::Picture | Kind::File | Kind::Break) {
                 continue;
             }
             let same = |q: &&Pair| {
@@ -1516,7 +1845,7 @@ pub fn join(left: &str, right: &str) -> String {
     // of `left` past `end` and all of `right` before `start`.
     let (mut end, mut start) = (left.len(), 0);
     // Each pair met has a closing mark, so `end` moves back and it ends.
-    while let Some(p) = lp.iter().find(|p| p.close.1 == end && p.close.0 < end && !matches!(p.kind, Kind::Link | Kind::Picture | Kind::Break)) {
+    while let Some(p) = lp.iter().find(|p| p.close.1 == end && p.close.0 < end && !matches!(p.kind, Kind::Link | Kind::Picture | Kind::File | Kind::Break)) {
         // Two code spans: one, its marks made for the words of both.
         if p.kind == Kind::Code {
             let Some(q) = rp.iter().find(|q| q.open.0 == start && q.kind == Kind::Code) else { break };
@@ -1698,7 +2027,7 @@ fn wrapping(ps: &[Pair], len: usize) -> Vec<&Pair> {
         p.open.0 == s
             && p.close.1 == e
             && (p.open.1 > p.open.0 || p.close.1 > p.close.0)
-            && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::Break)
+            && !matches!(p.kind, Kind::Code | Kind::Picture | Kind::File | Kind::Break)
     }) {
         (s, e) = (p.open.1, p.close.0);
         out.push(p);
@@ -1813,6 +2142,16 @@ fn retag(text: &mut String, t: &Tint, ink: Option<u32>, mark: Option<u32>) {
 
 /// The link the caret at `at` is in: its pair and its address.
 pub fn link_at(text: &str, at: usize) -> Option<(Pair, String)> {
+    // A tile, the caret beside it or the tile chosen: its link, as any
+    // other text reads it, so it is followed, changed or taken off its
+    // words as a link is.
+    if FILES.get()
+        && !IN_CELL.get()
+        && let Some(f) = tiles(text).into_iter().find(|f| f.at.0 <= at && at <= f.at.1)
+    {
+        let _plain = cell_text(false);
+        return link_at(text, f.at.0 + 1);
+    }
     pairs(text)
         .into_iter()
         .find(|p| p.kind == Kind::Link && p.open.1 <= at && at <= p.close.0)
@@ -2013,7 +2352,7 @@ pub fn change_case(text: &str, a: usize, b: usize, case: Case) -> Option<(String
     let (mut stop, mut start) = (false, true);
     let mut end = b;
     for (i, ch) in text.char_indices() {
-        let drawn = st.get(i).is_some_and(|s| !s.marker && !s.picture);
+        let drawn = st.get(i).is_some_and(|s| !s.marker && !s.picture && !s.file);
         if !drawn {
             out.push(ch);
             continue;
@@ -2851,5 +3190,89 @@ mod tests {
         // As the property test found it, among stray marks.
         let t = "](https://example.com)|ё<u>!<mark>!</u>>  <mark style=\"background: #D8EAC0CC\"></u>Ünï<span style=\"color: #C0553F; background: #F8EBA6CC\">";
         assert!(emphasis(t, 2, 25, Kind::Italic).is_some());
+    }
+
+    /// The words of `t` as the page draws them.
+    fn drawn(t: &str) -> String {
+        Visible::page(t).text(t)
+    }
+
+    /// Two dashes among the words are drawn as an em dash; the text keeps
+    /// them, and an edit reads them as two ([`Visible::of`]).
+    #[test]
+    fn two_dashes_are_drawn_as_an_em_dash() {
+        assert_eq!(dashes("a -- b"), [(2, 4)]);
+        assert_eq!(drawn("a -- b"), "a — b");
+        assert_eq!(drawn("word--word and--"), "word—word and—");
+        assert_eq!(drawn("--"), "—");
+        assert_eq!(Visible::of("a -- b").text("a -- b"), "a -- b", "read for an edit, two dashes");
+        assert_eq!(plain("a -- b"), "a -- b", "the words as a preview has them");
+        // Styled, the dash wears the style of its words.
+        assert_eq!(drawn("**a -- b**"), "a — b");
+        assert_eq!(drawn("*--*"), "—");
+        assert_eq!(drawn("[a -- b](https://x.y)"), "a — b", "a link's words");
+        assert_eq!(drawn("<u>a -- b</u> ==c--d=="), "a — b c—d");
+    }
+
+    /// Never in code, an address, a mark or HTML shown as written.
+    #[test]
+    fn no_dash_in_code_links_or_tags() {
+        for t in [
+            "`a -- b`",
+            "``x--y``",
+            "[x](https://a--b.example/c--d)",
+            "<https://a--b.example>",
+            "see https://a--b.example/x--y here",
+            "me--you@mail.example",
+            "<div class=\"a--b\">",
+            "<!-- a -- b -->",
+            "</x--y>",
+        ] {
+            assert_eq!(dashes(t), [], "{t}");
+        }
+        assert_eq!(drawn("[x](https://a--b.example) -- `c--d`"), "x — c--d");
+        assert_eq!(drawn("<mark style=\"background: #F8EBA6CC\">a -- b</mark>"), "a — b", "inside the tag's words, not its marks");
+        assert_eq!(drawn("<!-- x --> y -- z"), "<!-- x --> y — z", "after a comment");
+        assert_eq!(drawn("a < b -- c > d"), "a < b — c > d", "not a tag");
+    }
+
+    /// A run of three or more dashes, an arrow and an escaped dash are
+    /// kept as written.
+    #[test]
+    fn runs_arrows_and_escapes_keep_their_dashes() {
+        for t in ["a --- b", "a ---- b", "x---", "a --> b", "a <-- b", "<-->", "a \\-- b", "a -\\- b", "a \\-\\- b", "a \\--- b"] {
+            assert_eq!(dashes(t), [], "{t}");
+        }
+        assert_eq!(drawn("a \\-- b"), "a -- b", "the backslash hidden, both dashes shown");
+        assert_eq!(drawn("a -\\- b"), "a -- b");
+        assert_eq!(drawn("a \\\\-- b"), "a \\— b", "an escaped backslash escapes no dash");
+        assert_eq!(drawn("- -- -"), "- — -", "runs apart");
+        assert_eq!(drawn("a--b---c--d"), "a—b---c—d");
+    }
+
+    /// The dash is one letter for its two bytes: the words map past it
+    /// whole, never between its dashes.
+    #[test]
+    fn a_dash_is_one_letter_to_the_caret() {
+        let t = "a -- b";
+        let v = Visible::page(t);
+        let em = EM_DASH.len();
+        assert_eq!(v.drawn_len(), 2 + em + 2);
+        assert_eq!((v.drawn(2), v.drawn(4), v.drawn(5)), (2, 2 + em, 3 + em));
+        assert_eq!(v.drawn(3), 2 + em, "between the dashes is past the dash");
+        assert_eq!((v.at(2), v.at(2 + em), v.at(3 + em)), (2, 4, 5));
+        assert_eq!(v.at(3), 4, "inside the letter: after it");
+        assert_eq!((v.source(2), v.source(3), v.source(2 + em)), (2, 2, 4));
+        assert_eq!(v.spans(2, 2 + em), [(2, 4)]);
+        assert_eq!(v.spans(0, 3 + em), [(0, 5)], "one stretch of words");
+        assert_eq!((v.settle(3), v.settle(2), v.settle(4)), (4, 2, 4));
+        // Among marks: `**a**--` puts the caret after `a` inside its marks.
+        let t = "**a**--b";
+        let v = Visible::page(t);
+        assert_eq!(v.text(t), "a—b");
+        assert_eq!((v.at(1), v.at(1 + em), v.source(1)), (3, 7, 5));
+        // A cut keeps the dashes as written.
+        assert_eq!(slice("x -- y", 0, 6), "x -- y");
+        assert_eq!(delete("a -- b", 2, 4), ("a  b".to_string(), 2), "both dashes go");
     }
 }

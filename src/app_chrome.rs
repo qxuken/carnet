@@ -36,7 +36,8 @@ impl Carnet {
                 // Not drawn at rest; under the pointer and while dragged,
                 // one solid line the window's height, whatever the window
                 // shows through (nothing laid over it: the fade under the
-                // toolbar starts past it).
+                // toolbar starts past it). Just past the library's side,
+                // so out of its clip.
                 if shown {
                     let t = l.t;
                     let h = ui.viewport().h;
@@ -46,7 +47,7 @@ impl Carnet {
                         "library-edge",
                         NodeSpec::row()
                             .size(EDGE_W, h)
-                            .float(FloatConfig::parent().inside(Align::End, Align::Start).offset(EDGE_W, 0.0))
+                            .float(FloatConfig::parent().inside(Align::End, Align::Start).offset(EDGE_W, 0.0).escaping())
                             .bg(if self.library_from.is_some() { t.border_strong } else { Color::TRANSPARENT })
                             .hover_bg(t.border_strong)
                             .cursor(kui_native::CursorShape::EwResize)
@@ -62,10 +63,11 @@ impl Carnet {
         if !shown {
             if open {
                 // Its last frames: drawn until it has gone.
-                ui.request_frame();
+                ui.request_frame_for("library closing");
             } else {
                 // Nothing of it is there to take a dragged file.
                 self.card_rects.clear();
+                self.card_keys.clear();
                 self.folder_rects.clear();
             }
         }
@@ -228,6 +230,7 @@ impl Carnet {
                 })
                 .collect();
             let mut rects: Vec<(usize, Rect)> = Vec::new();
+            let mut keys: Vec<Key> = Vec::new();
             widgets::uniform_list_with(
                 ui,
                 "library",
@@ -300,6 +303,7 @@ impl Carnet {
                     if let Some(r) = ui.layout_of(ck) {
                         rects.push((n, r));
                     }
+                    keys.push(ck);
                     ui.with_indexed(0, card, |ui| {
                         ui.with(
                             NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center),
@@ -360,6 +364,7 @@ impl Carnet {
                 },
             );
             self.card_rects = rects;
+            self.card_keys = keys;
             self.sidebar_foot(ui, l);
         });
     }
@@ -444,6 +449,7 @@ impl Carnet {
         // Nothing of the library is drawn to take a dragged note or file,
         // nor a folder row for the arrows.
         self.card_rects.clear();
+        self.card_keys.clear();
         self.folder_rects.clear();
         self.folder_rows.clear();
         let Some(v) = &self.versions else { return };
@@ -651,8 +657,10 @@ impl Carnet {
                     .label(said)
                     .expanded(open)
                     // The rows' ← and → do it from the keyboard: not a Tab
-                    // stop of its own.
+                    // stop of its own, and a press leaves the keyboard
+                    // where it was.
                     .focus_region()
+                    .keep_focus()
                     .center(),
                 |ui| {
                     // Turned a quarter, open; a short turn between.
@@ -867,6 +875,9 @@ impl Carnet {
                         &EditOptions {
                             style: TextStyle::new(Type::UI.size).color(t.fg),
                             placeholder: Some("Search".into()),
+                            // Ctrl+Tab goes round what it found, as from
+                            // the title (`root_press` walks plain Tab on).
+                            keep_tab: true,
                             ..Default::default()
                         },
                         Field::Search.on(NodeSpec::row().grow_width().label("Search notes")),
@@ -891,14 +902,67 @@ impl Carnet {
         });
     }
 
+    /// What the caret is in, as the toolbar reads it: which tools it shows.
+    /// A selection is what it touches — words, list items, code, a divider
+    /// or a mix — and a picture or a table is so only alone (a selection
+    /// out of a table into the words around it is a mix).
+    pub(super) fn tool_set(&self) -> ToolSet {
+        if self.reading() {
+            return ToolSet::Reading;
+        }
+        if !self.editing {
+            return ToolSet::Away;
+        }
+        if self.picture_here().is_some() {
+            return ToolSet::Picture;
+        }
+        // On a line of files, beside a tile or one chosen: its file's.
+        if page::tile_at(self.doc(), self.caret).is_some() {
+            return ToolSet::File;
+        }
+        let (a, h) = (self.caret.anchor.slot, self.caret.head.slot);
+        if h.cell.is_some() && a.block == h.block {
+            return ToolSet::Table;
+        }
+        let doc = self.doc();
+        let kinds: Vec<&Kind> = page::touched(doc, self.caret).map(|i| &doc.blocks()[i].kind).collect();
+        let all = |f: fn(&Kind) -> bool| kinds.iter().all(|k| f(k));
+        if all(|k| matches!(k, Kind::Text(_) | Kind::Heading { .. } | Kind::Quote(_))) {
+            ToolSet::Words
+        } else if all(|k| matches!(k, Kind::Item { .. })) {
+            ToolSet::List
+        } else if all(|k| matches!(k, Kind::Raw(_))) {
+            ToolSet::Code
+        } else if all(|k| matches!(k, Kind::Divider)) {
+            ToolSet::Divider
+        } else {
+            ToolSet::Blocks
+        }
+    }
+
     /// The strip over the page: the window's drag handle, the block tools,
-    /// and the window's own buttons. Every tool has a fixed place; the
-    /// slot in the middle swaps list tools for table tools at one width.
-    /// On a wide window the tools start where the page's text does; on a
-    /// narrow one they give way — clipped at their end, never the window's
-    /// buttons — and a button brings back the library.
+    /// and the window's own buttons. The tools are those for what the caret
+    /// is in ([`ToolSet`]): a paragraph's kinds and styles, a list's kinds
+    /// and indents, a table's rows and columns, a picture's place. What
+    /// does nothing there is not shown; what does but cannot just now (a
+    /// row moved past the table's edge) is greyed. As the caret goes from
+    /// one to another, the tools that stay slide to their new places and
+    /// those that come fade in; within one (along a table, through a
+    /// list) nothing moves. On a wide window the tools start where the
+    /// page's text does; on a narrow one they give way — what does not fit
+    /// goes to More, never the window's buttons — and a button brings
+    /// back the library.
     pub(super) fn strip(&mut self, ui: &mut Ui<'_>, l: &Look, narrow: bool) {
         let t = l.t;
+        let set = self.tool_set();
+        // Another set than the last frame's: a moment of motion. Not the
+        // strip's first, which is simply there.
+        let now = ui.now();
+        if self.tool_set.is_some_and(|s| s != set) {
+            self.tool_set_at = now;
+        }
+        self.tool_set = Some(set);
+        let moving = now - self.tool_set_at < SET_MOTION;
         let doc = self.doc();
         // A version in the history is read, not written: no tools for it.
         let editing = self.editing && !self.reading();
@@ -909,9 +973,11 @@ impl Carnet {
         } else {
             Vec::new()
         };
-        let in_table = editing && self.caret.head.slot.cell.is_some();
-        let convertible = !in_table && kinds.iter().any(|k| page::turned(k, TURN_TEXT).is_some());
+        let in_table = set == ToolSet::Table;
+        let convertible = kinds.iter().any(|k| page::turned(k, TURN_TEXT).is_some());
         let is_item = kinds.iter().any(|k| matches!(k, Kind::Item { .. }));
+        // Words to style: not code's, a picture's or a divider's.
+        let styled = kinds.iter().any(|k| !matches!(k, Kind::Raw(_) | Kind::Image { .. } | Kind::Divider));
         let pinned = self.store.notes[self.current].pinned;
         // On when every block the caret touches is that already: a click
         // then takes them all back to paragraphs.
@@ -931,9 +997,10 @@ impl Carnet {
         let vw = ui.viewport().w;
         let main_w = vw - self.side_w(narrow);
         let lead = ((main_w - l.page_w).max(0.0) / 2.0 + 48.0).max(12.0);
-        // The tools, in groups that show whole or go to the More menu
-        // whole: what the block becomes, its styles, what to insert, and
-        // the slot that changes with what the caret is in.
+        // The tools, in groups the More menu keeps apart: what the block
+        // becomes, its words' styles, what to put in, the block's own
+        // moves, and those of a list, a table or a picture. Which of them
+        // the strip shows is the set's.
         let def = |key: &'static str, icon: Icon, name: &'static str, hint: String, msg: Msg| ToolDef {
             key,
             icon,
@@ -945,7 +1012,6 @@ impl Carnet {
             toggle: None,
             group: 0,
         };
-        let mut groups: Vec<Vec<ToolDef>> = Vec::new();
         let mut turn = Vec::new();
         for (key, icon, name, typed, spec, to) in [
             ("t-text", Icon::Text, "Text", "", keys::TEXT, TURN_TEXT),
@@ -967,7 +1033,8 @@ impl Carnet {
             d.toggle = Some(on(to));
             turn.push(d);
         }
-        // A paragraph's first letter dropped, a few lines tall.
+        // A paragraph's first letter dropped, a few lines tall: greyed on
+        // a heading or a quote, which share the paragraph's tools.
         let initial = page::initial_at(self.doc(), self.caret);
         let mut d = def(
             "t-initial",
@@ -980,7 +1047,6 @@ impl Carnet {
         d.enabled = editing && initial.is_some();
         d.toggle = Some(initial == Some(true));
         turn.push(d);
-        groups.push(turn);
         let mut styles = Vec::new();
         let caret_style = self.writing.style_at(self.doc(), self.caret);
         for (key, icon, name, spec, which) in [
@@ -992,7 +1058,6 @@ impl Carnet {
         ] {
             let mut d = def(key, icon, name, keys::hint(name, spec), Msg::Style { which });
             d.spec = Some(spec);
-            d.enabled = editing;
             // On where the caret's words have it, or where it is switched
             // on for what is typed next.
             let kind = crate::app::STYLES[which as usize];
@@ -1008,14 +1073,11 @@ impl Carnet {
         }
         let mut d = def("t-mark", Icon::Highlight, "Highlight", format!("Highlight  \u{b7}  {} for yellow", keys::label(keys::HIGHLIGHT)), Msg::TintMenu { ink: 0 });
         d.spec = Some(keys::HIGHLIGHT);
-        d.enabled = editing;
         d.toggle = Some(self.tint_open.is_some_and(|(ink, _)| !ink));
         styles.push(d);
         let mut d = def("t-color", Icon::TextColor, "Text colour", "Text colour".into(), Msg::TintMenu { ink: 1 });
-        d.enabled = editing;
         d.toggle = Some(self.tint_open.is_some_and(|(ink, _)| ink));
         styles.push(d);
-        groups.push(styles);
         let mut insert = vec![
             def("t-table", Icon::Table, "Table", keys::hint("Table", keys::TABLE), Msg::InsertTable),
             def("t-rule", Icon::Divider, "Divider", keys::hint("Divider", keys::DIVIDER) + "  \u{b7}  ---", Msg::InsertDivider),
@@ -1023,73 +1085,159 @@ impl Carnet {
         ];
         insert[0].spec = Some(keys::TABLE);
         insert[1].spec = Some(keys::DIVIDER);
-        insert[2].enabled = !self.reading();
-        groups.push(insert);
-        let mut slot = Vec::new();
+        // The block's own: up, down, away.
+        let mut moves = Vec::new();
+        let mut d = def("t-up", Icon::Up, "Move up", keys::hint("Move up", keys::MOVE_UP), Msg::Move { by: -1 });
+        d.spec = Some(keys::MOVE_UP);
+        moves.push(d);
+        let mut d = def("t-down", Icon::Down, "Move down", keys::hint("Move down", keys::MOVE_DOWN), Msg::Move { by: 1 });
+        d.spec = Some(keys::MOVE_DOWN);
+        moves.push(d);
+        let mut d = def("t-del", Icon::Cross, "Remove block", keys::hint("Remove", keys::REMOVE), Msg::DeleteBlock);
+        d.spec = Some(keys::REMOVE);
+        moves.push(d);
+        // A list's: in and out, and a to-do's tick.
+        let mut indent = Vec::new();
+        let mut d = def("t-out", Icon::Outdent, "Outdent", keys::hint("Outdent", keys::OUTDENT), Msg::Indent { by: -1 });
+        d.spec = Some(keys::OUTDENT);
+        indent.push(d);
+        let mut d = def("t-in", Icon::Indent, "Indent", keys::hint("Indent", keys::INDENT), Msg::Indent { by: 1 });
+        d.spec = Some(keys::INDENT);
+        indent.push(d);
+        let mut table = Vec::new();
         if in_table {
-            slot.push(def("t-addrow", Icon::AddRow, "Add row", "Add a row below  \u{b7}  Enter at the bottom".into(), Msg::AddRow));
-            slot.push(def("t-addcol", Icon::AddCol, "Add column", "Add a column to the right".into(), Msg::AddCol));
-            slot.push(def("t-delrow", Icon::DelRow, "Remove row", "Remove this row".into(), Msg::DelRow));
-            slot.push(def("t-delcol", Icon::DelCol, "Remove column", "Remove this column".into(), Msg::DelCol));
+            table.push(def("t-addrow", Icon::AddRow, "Add row", "Add a row below  \u{b7}  Enter at the bottom".into(), Msg::AddRow));
+            table.push(def("t-addcol", Icon::AddCol, "Add column", "Add a column to the right".into(), Msg::AddCol));
+            table.push(def("t-delrow", Icon::DelRow, "Remove row", "Remove this row".into(), Msg::DelRow));
+            table.push(def("t-delcol", Icon::DelCol, "Remove column", "Remove this column".into(), Msg::DelCol));
+            // Past its neighbour: greyed at the table's edge, and the
+            // header row, which stays on top, not up or down.
+            let moves = self.table_moves();
+            for ((key, icon, name, spec, msg), can) in [
+                ("t-rowup", Icon::RowUp, "Move row up", keys::ROW_UP, Msg::MoveRow { by: -1 }),
+                ("t-rowdown", Icon::RowDown, "Move row down", keys::ROW_DOWN, Msg::MoveRow { by: 1 }),
+                ("t-colleft", Icon::ColLeft, "Move column left", keys::COL_LEFT, Msg::MoveCol { by: -1 }),
+                ("t-colright", Icon::ColRight, "Move column right", keys::COL_RIGHT, Msg::MoveCol { by: 1 }),
+            ]
+            .into_iter()
+            .zip(moves)
+            {
+                let mut d = def(key, icon, name, keys::hint(name, spec), msg);
+                d.spec = Some(spec);
+                d.enabled = can;
+                table.push(d);
+            }
             let header = self.table_here().is_some_and(|t| t.header);
             let mut d = def("t-header", Icon::TableHeader, "Header row", if header { "Remove the header row" } else { "Add a header row" }.into(), Msg::TableHeader);
             d.toggle = Some(header);
-            slot.push(d);
+            table.push(d);
             let (glyph, name) = match sorted {
                 Some(false) => (Icon::SortUp, "Sort Z to A"),
                 Some(true) => (Icon::SortDown, "Sort A to Z"),
                 None => (Icon::Sort, "Sort by this column"),
             };
-            slot.push(def("t-sort", glyph, name, "Sort by this column (again to reverse)".into(), Msg::Sort));
+            table.push(def("t-sort", glyph, name, "Sort by this column (again to reverse)".into(), Msg::Sort));
             let mut d = def("t-del", Icon::Cross, "Remove table", keys::hint("Remove the table", keys::REMOVE), Msg::DeleteBlock);
             d.spec = Some(keys::REMOVE);
-            slot.push(d);
-        } else if editing {
-            // A picture: where it sits, beside the words or on its own line.
-            if let Some((_, float, _)) = self.picture_here() {
-                for (key, icon, name, spec, to) in [
-                    ("t-inline", Icon::Inline, "On its own line", None, carnet_core::doc::Float::None),
-                    ("t-left", Icon::FloatLeft, "Left of the text", Some(keys::FLOAT_LEFT), carnet_core::doc::Float::Left),
-                    ("t-right", Icon::FloatRight, "Right of the text", Some(keys::FLOAT_RIGHT), carnet_core::doc::Float::Right),
-                ] {
-                    let hint = spec.map_or_else(|| name.to_string(), |s| keys::hint(name, s));
-                    let mut d = def(key, icon, name, hint, Msg::Float { to: to as u64 });
-                    d.spec = spec;
-                    d.toggle = Some(float == to);
-                    slot.push(d);
+            table.push(d);
+        }
+        // A picture: where it sits, beside the words or on its own line.
+        let mut place = Vec::new();
+        if let Some((_, float, _)) = self.picture_here() {
+            for (key, icon, name, spec, to) in [
+                ("t-inline", Icon::Inline, "On its own line", None, carnet_core::doc::Float::None),
+                ("t-left", Icon::FloatLeft, "Left of the text", Some(keys::FLOAT_LEFT), carnet_core::doc::Float::Left),
+                ("t-right", Icon::FloatRight, "Right of the text", Some(keys::FLOAT_RIGHT), carnet_core::doc::Float::Right),
+            ] {
+                let hint = spec.map_or_else(|| name.to_string(), |s| keys::hint(name, s));
+                let mut d = def(key, icon, name, hint, Msg::Float { to: to as u64 });
+                d.spec = spec;
+                d.toggle = Some(float == to);
+                place.push(d);
+            }
+        }
+        // A file on a line of tiles (the one chosen, or the caret beside):
+        // what to do with it. Copy carries it as a line of its own, which a
+        // paste puts in as a row of tiles; Copy file the file itself, for a
+        // file manager or a mail; Copy path its place on this computer.
+        let mut file = Vec::new();
+        if set == ToolSet::File {
+            let here = self.tile_file().is_some();
+            for (key, icon, name, hint, what, can) in [
+                ("t-fopen", Icon::External, "Open the file", "Open the file in its own app".to_string(), FILE_OPEN, here),
+                ("t-freveal", Icon::Folder, super::reveal_label(), super::reveal_label().to_string(), FILE_REVEAL, here),
+                ("t-fcopy", Icon::Copy, "Copy", keys::hint("Copy, to paste as a file of its own", "mod+c"), FILE_COPY, true),
+                ("t-fclip", Icon::CopyFile, "Copy file", "Copy the file itself, to paste in a folder or a mail".to_string(), FILE_CLIP, here),
+                ("t-fpath", Icon::CopyPath, "Copy path", "Copy the file's full path".to_string(), FILE_PATH, true),
+                ("t-fremove", Icon::Trash, "Remove", keys::hint("Remove the file from the note", "backspace"), FILE_REMOVE, true),
+            ] {
+                let mut d = def(key, icon, name, hint, Msg::FileTool { what });
+                d.enabled = can;
+                if what == FILE_COPY {
+                    d.spec = Some("mod+c");
                 }
+                file.push(d);
             }
-            if is_item {
-                let mut d = def("t-out", Icon::Outdent, "Outdent", keys::hint("Outdent", keys::OUTDENT), Msg::Indent { by: -1 });
-                d.spec = Some(keys::OUTDENT);
-                slot.push(d);
-                let mut d = def("t-in", Icon::Indent, "Indent", keys::hint("Indent", keys::INDENT), Msg::Indent { by: 1 });
-                d.spec = Some(keys::INDENT);
-                slot.push(d);
+            // The line's moves: up and down, as other blocks'.
+            file.extend(moves.iter().take(2).cloned());
+        }
+        // What the set shows, in order. Its own tools come first, at the
+        // strip's start; the styles, what to put in and the block's moves
+        // follow in the same order wherever they apply, so what the sets
+        // share stays together as the caret goes between them.
+        let mut groups: Vec<Vec<ToolDef>> = match set {
+            ToolSet::Reading => Vec::new(),
+            ToolSet::Away => vec![insert],
+            ToolSet::Words => vec![turn, styles, insert, moves],
+            ToolSet::List => {
+                // Its kinds, and back to a paragraph: a heading or a quote
+                // is a paragraph's turn, there once it is one.
+                turn.retain(|d| matches!(d.msg, Msg::Turn { to: TURN_TEXT | TURN_BULLET | TURN_NUMBER | TURN_TODO }));
+                let head = doc.index_of(self.caret.head.slot.block).map(|i| &doc.blocks()[i]);
+                if let Some(b) = head
+                    && let Kind::Item { style: ListStyle::Todo, done, .. } = b.kind
+                {
+                    let mut d = def("t-tick", Icon::Check, "Done", keys::hint("Tick or untick", keys::TICK), Msg::Toggle { id: b.id });
+                    d.spec = Some(keys::TICK);
+                    d.toggle = Some(done);
+                    indent.push(d);
+                }
+                vec![turn, indent, styles, insert, moves]
             }
-            let mut d = def("t-up", Icon::Up, "Move up", keys::hint("Move up", keys::MOVE_UP), Msg::Move { by: -1 });
-            d.spec = Some(keys::MOVE_UP);
-            slot.push(d);
-            let mut d = def("t-down", Icon::Down, "Move down", keys::hint("Move down", keys::MOVE_DOWN), Msg::Move { by: 1 });
-            d.spec = Some(keys::MOVE_DOWN);
-            slot.push(d);
-            let mut d = def("t-del", Icon::Cross, "Remove block", keys::hint("Remove", keys::REMOVE), Msg::DeleteBlock);
-            d.spec = Some(keys::REMOVE);
-            slot.push(d);
-        }
-        if !slot.is_empty() {
-            groups.push(slot);
-        }
-        // A picture selected: what a block becomes and the words' styles
-        // do nothing to it, so its own tools come first in their place.
-        if editing && self.picture_here().is_some() {
-            groups.drain(..2);
-            groups.rotate_right(1);
-        }
+            ToolSet::Blocks => {
+                let mut g = Vec::new();
+                if convertible {
+                    g.push(turn);
+                }
+                if is_item {
+                    g.push(indent);
+                }
+                if styled {
+                    g.push(styles);
+                }
+                g.push(moves);
+                g
+            }
+            // A picture goes into a cell among its words; a table or a
+            // divider would go after the table, not where the caret is.
+            ToolSet::Table => {
+                let clip = insert.split_off(2);
+                vec![table, styles, clip]
+            }
+            ToolSet::Code | ToolSet::Divider => vec![moves, insert],
+            ToolSet::Picture => {
+                place.extend(moves);
+                vec![place, insert]
+            }
+            ToolSet::File => vec![file, insert],
+        };
+        groups.retain(|g| !g.is_empty());
         // The tools start where the text does, less what the strip's
         // start already holds.
         let side = self.side_shown();
-        let held = if side { 8.0 } else { 8.0_f32.max(self.lights) } + 61.0;
+        // A note's own window has no library to show, nor zen to go into.
+        let own = self.note_window.is_some();
+        let held = if side { 8.0 } else { 8.0_f32.max(self.lights) } + if own { 0.0 } else { 61.0 };
         let pad_l = if narrow { 4.0 } else { (lead - held).max(8.0) };
         let lights = self.lights;
         let menu_open = self.menu_open;
@@ -1121,6 +1269,8 @@ impl Carnet {
                         ("All notes", "Back to the list of notes")
                     };
                     Tool::new("t-back", Icon::Back, name, hint.to_string(), Msg::ShowList).draw(ui, &t);
+                } else if own {
+                    gap(ui, 8.0_f32.max(lights));
                 } else {
                     // The library's own switch, at the strip's start: past
                     // the traffic lights when the library has gone.
@@ -1135,10 +1285,12 @@ impl Carnet {
                     .calm(calm)
                     .draw(ui, &t);
                 }
-                Tool::new("t-zen", Icon::Zen, "Zen mode", keys::hint("Zen mode", keys::ZEN), Msg::ToggleZen)
-                    .toggle(self.zen)
-                    .calm(calm)
-                    .draw(ui, &t);
+                if !own {
+                    Tool::new("t-zen", Icon::Zen, "Zen mode", keys::hint("Zen mode", keys::ZEN), Msg::ToggleZen)
+                        .toggle(self.zen)
+                        .calm(calm)
+                        .draw(ui, &t);
+                }
                 // How many tools fit, in order: the row's width as last
                 // laid out. A tool is 30 with 1 between; groups 10 apart
                 // (+2). When not all fit, room is kept for More.
@@ -1174,7 +1326,10 @@ impl Carnet {
                         .gap(1.0)
                         .cross_align(Align::Center)
                         .on_layout(Value::Null)
-                        .clip(),
+                        .clip()
+                        // Named for what they are for: "Table tools".
+                        .role(Role::Group)
+                        .label(set.label()),
                     |ui| {
                         let mut n = 0;
                         for (i, g) in groups.drain(..).enumerate() {
@@ -1192,7 +1347,10 @@ impl Carnet {
                                 if let Some(i) = ["t-mark", "t-color"].iter().position(|k| *k == d.key) {
                                     anchors[i] = ui.layout_of(ui.child_key(d.key)).map(|r| Vec2::new(r.x, r.y + r.h + 4.0));
                                 }
-                                let mut tool = Tool::new(d.key, d.icon, d.name, d.hint, d.msg).enabled(d.enabled).calm(calm);
+                                let mut tool = Tool::new(d.key, d.icon, d.name, d.hint, d.msg)
+                                    .enabled(d.enabled)
+                                    .calm(calm)
+                                    .moving(moving);
                                 if let Some(on) = d.toggle {
                                     tool = tool.toggle(on);
                                 }
@@ -1207,6 +1365,7 @@ impl Carnet {
                             more = ui.layout_of(k).map(|r| (k, Vec2::new(r.x, r.y + r.h + 4.0)));
                             Tool::new("t-more", Icon::More, "More tools", "More tools".to_string(), Msg::ToolsMenu)
                                 .calm(calm)
+                                .moving(moving)
                                 .draw(ui, &t);
                         }
                     },
@@ -1246,8 +1405,7 @@ impl Carnet {
 
     /// The colour picker, hanging from its button: the grid Word and
     /// Obsidian's toolbar share — ten theme colours over five lighter and
-    /// darker steps of each, ten standard ones, the reader's recent ones —
-    /// and a way back to none. One picker, two tabs: the words' colour and
+    /// darker steps of each, ten standard ones — and a way back to none. One picker, two tabs: the words' colour and
     /// the highlighter's.
     pub(super) fn tint_picker(&self, ui: &mut Ui<'_>, l: &Look) {
         let Some((ink, at)) = self.tint_open else { return };
@@ -1261,16 +1419,13 @@ impl Carnet {
             st.get(i).map_or(0, |s| if ink { s.ink } else { s.mark })
         };
         let k = ink as u64;
-        let label = |ui: &mut Ui<'_>, s: &str| {
-            ui.text(s, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
-        };
         // A swatch shows what the colour does: an "A" in it, or an "A" on
         // its wash, as the page would draw it.
         let (dark, page) = (l.c.dark, t.bg);
         let swatch = |ui: &mut Ui<'_>, i: u64, c: u32| {
             let name = crate::design::tint::name(c);
             let (fill, letter) = if ink {
-                (t.hover.with_alpha(0.0), crate::design::tint::ink(c, dark))
+                (t.hover.with_alpha(0.0), crate::design::tint::ink(c, dark, page))
             } else {
                 (crate::design::tint::wash(c, dark, page), t.fg)
             };
@@ -1359,10 +1514,6 @@ impl Carnet {
                     .map(|h| if ink { (h.ink << 8) | 0xff } else { h.wash })
                     .collect();
                 row(ui, "hues", &hues, 0);
-                if !self.settings.colors.is_empty() {
-                    label(ui, "Recent");
-                    row(ui, "recent", &self.settings.colors, 200);
-                }
                 ui.with(NodeSpec::row().grow_width().gap(6.0).padding(Edges { l: 0.0, r: 0.0, t: 4.0, b: 0.0 }), |ui| {
                     let pill = |ui: &mut Ui<'_>, key: &str, name: &str, color: u32, dot: Option<Color>| {
                         ui.with_keyed(
@@ -1468,6 +1619,74 @@ pub(super) struct ToolDef {
     /// Which group it is in: what the More menu separates by.
     group: usize,
 }
+
+/// What the caret is in, for the toolbar: each shows only the tools that
+/// do something there ([`Carnet::tool_set`]). The shortcuts work whatever
+/// it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ToolSet {
+    /// A version in the history, or a deleted note: read, not written.
+    /// No tools.
+    Reading,
+    /// The page without the keyboard (the title, the search, the
+    /// library): what to put in, at the page's caret.
+    Away,
+    /// A paragraph, a heading or a quote: what the block becomes, the
+    /// words' styles, what to put in, the block's moves.
+    Words,
+    /// List items: a list's kinds and back to text, in and out (and a
+    /// to-do's tick), the styles, what to put in, the moves.
+    List,
+    /// A table's cell: its rows and columns, the styles, a picture.
+    Table,
+    /// Code: its moves, and what to put in after it.
+    Code,
+    /// A divider chosen: the same.
+    Divider,
+    /// A picture: where it sits and its moves, and what to put in.
+    Picture,
+    /// A file on a line of tiles, chosen or the caret beside it: open it,
+    /// show it in its folder, copy it (as a line of its own) or its path,
+    /// take it out; the line's moves; what to put in.
+    File,
+    /// A selection over blocks of different kinds: what the block becomes,
+    /// in and out where it has list items, the styles where it has words,
+    /// the moves.
+    Blocks,
+}
+
+impl ToolSet {
+    /// What a screen reader calls the strip's tools.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            ToolSet::Reading => "No tools while reading",
+            ToolSet::Away => "Insert tools",
+            ToolSet::Words => "Text tools",
+            ToolSet::List => "List tools",
+            ToolSet::Table => "Table tools",
+            ToolSet::Code => "Code block tools",
+            ToolSet::Divider => "Divider tools",
+            ToolSet::Picture => "Picture tools",
+            ToolSet::File => "File tools",
+            ToolSet::Blocks => "Block tools",
+        }
+    }
+}
+
+/// What a file's tool does to the tile chosen, or the one the caret is
+/// beside (`Msg::FileTool`): opens it, shows it in its folder, copies it
+/// as a line of its own, copies its path, takes it out, copies the file.
+pub(super) const FILE_OPEN: u64 = 0;
+pub(super) const FILE_REVEAL: u64 = 1;
+pub(super) const FILE_COPY: u64 = 2;
+pub(super) const FILE_PATH: u64 = 3;
+pub(super) const FILE_REMOVE: u64 = 4;
+pub(super) const FILE_CLIP: u64 = 5;
+
+/// How long the tools move after their set changes, seconds: well past
+/// their 140 ms ease, so they have arrived before it ends. (Faded for the
+/// writing, they ease for 900, out of sight.)
+const SET_MOTION: f64 = 0.4;
 /// Toolbar icons are drawn outlines (crate::icons), never glyphs from a
 /// font: the same on every machine.
 pub(super) use crate::icons::Glyph as Icon;
@@ -1487,6 +1706,9 @@ pub(super) struct Tool<'a> {
     filled: bool,
     /// Faded out while the reader writes.
     calm: bool,
+    /// The strip's set of tools just changed: it slides to its new place,
+    /// or fades in if it is new there.
+    moving: bool,
 }
 
 impl<'a> Tool<'a> {
@@ -1501,7 +1723,16 @@ impl<'a> Tool<'a> {
             toggle: None,
             filled: false,
             calm: false,
+            moving: false,
         }
+    }
+
+    /// The set of tools changed a moment ago: from where it was to where it
+    /// is now, or in from nothing. Only then — the strip following the
+    /// window's edge as it is dragged would trail behind it.
+    pub(super) fn moving(mut self, on: bool) -> Self {
+        self.moving = on;
+        self
     }
 
     /// Out of sight while words are going down: it fades slowly, so the
@@ -1558,6 +1789,9 @@ impl<'a> Tool<'a> {
             .on_menu(Msg::Chose);
         if let Some(state) = self.toggle {
             spec = spec.role(Role::Checkbox).checked(state);
+        }
+        if self.moving {
+            spec = spec.slide().enter(kui_native::Enter::default().opacity(0.0));
         }
         // Not while a menu is open: the pointer, still over the button
         // that opened it to the window, would call one up behind it. Nor

@@ -43,6 +43,10 @@ export type Look = {
   /// A paragraph's first line whose first letter drops: 1, or 2 when the
   /// letter has a colour of its own.
   ini: number;
+  /// A line of file links alone: a tile for each, the desktop's (carnet-core
+  /// `page::tiles`): where its one letter is in the line, the file's name,
+  /// the address its link opens, and its kind (`PDF`).
+  tl: [number, string, string, string][];
 };
 
 export const TURN = { text: 0, h1: 1, h2: 2, h3: 3, bullet: 4, number: 5, todo: 6, quote: 7 } as const;
@@ -237,6 +241,60 @@ class Rule extends WidgetType {
     s.className = 'cm-rule';
     return s;
   }
+}
+
+/// A file a note keeps, on a line of files alone, as the desktop draws one
+/// (app_page.rs `tile`) and the reader does (styles.css `.file-tile`): a
+/// tile with a paperclip, the file's name and its kind, in place of the
+/// one letter its link is in CodeMirror's words. The whole tile is the
+/// link (links.ts opens it, as a press on a link's words, by its
+/// `data-href`); chosen whole (`on`), it wears the accent's ring.
+export class FileTile extends WidgetType {
+  constructor(
+    readonly name: string,
+    readonly href: string,
+    readonly kind: string,
+    readonly on: boolean,
+  ) {
+    super();
+  }
+  eq(o: FileTile) {
+    return o.name === this.name && o.href === this.href && o.kind === this.kind && o.on === this.on;
+  }
+  toDOM() {
+    const tile = document.createElement('span');
+    tile.className = this.on ? 'file-tile cm-file on' : 'file-tile cm-file';
+    tile.dataset.href = this.href;
+    tile.title = this.name;
+    tile.setAttribute('role', 'link');
+    tile.setAttribute('aria-label', `${this.name}, ${this.kind}`);
+    const part = (cls: string, text?: string) => {
+      const s = document.createElement('span');
+      s.className = cls;
+      if (text !== undefined) s.textContent = text;
+      return s;
+    };
+    const clip = part('clip');
+    clip.setAttribute('aria-hidden', 'true');
+    const words = part('words');
+    words.append(part('name', this.name), part('kind', this.kind));
+    tile.append(clip, words);
+    return tile;
+  }
+  /// A press on it is the page's (links.ts): opened, or the tile chosen.
+  ignoreEvent() {
+    return false;
+  }
+}
+
+/// The tiles of a line, `look` as the page draws it, on line `from` of
+/// CodeMirror's words: each tile in its letter's place, chosen when the
+/// selection `sel` is that letter end to end.
+export function tilesOf(look: Look, from: number, sel: { from: number; to: number }) {
+  return (look.tl ?? []).map(([at, name, href, kind]) => {
+    const a = from + at;
+    return { from: a, to: a + 1, widget: new FileTile(name, href, kind, sel.from === a && sel.to === a + 1) };
+  });
 }
 
 /// A picture's `src` (an Obsidian embed's, with `wiki`) as a URL to show.
@@ -490,6 +548,7 @@ function build(view: EditorView, toggle: (line: number) => void, tables: TableCo
       if (look.f && n > 1) cls.push('cm-block');
       if (look.d) cls.push('cm-ticked');
       if (look.ini) cls.push(look.ini === 2 ? 'cm-initial cm-own' : 'cm-initial');
+      if (look.tl?.length) cls.push('cm-files');
       const attrs: Record<string, string> = { class: cls.join(' ') };
       if (look.i) attrs.style = `--indent:${look.i}`;
       out.push(Decoration.line({ attributes: attrs }).range(line.from));
@@ -519,6 +578,14 @@ function build(view: EditorView, toggle: (line: number) => void, tables: TableCo
         if (style) spec.attributes = { style };
         const at = markRange(line.from, line.length, a, b);
         if (at) out.push(Decoration.mark(spec).range(at[0], at[1]));
+      }
+      // A line of files alone: a tile in each one's letter, stepped over
+      // whole.
+      for (const t of tilesOf(look, line.from, view.state.selection.main)) {
+        if (t.to > line.to) continue;
+        const d = Decoration.replace({ widget: t.widget });
+        out.push(d.range(t.from, t.to));
+        atomic.push(d.range(t.from, t.to));
       }
     }
   }
@@ -576,7 +643,8 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
         ({ deco: this.deco, atomic: this.atomic } = build(v, toggle, tables));
       }
       update(u: ViewUpdate) {
-        if (u.docChanged || u.viewportChanged || u.transactions.some((t) => t.effects.some((e) => e.is(setLooks)))) {
+        // The selection too: a tile chosen wears its ring (`FileTile`).
+        if (u.docChanged || u.viewportChanged || u.selectionSet || u.transactions.some((t) => t.effects.some((e) => e.is(setLooks)))) {
           ({ deco: this.deco, atomic: this.atomic } = build(u.view, toggle, tables));
         }
         if (u.selectionSet || u.docChanged) o.moved();
@@ -721,6 +789,12 @@ export function pageEditor(pe: PageEditor, o: PageOptions) {
       { key: 'Alt-Delete', run: run(() => pe.delete(true)) },
       { key: 'Tab', run: run(() => pe.tab(false)) },
       { key: 'Shift-Tab', run: run(() => pe.tab(true)) },
+      // The desktop's: the caret's blocks up or down past their neighbour
+      // (in place of CodeMirror's own line moves, which would move a line
+      // of words, not a block), and a to-do ticked.
+      { key: 'Alt-ArrowUp', shift: run(() => pe.move_blocks(-1)), run: run(() => pe.move_blocks(-1)) },
+      { key: 'Alt-ArrowDown', shift: run(() => pe.move_blocks(1)), run: run(() => pe.move_blocks(1)) },
+      { key: 'Mod-Enter', run: run(() => pe.tick()) },
       ...STYLES.map((s) => ({ key: s.key, run: run(() => pe.style(s.which)) })),
       { key: 'Shift-Mod-h', run: run(() => pe.tint(false, HIGHLIGHT)) },
       { key: 'Mod-z', run: run(() => pe.undo()) },
