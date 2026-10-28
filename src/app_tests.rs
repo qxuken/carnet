@@ -1685,6 +1685,10 @@ fn a_tile_has_tools_of_its_own() {
     }
     assert!(!menu.iter().any(|m| m == "Copy link address"), "{menu:?}");
     assert_eq!(menu.iter().filter(|m| *m == "Copy").count(), 1, "{menu:?}");
+    // A file, not words: none of the styles, turns or inserts.
+    for not in ["Bold", "Link\u{2026}", "Edit link\u{2026}", "Highlight", "Change case", "Heading", "Insert table"] {
+        assert!(!menu.iter().any(|m| m == not), "{not} in {menu:?}");
+    }
     app.page_action("copy-path-file");
     assert_eq!(app.clip_out.as_ref().map(|c| std::path::PathBuf::from(&c.0)), Some(store::native_path(&dir.join("attachments/report.pdf"))));
     // Copy file: the file itself, its whole path, as a file manager copies

@@ -2379,6 +2379,11 @@ impl Carnet {
             items.push(item("Note history", "history"));
             items.push(item("Open in new window", "window").accel(keys::NEW_WINDOW).enabled(self.peek.is_none()));
         }
+        // A tile is a file, not words: no styles, turns or inserts for it,
+        // as a picture has none.
+        if tile.is_some() {
+            return items;
+        }
         items.push(MenuItem::separator());
         if let Some((_, float, now)) = self.picture_here() {
             items.extend([item("Copy picture", "copy-picture"), item("Copy picture as Markdown", "copy-picture-md"), MenuItem::separator()]);
