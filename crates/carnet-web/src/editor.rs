@@ -2152,7 +2152,8 @@ mod tests {
     /// As on the desktop: a line broken as Markdown's hard break (two
     /// spaces, a backslash) ends at its last letter; typed at, it keeps
     /// its break; Backspace at the next line's start takes the break and
-    /// its marks; a line turned below leaves none showing above.
+    /// its marks. Once a line turned below leaves no newline above, any
+    /// terminal spaces there become ordinary words.
     #[test]
     fn a_hard_line_break_shows_nothing_of_its_marks() {
         for mark in ["  ", "\\"] {
@@ -2170,8 +2171,8 @@ mod tests {
             assert!(e.undo());
             e.select(2, 2, 2, 2);
             e.turn(page::TURN_BULLET);
-            assert_eq!(e.lines()[1].text, "stays");
             let above = if mark == "  " { "stays  " } else { "stays" };
+            assert_eq!(e.lines()[1].text, above);
             assert_eq!(e.markdown(), format!("# T\n\n{above}\n\n- apart\n"));
         }
     }
