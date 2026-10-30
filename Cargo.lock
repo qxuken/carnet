@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "carnet"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "arboard",
  "axum",
@@ -891,14 +891,14 @@ dependencies = [
 
 [[package]]
 name = "carnet-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "carnet-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "axum",
  "carnet-sync",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "carnet-sync"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "argon2",
