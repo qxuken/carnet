@@ -276,9 +276,13 @@ mod tests {
         assert_eq!(query(&d, c), Some((d.blocks()[0].id, "h2".into())));
         let (d, c) = text("hello\neither/or", 15);
         assert_eq!(query(&d, c), None, "mid-sentence, a slash");
-        for (t, at) in [("/h2  \nmore", 3), ("one\n/h2\\\nmore", 7), ("one\n/h2  ", 7)] {
+        for (t, at) in [("/h2  \nmore", 3), ("one\n/h2\\\nmore", 7)] {
             let (d, c) = text(t, at);
             assert_eq!(query(&d, c), Some((d.blocks()[0].id, "h2".into())), "{t:?}");
+        }
+        for at in [7, 9] {
+            let (d, c) = text("one\n/h2  ", at);
+            assert_eq!(query(&d, c), None, "without a newline, trailing spaces are words");
         }
         let (d, c) = text("/h2 a  \nmore", 3);
         assert_eq!(query(&d, c), None, "words after the caret");

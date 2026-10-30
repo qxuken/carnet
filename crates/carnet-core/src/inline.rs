@@ -324,8 +324,7 @@ fn read_counting(text: &str, count: Count) -> Read {
     // Line breaks as Markdown writes a hard one, outside code: marks,
     // hidden as any other, so the line ends at its last letter. The `\n`
     // after them is the break's word ([`Kind::Break`]). Spaces at the very
-    // end, which end nothing, are marks too, of no pair: a paragraph's
-    // last line, as a file had it.
+    // end have no newline after them, so they are ordinary words.
     let breaks = line_breaks(text, &quiet);
     for &(s, e) in &breaks {
         for k in s..e {
@@ -890,8 +889,9 @@ pub fn dashed(text: &str, (a, b): (usize, usize), dashes: &[(usize, usize)]) -> 
 /// a line's last two spaces or more before its `\n`, or its last `\`
 /// (not itself escaped), each after a letter on its line — a line of
 /// spaces alone, or of one backslash, is what it says, as the writer
-/// writes them (`doc::escape_line`). And spaces, two or more, at the end
-/// of the last line. Each `(start, end)`, `end` the `\n`'s place.
+/// writes them (`doc::escape_line`). Spaces at the end of the text, with
+/// no `\n` after them, are ordinary words. Each `(start, end)`, `end` the
+/// `\n`'s place.
 fn line_breaks(text: &str, quiet: &[bool]) -> Vec<(usize, usize)> {
     let b = text.as_bytes();
     let mut out = Vec::new();
@@ -907,7 +907,7 @@ fn line_breaks(text: &str, quiet: &[bool]) -> Vec<(usize, usize)> {
         let spaces = line.iter().rev().take_while(|&&c| c == b' ').count();
         let lettered = |n: usize| line[..line.len() - n].iter().any(|c| !c.is_ascii_whitespace());
         let calm = |n: usize| !quiet[e - n..e].iter().any(|&q| q);
-        if spaces >= 2 && lettered(spaces) && calm(spaces) {
+        if !last && spaces >= 2 && lettered(spaces) && calm(spaces) {
             out.push((e - spaces, e));
         } else if !last && line.last() == Some(&b'\\') && lettered(1) && calm(1) {
             out.push((e - 1, e));
@@ -916,8 +916,8 @@ fn line_breaks(text: &str, quiet: &[bool]) -> Vec<(usize, usize)> {
     out
 }
 
-/// The marks of each line break of `text` ([`Kind::Break`]), and those of
-/// spaces ending its last line: `(start, end)`, in order.
+/// The marks of each line break of `text` ([`Kind::Break`]):
+/// `(start, end)`, in order.
 pub fn breaks(text: &str) -> Vec<(usize, usize)> {
     read(text).breaks
 }
@@ -3091,6 +3091,16 @@ mod tests {
         assert_eq!(merge("<u>a</u><u>b</u>"), "<u>ab</u>");
     }
 
+    #[test]
+    fn terminal_spaces_are_words() {
+        let text = "**stay**  ";
+        let visible = Visible::page(text);
+        assert_eq!(visible.text(text), "stay  ", "the emphasis marks stay hidden");
+        assert_eq!(visible.drawn(10), 6);
+        assert_eq!(visible.source(5), 9);
+        assert_eq!(visible.at(6), 10);
+    }
+
     /// Markdown's hard line break — two spaces or more, or a backslash,
     /// at the end of a line that goes on — is marks, hidden; in code, or
     /// a backslash escaped, or a line of nothing else, it is what it says.
@@ -3106,10 +3116,10 @@ mod tests {
         assert_eq!(words("`a  \nb`  \nc"), "a  \nb\nc", "in code");
         assert_eq!(words("a\n\\\nb"), "a\n\\\nb", "a line of one backslash");
         assert_eq!(words("a\n   \nb"), "a\n   \nb", "a line of spaces");
-        assert_eq!(words("ends  "), "ends", "spaces at the end end nothing");
+        assert_eq!(words("ends  "), "ends  ", "without a newline, spaces are words");
         assert_eq!(words("ends\\"), "ends\\", "a backslash at the end is one");
-        assert_eq!(breaks("one  \ntwo\\\nthree  "), [(3, 5), (9, 10), (16, 18)]);
-        assert_eq!(lines("one  \ntwo\\\nthree  "), ["one", "two", "three"]);
+        assert_eq!(breaks("one  \ntwo\\\nthree  "), [(3, 5), (9, 10)]);
+        assert_eq!(lines("one  \ntwo\\\nthree  "), ["one", "two", "three  "]);
         // The break is a pair: its marks open it, its `\n` its word.
         let p: Vec<Pair> = pairs("a  \nb").into_iter().filter(|p| p.kind == Kind::Break).collect();
         assert_eq!(p, [Pair { kind: Kind::Break, open: (1, 3), close: (4, 4) }]);

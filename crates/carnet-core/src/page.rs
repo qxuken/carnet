@@ -604,13 +604,6 @@ fn join_text(t: &mut String, rest: &str, styled: bool) -> usize {
         t.push_str(rest);
         return before;
     }
-    // Spaces ending its last line, a break's marks once, are no break with
-    // words after them: they go, hidden as they were.
-    if !rest.is_empty()
-        && let Some(&(s, _)) = inline::breaks(t).last().filter(|r| r.1 == t.len())
-    {
-        t.truncate(s);
-    }
     let d = Visible::of(t).drawn_len();
     *t = inline::merge(&inline::join(t, rest));
     // Where `-` met `-`: past the dash they make.
@@ -625,8 +618,8 @@ fn one_line(t: &str) -> String {
 
 /// The lines of a paragraph that went on below, now ending it: a
 /// backslash that broke its last line from the next goes, as at a
-/// paragraph's end it would be the backslash it is. Spaces stay, as the
-/// file had them: at the end they are hidden all the same.
+/// paragraph's end it would be the backslash it is. Spaces stay, ordinary
+/// words at its end.
 fn ended(t: String) -> String {
     let broken = format!("{t}\n");
     match inline::breaks(&broken).last() {
@@ -6632,13 +6625,14 @@ mod tests {
             assert!(enter(&mut d, &mut c, true));
             assert_eq!(visible(&d, s).text(text(&d, s)), "stay\n\napart");
             assert_eq!(text(&d, s), format!("stay{mark}\n\napart"));
-            // Enter there: two paragraphs, nothing of the break showing.
+            // Enter there: two paragraphs. The spaces left at the first's
+            // end have no newline after them now, so they are words again.
             let mut d = d0.clone();
             let mut c = Caret::at(Pos { slot: s, byte: end });
             assert!(enter(&mut d, &mut c, false));
             let first = if mark == "\\" { "stay" } else { &format!("stay{mark}") };
             assert_eq!(texts(&d)[..2], [format!("Text:{first}"), "Text:\napart".to_string()]);
-            assert_eq!(visible(&d, s).text(text(&d, s)), "stay");
+            assert_eq!(visible(&d, s).text(text(&d, s)), first);
         }
     }
 
@@ -6657,8 +6651,8 @@ mod tests {
         let s = block_slots(&d0.blocks()[0])[0];
         let v = visible(&d0, s);
         let end = v.at(v.drawn_len());
-        assert_eq!(end, line.find("</mark>").unwrap(), "the line's end: inside the highlight");
-        // Enter: the spaces stay above, hidden as the file had them.
+        assert_eq!(end, line.len(), "the line's real end is past its spaces");
+        // Enter: the spaces stay above, ordinary words at its end.
         let (mut d, mut c) = (d0.clone(), Caret::at(Pos { slot: s, byte: end }));
         assert!(enter(&mut d, &mut c, false));
         assert_eq!(texts(&d)[..3], [format!("Text:{line}"), "Text:".to_string(), "[ ]next".to_string()]);
@@ -6690,9 +6684,8 @@ mod tests {
     }
 
     /// A line turned into an item or a heading loses its break's marks;
-    /// the lines that stay a paragraph keep theirs, as the file had them,
-    /// hidden — the last line of the one above too, but for a backslash,
-    /// which at a paragraph's end would be one.
+    /// the lines that stay a paragraph keep theirs. On the last line of
+    /// the one above, spaces become ordinary words; a backslash goes.
     #[test]
     fn a_turned_line_takes_no_break_and_leaves_none_showing() {
         for (mark, above) in [("  ", "one  "), ("\\", "one")] {
@@ -6704,7 +6697,7 @@ mod tests {
             assert!(toggle_turn(&mut d, &mut c, TURN_BULLET));
             assert_eq!(texts(&d)[..3], [format!("Text:{above}"), "[ ]two".to_string(), "Text:three".to_string()], "{mark:?}");
             let first = block_slots(&d.blocks()[0])[0];
-            assert_eq!(visible(&d, first).text(text(&d, first)), "one", "nothing of the break shows");
+            assert_eq!(visible(&d, first).text(text(&d, first)), above, "the paragraph's last line has no break after it");
             assert_eq!(crate::doc::to_markdown(None, &d), format!("{above}\n\n- two\n\nthree\n"));
             // The whole paragraph made a list: no item ends in marks.
             let mut d = d0.clone();

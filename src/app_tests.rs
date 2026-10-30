@@ -10680,7 +10680,7 @@ fn an_exported_notes_line_is_turned_alone() {
     };
     assert_eq!(written(&mut app), EXPORT);
     // On the page (not the note's card in the library): the paragraph.
-    let first = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("путь: жильё\nhostel / ryokan")).expect("the first paragraph").rect;
+    let first = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("путь: жильё\nhostel / ryokan  ")).expect("the first paragraph").rect;
     d.click(&mut app, first.x + 30.0, first.y + 8.0);
     d_frame_twice(&mut app, &mut d);
     assert_eq!(page::touched(app.doc(), app.caret), 0..=0);
@@ -10706,6 +10706,55 @@ fn an_exported_notes_line_is_turned_alone() {
     assert_eq!(
         written(&mut app),
         EXPORT.replacen("коридоре  \npicture rail  \nskylight", "коридоре  \n\n1. picture rail\n\nskylight", 1)
+    );
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Spaces at the end of the line being written are not a hard break yet:
+/// every one is drawn and moves the caret, including across a wrap. A
+/// letter after them appears where it was typed, with every space kept.
+#[test]
+fn typing_spaces_at_the_end_keeps_the_caret_moving() {
+    let (mut app, mut d, dir) = body("trailing-spaces");
+    d.viewport = kui_native::Size::new(560.0, 560.0);
+    d.frame(&mut app);
+    let words = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen";
+    type_in(&mut app, &mut d, words);
+    d_frame_twice(&mut app, &mut d);
+    let slot = app.caret.head.slot;
+    for n in 1..=12 {
+        let before = app.rect_at(&d.core, slot, app.caret.head.byte).unwrap();
+        key(&mut app, &mut d, "space");
+        d_frame_twice(&mut app, &mut d);
+        let after = app.rect_at(&d.core, slot, app.caret.head.byte).unwrap();
+        assert!(
+            after.y > before.y + 0.5 || ((after.y - before.y).abs() < 0.5 && after.x > before.x + 0.5),
+            "Space {n} did not advance the caret: {before:?} -> {after:?}"
+        );
+        assert_eq!(page::text(app.doc(), slot), format!("{words}{}", " ".repeat(n)));
+    }
+    let end = words.len() + 12;
+    key(&mut app, &mut d, "left");
+    assert_eq!(app.caret.head.byte, end - 1, "← enters the spaces one at a time");
+    key(&mut app, &mut d, "right");
+    assert_eq!(app.caret.head.byte, end);
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(page::text(app.doc(), slot), format!("{words}{}", " ".repeat(11)));
+    type_in(&mut app, &mut d, " ");
+    assert_eq!(page::text(app.doc(), slot), format!("{words}{}", " ".repeat(12)));
+    type_in(&mut app, &mut d, ".");
+    assert_eq!(page::text(app.doc(), slot), format!("{words}{}.", " ".repeat(12)));
+    key(&mut app, &mut d, "backspace");
+    assert_eq!(page::text(app.doc(), slot), format!("{words}{}", " ".repeat(12)));
+    press_title(&mut app, &mut d, 1e4);
+    d_frame_twice(&mut app, &mut d);
+    let word_end = app.rect_at(&d.core, slot, words.len()).unwrap();
+    let real_end = app.rect_at(&d.core, slot, end).unwrap();
+    assert!(
+        real_end.y > word_end.y + 0.5 || ((real_end.y - word_end.y).abs() < 0.5 && real_end.x > word_end.x + 0.5),
+        "terminal spaces stay drawn when another line has focus: {word_end:?} -> {real_end:?}"
     );
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
@@ -10827,7 +10876,7 @@ fn a_slash_on_the_line_after_a_highlight_offers_the_blocks() {
         };
         // On the page, not the note's line in the list.
         let keys: Vec<Key> = app.slot_keys.values().copied().collect();
-        let para = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Open terminal") && keys.contains(&n.key)).expect("the line, its marks hidden").rect;
+        let para = d.core.nodes().iter().find(|n| n.text.as_deref() == Some("Open terminal  ") && keys.contains(&n.key)).expect("the line, its marks hidden").rect;
         d.click(&mut app, para.x + 10.0, para.y + 6.0);
         d_frame_twice(&mut app, &mut d);
         key(&mut app, &mut d, "end");
