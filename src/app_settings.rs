@@ -735,31 +735,34 @@ impl Carnet {
         });
 
         // -- every shortcut, as this platform writes it
-        section(ui, l, "Keyboard");
-        card(ui, l, "card-keys", |ui| {
-            ui.with(
-                NodeSpec::column().grow_width().pad_xy(18.0, 10.0).selectable(),
-                |ui| {
-                    for (i, (what, spec)) in crate::keys::ALL.iter().enumerate() {
-                        ui.with_indexed(
-                            i as u64,
-                            NodeSpec::row().grow_width().height(28.0).cross_align(Align::Center),
-                            |ui| {
-                                ui.text_in(
-                                    NodeSpec::row().grow_width().min_width(0.0),
-                                    what,
-                                    TextStyle::new(Type::UI.size).color(t.fg).nowrap(),
-                                );
-                                ui.text_in(
-                                    NodeSpec::row().pad_xy(8.0, 2.0).radius(radius::TIGHT).bg(t.sunken),
-                                    &crate::keys::label(spec),
-                                    TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
-                                );
-                            },
-                        );
-                    }
-                },
-            );
+        let look = Value::List(vec![Value::str(s.palette.key()), Value::Bool(l.c.dark)]);
+        ui.memo("settings-keyboard", &look, |ui| {
+            section(ui, l, "Keyboard");
+            card(ui, l, "card-keys", |ui| {
+                ui.with(
+                    NodeSpec::column().grow_width().pad_xy(18.0, 10.0).selectable(),
+                    |ui| {
+                        for (i, (what, spec)) in crate::keys::ALL.iter().enumerate() {
+                            ui.with_indexed(
+                                i as u64,
+                                NodeSpec::row().grow_width().height(28.0).cross_align(Align::Center),
+                                |ui| {
+                                    ui.text_in(
+                                        NodeSpec::row().grow_width().min_width(0.0),
+                                        what,
+                                        TextStyle::new(Type::UI.size).color(t.fg).nowrap(),
+                                    );
+                                    ui.text_in(
+                                        NodeSpec::row().pad_xy(8.0, 2.0).radius(radius::TIGHT).bg(t.sunken),
+                                        &crate::keys::label(spec),
+                                        TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
+                                    );
+                                },
+                            );
+                        }
+                    },
+                );
+            });
         });
 
         self.sync_settings(ui, l);
