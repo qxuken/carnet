@@ -23,7 +23,7 @@ keyring = "4"
 # kui as released on crates.io, pinned: a release of Carnet names the kui
 # it was built with. To try kui's main, point this at a checkout with
 # `path = "../kui/crates/kui-native"`.
-kui-native = "=0.1.0-alpha.70"
+kui-native = "=0.1.0-alpha.73"
 # Pictures in notes: what a paste brings beyond text (kui puts a picture on
 # the clipboard but reads only text back) and the files'. Both are already
 # in kui-native's tree; these name them for Carnet's use.

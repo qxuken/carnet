@@ -1931,6 +1931,42 @@ fn settings_open_change_the_page_and_close() {
 }
 
 #[test]
+fn settings_shortcuts_follow_the_look_when_replayed() {
+    let (mut app, mut d, dir) = body("settings-keyboard-memo");
+    app.settings_open = true;
+    d_frame_twice(&mut app, &mut d);
+    let card_bg = |d: &mut Drive| {
+        let key = d.key_of("card-keys").expect("the shortcuts card");
+        d.core.nodes().iter().find(|n| n.key == key).map(|n| n.bg).expect("the card's colour")
+    };
+    let expected = |app: &Carnet, dark| crate::design::Colors::of(app.settings.palette, dark).card;
+    assert_eq!(card_bg(&mut d), expected(&app, false));
+    assert_eq!(d.texts_under("card-keys").len(), crate::keys::ALL.len() * 2);
+    for _ in 0..3 {
+        app.on_settings(Msg::SetSize { by: 1 });
+        d.frame(&mut app);
+    }
+    assert_eq!(card_bg(&mut d), expected(&app, false));
+    app.on_settings(Msg::SetPalette { to: 1 });
+    d.frame(&mut app);
+    assert_eq!(card_bg(&mut d), expected(&app, false));
+    app.on_settings(Msg::SetTheme { to: 2 });
+    d.frame(&mut app);
+    assert_eq!(card_bg(&mut d), expected(&app, true));
+    app.on_settings(Msg::SetTheme { to: 0 });
+    d.core.env.system.appearance = kui_native::Appearance::Light;
+    d.frame(&mut app);
+    assert_eq!(card_bg(&mut d), expected(&app, false));
+    d.core.env.system.appearance = kui_native::Appearance::Dark;
+    d.frame(&mut app);
+    assert_eq!(card_bg(&mut d), expected(&app, true));
+    assert_eq!(d.texts_under("card-keys").len(), crate::keys::ALL.len() * 2);
+    let w = d.warnings();
+    assert!(w.is_empty(), "{w:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn the_notes_folder_can_move() {
     let (mut app, mut d, dir) = fresh("move-dir");
     d.text(&mut app, "Stays here");
