@@ -143,10 +143,20 @@ impl Carnet {
                     } else {
                         self.folder.as_deref().map_or("Notes", folder_name)
                     };
-                    ui.text_in(
-                        NodeSpec::row().grow_width().min_width(0.0),
-                        heading,
-                        TextStyle::new(Type::HEADING.size).family(l.serif).color(t.fg).ellipsis(),
+                    let style = TextStyle::new(Type::HEADING.size).family(l.serif).color(t.fg).ellipsis();
+                    // A lone ellipsis looks like a menu. Give the heading
+                    // away before fewer than three letters fit, keeping
+                    // its space flexible and the creation buttons in place.
+                    let prefix = format!("{}…", heading.chars().take(3).collect::<String>());
+                    let least = ui.measure_text(heading, &style, None).width
+                        .min(ui.measure_text(&prefix, &style, None).width);
+                    ui.with_keyed(
+                        "library-heading",
+                        NodeSpec::row().grow_width().min_width(0.0)
+                            .when(kui_native::Cond::width_below(least), |s| s.hide("title")),
+                        |ui| {
+                            ui.text_in_keyed("title", NodeSpec::row().grow_width().min_width(0.0), heading, style);
+                        },
                     );
                     ui.with_keyed(
                         "new-folder",
