@@ -60,7 +60,7 @@ function plain(e: unknown, making: boolean): PasskeyError {
   return new PasskeyError(e instanceof Error ? e.message : String(e), 'other');
 }
 
-const NO_PRF = 'That passkey can’t unlock your notes: the app that keeps it doesn’t give what Carnet needs. Try a passkey kept by this browser, your phone, or a security key.';
+const NO_PRF = 'This passkey and browser combination doesn’t provide PRF, the encryption feature Carnet needs to unlock your notes. This is a compatibility limitation. Try another passkey provider or browser with PRF support.';
 
 /// A passkey used: the one chosen (or one of `allow`): its credential id,
 /// its PRF output, and the account it names.

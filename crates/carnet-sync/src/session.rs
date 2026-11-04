@@ -949,9 +949,11 @@ impl Session {
 
     /// Opens a pairing, to let a new device in (§7): the code to show it
     /// comes as [`Event::PairCode`]. One at a time; opening another closes
-    /// the last.
+    /// the last. Repeated requests before the code arrives share the
+    /// pending request: PairOpened has no request id, so replacing its
+    /// opener early would apply the old reply to the new secret.
     pub fn pair_open(&mut self, rng: &mut impl Random) {
-        if self.state != State::Ready {
+        if self.state != State::Ready || self.pairing.as_ref().is_some_and(Opener::waiting_for_code) {
             return;
         }
         self.pairing = Some(Opener::new(rng));
