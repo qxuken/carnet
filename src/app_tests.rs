@@ -263,7 +263,10 @@ fn a_tables_rows_and_columns_move_and_the_caret_with_them() {
         let k = d.key_of(key).expect(key);
         d.core.nodes().iter().any(|n| n.key == k && !n.flags.contains(&"disabled"))
     };
-    let menu = |app: &Carnet, label: &str| app.page_menu().into_iter().find(|m| m.label == label).expect(label).enabled;
+    let menu = |app: &Carnet, label: &str| {
+        app.page_menu().into_iter().find(|m| m.label == "Table").expect("Table")
+            .submenu.into_iter().find(|m| m.label == label).expect(label).enabled
+    };
     // Under the header, at the left: only down and right.
     assert_eq!(app.table_moves(), [false, true, false, true]);
     assert!(!enabled(&mut d, "t-rowup") && enabled(&mut d, "t-rowdown"));
@@ -641,6 +644,12 @@ fn a_right_click_on_the_page_opens_its_menu() {
     // Inside the selection: it stays, for the menu to act on.
     let (a, b) = page::ordered(app.doc(), app.caret);
     assert_eq!(b.byte - a.byte, 11);
+    let format = d.core.nodes().iter()
+        .find(|n| n.text.as_deref() == Some("Format"))
+        .map(|n| n.rect.center()).expect("the page's menu is open");
+    d.click(&mut app, format.x, format.y);
+    d.frame(&mut app);
+    d.frame(&mut app);
     let bold = d
         .core
         .nodes()
@@ -1775,9 +1784,10 @@ fn the_case_changes_by_shift_f3_and_the_menu() {
     assert_eq!(texts(&app)[0], "Hello **brave** world");
     key_with(&mut app, &mut d, "z", CTRL);
     assert_eq!(texts(&app)[0], "HELLO **BRAVE** WORLD", "one undo");
-    // In the page's menu, under Change case.
+    // In the page's menu, under Format → Change case.
     let menu = app.page_menu();
-    let sub = menu.iter().find(|i| i.label == "Change case").expect("Change case");
+    let format = menu.iter().find(|i| i.label == "Format").expect("Format");
+    let sub = format.submenu.iter().find(|i| i.label == "Change case").expect("Change case");
     let names: Vec<&str> = sub.submenu.iter().map(|i| i.label.as_str()).collect();
     assert_eq!(names, ["lowercase", "UPPERCASE", "Capitalize Each Word", "Sentence case"]);
     let _ = std::fs::remove_dir_all(dir);
@@ -9143,7 +9153,11 @@ fn any_paragraph_drops_its_first_letter_from_the_toolbar() {
     assert!(!blocks(&app)[1].initial);
     d_frame_twice(&mut app, &mut d);
     assert_eq!(at(&app, &d, 0).h, lh);
-    let item = app.page_menu().into_iter().find(|m| m.label == "Drop the first letter").expect("in the page's menu");
+    let initial_item = |app: &Carnet| {
+        app.page_menu().into_iter().find(|m| m.label == "Format").expect("Format")
+            .submenu.into_iter().find(|m| m.label == "Drop the first letter").expect("in the page's menu")
+    };
+    let item = initial_item(&app);
     assert!(item.enabled);
     app.page_action("initial");
     assert!(blocks(&app)[1].initial);
@@ -9152,7 +9166,7 @@ fn any_paragraph_drops_its_first_letter_from_the_toolbar() {
     app.on_plain(Msg::Turn { to: TURN_H2 });
     d_frame_twice(&mut app, &mut d);
     assert_eq!(page::initial_at(app.doc(), app.caret), None, "nothing to drop in a heading");
-    assert!(!app.page_menu().into_iter().find(|m| m.label == "Drop the first letter").unwrap().enabled);
+    assert!(!initial_item(&app).enabled);
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
