@@ -2326,8 +2326,9 @@ impl Carnet {
         }
     }
 
-    /// The page's right-click menu: the clipboard, the styles, what the
-    /// block can turn into, and the table's tools inside a table.
+    /// The page's right-click menu: clipboard actions up front, with
+    /// formatting, block types, inserts and note tools grouped behind them.
+    /// A table gets its own tools in place of block types and inserts.
     pub(super) fn page_menu(&self) -> Vec<MenuItem> {
         let doc = self.doc();
         let selected = !self.caret.is_empty();
@@ -2371,21 +2372,23 @@ impl Carnet {
         items.extend([
             item("Paste", "paste").accel("mod+v"),
             item("Select all", "all").accel("mod+a"),
-            item("Copy note as Markdown", "copy-note"),
         ]);
+        let mut note_items = vec![item("Copy note as Markdown", "copy-note")];
         // The history and another window are the main window's: a note's
         // own window is that already, and has no library to list versions.
         if self.note_window.is_none() {
-            items.push(item("Note history", "history"));
-            items.push(item("Open in new window", "window").accel(keys::NEW_WINDOW).enabled(self.peek.is_none()));
+            note_items.push(item("Note history", "history"));
+            note_items.push(item("Open in new window", "window").accel(keys::NEW_WINDOW).enabled(self.peek.is_none()));
         }
         // A tile is a file, not words: no styles, turns or inserts for it,
         // as a picture has none.
         if tile.is_some() {
+            items.extend(note_items);
             return items;
         }
-        items.push(MenuItem::separator());
         if let Some((_, float, now)) = self.picture_here() {
+            items.extend(note_items);
+            items.push(MenuItem::separator());
             items.extend([item("Copy picture", "copy-picture"), item("Copy picture as Markdown", "copy-picture-md"), MenuItem::separator()]);
             // Sizes: shares of the text's width, the one it has now ticked.
             let full = (self.text_w - 10.0).max(48.0);
@@ -2416,7 +2419,8 @@ impl Carnet {
             items.extend([item(super::reveal_label(), "reveal-picture"), item("Remove picture", "remove")]);
             return items;
         }
-        items.extend([
+        items.push(MenuItem::separator());
+        let mut format = vec![
             item("Bold", "style:0").accel("mod+b"),
             item("Italic", "style:1").accel("mod+i"),
             item("Strikethrough", "style:2").accel("mod+shift+x"),
@@ -2433,11 +2437,21 @@ impl Carnet {
                 "Change case",
                 CASES.iter().map(|(label, name, _)| item(label, &format!("case:{name}"))).collect(),
             ),
-            MenuItem::separator(),
-        ]);
+        ];
+        if !in_table {
+            let initial = page::initial_at(doc, self.caret);
+            format.extend([
+                MenuItem::separator(),
+                item("Drop the first letter", "initial")
+                    .accel(keys::INITIAL)
+                    .enabled(initial.is_some())
+                    .checked(initial == Some(true)),
+            ]);
+        }
+        items.push(MenuItem::submenu("Format", format));
         if in_table {
             let [up, down, left, right] = self.table_moves();
-            items.extend([
+            items.push(MenuItem::submenu("Table", vec![
                 item("Add row below", "addrow"),
                 item("Add column right", "addcol"),
                 item("Remove row", "delrow"),
@@ -2451,10 +2465,11 @@ impl Carnet {
                 item("Header row", "header").checked(self.table_here().is_some_and(|t| t.header)),
                 MenuItem::separator(),
                 item("Remove table", "remove"),
-            ]);
+            ]));
         } else {
             let convertible = page::touched(doc, self.caret)
                 .any(|i| page::turned(&doc.blocks()[i].kind, TURN_TEXT).is_some());
+            let mut turns = Vec::new();
             for (label, to, spec) in [
                 ("Text", TURN_TEXT, keys::TEXT),
                 ("Heading", TURN_H2, keys::H2),
@@ -2463,24 +2478,20 @@ impl Carnet {
                 ("Checklist", TURN_TODO, keys::TODO),
                 ("Quote", TURN_QUOTE, keys::QUOTE),
             ] {
-                items.push(item(label, &format!("turn:{to}")).accel(spec).enabled(convertible));
+                turns.push(item(label, &format!("turn:{to}")).accel(spec).enabled(convertible));
             }
-            let initial = page::initial_at(doc, self.caret);
-            items.push(
-                item("Drop the first letter", "initial")
-                    .accel(keys::INITIAL)
-                    .enabled(initial.is_some())
-                    .checked(initial == Some(true)),
-            );
-            items.extend([
-                MenuItem::separator(),
+            items.push(MenuItem::submenu("Turn into", turns));
+            items.push(MenuItem::submenu("Insert", vec![
                 item("Insert table", "table").accel(keys::TABLE),
                 item("Insert divider", "rule").accel(keys::DIVIDER),
+            ]));
+            items.extend([
                 MenuItem::separator(),
                 item(if selected { "Duplicate blocks" } else { "Duplicate block" }, "duplicate").accel(keys::DUPLICATE),
                 item(if selected { "Remove blocks" } else { "Remove block" }, "remove").accel(keys::REMOVE),
             ]);
         }
+        items.extend([MenuItem::separator(), MenuItem::submenu("Note", note_items)]);
         items
     }
 
