@@ -1935,6 +1935,20 @@ fn settings_shortcuts_follow_the_look_when_replayed() {
     let (mut app, mut d, dir) = body("settings-keyboard-memo");
     app.settings_open = true;
     d_frame_twice(&mut app, &mut d);
+    assert!(d.key_of("card-keys").is_none(), "shortcuts start collapsed");
+    assert_eq!(heard_open(&mut d, "Keyboard"), Some(false));
+    let toggle = d.key_of("settings-keyboard-toggle").expect("the keyboard heading");
+    for _ in 0..40 {
+        if d.rect_of(toggle).is_some_and(|r| r.y < 400.0) {
+            break;
+        }
+        d.wheel(&mut app, 700.0, 400.0, 0.0, -120.0);
+        d.frame(&mut app);
+    }
+    assert!(d.rect_of(toggle).is_some_and(|r| r.y < 400.0), "the keyboard heading is visible");
+    d.click_key(&mut app, toggle);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(heard_open(&mut d, "Keyboard"), Some(true));
     let card_bg = |d: &mut Drive| {
         let key = d.key_of("card-keys").expect("the shortcuts card");
         d.core.nodes().iter().find(|n| n.key == key).map(|n| n.bg).expect("the card's colour")
@@ -1960,6 +1974,15 @@ fn settings_shortcuts_follow_the_look_when_replayed() {
     d.core.env.system.appearance = kui_native::Appearance::Dark;
     d.frame(&mut app);
     assert_eq!(card_bg(&mut d), expected(&app, true));
+    assert_eq!(d.texts_under("card-keys").len(), crate::keys::ALL.len() * 2);
+    let toggle = d.key_of("settings-keyboard-toggle").unwrap();
+    d.click_key(&mut app, toggle);
+    d_frame_twice(&mut app, &mut d);
+    assert!(d.key_of("card-keys").is_none(), "shortcuts can be collapsed again");
+    assert_eq!(heard_open(&mut d, "Keyboard"), Some(false));
+    let toggle = d.key_of("settings-keyboard-toggle").unwrap();
+    d.click_key(&mut app, toggle);
+    d_frame_twice(&mut app, &mut d);
     assert_eq!(d.texts_under("card-keys").len(), crate::keys::ALL.len() * 2);
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");

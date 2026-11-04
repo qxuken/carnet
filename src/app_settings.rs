@@ -38,6 +38,10 @@ impl Carnet {
                 self.list_view = false;
                 return;
             }
+            Msg::ToggleSettingsKeyboard => {
+                self.settings_keyboard_open = !self.settings_keyboard_open;
+                return;
+            }
             Msg::SetTheme { to } => {
                 s.theme = match to {
                     1 => ThemePref::Light,
@@ -735,35 +739,61 @@ impl Carnet {
         });
 
         // -- every shortcut, as this platform writes it
-        let look = Value::List(vec![Value::str(s.palette.key()), Value::Bool(l.c.dark)]);
-        ui.memo("settings-keyboard", &look, |ui| {
-            section(ui, l, "Keyboard");
-            card(ui, l, "card-keys", |ui| {
-                ui.with(
-                    NodeSpec::column().grow_width().pad_xy(18.0, 10.0).selectable(),
+        let keyboard_open = self.settings_keyboard_open;
+        ui.with(
+            NodeSpec::row().grow_width().padding(Edges { l: 0.0, r: 0.0, t: 14.0, b: 0.0 }),
+            |ui| {
+                ui.with_keyed(
+                    "settings-keyboard-toggle",
+                    NodeSpec::row()
+                        .grow_width()
+                        .pad_xy(12.0, 6.0)
+                        .gap(6.0)
+                        .cross_align(Align::Center)
+                        .radius(radius::CONTROL)
+                        .hover_bg(t.sunken)
+                        .on_click(Msg::ToggleSettingsKeyboard)
+                        .role(Role::Button)
+                        .label("Keyboard")
+                        .expanded(keyboard_open),
                     |ui| {
-                        for (i, (what, spec)) in crate::keys::ALL.iter().enumerate() {
-                            ui.with_indexed(
-                                i as u64,
-                                NodeSpec::row().grow_width().height(28.0).cross_align(Align::Center),
-                                |ui| {
-                                    ui.text_in(
-                                        NodeSpec::row().grow_width().min_width(0.0),
-                                        what,
-                                        TextStyle::new(Type::UI.size).color(t.fg).nowrap(),
-                                    );
-                                    ui.text_in(
-                                        NodeSpec::row().pad_xy(8.0, 2.0).radius(radius::TIGHT).bg(t.sunken),
-                                        &crate::keys::label(spec),
-                                        TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
-                                    );
-                                },
-                            );
-                        }
+                        let chevron = if keyboard_open { Icon::ChevronDown } else { Icon::ChevronRight };
+                        crate::icons::icon(ui, chevron, t.muted, 12.0, false);
+                        ui.text("Keyboard", TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
                     },
                 );
+            },
+        );
+        let look = Value::List(vec![Value::str(s.palette.key()), Value::Bool(l.c.dark)]);
+        if keyboard_open {
+            ui.memo("settings-keyboard", &look, |ui| {
+                card(ui, l, "card-keys", |ui| {
+                    ui.with(
+                        NodeSpec::column().grow_width().pad_xy(18.0, 10.0).selectable(),
+                        |ui| {
+                            for (i, (what, spec)) in crate::keys::ALL.iter().enumerate() {
+                                ui.with_indexed(
+                                    i as u64,
+                                    NodeSpec::row().grow_width().height(28.0).cross_align(Align::Center),
+                                    |ui| {
+                                        ui.text_in(
+                                            NodeSpec::row().grow_width().min_width(0.0),
+                                            what,
+                                            TextStyle::new(Type::UI.size).color(t.fg).nowrap(),
+                                        );
+                                        ui.text_in(
+                                            NodeSpec::row().pad_xy(8.0, 2.0).radius(radius::TIGHT).bg(t.sunken),
+                                            &crate::keys::label(spec),
+                                            TextStyle::new(Type::SMALL.size).color(t.muted).nowrap(),
+                                        );
+                                    },
+                                );
+                            }
+                        },
+                    );
+                });
             });
-        });
+        }
 
         self.sync_settings(ui, l);
 

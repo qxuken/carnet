@@ -144,6 +144,8 @@ pub enum Msg {
     NewFolder,
     /// Opens the settings, or closes them.
     ShowSettings,
+    /// Fold or unfold the keyboard shortcuts in Settings.
+    ToggleSettingsKeyboard,
     /// GitHub asked once a day whether a newer Carnet is out: 0 no, 1 yes.
     SetCheckUpdates { to: u64 },
     /// The newer Carnet's release page, in the browser.
@@ -764,6 +766,8 @@ pub struct Carnet {
     pub settings: Settings,
     /// The settings show in place of the note.
     pub settings_open: bool,
+    /// Whether Settings shows the keyboard shortcuts.
+    settings_keyboard_open: bool,
     /// Reset in Settings pressed: its line asks to be sure.
     pub reset_armed: bool,
     /// The font list's search to take the keyboard on the next frame: it
@@ -1367,6 +1371,7 @@ impl Carnet {
             cards_clicked: false,
             settings,
             settings_open: false,
+            settings_keyboard_open: false,
             reset_armed: false,
             font_search_focus: false,
             dated: Default::default(),
@@ -4076,6 +4081,7 @@ impl Carnet {
                 }
             },
             Msg::ShowSettings
+            | Msg::ToggleSettingsKeyboard
             | Msg::SetCheckUpdates { .. }
             | Msg::OpenRelease
             | Msg::SetTheme { .. }
