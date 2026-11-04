@@ -199,6 +199,10 @@ pub(crate) enum OpenerOut {
 }
 
 impl Opener {
+    pub(crate) fn waiting_for_code(&self) -> bool {
+        matches!(self.state, OpenerState::Asked)
+    }
+
     pub(crate) fn new(rng: &mut impl Random) -> Self {
         let secret = u32::from_le_bytes(rng.bytes()) % 1_000_000;
         Opener { secret, state: OpenerState::Asked }
