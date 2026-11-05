@@ -132,7 +132,10 @@ The toolbar acts on the blocks the caret touches, and shows only the tools that 
 
 | Keys | What they do |
 |---|---|
-| Ctrl+N / Ctrl+F / Ctrl+S | new note / search / save now |
+| Ctrl+N / Ctrl+S | new note / save now |
+| Ctrl+F | find in the open note; Enter / Shift+Enter or the arrows move between matches, Escape closes |
+| Ctrl+Shift+F | search all notes; opening a result selects and scrolls to its match |
+| Ctrl+G / Ctrl+Shift+G | next / previous match in the note |
 | Ctrl+Shift+N | new folder |
 | Ctrl+Shift+O | the note in a window of its own, the toolbar and the page alone (or from its menu in the list, or the page's); open in both, what is typed in one is in the other at once. Ctrl+W closes it, and so does moving its note to Deleted |
 | Ctrl+Alt+↑ / ↓ | the note above or below in the list |

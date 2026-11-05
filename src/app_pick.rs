@@ -29,7 +29,8 @@ impl Carnet {
     /// sight (none folded away), then the notes shown. What a ⇧-click's
     /// range runs over.
     fn pick_rows(&self) -> Vec<Pick> {
-        let folders = self.folders_in_sight().into_iter().map(Pick::Folder);
+        let folders = if self.query.trim().is_empty() { self.folders_in_sight() } else { Vec::new() };
+        let folders = folders.into_iter().map(Pick::Folder);
         let notes = self.order.iter().map(|&i| Pick::Note(self.store.notes[i].id));
         folders.chain(notes).collect()
     }

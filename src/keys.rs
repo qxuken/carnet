@@ -63,7 +63,10 @@ pub const NEW_FOLDER: &str = "mod+shift+n";
 pub const NEW_WINDOW: &str = "mod+shift+o";
 /// On a folder in the list, or the one shown after a click on it.
 pub const RENAME_FOLDER: &str = "f2";
-pub const SEARCH: &str = "mod+f";
+pub const FIND: &str = "mod+f";
+pub const SEARCH: &str = "mod+shift+f";
+pub const FIND_NEXT: &str = "mod+g";
+pub const FIND_PREVIOUS: &str = "mod+shift+g";
 pub const PIN: &str = "mod+shift+p";
 pub const TRASH: &str = "mod+shift+backspace";
 pub const SETTINGS: &str = "mod+,";
@@ -75,12 +78,15 @@ pub const SAVE: &str = "mod+s";
 pub const PASTE: &str = "mod+v";
 
 /// Every shortcut with what it does, in the order the settings list them.
-pub const ALL: [(&str, &str); 52] = [
+pub const ALL: [(&str, &str); 55] = [
     ("New note", NEW_NOTE),
     ("New folder", NEW_FOLDER),
     ("Open the note in a new window", NEW_WINDOW),
     ("Rename folder", RENAME_FOLDER),
-    ("Search", SEARCH),
+    ("Find in note", FIND),
+    ("Search all notes", SEARCH),
+    ("Next match", FIND_NEXT),
+    ("Previous match", FIND_PREVIOUS),
     ("Previous note", PREVIOUS_NOTE),
     ("Next note", NEXT_NOTE),
     ("Next note, round the list", CYCLE_NEXT),

@@ -138,7 +138,9 @@ impl Carnet {
                     .focus_region()
                     .window_drag_unless(self.menu_open),
                 |ui| {
-                    let heading = if self.deleted {
+                    let heading = if !self.query.trim().is_empty() {
+                        "Search"
+                    } else if self.deleted {
                         "Deleted"
                     } else {
                         self.folder.as_deref().map_or("Notes", folder_name)
@@ -191,7 +193,20 @@ impl Carnet {
                 },
             );
             self.search(ui, l);
-            self.folders(ui, l);
+            let searching = !self.query.trim().is_empty();
+            if searching {
+                // These rows are absent during search, including from keyboard
+                // navigation and range selection.
+                self.folder_rows.clear();
+                self.folder_rects.clear();
+                let count = self.order.len();
+                ui.with_keyed("search-summary", NodeSpec::row().grow_width().pad_xy(26.0, 10.0), |ui| {
+                    ui.text(&format!("{count} {} found", if count == 1 { "note" } else { "notes" }),
+                        TextStyle::new(Type::STRONG.size).color(t.fg).nowrap());
+                });
+            } else {
+                self.folders(ui, l);
+            }
             if self.deleted {
                 self.deleted_list(ui, l);
                 self.sidebar_foot(ui, l);
@@ -226,6 +241,8 @@ impl Carnet {
             let created = self.settings.dates_created;
             let away = !ui.env().focused;
             let (order, notes, current) = (&self.order, &self.store.notes, self.current);
+            let query = self.query.trim();
+            let card_width = self.library_w() - 52.0;
             // Every note at once (all of them, or a search): each card says
             // which folder it is in.
             let all = self.folder.is_none() || !self.query.trim().is_empty();
@@ -254,14 +271,17 @@ impl Carnet {
                 order.len(),
                 // Taller or shorter with the density: the air around a
                 // card's text, never the text.
-                crate::design::Density::library_row(l.d),
+                crate::design::Density::library_row(l.d) + if searching { 40.0 } else { 0.0 },
                 |_| NodeSpec::column().pad_xy(0.0, 3.0),
                 |ui, i| {
                     let n = order[i];
                     let note = &notes[n];
                     let selected = n == current;
                     let ago = short_when(now, if created { note.created } else { note.modified });
-                    let snippet = note.doc.snippet();
+                    let preview_style = TextStyle::new(Type::SMALL.size).line_height(18.0).color(t.muted);
+                    let found = searching.then(|| super::search_view::snippet(&note.doc, query, card_width,
+                        |s| ui.measure_text(s, &preview_style, None).width)).flatten();
+                    let snippet = found.clone().unwrap_or_else(|| note.doc.snippet());
                     let place = if all && !note.folder.is_empty() {
                         Some(folder_name(&note.folder))
                     } else {
@@ -321,18 +341,34 @@ impl Carnet {
                                 if note.pinned {
                                     ui.leaf(NodeSpec::row().size(6.0, 6.0).radius(3.0).bg(t.accent));
                                 }
-                                ui.text_in(
-                                    NodeSpec::row().grow_width(),
-                                    note.display_title(),
-                                    TextStyle::new(Type::STRONG.size).color(t.fg).ellipsis(),
-                                );
+                                if searching {
+                                    let style = TextStyle::new(Type::STRONG.size).color(t.fg).ellipsis();
+                                    let room = (card_width - ui.measure_text(&ago, &TextStyle::new(Type::CAPTION.size), None).width - 12.0).max(40.0);
+                                    let title = super::search_view::excerpt(note.display_title(), query, room, |s| ui.measure_text(s, &style, None).width);
+                                    ui.with(NodeSpec::row().grow_width().min_width(0.0).tooltip(note.display_title()), |ui| {
+                                        ui.rich_text(&super::search_view::result_spans(&title, query, l), style);
+                                    });
+                                } else {
+                                    ui.text_in(
+                                        NodeSpec::row().grow_width(),
+                                        note.display_title(),
+                                        TextStyle::new(Type::STRONG.size).color(t.fg).ellipsis(),
+                                    );
+                                }
                                 ui.text(&ago, TextStyle::new(Type::CAPTION.size).color(t.muted).nowrap());
                             },
                         );
+                        if searching {
+                            ui.text(place.unwrap_or("All notes"), TextStyle::new(Type::CAPTION.size).color(t.focus_ring).nowrap());
+                            ui.with(NodeSpec::row().grow_width().height(36.0).clip(), |ui| {
+                                ui.rich_text(&super::search_view::result_spans(&snippet, query, l), preview_style);
+                            });
+                            return;
+                        }
                         // The folder, then the preview's pieces, drawn dots
                         // between them: a typed "·" sits wherever the
                         // font's metrics put it.
-                        let parts = note.doc.snippet_parts();
+                        let parts = found.map(|s| vec![s]).unwrap_or_else(|| note.doc.snippet_parts());
                         let style = TextStyle::new(Type::SMALL.size).color(t.muted);
                         let mut pieces: Vec<(&str, Color)> = Vec::new();
                         if let Some(place) = place {
@@ -857,7 +893,12 @@ impl Carnet {
         // Quiet until it is used: in a window in the background, or with
         // nothing searched and the keyboard elsewhere.
         let quiet = !ui.env().focused || (self.query.is_empty() && !self.search_active);
-        ui.with(NodeSpec::row().grow_width().pad_xy(12.0, 8.0), |ui| {
+        let active = !self.query.trim().is_empty() || self.search_active || self.focus_req == Some(Field::Search);
+        ui.with(NodeSpec::column().grow_width().pad_xy(12.0, 8.0).gap(6.0), |ui| {
+            if active {
+                ui.text_in_keyed("search-scope", NodeSpec::row().pad_xy(4.0, 0.0), "All notes",
+                    TextStyle::new(Type::SMALL.size).color(t.fg).nowrap());
+            }
             ui.with_keyed(
                 "search-pill",
                 NodeSpec::row()
@@ -865,14 +906,16 @@ impl Carnet {
                     .height(34.0)
                     .padding(Edges { l: 14.0, r: 6.0, t: 0.0, b: 0.0 })
                     .gap(8.0)
-                    .radius(radius::ROUND)
+                    .radius(radius::CONTROL)
+                    .border(if self.search_active || self.focus_req == Some(Field::Search) { 1.5 } else { 0.0 }, t.focus_ring)
                     // Not in use, the field steps back into the library, as
                     // a Mac's controls do in a window in the background: a
                     // solid pill there is the loudest thing on the screen.
-                    // A click, ⌘F or a search brings it whole.
+                    // A click, ⌘⇧F or a search brings it whole.
                     .bg(if quiet { l.pill.with_alpha(l.pill.a * 0.35) } else { l.pill })
                     .transition(160.0)
                     .cross_align(Align::Center)
+                    .tooltip(&crate::keys::hint("Search all notes", crate::keys::SEARCH))
                     .on_click(Msg::FocusSearch)
                     // A click target for the mouse, not a second Tab stop
                     // in front of the field.
@@ -893,7 +936,9 @@ impl Carnet {
                         Field::Search.on(NodeSpec::row().grow_width().label("Search notes")),
                     );
                     self.fields.insert(k, Field::Search);
+                    let requested = self.focus_req == Some(Field::Search);
                     self.apply_focus(ui, k, Field::Search);
+                    if requested { ui.core().edit.set_selection(k, (0, 0), (0, usize::MAX)); }
                     if !empty {
                         ui.with_keyed(
                             "clear-search",
