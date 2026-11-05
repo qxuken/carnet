@@ -9836,6 +9836,25 @@ fn several_notes_and_folders_are_chosen_and_go_together() {
 }
 
 #[test]
+fn a_narrow_library_heading_disappears_instead_of_looking_like_a_menu() {
+    let (mut app, mut d, dir) = fresh("library-heading");
+    d.core.env.window.native_controls = Some(kui_native::Rect::new(0.0, 0.0, 98.0, 52.0));
+    let named = |d: &mut Drive, name: &str| {
+        d.core.access_tree().nodes.iter().any(|n| n.name.as_deref() == Some(name))
+    };
+    for (width, shown) in [(200, false), (320, true), (200, false)] {
+        app.settings.library_w = width;
+        d_frame_twice(&mut app, &mut d);
+        let heading = d.core.access_tree().nodes.iter()
+            .any(|n| n.role == Role::StaticText && n.name.as_deref() == Some("Notes"));
+        assert_eq!(heading, shown, "heading at {width}px");
+        assert!(named(&mut d, "New folder"));
+        assert!(named(&mut d, "New note"));
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn the_library_is_as_wide_as_its_edge_is_dragged() {
     let (mut app, mut d, dir) = fresh("library-width");
     d.core.set_inspect(true);
