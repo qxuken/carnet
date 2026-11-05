@@ -1882,6 +1882,50 @@ fn code_copied_carries_code_as_its_html() {
 }
 
 #[test]
+fn settings_drop_the_notes_ime_anchor() {
+    // The title is a stock editor; the body draws its own caret. Either
+    // must stop anchoring macOS's input-source indicator in Settings.
+    // The native runner disables IME when this anchor is absent.
+    for title in [false, true] {
+        for click in [false, true] {
+            let name = format!("settings-ime-{title}-{click}");
+            let (mut app, mut d, dir) = if title { fresh(&name) } else { body(&name) };
+            type_in(&mut app, &mut d, "hello");
+            d.core.set_inspect(true);
+            d.frame(&mut app);
+            assert!(d.core.ime_rect().is_some(), "the note has an IME anchor");
+
+            if click {
+                let settings = d.key_of("open-settings").expect("the Settings button");
+                d.click_key(&mut app, settings);
+                d.frame(&mut app);
+            } else {
+                key_with(&mut app, &mut d, ",", CTRL);
+            }
+            assert!(app.settings_open);
+            assert_eq!(d.core.ime_rect(), None, "settings must not retain the note's caret");
+            d.frame(&mut app);
+            assert_eq!(d.core.ime_rect(), None, "the old anchor stays cleared");
+
+            key(&mut app, &mut d, "escape");
+            assert!(!app.settings_open);
+            // A mouse-opened Settings button can keep keyboard focus.
+            // Refocus the note as a user would before typing again.
+            let input = if title {
+                *app.fields.iter().find(|(_, f)| **f == Field::Title).unwrap().0
+            } else {
+                *app.slot_keys.get(&app.caret.head.slot).unwrap()
+            };
+            let r = d.rect_of(input).expect("the note's text is visible");
+            d.click(&mut app, r.x + 2.0, r.y + r.h / 2.0);
+            d.frame(&mut app);
+            assert!(d.core.ime_rect().is_some(), "refocusing the note restores its anchor");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[test]
 fn settings_open_change_the_page_and_close() {
     let (mut app, mut d, dir) = body("settings");
     type_in(&mut app, &mut d, "hello");
@@ -1893,6 +1937,7 @@ fn settings_open_change_the_page_and_close() {
     key_with(&mut app, &mut d, ",", CTRL);
     d.frame(&mut app);
     assert!(app.settings_open);
+    assert_eq!(d.core.ime_rect(), None, "no text field has focus in Settings yet");
     assert!(d.key_of("t-trash").is_none(), "the note's tools are gone");
     for _ in 0..4 {
         let up = d.key_of("size-up").expect("a bigger-text button");
@@ -1927,6 +1972,7 @@ fn settings_open_change_the_page_and_close() {
     d.frame(&mut app);
     assert!(d.core.nodes().iter().any(|n| n.text.as_deref() == Some("System")));
     assert!(app.fields.values().any(|f| *f == Field::Font), "with its search");
+    assert!(d.core.ime_rect().is_some(), "the focused font search has its own IME anchor");
     // Back: the note, its text bigger.
     let back = d.key_of("t-close-settings").unwrap();
     d.click_key(&mut app, back);
