@@ -614,6 +614,45 @@ impl Notes {
         self.rooms.docs.get(vault::ROOM)?.place(Key::parse(key)?)
     }
 
+    /// A Markdown link resolved by the vault's file names, never by a
+    /// displayed title (a file imported from another app may differ).
+    pub fn linked_note(&self, folder: &str, href: &str) -> Option<String> {
+        let (path, _) = doc::note_link(folder, href)?;
+        let stem = path.rsplit_once('.')?.0;
+        self.note_paths().into_iter().find_map(|(key, path)| (path.rsplit_once('.').is_some_and(|(p, _)| p == stem) && self.rooms.docs.contains_key(&key)).then_some(key))
+    }
+
+    fn note_paths(&self) -> carnet_core::navigation::Paths {
+        let placed = self.placed();
+        carnet_core::navigation::file_paths(placed.notes.iter().filter(|(k, p)| !p.trashed && !placed.gone.contains(k)).map(|(key, p)| (key.to_string(), p.folder.clone(), p.name.clone())).collect())
+    }
+
+    fn repair_note_links(&mut self, before: &carnet_core::navigation::Paths, rng: &mut impl Random) {
+        use carnet_core::navigation as nav;
+        let after = self.note_paths();
+        let moved = nav::moves(before, &after);
+        if moved.is_empty() { return; }
+        for (room, to) in after {
+            let Some(d) = self.rooms.docs.get(&room) else { continue };
+            let from = before.get(&room).unwrap_or(&to);
+            if let Some(text) = nav::rewrite(&d.text(), from, &to, &moved) {
+                d.record(&text, Origin::Save);
+                self.changed.insert(room.clone());
+                self.session.saved(&room, &mut self.rooms, rng);
+            }
+        }
+    }
+
+    pub fn link_notes(&self, query: &str) -> Vec<carnet_core::navigation::Note> {
+        let paths = self.note_paths();
+        let notes = self.notes().into_iter().filter_map(|n| Some(carnet_core::navigation::Note { path: paths.get(&n.key)?.clone(), id: n.key, title: n.title })).collect::<Vec<_>>();
+        carnet_core::navigation::search(&notes, query)
+    }
+
+    pub fn link_sections(&self, key: &str) -> Vec<carnet_core::navigation::Section> {
+        self.rooms.docs.get(key).map(|d| carnet_core::navigation::sections(&doc::from_markdown(&d.text()).1)).unwrap_or_default()
+    }
+
     /// Each note's [`Summary`], by room: made again only for a note whose
     /// version moved since.
     fn summaries(&self) -> std::cell::RefMut<'_, HashMap<String, (Version, Summary)>> {
@@ -821,13 +860,18 @@ impl Notes {
         } else {
             d.apply_from(&base, text, Origin::Save).ok()?
         };
-        let version = hex(&d.version().to_bytes());
         let changed = merged != before;
+        let title_changed = name::for_text(&before) != name::for_text(&merged);
+        let paths_before = title_changed.then(|| self.note_paths());
+        let wanted = name::for_text(&merged);
+        let wanted = if title_changed {
+            let folder = self.place(key).map(|p| p.folder).or_else(|| self.fresh.get(key).cloned()).unwrap_or_default();
+            self.note_name_free_except(&folder, &wanted, Some(k))
+        } else { wanted };
         // Where it goes: placed with its first words, renamed with its title.
         let vault = self.rooms.doc(vault::ROOM);
-        let wanted = name::for_text(&merged);
         let placed = match vault.place(k) {
-            Some(mut p) if name::for_text(&before) != wanted => {
+            Some(mut p) if title_changed => {
                 p.name = wanted;
                 vault.set_place(k, &p)
             }
@@ -847,7 +891,9 @@ impl Notes {
         if changed {
             self.session.saved(key, &mut self.rooms, rng);
         }
-        Some((merged, version))
+        if let Some(before) = paths_before { self.repair_note_links(&before, rng); }
+        let d = self.rooms.docs.get(key)?;
+        Some((d.text(), hex(&d.version().to_bytes())))
     }
 
     /// A new note, blank, in `folder`: its key. Nothing is sent until it
@@ -1007,8 +1053,10 @@ impl Notes {
     /// `folder` renamed `name`, its folders and notes with it: its new
     /// path, or why not.
     pub fn rename_folder(&mut self, folder: &str, name: &str, rng: &mut impl Random) -> Result<String, String> {
+        let before = self.note_paths();
         let r = self.in_vault(rng, |v| v.rename_folder(folder, name)).map_err(|e| e.to_string())?;
         self.relink(&r.notes, rng);
+        self.repair_note_links(&before, rng);
         Ok(r.to)
     }
 
@@ -1016,8 +1064,10 @@ impl Notes {
     /// it; never into itself or a folder inside it: its new path, or why
     /// not.
     pub fn move_folder(&mut self, folder: &str, parent: &str, rng: &mut impl Random) -> Result<String, String> {
+        let before = self.note_paths();
         let r = self.in_vault(rng, |v| v.move_folder(folder, parent)).map_err(|e| e.to_string())?;
         self.relink(&r.notes, rng);
+        self.repair_note_links(&before, rng);
         Ok(r.to)
     }
 
@@ -1053,9 +1103,11 @@ impl Notes {
     /// rewritten from there ([`crate::relink`]). False if it's in Deleted,
     /// there already, or the folder is gone.
     pub fn move_note(&mut self, key: &str, folder: &str, rng: &mut impl Random) -> bool {
+        let before = self.note_paths();
         let Some(k) = Key::parse(key) else { return false };
         let Some(from) = self.in_vault(rng, |v| v.move_note(k, folder)) else { return false };
         self.relink(&[(k, from)], rng);
+        self.repair_note_links(&before, rng);
         true
     }
 
@@ -1137,9 +1189,13 @@ impl Notes {
     /// the names its other notes have, case aside, as the desktop finds a
     /// free file name (`free_path`).
     fn note_name_free(&self, folder: &str, stem: &str) -> String {
+        self.note_name_free_except(folder, stem, None)
+    }
+
+    fn note_name_free_except(&self, folder: &str, stem: &str, except: Option<Key>) -> String {
         let placed = self.placed();
         let taken: HashSet<String> =
-            placed.notes.iter().filter(|(k, p)| !p.trashed && p.folder == folder && !placed.gone.contains(*k)).map(|(_, p)| p.name.to_lowercase()).collect();
+            placed.notes.iter().filter(|(k, p)| Some(**k) != except && !p.trashed && p.folder == folder && !placed.gone.contains(*k)).map(|(_, p)| p.name.to_lowercase()).collect();
         (1..).map(|n| if n == 1 { stem.to_string() } else { format!("{stem} {n}") }).find(|n| !taken.contains(&n.to_lowercase())).expect("a free name")
     }
 

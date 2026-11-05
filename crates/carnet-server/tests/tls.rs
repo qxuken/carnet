@@ -109,9 +109,15 @@ async fn connect(port: u16, connector: &tokio_rustls::TlsConnector) -> std::io::
 /// A request by hand over TLS: the status (0 if nothing came back), and
 /// the body.
 async fn request(port: u16, connector: &tokio_rustls::TlsConnector, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
-    let Ok(mut s) = connect(port, connector).await else { return (0, Vec::new()) };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let Ok(s) = connect(port, connector).await else { return (0, Vec::new()) };
+        request_on(port, s, method, path, body).await
+    }).await.expect("TLS HTTP request stalled")
+}
+
+async fn request_on<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(port: u16, mut s: S, method: &str, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
     let head = format!("{method} {path} HTTP/1.1\r\nHost: localhost:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
-    if s.write_all(head.as_bytes()).await.is_err() || s.write_all(body).await.is_err() {
+    if s.write_all(head.as_bytes()).await.is_err() || s.write_all(body).await.is_err() || s.flush().await.is_err() {
         return (0, Vec::new());
     }
     let mut out = Vec::new();
@@ -165,6 +171,10 @@ impl carnet_sync::session::Docs for NoNotes {
 }
 
 async fn settle(session: &mut Session, ws: &mut Socket) -> Vec<Event> {
+    tokio::time::timeout(Duration::from_secs(10), settle_inner(session, ws)).await.expect("TLS sync session stalled")
+}
+
+async fn settle_inner(session: &mut Session, ws: &mut Socket) -> Vec<Event> {
     let mut said = Vec::new();
     loop {
         for out in session.take_out() {
@@ -278,4 +288,21 @@ async fn without_a_client_ca_any_client_is_served_over_tls() {
     let _ = stop.send(());
     tokio::time::timeout(Duration::from_secs(10), done).await.unwrap().unwrap().unwrap();
     let _ = std::fs::remove_dir_all(&data);
+}
+
+/// Buffered writes reproduce a socket that accepts the TLS bytes before
+/// they have all reached the peer, as under Windows backpressure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_http_request_flushes_its_tls_bytes_before_waiting_for_the_response() {
+    let data = temp("tls-buffered-http");
+    let certs = Certs::make(&data);
+    let (port, stop, done) = start(&data, certs.tls(true)).await;
+    let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let buffered = tokio::io::BufWriter::with_capacity(64 * 1024, tcp);
+    let tls = certs.client(Some(&certs.client)).connect(ServerName::try_from("localhost").unwrap(), buffered).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), request_on(port, tls, "GET", "/v1/health", b"")).await;
+    let _ = stop.send(());
+    tokio::time::timeout(Duration::from_secs(5), done).await.unwrap().unwrap().unwrap();
+    assert_eq!(result.expect("the request must reach the server before reading its response").0, 200);
+    let _ = std::fs::remove_dir_all(data);
 }

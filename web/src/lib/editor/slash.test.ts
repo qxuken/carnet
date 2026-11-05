@@ -36,6 +36,21 @@ function open(md: string, n: number) {
 const names = (pe: PageEditor) => slashHere(pe)?.shown.map((i) => commands()[i].name);
 
 describe('the / menu', () => {
+  it('creates a visible anchor, selects its name and keeps it intact on Enter', () => {
+    const e = open('# T\n\n\n', 2);
+    e.type('/anchor');
+    expect(names(e.pe)).toEqual(['Anchor']);
+    expect(e.pe.run_slash(slashHere(e.pe)!.shown[0])).toBe(true);
+    expect(e.pe.text()).toBe('T\nsection');
+    expect(Array.from(e.pe.caret())).toEqual([1, 0, 1, 7]);
+    expect(e.pe.input('decision')).toBe(true);
+    expect(e.pe.markdown()).toContain('<a id="decision"></a>');
+    expect(e.pe.enter(false)).toBe(true);
+    expect(e.pe.text()).toBe('T\ndecision\n');
+    expect(e.pe.markdown()).toContain('<a id="decision"></a>');
+    expect(e.pe.fragment_line('#decision')).toBe(1);
+    e.pe.free();
+  });
   it('offers what the word picks, as the desktop does', () => {
     const e = open('# T\n\nIntro\n\n\n', 3);
     e.type('/ta');
@@ -109,6 +124,6 @@ describe('its keys and rows', () => {
     const [h1, , , bullets, , , , table, divider, , picture, file] = commands();
     expect([h1.hint, bullets.hint, divider.hint, table.hint, file.hint]).toEqual(['#', '-', '---', '', '']);
     expect([hintOf(picture, true), hintOf(picture, false)]).toEqual(['⌘V', 'Ctrl+V']);
-    expect(commands().map((c) => c.act)).toEqual(['turn', 'turn', 'turn', 'turn', 'turn', 'turn', 'turn', 'table', 'divider', 'code', 'picture', 'file']);
+    expect(commands().map((c) => c.act)).toEqual(['turn', 'turn', 'turn', 'turn', 'turn', 'turn', 'turn', 'table', 'divider', 'code', 'picture', 'file', 'anchor', 'link']);
   });
 });

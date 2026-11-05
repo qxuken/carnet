@@ -119,11 +119,16 @@ impl History {
     /// no state should bring back the path it had.
     pub fn rewrite(&mut self, mut f: impl FnMut(&Block) -> Option<Block>) {
         for state in self.undo.iter_mut().chain(self.redo.iter_mut()) {
+            let mut before = Doc::new(Vec::new());
+            before.restore(state.blocks.clone());
             for b in state.blocks.iter_mut() {
                 if let Some(new) = f(b) {
                     *b = Rc::new(new);
                 }
             }
+            let mut after = Doc::new(Vec::new());
+            after.restore(state.blocks.clone());
+            state.caret = crate::compare::carry(&before, &after, state.caret);
         }
     }
 

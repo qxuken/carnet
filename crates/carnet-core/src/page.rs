@@ -50,6 +50,26 @@ impl Caret {
     }
 }
 
+/// Where a same-note link points. Empty HTML anchors are kept in their
+/// own text block, immediately before the section they name.
+pub fn fragment_target(doc: &Doc, url: &str) -> Option<Pos> {
+    let id = doc::percent_decoded(url.trim().strip_prefix('#')?);
+    let mut used = HashSet::new();
+    // Explicit targets take precedence over heading names.
+    for b in doc.blocks() {
+        if let Kind::Text(t) = &b.kind && let Some(anchor) = doc::anchor_id(t) {
+            if anchor == id {
+                return Some(Pos { slot: Slot::block(b.id), byte: doc::anchor_range(t)?.0 });
+            }
+            used.insert(anchor);
+        }
+    }
+    doc.blocks().iter().find_map(|b| match &b.kind {
+        Kind::Heading { text, .. } if doc::heading_id(text, &mut used) == id => Some(Pos { slot: Slot::block(b.id), byte: 0 }),
+        _ => None,
+    })
+}
+
 // ------------------------------------------------------------ slots
 
 /// Every slot, in reading order: blocks top to bottom, a table's cells row
@@ -411,6 +431,7 @@ fn open_bare_code(doc: &mut Doc, slot: Slot) {
 /// ([`code_body`]); anywhere else, all of it.
 pub fn writable(doc: &Doc, slot: Slot) -> (usize, usize) {
     match kind_at(doc, slot) {
+        Some(Kind::Text(t)) if slot.cell.is_none() && doc::anchor_range(t).is_some() => doc::anchor_range(t).unwrap_or((0, t.len())),
         Some(Kind::Raw(t)) if slot.cell.is_none() => code_body(t).unwrap_or((0, t.len())),
         _ => (0, len(doc, slot)),
     }
@@ -434,7 +455,7 @@ pub fn drawn(doc: &Doc, slot: Slot) -> Visible {
 /// lines between them ([`code_body`]): what a selection that leaves code
 /// part-way takes or keeps, still code.
 fn code_cut(t: &str, a: usize, b: usize) -> String {
-    let (lo, hi) = code_body(t).unwrap_or((0, t.len()));
+    let (lo, hi) = doc::anchor_range(t).or_else(|| code_body(t)).unwrap_or((0, t.len()));
     let a = a.clamp(lo, hi);
     let b = b.clamp(a, hi);
     format!("{}{}{}", &t[..lo], &t[a..b], &t[hi..])
@@ -1064,13 +1085,15 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
     // Code cut at an end keeps its fences round the lines it keeps, and
     // takes nothing joined after them: what is joined to code goes in
     // between its fences, and code below is not joined on.
-    let code = |s: Slot| s.cell.is_none() && matches!(kind_at(doc, s), Some(Kind::Raw(_)));
+    let anchor = |s: Slot| s.cell.is_none() && matches!(kind_at(doc, s), Some(Kind::Text(t)) if doc::anchor_range(t).is_some());
+    let a_anchor = anchor(a.slot);
+    let code = |s: Slot| s.cell.is_none() && (matches!(kind_at(doc, s), Some(Kind::Raw(_))) || anchor(s));
     let (a_code, b_code) = (code(a.slot), code(b.slot));
     let mut a = a;
     if first_textual && let Some(t) = text_mut(doc, a.slot) {
         if a_code {
             *t = code_cut(t, 0, a.byte);
-            a.byte = code_body(t).map_or(t.len(), |(_, hi)| hi);
+            a.byte = doc::anchor_range(t).or_else(|| code_body(t)).map_or(t.len(), |(_, hi)| hi);
         } else {
             *t = split_text(t, a.byte, a_marks).0;
             a.byte = t.len();
@@ -1086,7 +1109,7 @@ fn remove_selection(doc: &mut Doc, c: &mut Caret, keep_first: bool) -> bool {
         doc.splice(remove_from..remove_to, []);
     }
     // Two ends of text meet: the last joins the first.
-    if first_textual && last_textual && !b_code {
+    if first_textual && last_textual && !b_code && !a_anchor {
         let joined = remove_from; // the last block now sits right after the first
         if joined < doc.len() {
             let mut rest = tail.unwrap_or_default();
@@ -1173,6 +1196,11 @@ pub fn insert(doc: &mut Doc, c: &mut Caret, s: &str) -> bool {
     let single = kind_at(doc, p.slot).is_some_and(single_line);
     let s = if single { s.replace('\n', " ") } else { s.to_string() };
     let old = text(doc, p.slot).to_string();
+    // Anchor names stay on one line and cannot break out of their HTML
+    // attribute. Spaces in a name are written as URL-friendly dashes.
+    let s = if matches!(kind_at(doc, p.slot), Some(Kind::Text(t)) if doc::anchor_range(t).is_some()) {
+        s.chars().map(|ch| if ch.is_whitespace() || matches!(ch, '<' | '>' | '\'' | '"') { '-' } else { ch }).collect()
+    } else { s };
     let marks = styled(doc, p.slot);
     let byte = if marks { settle_pos(doc, p).byte } else { p.byte };
     let read = (marks && s.starts_with('\n')).then(|| reading(doc, p.slot));
@@ -1386,6 +1414,11 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
     }
     let kind = doc.blocks()[i].kind.clone();
     match kind {
+        Kind::Text(t) if doc::anchor_range(&t).is_some() => {
+            doc.block_mut(i).kind = Kind::Text(inline::plain(&t));
+            *c = Caret::at(Pos { byte: 0, ..p });
+            true
+        }
         Kind::Item { indent, .. } if indent > 0 => {
             if let Kind::Item { indent, .. } = &mut doc.block_mut(i).kind {
                 *indent -= 1;
@@ -1423,6 +1456,10 @@ pub fn backspace(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
         }
         Kind::Text(t) | Kind::Heading { text: t, .. } => {
             let Some(prev) = i.checked_sub(1) else { return false };
+            if matches!(&doc.blocks()[prev].kind, Kind::Text(t) if doc::anchor_range(t).is_some()) {
+                *c = Caret::at(Pos { slot: Slot::block(doc.blocks()[prev].id), byte: writable(doc, Slot::block(doc.blocks()[prev].id)).1 });
+                return false;
+            }
             match doc.blocks()[prev].kind.clone() {
                 // Words under a divider take its place; an empty line
                 // goes instead, the divider selected, as by a picture.
@@ -1576,11 +1613,17 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
         *c = settle(doc, *c);
         return true;
     }
-    if p.slot.cell.is_some() || matches!(doc.blocks()[i].kind, Kind::Raw(_)) {
+    if p.slot.cell.is_some() || matches!(doc.blocks()[i].kind, Kind::Raw(_))
+        || matches!(&doc.blocks()[i].kind, Kind::Text(t) if doc::anchor_range(t).is_some())
+    {
         *c = right(doc, *c, false, false);
         return false;
     }
     let Some(next) = doc.blocks().get(i + 1).cloned() else { return false };
+    if let Kind::Text(t) = &next.kind && let Some((from, _)) = doc::anchor_range(t) {
+        *c = Caret::at(Pos { slot: Slot::block(next.id), byte: from });
+        return false;
+    }
     match &next.kind {
         // A divider below goes; from an empty line, the line goes instead
         // and the divider is selected, as a picture is.
@@ -1646,6 +1689,17 @@ pub fn delete(doc: &mut Doc, c: &mut Caret, word: bool) -> bool {
 /// down a column, adds a row at the bottom, and in an empty last row steps
 /// out of the table. In code, it is a newline.
 pub fn enter(doc: &mut Doc, c: &mut Caret, soft: bool) -> bool {
+    // An anchor names one place: Enter confirms its name and starts a
+    // paragraph below, rather than splitting the HTML attribute.
+    if c.head.slot == c.anchor.slot && c.head.slot.cell.is_none()
+        && matches!(kind_at(doc, c.head.slot), Some(Kind::Text(t)) if doc::anchor_range(t).is_some())
+        && let Some(i) = doc.index_of(c.head.slot.block)
+    {
+        let b = Block::text("");
+        *c = Caret::at(start(Slot::block(b.id)));
+        doc.insert(i + 1, b);
+        return true;
+    }
     // A divider or a picture chosen: a new line on the side it was come
     // to from, the thing itself kept.
     if chosen_atom(doc, *c).is_some() {
@@ -3071,6 +3125,24 @@ pub fn make_link(doc: &mut Doc, c: &mut Caret, url: &str) -> bool {
         return true;
     }
     edit_ranges(doc, c, |t, a, b| inline::make_link(t, a, b, url))
+}
+
+/// A picked note supplies the label only when no words were selected.
+pub fn make_named_link(doc: &mut Doc, c: &mut Caret, url: &str, name: &str) -> bool {
+    if !c.is_empty() { return make_link(doc, c, url); }
+    if !styled(doc, c.head.slot) { return false; }
+    let p = c.head;
+    let label: String = inline::plain(name).chars().flat_map(|ch| {
+        if "\\[]*_~`<>|".contains(ch) { vec!['\\', ch] } else { vec![ch] }
+    }).collect();
+    let link = format!("[{label}]({})", inline::link_target(url));
+    if let Some(t) = text_mut(doc, p.slot) {
+        t.insert_str(p.byte, &link);
+        let v = Visible::of(t);
+        *c = Caret::at(Pos { byte: v.at(v.drawn(p.byte + link.len())), ..p });
+        return true;
+    }
+    false
 }
 
 /// Links to files, `(name, src)`, put in as a line of their own, one

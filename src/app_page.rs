@@ -168,7 +168,8 @@ impl Carnet {
         self.page_rect = ui.layout_of(scroll_key);
         let tail = match self.page_rect {
             Some(r) if self.typewriter_on() => (r.h * (1.0 - TYPEWRITER_AT)).max(240.0),
-            _ => 240.0,
+            Some(r) => (r.h * 0.5).max(240.0),
+            None => 240.0,
         };
         // Keyed by the note: each note keeps its own scroll position.
         ui.with_indexed(
@@ -285,8 +286,8 @@ impl Carnet {
                         // Over a link a press would open, a hand.
                         let body = if self.link_hand(ui) { body.cursor(kui_native::CursorShape::Pointer) } else { body };
                         ui.with_keyed("body", body, |ui| self.blocks(ui, l));
-                        // Room below the last block — on a typewriter, enough
-                        // for the last line to come up to the middle. A
+                        // Room below the last block lets section navigation
+                        // center even the final line. A
                         // click here is the page's (`Msg::PageDrag`): it
                         // puts the caret at the end.
                         ui.leaf_keyed("tail", NodeSpec::row().grow_width().height(tail));
@@ -327,14 +328,23 @@ impl Carnet {
         let r = match self.cell_pieces.contains_key(&slot) {
             true => self.rect_at(ui.core(), slot, head),
             false => ui.caret_rect(k, self.drawn_byte(slot, head)),
-        };
+        }.or_else(|| self.center_reveal.then(|| self.section_rows.get(&slot).and_then(|(row, h)| ui.layout_of(*row).map(|r| Rect { h: *h, ..r }))).flatten());
         let (Some(g), Some(r)) = (ui.scroll_geometry(page_key), r) else {
-            ui.reveal(k);
+            if self.center_reveal {
+                // Wait for a new section's layout without scrolling to an
+                // intermediate destination and restarting the animation.
+                self.reveal = true;
+                ui.request_frame_for("section reveal");
+            } else {
+                ui.reveal(k);
+            }
             return;
         };
         let (top, h, off) = (g.rect.y, g.rect.h, g.offset.y);
         let (bottom, line) = (r.y + r.h, r.y + r.h / 2.0);
-        let target = if self.typing && self.typewriter_on() {
+        let target = if std::mem::take(&mut self.center_reveal) {
+            off + line - (top + h * 0.5)
+        } else if self.typing && self.typewriter_on() {
             off + line - (top + h * TYPEWRITER_AT)
         } else {
             // Room kept above and below the caret's line: a breath while
@@ -510,6 +520,7 @@ impl Carnet {
         self.cell_rects.clear();
         self.cell_pieces.clear();
         self.slot_keys.clear();
+        self.section_rows.clear();
         self.shown.clear();
         // Pointers, not text: the blocks stay shared with the note.
         let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
@@ -708,6 +719,15 @@ impl Carnet {
             .on_layout(Value::Null);
         let wrap = step_back(wrap, self.focus_on(), cx.focus.is_some_and(|f| f != id));
         ui.with_indexed(id, wrap, |ui| match &b.kind {
+            Kind::Text(text) if carnet_core::doc::anchor_range(text).is_some() => {
+                let ink = l.page_type(Type::SMALL).family(l.code).color(t.muted);
+                ui.with(NodeSpec::row().grow_width().pad_xy(0.0, l.air(3.0)), |ui| {
+                    ui.with(NodeSpec::row().grow_width().pad_xy(8.0, 3.0).gap(4.0).radius(radius::TIGHT).bg(t.hover).label("Anchor"), |ui| {
+                        ui.text("#", ink);
+                        self.slot_line(ui, l, Slot::block(id), text, ink, Some("anchor-name"), false, cov);
+                    });
+                });
+            }
             Kind::Text(text) => {
                 // An empty note says what it can do, once, quietly.
                 let hint = if lone && text.is_empty() {
@@ -1009,6 +1029,14 @@ impl Carnet {
                 let (drawn, _) = page::picture_width(nw, width, self.text_w, max_w, floated);
                 let dw = resizing.map_or(drawn, |r| r.w.clamp(page::PICTURE_MIN.min(nw), max_w));
                 let dh = dw * nh / nw;
+                // A previously missing picture can acquire its real size
+                // while this frame is built. The float grouping read the
+                // old placeholder's box; measure this one, then regroup.
+                if floated && self.row_seen.get(&id).and_then(|(_, r)| *r).is_some_and(|r| {
+                    (r.h - (dh + 2.0 * l.air(14.0))).abs() > 0.5 || (r.w - (dw + 16.0)).abs() > 0.5
+                }) {
+                    ui.request_frame_for("float picture size");
+                }
                 // Drawn, its own width, the room, and how wide it is
                 // with no width given: what a resize let go writes by.
                 let none = page::picture_width(nw, None, self.text_w, max_w, floated).0;
@@ -1902,6 +1930,11 @@ impl Carnet {
         // Bytes of the drawn text from where this part starts.
         let d0 = self.drawn_byte(slot, lo);
         let mut row = NodeSpec::row().grow_width().role(Role::Line);
+        // Section navigation needs geometry even when the renderer skips
+        // glyphs outside the viewport. Retain the section's text box so
+        // centering can be a single smooth scroll from the outset.
+        let section = matches!(self.doc().get(slot.block).map(|b| &b.kind), Some(Kind::Heading { .. })) || carnet_core::doc::anchor_range(text).is_some();
+        if section { row = row.on_layout(Value::Null); }
         if here {
             row = row.caret(self.drawn_byte(slot, byte).saturating_sub(d0) as u32);
             if self.caret.anchor.slot == slot && !self.caret.is_empty() {
@@ -1946,7 +1979,7 @@ impl Carnet {
         let (dark, page_bg) = (l.c.dark, t.bg);
         let (cap_lines, cap_accent, text_w) = (self.settings.initial_lines, self.settings.initial_accent, self.text_w);
         let mut text_key = None;
-        ui.with(row, |ui| {
+        let row_key = ui.with(row, |ui| {
             let key = ui.child_key_indexed(0);
             text_key = Some(key);
             let mut spans: Vec<Span<'_>> = Vec::new();
@@ -2162,6 +2195,7 @@ impl Carnet {
                 }
             }
         });
+        if section { self.section_rows.insert(slot, (row_key, style.line_height)); }
         text_key
     }
 
@@ -2359,6 +2393,7 @@ impl Carnet {
             // `safe_href`): a `javascript:` one isn't, as on the web.
             items.extend([
                 item("Open link", "open-link").enabled(carnet_core::export::safe_href(&url).is_some()),
+                item("Edit link\u{2026}", "link").accel("mod+k"),
                 item("Copy link address", "copy-link"),
                 item("Remove link", "unlink"),
                 MenuItem::separator(),
@@ -2431,12 +2466,6 @@ impl Carnet {
             item("Highlight", "highlight").accel(keys::HIGHLIGHT),
             item("Text colour\u{2026}", "tint-menu:1"),
             item("Highlight colour\u{2026}", "tint-menu:0"),
-            // The selection's words, or the word the caret is in, each
-            // case written as it makes them; Shift+F3 goes round them.
-            MenuItem::submenu(
-                "Change case",
-                CASES.iter().map(|(label, name, _)| item(label, &format!("case:{name}"))).collect(),
-            ),
         ];
         if !in_table {
             let initial = page::initial_at(doc, self.caret);
@@ -2449,6 +2478,12 @@ impl Carnet {
             ]);
         }
         items.push(MenuItem::submenu("Format", format));
+        // The selection's words, or the word the caret is in; Shift+F3
+        // cycles through these same choices.
+        items.push(MenuItem::submenu(
+            "Change case",
+            CASES.iter().map(|(label, name, _)| item(label, &format!("case:{name}"))).collect(),
+        ));
         if in_table {
             let [up, down, left, right] = self.table_moves();
             items.push(MenuItem::submenu("Table", vec![
@@ -2973,6 +3008,7 @@ impl Carnet {
             Some(slash::Action::Picture) => self.pick_pictures = true,
             // The paperclip's dialog: pictures and files of every kind.
             Some(slash::Action::File) => self.pick_files = true,
+            Some(slash::Action::Link) => self.open_link_editor(),
             _ => {}
         }
     }
@@ -3052,51 +3088,113 @@ impl Carnet {
             .is_some_and(|i| matches!(self.doc().blocks()[i].kind, Kind::Image { width: Some(_), .. }))
     }
 
-    /// Ctrl+K: the link editor, on the link the caret is in or for the
-    /// selection (a word, with none) to become one.
+    /// Notes offered by title, with the file's location for duplicates.
+    pub(super) fn link_notes(&self, query: &str) -> Vec<carnet_core::navigation::Note> {
+        let current = self.store.notes[self.current].id;
+        let all = self.store.notes.iter().filter(|n| n.id == current || !n.is_blank()).map(|n| {
+            let path = n.path.as_ref().and_then(|p| p.strip_prefix(&self.store.dir).ok()).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|| {
+                let file = format!("{}.md", carnet_core::name::slug(n.display_title()));
+                if n.folder.is_empty() { file } else { format!("{}/{file}", n.folder) }
+            });
+            carnet_core::navigation::Note { id: n.id.to_string(), title: n.display_title().to_string(), path }
+        }).collect::<Vec<_>>();
+        let mut found = carnet_core::navigation::search(&all, query);
+        found.sort_by_key(|n| n.id != current.to_string());
+        found
+    }
+
+    fn link_sections(&self) -> Vec<carnet_core::navigation::Section> {
+        let Some(le) = &self.link_edit else { return Vec::new() };
+        let mut all = if le.target == Some(self.store.notes[self.current].id) { Vec::new() } else { vec![carnet_core::navigation::Section { name: "Whole note".into(), fragment: String::new() }] };
+        if let Some(n) = self.store.notes.iter().find(|n| Some(n.id) == le.target) {
+            all.extend(carnet_core::navigation::sections(&n.doc));
+        }
+        let q = le.query.to_lowercase();
+        all.retain(|s| s.name.to_lowercase().contains(&q) || s.fragment.to_lowercase().contains(&q));
+        all
+    }
+
     fn open_link_editor(&mut self) {
         if self.caret.is_empty() && page::link_at(self.doc(), self.caret).is_none() {
             let w = page::word_at(self.doc(), self.caret.head);
-            if !w.is_empty() {
-                self.caret = w;
-            }
+            if !w.is_empty() { self.caret = w; }
         }
         let existing = page::link_at(self.doc(), self.caret);
-        self.link_edit = Some(LinkEdit {
-            caret: self.caret,
-            // Shown with no bidi control in it to turn it round.
-            url: existing.as_ref().map(|l| inline::without_bidi(&l.2)).unwrap_or_default(),
-            existing: existing.is_some(),
-            at: None,
-        });
+        let url = existing.as_ref().map(|l| inline::without_bidi(&l.2)).unwrap_or_default();
+        let target = if url.starts_with('#') { Some(self.store.notes[self.current].id) }
+        else { carnet_core::doc::note_link(&self.store.notes[self.current].folder, &url).and_then(|(p, _)| self.link_notes("").into_iter().find(|n| n.path == p).and_then(|n| n.id.parse().ok())) };
+        let section = url.find('#').map(|i| url[i..].to_string());
+        self.link_edit = Some(LinkEdit { caret: self.caret, before: self.doc().clone(), notes: url.is_empty() || url.starts_with('#') || carnet_core::doc::is_note_link(&url), url, existing: existing.is_some(), query: String::new(), target, section, pick: 0, at: None, field_fresh: true });
+        let sections = self.link_sections();
+        if let Some(le) = &mut self.link_edit {
+            le.pick = sections.iter().position(|s| Some(s.fragment.as_str()) == le.section.as_deref()).unwrap_or(0);
+        }
+        self.focus(Field::Link);
     }
 
-    /// The link editor's buttons, and Enter in it.
+    pub(super) fn link_move(&mut self, down: bool) {
+        let Some(le) = &self.link_edit else { return };
+        if !le.notes { return; }
+        let len = if le.target.is_some() { self.link_sections().len() } else { self.link_notes(&le.query).len().min(6) };
+        if let Some(le) = &mut self.link_edit && len > 0 { le.pick = (le.pick.min(len - 1) + if down { 1 } else { len - 1 }) % len; }
+    }
+
+    pub(super) fn link_choose(&mut self, row: usize) {
+        let Some(le) = self.link_edit.clone() else { return };
+        if le.target.is_some() {
+            if let Some(s) = self.link_sections().get(row) && let Some(le) = &mut self.link_edit {
+                le.section = (!s.fragment.is_empty()).then(|| s.fragment.clone()); le.pick = row;
+            }
+        } else if let Some(note) = self.link_notes(&le.query).get(row) && let Some(le) = &mut self.link_edit {
+            le.target = note.id.parse().ok(); le.query.clear(); le.pick = 0; le.section = None; le.field_fresh = true;
+        }
+        self.focus(Field::Link);
+    }
+
+    pub(super) fn link_submit(&mut self) {
+        if let Some(le) = &self.link_edit && le.notes && le.target.is_none() {
+            self.link_choose(le.pick); return;
+        }
+        self.link_act(0);
+    }
+
     pub(super) fn link_act(&mut self, what: u64) {
         let Some(le) = self.link_edit.clone() else { return };
-        let url = le.url.trim().to_string();
-        self.caret = page::fix(self.doc(), le.caret);
+        if what == 6 { self.link_edit = None; self.focus_page = true; return; }
+        if matches!(what, 3..=5) {
+            if let Some(le) = &mut self.link_edit {
+                if what == 5 { le.target = None; le.query.clear(); le.section = None; }
+                else { le.notes = what == 3; }
+                le.pick = 0; le.field_fresh = true;
+            }
+            self.focus(Field::Link); return;
+        }
+        let mut url = le.url.trim().to_string();
+        let mut title = None;
+        if le.notes && what != 2 {
+            let Some(id) = le.target else { self.link_choose(le.pick); return };
+            let Some(i) = self.store.notes.iter().position(|n| n.id == id) else { self.link_act(5); return };
+            let local = i == self.current;
+            if !local && self.store.notes[i].path.is_none() && let Err(e) = self.store.save(i, true) { self.error = Some(format!("Couldn't save the note: {e}")); return; }
+            let Some(note) = self.link_notes("").into_iter().find(|n| n.id == id.to_string()) else { return };
+            let source = self.link_notes("").into_iter().find(|n| n.id == self.store.notes[self.current].id.to_string()).map(|n| n.path).unwrap_or_else(|| {
+                let folder = &self.store.notes[self.current].folder;
+                if folder.is_empty() { "source.md".into() } else { format!("{folder}/source.md") }
+            });
+            let sections = self.link_sections();
+            let chosen = sections.get(le.pick);
+            let section = chosen.map(|s| s.fragment.clone()).filter(|s| !s.is_empty());
+            if local && section.is_none() { return; }
+            url = carnet_core::navigation::href(&source, &note.path, section.as_deref());
+            title = Some(if local { chosen.map(|s| s.name.clone()).unwrap_or(note.title) } else { note.title });
+        }
+        self.caret = carnet_core::compare::carry(&le.before, self.doc(), le.caret);
         match what {
-            1 => {
-                if !url.is_empty() {
-                    self.open_url(&url);
-                }
-                return;
-            }
-            2 => {
-                if let Some((slot, at, _)) = page::link_at(self.doc(), self.caret) {
-                    self.edit(Step::Other, |d, _| page::set_link(d, slot, at, None));
-                }
-            }
-            _ if url.is_empty() => {}
-            _ if le.existing => {
-                if let Some((slot, at, _)) = page::link_at(self.doc(), self.caret) {
-                    self.edit(Step::Other, |d, _| page::set_link(d, slot, at, Some(&url)));
-                }
-            }
-            _ => {
-                self.edit(Step::Other, |d, c| page::make_link(d, c, &url));
-            }
+            1 => { if !url.is_empty() { self.open_url(&url); } return; }
+            2 => { if let Some((slot, at, _)) = page::link_at(self.doc(), self.caret) { self.edit(Step::Other, |d, _| page::set_link(d, slot, at, None)); } }
+            _ if url.is_empty() => return,
+            _ if le.existing => { if let Some((slot, at, _)) = page::link_at(self.doc(), self.caret) { self.edit(Step::Other, |d, _| page::set_link(d, slot, at, Some(&url))); } }
+            _ => { self.edit(Step::Other, |d, c| match &title { Some(title) => page::make_named_link(d, c, &url, title), None => page::make_link(d, c, &url) }); }
         }
         self.link_edit = None;
         self.focus_page = true;
@@ -3108,6 +3206,32 @@ impl Carnet {
     /// anything else stays shut, as does a mail link that would attach a
     /// file of this computer's (export.rs `safe_href`), whatever opens it.
     pub(super) fn open_url(&mut self, url: &str) {
+        if url.trim().starts_with('#') {
+            if let Some(pos) = page::fragment_target(self.doc(), url) {
+                self.caret = Caret::at(pos);
+                self.writing.moved();
+                self.history().seal();
+                self.typing = false;
+                self.center_reveal = true;
+                self.reveal = true;
+            } else {
+                self.error = Some(format!("Couldn't find the section: {}", url.trim()));
+            }
+            return;
+        }
+        let folder = self.store.notes[self.current].folder.clone();
+        if carnet_core::doc::is_note_link(url) {
+            let target = carnet_core::doc::note_link(&folder, url).and_then(|(path, fragment)| {
+                let path = self.store.dir.join(path);
+                self.store.notes.iter().find(|n| n.path.as_ref() == Some(&path)).map(|n| (n.id, fragment))
+            });
+            match target {
+                Some((note, fragment)) if self.note_window.is_some() => self.to_main = Some(Msg::FollowNote { note, fragment }),
+                Some((note, fragment)) => self.follow_note(note, fragment.as_deref()),
+                None => self.error = Some(format!("Couldn't find the note: {}", url.trim())),
+            }
+            return;
+        }
         // A file in the notes folder (one the paperclip put there, a PDF
         // an export brought): opened in its own app, one that could run
         // once asked (app_open.rs).
@@ -3150,24 +3274,46 @@ impl Carnet {
         }
     }
 
+    pub(super) fn follow_note(&mut self, note: u64, fragment: Option<&str>) {
+        let Some(i) = self.store.notes.iter().position(|n| n.id == note) else { return };
+        self.open(i);
+        self.link_edit = None;
+        if let Some(fragment) = fragment.filter(|f| *f != "#") {
+            self.open_url(fragment);
+        } else {
+            self.caret = Caret::at(page::first(self.doc()));
+            self.reveal = true;
+        }
+    }
+
     /// The link editor: the address, Enter to keep it, a way to open the
     /// link and to take it off its words. Hangs under the caret.
     pub(super) fn link_editor(&mut self, ui: &mut Ui<'_>, l: &Look) {
         let Some(le) = self.link_edit.clone() else { return };
         let t = l.t;
         // Its first frame: placed now.
-        let fresh = le.at.is_none();
+        let fresh = le.field_fresh;
+        if let Some(le) = self.link_edit.as_mut() { le.field_fresh = false; }
         let at = match le.at {
             Some(at) => at,
             None => {
-                let p = self.caret.head;
-                let at = self
-                    .rect_at(ui.core(), p.slot, p.byte)
-                    .map_or(self.menu_at, |r| Vec2::new(r.x - 12.0, r.y + r.h + 8.0));
-                if let Some(le) = self.link_edit.as_mut() {
-                    le.at = Some(at);
+                let p = le.caret.head;
+                // Empty text has no glyph caret to measure. Its laid-out
+                // line still anchors the picker; a context menu's old
+                // position says nothing about this selection.
+                let line = self.rect_at(ui.core(), p.slot, p.byte)
+                    .or_else(|| self.slot_keys.get(&p.slot).and_then(|k| ui.layout_of(*k)))
+                    .or_else(|| self.row_rects.iter().find(|(id, _)| *id == p.slot.block).map(|(_, r)| *r));
+                if let Some(r) = line {
+                    let at = Vec2::new(r.x - 12.0, r.y + r.h + 8.0);
+                    if let Some(le) = self.link_edit.as_mut() { le.at = Some(at); }
+                    at
+                } else {
+                    // A newly inserted block may need one layout first.
+                    // Keep this temporary placement out of the saved origin.
+                    ui.request_frame_for("link picker placement");
+                    self.page_rect.map_or(Vec2::new(24.0, 80.0), |r| Vec2::new(r.x + 24.0, r.y + 80.0))
                 }
-                at
             }
         };
         let mut field = None;
@@ -3187,22 +3333,42 @@ impl Carnet {
                 .role(Role::Dialog)
                 .label("Link"),
             |ui| {
-                ui.text(if le.existing { "Link" } else { "Make a link" }, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
-                ui.with(NodeSpec::row().grow_width().pad_xy(10.0, 7.0).radius(radius::CONTROL).bg(t.sunken), |ui| {
-                    let k = ui.text_edit_value(
-                        "link-url",
-                        &le.url,
-                        &EditOptions { style: TextStyle::new(Type::UI.size).color(t.fg), ..Default::default() },
-                        Field::Link.on(NodeSpec::row().grow_width().label("Link address")),
-                    );
-                    // A link of its own: kui keeps the field between
-                    // links, and Ctrl+Z would go back into the last one's
-                    // address. Set whole, its undo starts here.
-                    if fresh {
-                        ui.set_edit_text(k, &le.url);
+                ui.with(NodeSpec::row().grow_width().gap(6.0), |ui| {
+                    for (name, active, what) in [("Note", le.notes, 3), ("Web address", !le.notes, 4)] {
+                        ui.text_in(NodeSpec::row().pad_xy(10.0, 6.0).radius(radius::CONTROL).bg(if active { t.sunken } else { Color::TRANSPARENT }).on_click(Msg::LinkAct { what }).focusable().role(Role::Button).label(name), name, TextStyle::new(Type::SMALL.size).color(if active { t.fg } else { t.muted }));
                     }
+                });
+                if le.notes && let Some(note) = self.store.notes.iter().find(|n| Some(n.id) == le.target) {
+                    ui.text_in(NodeSpec::row().grow_width().pad_xy(4.0, 4.0).on_click(Msg::LinkAct { what: 5 }).focusable().role(Role::Button).label("Choose another note"), &format!("← {}", if note.id == self.store.notes[self.current].id { "This note" } else { note.display_title() }), TextStyle::new(Type::UI.size).color(t.fg).ellipsis());
+                }
+                let value = if le.notes { &le.query } else { &le.url };
+                let hint = if !le.notes { "https://example.com" } else if le.target == Some(self.store.notes[self.current].id) { "Find a section" } else if le.target.is_some() { "Find a section (optional)" } else { "Search notes by title" };
+                ui.with_keyed("link-input", NodeSpec::row().grow_width().pad_xy(10.0, 7.0).radius(radius::CONTROL).bg(t.sunken), |ui| {
+                    let k = ui.text_edit_value("link-url", value, &EditOptions { style: TextStyle::new(Type::UI.size).color(t.fg), placeholder: Some(hint.into()), ..Default::default() }, Field::Link.on(NodeSpec::row().grow_width().label(if le.notes { hint } else { "Link address" })));
+                    if fresh { ui.set_edit_text(k, value); }
                     field = Some(k);
                 });
+                if le.notes {
+                    let rows = if le.target.is_some() {
+                        self.link_sections().into_iter().map(|s| (s.name, s.fragment)).collect::<Vec<_>>()
+                    } else {
+                        self.link_notes(&le.query).into_iter().take(6).map(|n| {
+                            let detail = if n.id == self.store.notes[self.current].id.to_string() { format!("This note · {}", n.path) } else { n.path };
+                            (n.title, detail)
+                        }).collect()
+                    };
+                    ui.with_keyed("link-results", NodeSpec::column().grow_width().max_height(220.0).scroll_y().gap(2.0), |ui| {
+                        if rows.is_empty() { ui.text(if le.target == Some(self.store.notes[self.current].id) { "No sections match. Add a heading or /anchor to this note." } else { "No matches. Try a different title or folder." }, TextStyle::new(Type::SMALL.size).color(t.muted)); }
+                        for (i, (name, detail)) in rows.iter().enumerate() {
+                            let k = ui.with_indexed(i as u64, NodeSpec::column().grow_width().pad_xy(8.0, 6.0).gap(3.0).radius(radius::CONTROL).bg(if i == le.pick { t.sunken } else { Color::TRANSPARENT }).hover_bg(t.hover).on_click(Msg::LinkChoose { row: i as u64 }).focusable().role(Role::Button).label(format!("{name}, {detail}")), |ui| {
+                                ui.text_in(NodeSpec::row().grow_width(), name, TextStyle::new(Type::UI.size).color(t.fg).ellipsis());
+                                if !detail.is_empty() { ui.text_in(NodeSpec::row().grow_width(), detail, TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis()); }
+                            });
+                            if i == le.pick { ui.reveal(k); }
+                        }
+                    });
+                }
+                let no_section = le.notes && le.target == Some(self.store.notes[self.current].id) && self.link_sections().is_empty();
                 ui.with(NodeSpec::row().grow_width().gap(6.0).cross_align(Align::Center), |ui| {
                     let button = |ui: &mut Ui<'_>, key: &str, name: &str, what: u64, primary: bool| {
                         ui.text_in(
@@ -3213,6 +3379,7 @@ impl Carnet {
                                 .border(1.0, if primary { l.c.primary } else { t.border })
                                 .hover_bg(if primary { l.c.primary } else { t.hover })
                                 .on_click(Msg::LinkAct { what })
+                                .disabled(no_section && matches!(what, 0 | 1))
                                 .role(Role::Button)
                                 .label(key),
                             name,
@@ -3223,11 +3390,12 @@ impl Carnet {
                         button(ui, "link-remove", "Remove link", 2, false);
                     }
                     // Only a link a note may follow (export.rs `safe_href`).
-                    if carnet_core::export::safe_href(&le.url).is_some() {
+                    if (le.notes && le.target.is_some()) || (!le.notes && !le.url.trim().is_empty() && carnet_core::export::safe_href(&le.url).is_some()) {
                         button(ui, "link-open", "Open", 1, false);
                     }
                     ui.leaf(NodeSpec::row().grow_width());
-                    button(ui, "link-done", "Done", 0, true);
+                    button(ui, "link-cancel", "Cancel", 6, false);
+                    button(ui, "link-done", if le.notes && le.target.is_none() { "Choose note" } else if le.existing { "Change link" } else { "Insert link" }, 0, true);
                 });
             },
         );
@@ -3577,6 +3745,12 @@ impl Carnet {
     pub(super) fn page_drag(&mut self, d: kui_native::Drag, core: &Core) {
         let (x, y) = (d.pos.x, d.pos.y);
         let clicks = d.clicks.map_or(1, i64::from);
+        // A link opened on mouse-down owns the rest of that gesture.
+        // Its release must not cancel the destination's pending reveal.
+        if d.phase != DragPhase::Start && self.link_opened {
+            self.drag_at = None;
+            return;
+        }
         // A cell's picture pressed: carried, not a selection.
         if d.phase != DragPhase::Start && self.pic_drag.as_ref().is_some_and(|d| matches!(d.what, Carried::Cell(..))) {
             self.carry(core, d.phase, Vec2::new(x, y));

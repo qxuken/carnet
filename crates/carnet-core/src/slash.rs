@@ -19,6 +19,8 @@ pub enum Action {
     Picture,
     /// Asks for files of any kind, as the toolbar's paperclip does.
     File,
+    Anchor,
+    Link,
 }
 
 pub struct Command {
@@ -30,7 +32,7 @@ pub struct Command {
     pub action: Action,
 }
 
-pub const COMMANDS: [Command; 12] = [
+pub const COMMANDS: [Command; 14] = [
     Command { name: "Heading 1", hint: "#", keys: &["h1", "title", "heading"], action: Action::Turn(TURN_H1) },
     Command { name: "Heading 2", hint: "##", keys: &["h2", "subheading", "heading"], action: Action::Turn(TURN_H2) },
     Command { name: "Heading 3", hint: "###", keys: &["h3", "heading"], action: Action::Turn(TURN_H3) },
@@ -43,6 +45,8 @@ pub const COMMANDS: [Command; 12] = [
     Command { name: "Code block", hint: "```", keys: &["code", "pre", "snippet"], action: Action::Code },
     Command { name: "Picture", hint: "", keys: &["image", "photo", "img", "screenshot"], action: Action::Picture },
     Command { name: "File", hint: "", keys: &["attach", "attachment", "document", "pdf"], action: Action::File },
+    Command { name: "Anchor", hint: "/anchor", keys: &["section", "bookmark"], action: Action::Anchor },
+    Command { name: "Link to note", hint: "/link", keys: &["link", "note", "reference"], action: Action::Link },
 ];
 
 /// The word being typed after a `/`, when the caret ends a line of text
@@ -165,7 +169,16 @@ pub fn apply(doc: &mut Doc, c: &mut Caret, i: usize) -> bool {
         Action::Code => {
             page::insert_block(doc, c, Kind::Raw("```\n\n```".to_string()));
         }
-        Action::Picture | Action::File => {}
+        Action::Picture | Action::File | Action::Link => {}
+        Action::Anchor => {
+            let id = (1..).map(|n| if n == 1 { "section".to_string() } else { format!("section-{n}") })
+                .find(|id| page::fragment_target(doc, &format!("#{id}")).is_none()).unwrap();
+            let text = format!("<a id=\"{id}\"></a>");
+            let (from, to) = crate::doc::anchor_range(&text).unwrap();
+            doc.block_mut(at).kind = Kind::Text(text);
+            c.anchor.byte = from;
+            c.head.byte = to;
+        }
     }
     true
 }
@@ -179,6 +192,43 @@ mod tests {
         let d = Doc::new(vec![Block::text(t)]);
         let slot = Slot::block(d.blocks()[0].id);
         (d, Caret::at(Pos { slot, byte: t.len() }))
+    }
+
+    #[test]
+    fn anchors_can_be_created_named_and_left_with_enter() {
+        let (mut d, mut c) = line("/anchor");
+        assert!(apply(&mut d, &mut c, matches("anchor")[0]));
+        assert_eq!(inline::plain(d.blocks()[0].text_ref().unwrap()), "section");
+        assert!(page::insert(&mut d, &mut c, "decision"));
+        assert_eq!(crate::doc::anchor_id(d.blocks()[0].text_ref().unwrap()).as_deref(), Some("decision"));
+        assert!(page::backspace(&mut d, &mut c, false));
+        assert_eq!(crate::doc::anchor_id(d.blocks()[0].text_ref().unwrap()).as_deref(), Some("decisio"));
+        assert!(page::enter(&mut d, &mut c, false));
+        assert_eq!(crate::doc::anchor_id(d.blocks()[0].text_ref().unwrap()).as_deref(), Some("decisio"));
+        assert_ne!(c.head.slot.block, d.blocks()[0].id);
+        page::backspace(&mut d, &mut c, false);
+        assert_eq!(crate::doc::anchor_id(d.blocks()[0].text_ref().unwrap()).as_deref(), Some("decisio"), "Backspace below an anchor does not join its HTML to the paragraph");
+        let t = d.blocks()[0].text_ref().unwrap();
+        let (from, to) = crate::doc::anchor_range(t).unwrap();
+        let slot = Slot::block(d.blocks()[0].id);
+        c = Caret { anchor: Pos { slot, byte: from }, head: Pos { slot, byte: to } };
+        page::insert(&mut d, &mut c, "a new name");
+        assert_eq!(crate::doc::anchor_id(d.blocks()[0].text_ref().unwrap()).as_deref(), Some("a-new-name"));
+    }
+
+    #[test]
+    fn selections_keep_partial_anchors_valid() {
+        for forward in [true, false] {
+            let (_, mut d) = crate::doc::from_markdown("<a id=\"decision\"></a>\n\nAfterwards");
+            let slot = Slot::block(d.blocks()[0].id);
+            let from = crate::doc::anchor_range(d.blocks()[0].text_ref().unwrap()).unwrap().0;
+            let a = Pos { slot, byte: from + 3 };
+            let b = Pos { slot: Slot::block(d.blocks()[1].id), byte: 5 };
+            let mut c = if forward { Caret { anchor: a, head: b } } else { Caret { anchor: b, head: a } };
+            page::delete_selection(&mut d, &mut c);
+            assert_eq!(crate::doc::anchor_id(d.blocks()[0].text_ref().unwrap()).as_deref(), Some("dec"));
+            assert_eq!(d.blocks()[1].text_ref(), Some("wards"));
+        }
     }
 
     #[test]

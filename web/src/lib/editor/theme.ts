@@ -67,6 +67,8 @@ export const theme = EditorView.theme({
   '.cm-initial.drop-none::first-letter, .cm-initial.drop-measure::first-letter': { float: 'none', font: 'inherit', margin: '0', color: 'inherit' },
   '.cm-code, .cm-front': { font: '14px/1.6 var(--mono)', backgroundColor: 'var(--sunken)', paddingLeft: '12px !important', paddingRight: '12px !important' },
   '.cm-front': { color: 'var(--muted)' },
+  '.cm-anchor': { font: '13px/22px var(--mono)', color: 'var(--muted)', backgroundColor: 'var(--sunken)', borderRadius: '4px', padding: '3px 8px !important', marginTop: '6px', marginBottom: '6px' },
+  '.cm-anchor-mark': { marginRight: '4px', userSelect: 'none' },
   '.cm-b': { fontWeight: '700' },
   '.cm-i': { fontStyle: 'italic' },
   '.cm-s': { textDecoration: 'line-through' },

@@ -554,6 +554,7 @@ function build(view: EditorView, toggle: (line: number) => void, tables: TableCo
       out.push(Decoration.line({ attributes: attrs }).range(line.from));
       if (look.k === 'title' && !line.length) out.push(Decoration.widget({ widget: new Placeholder('Untitled'), side: 1 }).range(line.from));
       if (look.k === 'todo') out.push(Decoration.widget({ widget: new Box(look.d, n - 1, toggle), side: -1 }).range(line.from));
+      if (look.k === 'anchor') out.push(Decoration.widget({ widget: new Marker('#', 'cm-anchor-mark'), side: -1 }).range(line.from));
       if (look.k === 'bullet') out.push(Decoration.widget({ widget: new Marker(['•', '◦', '▪'][look.i % 3], 'cm-dot'), side: -1 }).range(line.from));
       if (look.k === 'number') out.push(Decoration.widget({ widget: new Marker(`${look.n}.`, 'cm-num'), side: -1 }).range(line.from));
       if (look.k === 'divider' || look.k === 'table') {

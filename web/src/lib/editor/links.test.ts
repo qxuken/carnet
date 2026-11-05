@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { EditorState } from '@codemirror/state';
+import { type EditorView } from '@codemirror/view';
 import { initSync, link_hand, link_opens, PageEditor } from '../../wasm/carnet_web.js';
 
 // No window here: a store for the setting, as a browser keeps it.
@@ -13,7 +15,7 @@ const kept = vi.hoisted(() => {
   return m;
 });
 
-import { linkOpen, linkOpenWords, pressed, setLinkOpen } from './links';
+import { followFragment, linkOpen, linkOpenWords, pressed, setLinkOpen } from './links';
 
 beforeAll(async () => {
   const fs = await import(/* @vite-ignore */ ['node', 'fs'].join(':'));
@@ -21,6 +23,20 @@ beforeAll(async () => {
 });
 
 describe('how links open', () => {
+  it('scrolls to a same-note anchor without opening a tab', () => {
+    const pe = new PageEditor('# T\n\n[section](#section-1)\n<a id="section-1"></a>\n## A different heading');
+    const dispatch = vi.fn();
+    const view = { state: EditorState.create({ doc: pe.text() }), dispatch } as unknown as EditorView;
+    expect(followFragment(pe, view, '#section-1')).toBe(true);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch.mock.calls[0][0].effects.value.y).toBe('center');
+    dispatch.mockClear();
+    expect(followFragment(pe, view, '#missing')).toBe(true);
+    expect(followFragment(pe, view, 'https://example.com')).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+    pe.free();
+  });
+
   it('is kept in this browser, ⌘-click when none is', () => {
     expect(linkOpen()).toBe('double-click');
     setLinkOpen('click');

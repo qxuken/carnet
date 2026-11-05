@@ -18,8 +18,8 @@
 # so a change is checked once. No secrets: a pull request from a fork
 # gets none, and needs none.
 #
-# On GitHub's Ubuntu runner, with ALSA's headers (kui's sound links
-# libasound). Swatinem/rust-cache keeps the registry and the target dir
+# Workspace tests run on Ubuntu and Windows. Ubuntu also needs ALSA's
+# headers (kui's sound links libasound). Swatinem/rust-cache keeps the registry and the target dir
 # per job, saved from main only, so pull requests start from main's and
 # don't crowd it out. Debug info is off: with it, the test build of kui's
 # tree (wgpu, naga, winit, all at opt-level 2) fills more disk than the
@@ -46,11 +46,16 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       # kui's sound links ALSA.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: rustup toolchain install stable --profile minimal -c clippy -t wasm32-unknown-unknown && rustup default stable
       - uses: Swatinem/rust-cache@v2
         with:

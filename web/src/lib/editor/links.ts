@@ -10,7 +10,7 @@
 // keys held now, the pointer is a hand. The reader opens a link on a
 // plain click, whatever this says.
 
-import { ViewPlugin, type EditorView } from '@codemirror/view';
+import { ViewPlugin, EditorView } from '@codemirror/view';
 import type { EditorSelection } from '@codemirror/state';
 import { link_hand, link_ignores, link_opens, type PageEditor } from '../../wasm/carnet_web.js';
 
@@ -53,6 +53,14 @@ export function setLinkOpen(to: LinkOpen) {
 /// Opens an address a page may follow, as the link sheet's Open does.
 const openTab = (url: string) => void window.open(url, '_blank', 'noopener,noreferrer');
 
+/// Same-note links stay on the page, including when their target is absent.
+export function followFragment(pe: PageEditor, view: EditorView, url: string): boolean {
+  if (!url.trim().startsWith('#')) return false;
+  const line = pe.fragment_line(url);
+  if (line !== undefined) view.dispatch({ effects: EditorView.scrollIntoView(view.state.doc.line(line + 1).from, { y: 'center' }) });
+  return true;
+}
+
 type Press = { url: string; x: number; y: number; sel: EditorSelection };
 
 /// The tile a press is on (page.ts `FileTile`), if it's on one.
@@ -90,6 +98,10 @@ export function linkOpening(pe: PageEditor, open: (url: string) => void = openTa
         addEventListener('blur', this.left);
       }
 
+      follow(url: string) {
+        if (!followFragment(pe, this.view, url)) open(url);
+      }
+
       destroy() {
         this.view.contentDOM.removeEventListener('mousedown', this.down, true);
         this.view.contentDOM.removeEventListener('mousemove', this.moved);
@@ -123,7 +135,7 @@ export function linkOpening(pe: PageEditor, open: (url: string) => void = openTa
         if (does === 'open' || does === 'ignore') {
           e.preventDefault();
           e.stopPropagation();
-          if (does === 'open' && url) open(url);
+          if (does === 'open' && url) this.follow(url);
           return;
         }
         if (does === 'release' && url) this.press = { url, x: e.clientX, y: e.clientY, sel: this.view.state.selection };
@@ -145,7 +157,7 @@ export function linkOpening(pe: PageEditor, open: (url: string) => void = openTa
         const p = this.press;
         this.press = null;
         if (!p || e.button !== 0 || Math.hypot(e.clientX - p.x, e.clientY - p.y) >= 4) return;
-        open(p.url);
+        this.follow(p.url);
         // After CodeMirror's own end of the press, which sets the caret
         // where it was let go.
         setTimeout(() => {

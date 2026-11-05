@@ -7,9 +7,10 @@
 // desktop's words, Cancel what Enter, Esc or a press outside does
 // (OpenAsk.svelte).
 
-import { could_run } from '../wasm/carnet_web.js';
+import { could_run, is_note_link } from '../wasm/carnet_web.js';
 import { sync } from './sync.svelte';
 import { fileName, shownAs } from './files';
+import { noteAddress } from './routes';
 
 class Opener {
   /// The file asked about before it opens, by its path from the notes
@@ -20,6 +21,12 @@ class Opener {
   /// on its way there from here) opened, and true; a link to anything
   /// else, false, the browser's to follow.
   link(folder: string, href: string): boolean {
+    if (is_note_link(href)) {
+      const key = sync.linkedNote(folder, href);
+      if (!key) sync.say(`Couldn’t find the note: ${href}`);
+      else location.hash = noteAddress(key, href);
+      return true;
+    }
     const path = sync.linkedFile(folder, href);
     if (!path) return false;
     if (could_run(fileName(path))) this.asking = path;

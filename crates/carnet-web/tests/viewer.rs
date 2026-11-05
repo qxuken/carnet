@@ -1575,6 +1575,27 @@ fn a_markdown_file_dropped_comes_in_as_a_note() {
     assert_eq!(web.import_note("", "Big.md", &big, &[], &mut rng).unwrap_err(), "it's too big to be a note");
 }
 
+#[test]
+fn markdown_links_find_vault_file_names_even_when_titles_differ() {
+    let mut rng = Seeded(432);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let k = Key::random();
+    let room = k.to_string();
+    desk.docs.insert(room.clone(), NoteDoc::new(7));
+    desk.docs[&room].record("# A different title\n\n<a id=\"decision\"></a>\n## Merge stable record assignments", Origin::Save);
+    desk.docs.entry(vault::ROOM.to_string()).or_insert_with(|| NoteDoc::new(7)).set_place(k, &Place { folder: "docs/adr".into(), name: "0007-merge-stable-record-assignments".into(), pinned: false, trashed: false });
+    for r in [vault::ROOM.to_string(), room.clone()] { desk.session.saved(&r, &mut DeskDocs(&mut desk.docs), &mut rng); }
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.linked_note("", "docs/adr/0007-merge-stable-record-assignments.md#decision"), Some(room.clone()));
+    assert_eq!(web.linked_note("docs", "./adr/0007-merge-stable-record-assignments.md#merge-stable-record-assignments"), Some(room.clone()));
+    assert_eq!(web.linked_note("docs/adr", "../../docs/adr/0007-merge-stable-record-assignments.md"), Some(room));
+    assert_eq!(web.linked_note("", "docs/adr/A different title.md"), None);
+    assert_eq!(web.linked_note("", "../outside.md"), None);
+    assert_eq!(web.linked_note("", "https://example.com/a.md"), None);
+    web.set_trashed(&k.to_string(), true, &mut rng);
+    assert_eq!(web.linked_note("", "docs/adr/0007-merge-stable-record-assignments.md"), None);
+}
+
 /// The welcome note asked for again: the one nobody has written in, if
 /// there is one, not a second beside it; once it's written in (or in
 /// Deleted), a new one under the next free name, which the desktop has.
@@ -1598,4 +1619,70 @@ fn the_welcome_note_comes_again_once() {
     assert!(web.set_trashed(&second, true, &mut rng));
     let third = web.add_welcome(&md, &mut rng);
     assert!(third != first && third != second, "one in Deleted isn't taken out of it");
+}
+
+#[test]
+fn note_links_follow_web_renames_and_moves_then_sync_as_plain_markdown() {
+    let mut rng = Seeded(788);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let target = web.import_note("", "Target.md", "# Target\n\n## Decision\n", &[], &mut rng).unwrap();
+    let index = web.import_note("", "Index.md", "# Index\n\n[Readable label](Target.md#decision)\n", &[], &mut rng).unwrap();
+    let (_, version) = web.source(&target).unwrap();
+    web.edit(&target, &version, "# Renamed\n\n## Decision\n", &mut rng).unwrap();
+    assert!(web.source(&index).unwrap().0.contains("[Readable label](Renamed.md#decision)"));
+    web.make_folder("", "Work", &mut rng).unwrap();
+    assert!(web.move_note(&target, "Work", &mut rng));
+    assert!(web.source(&index).unwrap().0.contains("Work/Renamed.md#decision"));
+    assert!(web.move_note(&index, "Work", &mut rng));
+    assert!(web.source(&index).unwrap().0.contains("[Readable label](Renamed.md#decision)"));
+    web.rename_folder("Work", "Projects", &mut rng).unwrap();
+    assert!(web.move_note(&index, "", &mut rng));
+    assert!(web.source(&index).unwrap().0.contains("Projects/Renamed.md#decision"));
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert!(desk.docs[&index].text().contains("[Readable label](Projects/Renamed.md#decision)"));
+    let again = Notes::open(ORIGIN, Me::from_bytes(&web.me.to_bytes()).unwrap(), "Phone", &web.save(), 100).unwrap();
+    assert_eq!(again.linked_note("", "Projects/Renamed.md#decision"), Some(target));
+}
+
+#[test]
+fn links_survive_a_web_title_change_that_collides_with_another_file() {
+    let mut rng = Seeded(789);
+    let (_, _, mut web) = two(&mut rng);
+    let _existing = web.import_note("", "Plan.md", "# Plan\n\nExisting\n", &[], &mut rng).unwrap();
+    let target = web.import_note("", "Old.md", "# Old\n\nTarget\n", &[], &mut rng).unwrap();
+    let index = web.import_note("", "Index.md", "# Index\n\n[The target](Old.md)\n", &[], &mut rng).unwrap();
+    let (_, version) = web.source(&target).unwrap();
+    web.edit(&target, &version, "# Plan\n\nTarget\n", &mut rng).unwrap();
+    assert!(web.source(&index).unwrap().0.contains("[The target](Plan%202.md)"));
+    assert_eq!(web.linked_note("", "Plan%202.md"), Some(target));
+}
+
+#[test]
+fn the_web_picker_keeps_a_heading_distinct_from_the_anchor_before_it() {
+    let mut rng = Seeded(791);
+    let (_, _, mut web) = two(&mut rng);
+    let key = web.import_note("", "Plan.md", "# Plan\n\n<a id=\"next-steps-section\"></a>\n## Next steps\n\nDetails\n", &[], &mut rng).unwrap();
+    let sections = web.link_sections(&key);
+    assert_eq!(sections.iter().map(|s| s.fragment.as_str()).collect::<Vec<_>>(), ["#next-steps-section", "#next-steps"]);
+}
+
+#[test]
+fn the_web_picker_distinguishes_concurrent_duplicate_file_names() {
+    let mut rng = Seeded(795);
+    let (mut hub, mut desk, mut web) = two(&mut rng);
+    let mut keys = [Key::random(), Key::random()]; keys.sort();
+    let reserved = Key::random();
+    for (key, name, body) in [(keys[0], "Plan", "First"), (keys[1], "Plan", "Second"), (reserved, "Plan 2", "Reserved")] {
+        let room = key.to_string();
+        let doc = NoteDoc::new(7); doc.record(&format!("# Plan\n\n{body}\n"), Origin::Save);
+        desk.docs.insert(room.clone(), doc);
+        desk.docs.entry(vault::ROOM.to_string()).or_insert_with(|| NoteDoc::new(7)).set_place(key, &Place { folder: "Work".into(), name: name.into(), pinned: false, trashed: false });
+        desk.session.saved(&room, &mut DeskDocs(&mut desk.docs), &mut rng);
+    }
+    desk.session.saved(vault::ROOM, &mut DeskDocs(&mut desk.docs), &mut rng);
+    pump(&mut hub, &mut desk, &mut web, &mut rng);
+    assert_eq!(web.linked_note("", "Work/Plan.md"), Some(keys[0].to_string()));
+    assert_eq!(web.linked_note("", "Work/Plan%203.md"), Some(keys[1].to_string()));
+    assert_eq!(web.linked_note("", "Work/Plan%202.md"), Some(reserved.to_string()));
+    assert_eq!(web.link_notes("Plan Work").iter().find(|n| n.id == keys[1].to_string()).unwrap().path, "Work/Plan 3.md");
 }
