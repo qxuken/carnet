@@ -153,9 +153,9 @@ impl Carnet {
                     ui.with_keyed(
                         "library-heading",
                         NodeSpec::row().grow_width().min_width(0.0)
-                            .when(kui_native::Cond::width_below(least), |s| s.hide("title")),
+                            .when(kui_native::Cond::width_below(least), |s| s.hide("library-heading-text")),
                         |ui| {
-                            ui.text_in_keyed("title", NodeSpec::row().grow_width().min_width(0.0), heading, style);
+                            ui.text_in_keyed("library-heading-text", NodeSpec::row().grow_width().min_width(0.0), heading, style);
                         },
                     );
                     ui.with_keyed(
