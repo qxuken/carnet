@@ -141,6 +141,11 @@ pub struct Colors {
     /// A wash of the accent: a chosen tool, a hovered row.
     pub accent_soft: Color,
     pub selection: Color,
+    /// Search results: a wash for every match, a solid fill for the current
+    /// one, and its readable text. Independent of a note's own highlights.
+    pub search_match: Color,
+    pub search_current: Color,
+    pub search_on_current: Color,
     /// The keyboard's focus ring.
     pub focus: Color,
     // States.
@@ -235,6 +240,9 @@ impl Colors {
             on_accent,
             accent_soft: accent.with_alpha(if dark { 0.16 } else { 0.12 }),
             selection: accent.with_alpha(if dark { 0.30 } else { 0.22 }),
+            search_match: page.mix(accent, if dark { 0.25 } else { 0.23 }),
+            search_current: primary,
+            search_on_current: on_accent,
             focus: accent_ink,
             hover: ink.with_alpha(if dark { 0.05 } else { 0.045 }),
             pressed: ink.with_alpha(if dark { 0.09 } else { 0.08 }),
@@ -303,6 +311,9 @@ impl Colors {
             ("on-accent", self.on_accent),
             ("accent-soft", self.accent_soft),
             ("selection", self.selection),
+            ("search-match", self.search_match),
+            ("search-current", self.search_current),
+            ("search-on-current", self.search_on_current),
             ("focus", self.focus),
             ("hover", self.hover),
             ("pressed", self.pressed),
@@ -666,6 +677,10 @@ mod tests {
                 at("faint on side", c.faint, c.side, 3.3);
                 at("checkbox ring", c.ring, c.page, 3.0);
                 at("primary label", c.on_accent, c.primary, 4.5);
+                at("current search text", c.search_on_current, c.search_current, 4.5);
+                at("search text", c.ink, c.search_match, 4.5);
+                at("current match on page", c.search_current, c.page, 3.0);
+                at("current match beside other matches", c.search_current, c.search_match, 3.0);
                 at("danger", c.danger, c.page, 4.5);
                 // Faint stays fainter than muted: two steps, not one.
                 assert!(contrast(c.faint, c.page) < contrast(c.muted, c.page));

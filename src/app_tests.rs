@@ -4372,7 +4372,7 @@ fn the_library_hides_and_comes_back() {
     assert!(!cards(&mut d), "nothing of the library is left");
     assert!(d.key_of("t-sidebar").is_some(), "the strip has the way back");
     // Searching wants the library: it comes back.
-    key_with(&mut app, &mut d, "f", CTRL);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     settle(&mut app, &mut d);
     assert!(app.settings.sidebar && cards(&mut d));
     let _ = std::fs::remove_dir_all(dir);
@@ -4615,7 +4615,7 @@ fn the_menu_bar_plays_its_keys_where_the_keyboard_is() {
 #[test]
 fn a_menu_row_from_the_search_runs_once() {
     let (mut app, mut d, dir) = fresh_mac("menubar-search");
-    key_with(&mut app, &mut d, "f", CTRL);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     let search = d.core.focus().unwrap();
     assert_eq!(app.fields.get(&search), Some(&Field::Search));
     // File ▸ New Note from the search: one note, not one from the row and
@@ -4626,7 +4626,7 @@ fn a_menu_row_from_the_search_runs_once() {
     assert_eq!(app.store.notes.len(), before + 1);
     // Back in the search (a new note's title has the keyboard), Select
     // All and Cut are the field's own.
-    key_with(&mut app, &mut d, "f", CTRL);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     assert_eq!(d.core.focus(), Some(search));
     d.text(&mut app, "milk");
     d.frame(&mut app);
@@ -4744,7 +4744,7 @@ fn the_apps_chords_reach_it_from_the_title_and_the_search() {
     key_with(&mut app, &mut d, ".", CTRL);
     assert!(!app.zen);
     // From the title to the search.
-    key_with(&mut app, &mut d, "f", CTRL);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     let search = d.core.focus().unwrap();
     assert_eq!(app.fields.get(&search), Some(&Field::Search));
     // From the search: a new note, one.
@@ -4847,8 +4847,8 @@ fn the_search_is_quiet_until_it_is_used() {
     };
     settled(&mut app, &mut d);
     let idle = pill(&d);
-    // Mod+F: the field whole.
-    key_with(&mut app, &mut d, "f", CTRL);
+    // Mod+Shift+F: the field whole.
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     settled(&mut app, &mut d);
     let used = pill(&d);
     assert!(idle < used * 0.5, "nothing searched, the keyboard elsewhere: quiet ({idle} against {used})");
@@ -4889,7 +4889,7 @@ fn the_bar_greys_what_does_not_apply_where_the_keyboard_is() {
     assert!(on(&app, &d, "Edit", "Undo"));
     assert!(on(&app, &d, "Edit", "Copy"));
     // In the search: the note's rows grey, the field's own apply.
-    key_with(&mut app, &mut d, "f", CTRL);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Search));
     assert!(!on(&app, &d, "Format", "Bold"));
     assert!(!on(&app, &d, "Edit", "Remove Block"));
@@ -5994,7 +5994,7 @@ fn the_history_is_a_level_of_its_own_and_back_leaves_the_library_as_it_was() {
     // The search's shortcut, or a new folder, is the library's: back to it.
     app.on_plain(Msg::ShowHistory);
     d_frame_twice(&mut app, &mut d);
-    key_with(&mut app, &mut d, "f", CTRL);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     d.frame(&mut app);
     assert!(app.versions.is_none(), "searching closes the history");
     assert_eq!(d.core.focus(), Some(search), "and the search has the keyboard");
@@ -12362,7 +12362,7 @@ fn a_field_shows_what_the_model_holds() {
     d.frame(&mut app);
     assert_eq!(d.core.edit_text(title).as_deref(), Some("Elsewhere"), "and without it");
     // The search, emptied by the app: so is its field.
-    key_with(&mut app, &mut d, "f", CTRL);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
     type_in(&mut app, &mut d, "zzz");
     let search = app_field(&app, Field::Search).expect("the search");
     assert_eq!(d.core.edit_text(search).as_deref(), Some("zzz"));
@@ -13107,4 +13107,283 @@ fn table_width_modes_keep_prose_narrow_and_reveal_the_last_column() {
     assert!(app.cell_at(window.x - 20.0, last.y + 20.0).is_none());
     assert!(d.warnings().is_empty(), "{:?}", d.warnings());
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn find_in_note_keeps_the_library_and_scrolls_to_each_match() {
+    let (mut app, mut d, dir) = body("find-in-note");
+    d.core.set_inspect(true);
+    let md = format!("{}\n\nFirst **NeEdLe** here\n\nLast needle there", (0..70).map(|i| format!("Paragraph {i}: words on the page.\n\n")).collect::<String>());
+    app.note().doc = carnet_core::doc::from_markdown(&md).1;
+    app.edited();
+    app.caret = Caret::at(page::first(app.doc()));
+    let before = carnet_core::doc::to_markdown(None, app.doc());
+    d_frame_twice(&mut app, &mut d);
+    let order = app.order.clone();
+    key_with(&mut app, &mut d, "f", CTRL);
+    assert!(app.find.open);
+    assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Find));
+    type_in(&mut app, &mut d, "needle");
+    settle(&mut app, &mut d);
+    assert!(app.query.is_empty());
+    assert_eq!(app.order, order, "finding never filters the library");
+    assert_eq!(app.find.hits.len(), 2);
+    assert_eq!(app.find.active, Some(0));
+    assert_eq!(&page::text(app.doc(), app.caret.head.slot)[app.caret.anchor.byte..app.caret.head.byte], "NeEdLe");
+    assert!(d.core.scroll_offset(app.scroll_key.unwrap()).y > 500.0, "the first match is down the note");
+    let r = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).unwrap();
+    let page = app.page_rect.unwrap();
+    assert!(r.y >= page.y && r.y + r.h <= page.y + page.h, "the match is visible: {r:?}, page {page:?}");
+    key(&mut app, &mut d, "enter");
+    assert_eq!(app.find.active, Some(1));
+    key(&mut app, &mut d, "enter");
+    assert_eq!(app.find.active, Some(0), "next wraps");
+    key_with(&mut app, &mut d, "enter", SHIFT);
+    assert_eq!(app.find.active, Some(1), "Shift+Enter goes backwards");
+    key_with(&mut app, &mut d, "g", CTRL);
+    assert_eq!(app.find.active, Some(0));
+    key_with(&mut app, &mut d, "g", CTRL_SHIFT);
+    assert_eq!(app.find.active, Some(1));
+    assert_eq!(carnet_core::doc::to_markdown(None, app.doc()), before, "search never edits the note");
+    assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Find));
+    key(&mut app, &mut d, "escape");
+    assert!(!app.find.open);
+    assert!(page_focused(&app, &d));
+    assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn global_search_opens_at_the_match_by_enter_and_by_card() {
+    let (mut app, mut d, dir) = body("global-search-jump");
+    d.core.set_inspect(true);
+    app.note().title = "Target".into();
+    app.note().folder = "Elsewhere".into();
+    app.note().doc = carnet_core::doc::from_markdown("Introduction\n\nA **secret** phrase in this paragraph.").1;
+    app.edited();
+    let id = app.store.notes[app.current].id;
+    app.new_note();
+    app.note().title = "Other".into();
+    app.edited();
+    app.folder = Some("Work".into());
+    app.reorder();
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
+    assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Search));
+    type_in(&mut app, &mut d, "secret phrase");
+    assert_eq!(app.order.len(), 1, "search reaches other folders and crosses Markdown styles");
+    key(&mut app, &mut d, "enter");
+    settle(&mut app, &mut d);
+    assert_eq!(app.store.notes[app.current].id, id);
+    assert_eq!(&page::text(app.doc(), app.caret.head.slot)[app.caret.anchor.byte..app.caret.head.byte], "secret** phrase");
+    assert!(page_focused(&app, &d));
+    assert_eq!(app.find.query, "secret phrase");
+    app.caret = Caret::at(page::first(app.doc()));
+    d_frame_twice(&mut app, &mut d);
+    let card = app.card_keys[0];
+    d.click_key(&mut app, card);
+    settle(&mut app, &mut d);
+    assert_eq!(app.caret.anchor.byte, 4, "clicking even the open note jumps to the match");
+    assert!(page_focused(&app, &d));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn find_handles_no_matches_table_cells_and_changes_to_the_note() {
+    let (mut app, mut d, dir) = body("find-cells");
+    app.note().doc = carnet_core::doc::from_markdown("| Name |\n| --- |\n| ПрИвЕт |\n\nAnother привет").1;
+    app.edited();
+    app.caret = Caret::at(page::first(app.doc()));
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "f", CTRL);
+    type_in(&mut app, &mut d, "привет");
+    assert_eq!(app.find.hits.len(), 2);
+    assert!(app.caret.head.slot.cell.is_some());
+    let find = d.core.focus().unwrap();
+    key_with(&mut app, &mut d, "f", CTRL);
+    type_in(&mut app, &mut d, "no match");
+    assert!(app.find.hits.is_empty());
+    assert_eq!(d.core.edit_text(find).as_deref(), Some("no match"), "reopening selects the query for replacement");
+    key(&mut app, &mut d, "enter");
+    assert!(app.find.hits.is_empty());
+    key_with(&mut app, &mut d, "f", CTRL);
+    type_in(&mut app, &mut d, "привет");
+    app.note().doc = carnet_core::doc::from_markdown("Changed elsewhere").1;
+    app.edited();
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.find.hits.is_empty(), "cached matches follow edits and reloads");
+    key(&mut app, &mut d, "escape");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn global_search_selects_title_matches() {
+    let (mut app, mut d, dir) = body("find-title");
+    app.note().title = "Été: Holiday plans".into();
+    app.edited();
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
+    type_in(&mut app, &mut d, "holiday");
+    key(&mut app, &mut d, "enter");
+    d_frame_twice(&mut app, &mut d);
+    let title = d.core.focus().unwrap();
+    assert_eq!(app.fields.get(&title), Some(&Field::Title));
+    assert_eq!(d.core.edit.selection_cursors(title), Some(((0, 7), (0, 14))));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn find_stays_in_a_note_window_and_global_search_goes_to_main() {
+    let (mut app, mut d, dir) = body("find-window");
+    type_in(&mut app, &mut d, "window words");
+    let note = app.store.notes[app.current].id;
+    app.open_in_window(note);
+    app.in_window(0, |app| {
+        let mut k = kui_native::KeyPress::new(KeyCode::Char('f'), CTRL);
+        k.mods = CTRL;
+        assert!(app.chord(&k));
+        assert!(app.find.open);
+        assert_eq!(app.focus_req, Some(Field::Find));
+        assert!(app.to_main.is_none());
+        k.mods.shift = true;
+        assert!(app.chord(&k));
+        assert_eq!(app.to_main, Some(Msg::FocusSearch));
+    });
+    assert!(!app.find.open, "the main editor has its own find state");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn cmd_find_works_in_a_narrow_mac_window_without_opening_the_sidebar() {
+    let (mut app, mut d, dir) = fresh_mac("find-narrow-mac");
+    d.viewport = kui_native::Size::new(560.0, 640.0);
+    key(&mut app, &mut d, "enter");
+    type_in(&mut app, &mut d, "Look for these words");
+    app.settings.sidebar = false;
+    let cmd = KeyMods { super_key: true, ..KeyMods::NONE };
+    key_with(&mut app, &mut d, "f", cmd);
+    assert!(app.find.open && !app.list_view);
+    assert!(!app.settings.sidebar, "local find keeps the note on screen");
+    type_in(&mut app, &mut d, "words");
+    assert_eq!(app.find.hits.len(), 1);
+    key(&mut app, &mut d, "escape");
+    assert!(!app.find.open);
+    key_with(&mut app, &mut d, "f", KeyMods { shift: true, ..cmd });
+    assert!(app.list_view && app.settings.sidebar);
+    assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Search));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+
+#[test]
+fn search_results_replace_folders_and_clearing_restores_them() {
+    let (mut app, mut d, dir) = body("search-results-mode");
+    d.core.set_inspect(true);
+    app.store.create_folder("", "Work").unwrap();
+    app.note().title = "A result".into();
+    app.note().doc = Doc::new(vec![Block::text(format!("{} distinctive ending", "introductory words ".repeat(20)))]);
+    app.edited();
+    d_frame_twice(&mut app, &mut d);
+    assert!(!app.folder_rows.is_empty());
+    key_with(&mut app, &mut d, "f", CTRL_SHIFT);
+    type_in(&mut app, &mut d, "distinctive");
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.folder_rows.is_empty(), "hidden folders also leave keyboard navigation");
+    assert_eq!(d.texts_under("search-summary"), ["1 note found"]);
+    assert_eq!(d.texts_under("search-scope"), ["All notes"]);
+    key(&mut app, &mut d, "escape");
+    d_frame_twice(&mut app, &mut d);
+    assert!(app.query.is_empty());
+    assert!(!app.folder_rows.is_empty());
+    assert!(d.key_of("search-summary").is_none());
+    assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn finding_title_words_keeps_the_title_editable_and_the_query_focused() {
+    let (mut app, mut d, dir) = body("find-title-paint");
+    app.note().title = "Holiday and more Holiday".into();
+    app.edited();
+    d.core.set_inspect(true);
+    d_frame_twice(&mut app, &mut d);
+    key_with(&mut app, &mut d, "f", CTRL);
+    type_in(&mut app, &mut d, "holiday");
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(app.find.hits.len(), 2);
+    assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Find));
+    let title = app_field(&app, Field::Title).unwrap();
+    assert_eq!(d.core.edit_text(title).as_deref(), Some("Holiday and more Holiday"));
+    let overlay_key = d.key_of("title-matches").unwrap();
+    let overlay = d.rect_of(overlay_key).unwrap();
+    let editor = d.rect_of(title).unwrap();
+    assert!((overlay.x - editor.x).abs() < 0.5 && (overlay.w - editor.w).abs() < 0.5,
+        "the highlighted title uses the editor's origin and wrap width: {overlay:?}, {editor:?}");
+    d.click(&mut app, editor.x + 20.0, editor.y + editor.h / 2.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(d.core.focus(), Some(title), "clicking the highlighted words still enters the title editor");
+    assert!(d.key_of("title-matches").is_none(), "the editor paints its own selection and composition while typing");
+    let warnings = d.warnings();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+
+#[test]
+fn find_controls_fit_the_minimum_window_with_and_without_results() {
+    let (mut app, mut d, dir) = body("find-minimum-width");
+    d.core.set_inspect(true);
+    type_in(&mut app, &mut d, "A word to find");
+    for query in ["word", "nothing matches here", ""] {
+        d.viewport = kui_native::Size::new(360.0, 500.0);
+        key_with(&mut app, &mut d, "f", CTRL);
+        if query.is_empty() { key(&mut app, &mut d, "backspace"); } else { type_in(&mut app, &mut d, query); }
+        d_frame_twice(&mut app, &mut d);
+        for label in ["find-panel", "find-input", "find-count", "Close find"] {
+            let k = d.key_of(label).expect(label);
+            let r = d.rect_of(k).unwrap();
+            assert!(r.x >= 0.0 && r.x + r.w <= 360.5, "{query:?}: {label} stays on screen: {r:?}");
+        }
+    }
+    assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn search_reveals_matches_in_horizontally_scrolled_tables() {
+    use crate::settings::TableWidth;
+    for (mode, width) in [("page", TableWidth::Page), ("window", TableWidth::Window), ("scroll", TableWidth::Scroll)] {
+        for global in [false, true] {
+            let (mut app, mut d, dir) = body(&format!("table-search-{mode}-{global}"));
+            app.settings.table_width = width;
+            let table = Table::from_cells(vec![
+                (0..10).map(|c| format!("Column {c}")).collect(),
+                (0..10).map(|c| if c == 9 { "rare match".to_string() } else { format!("A longer phrase in column {c}") }).collect(),
+            ]);
+            let block = Block::new(Kind::Table(table));
+            let table_id = block.id;
+            app.store.notes[app.current].doc = Doc::new(vec![Block::text("Before the reference table"), block]);
+            app.edited();
+            app.caret = Caret::at(page::first(app.doc()));
+            let before = carnet_core::doc::to_markdown(None, app.doc());
+            for _ in 0..4 { d.frame(&mut app); }
+            key_with(&mut app, &mut d, "f", if global { CTRL_SHIFT } else { CTRL });
+            type_in(&mut app, &mut d, "rare match");
+            if global { key(&mut app, &mut d, "enter"); }
+            for _ in 0..8 { d.advance(0.2); d.frame(&mut app); }
+            let key = app.row_seen[&table_id].0.str("table-scroll");
+            let geometry = d.core.scroll_geometry(key).unwrap();
+            if geometry.max_offset.x > 0.5 {
+                assert!(geometry.offset.x > 0.5, "{mode}, global={global}: the matching column scrolls into view");
+            }
+            let r = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).unwrap();
+            assert!(r.x >= geometry.rect.x && r.x + r.w <= geometry.rect.x + geometry.rect.w,
+                "{mode}, global={global}: match {r:?} is inside {:?}", geometry.rect);
+            assert_eq!(carnet_core::doc::to_markdown(None, app.doc()), before);
+            if !global {
+                assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Find));
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }

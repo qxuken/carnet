@@ -52,6 +52,8 @@ mod open_view;
 mod window_view;
 use pick_view::Pick;
 use chrome::ago;
+#[path = "app_search.rs"]
+mod search_view;
 
 use crate::design::{Type, radius, size};
 
@@ -131,6 +133,8 @@ pub enum Msg {
     Sort,
     Undo,
     ClearSearch,
+    FindStep { back: u64 },
+    CloseFind,
     FocusTitle,
     FocusSearch,
     /// Bold, italic, struck, code or underlined (`STYLES[which]`) on the
@@ -455,6 +459,7 @@ pub enum Act {
 #[message(string)]
 pub enum Field {
     Search,
+    Find,
     Title,
     Folder,
     /// A face's name typed in the settings.
@@ -615,6 +620,7 @@ pub struct Carnet {
     /// never on a click, so a row is not pulled out from under the pointer.
     pub order: Vec<usize>,
     query: String,
+    find: search_view::Find,
     /// This frame's kui editors. Rebuilt every view.
     pub fields: HashMap<Key, Field>,
     focus_req: Option<Field>,
@@ -1086,6 +1092,7 @@ macro_rules! editor {
 
 editor! {
     current: usize,
+    find: search_view::Find,
     caret: Caret = Caret::at(page::start(Slot::block(0))),
     editing: bool,
     focus_req: Option<Field>,
@@ -1323,6 +1330,7 @@ impl Carnet {
             store,
             current: 0,
             order: Vec::new(),
+            find: Default::default(),
             query: String::new(),
             fields: HashMap::new(),
             focus_req: None,
@@ -1684,13 +1692,13 @@ impl Carnet {
     /// a search, every note (each card names its folder), so a note is
     /// never "not found" for being in another folder.
     fn reorder(&mut self) {
-        let q = self.query.trim().to_lowercase();
+        let q = self.query.trim();
         let folder = if q.is_empty() { self.folder.as_deref() } else { None };
         let mut order: Vec<usize> = (0..self.store.notes.len())
             .filter(|&i| {
                 let n = &self.store.notes[i];
                 folder.is_none_or(|f| n.folder == f)
-                    && (q.is_empty() || n.title.to_lowercase().contains(&q) || n.doc.contains(&q))
+                    && (q.is_empty() || search_view::matches(&n.title, &n.doc, q))
             })
             .collect();
         let notes = &self.store.notes;
@@ -1900,6 +1908,12 @@ impl Carnet {
     }
 
     fn focus(&mut self, field: Field) {
+        // Naming or renaming a folder leaves results mode so its row is
+        // visible and can take the keyboard.
+        if field == Field::Folder && !self.query.is_empty() {
+            self.query.clear();
+            self.reorder();
+        }
         // The search and a new folder's name are the library's: it shows,
         // in place of a note's history.
         if matches!(field, Field::Search | Field::Folder) {
@@ -2130,6 +2144,7 @@ impl Carnet {
     fn new_note(&mut self) {
         self.close_history();
         self.settings_open = false;
+        self.find = Default::default();
         self.deleted = false;
         self.close_peek();
         self.leave_current();
@@ -2939,9 +2954,11 @@ impl Carnet {
             self.say = self.peek.as_ref().map(|p| p.title.clone());
             return;
         }
-        self.open(self.order[to]);
-        self.focus_page = true;
-        self.editing = true;
+        self.open_result(self.order[to]);
+        if self.query.trim().is_empty() {
+            self.focus_page = true;
+            self.editing = true;
+        }
         self.say = Some(self.store.notes[self.current].display_title().to_string());
     }
 
@@ -3704,7 +3721,7 @@ impl Carnet {
         }
         match msg {
             Msg::RootKey | Msg::Page | Msg::PageDrag | Msg::SettingsTitle => {}
-            Msg::OpenNote { note } => self.open(note as usize),
+            Msg::OpenNote { note } => self.open_result(note as usize),
             Msg::FollowNote { note, fragment } => self.follow_note(note, fragment.as_deref()),
             Msg::NewNote => self.new_note(),
             Msg::AddWelcome => self.add_welcome(),
@@ -3795,7 +3812,13 @@ impl Carnet {
                 self.focus(Field::Search);
             }
             Msg::FocusTitle => self.focus(Field::Title),
-            Msg::FocusSearch => self.focus(Field::Search),
+            Msg::FocusSearch => {
+                self.list_view = true;
+                self.settings_open = false;
+                self.focus(Field::Search);
+            }
+            Msg::FindStep { back } => self.step_find(back != 0),
+            Msg::CloseFind => self.close_find(),
             Msg::Style { which } => {
                 let kind = STYLES[(which as usize).min(STYLES.len() - 1)];
                 if page::styles_typing(self.doc(), self.caret) {
@@ -4313,6 +4336,10 @@ impl Carnet {
             return;
         }
         let m = k.mods;
+        if self.find.open && !self.settings_open && k.code == KeyCode::Escape {
+            self.close_find();
+            return;
+        }
         if let Some(row) = core
             .focus()
             .and_then(|f| self.folder_rows.iter().find(|(key, _)| *key == f))
@@ -4356,7 +4383,7 @@ impl Carnet {
                 let pos = self.order.iter().position(|&i| i == self.current);
                 let next = pos.and_then(|p| if up { p.checked_sub(1) } else { Some(p + 1) });
                 if let Some(&i) = next.and_then(|p| self.order.get(p)) {
-                    self.open(i);
+                    self.open_result(i);
                     self.pick_anchor = Some(Pick::Note(self.store.notes[i].id));
                     self.say = Some(self.store.notes[i].display_title().to_string());
                 }
@@ -4465,6 +4492,7 @@ impl Carnet {
             // Mac too, whose ⌘Tab is the system's. Not from the settings,
             // which are not among them.
             KeyCode::Tab if k.mods.ctrl && !alt && !self.settings_open => self.step_note(shift, true),
+            KeyCode::Char('g') if !alt && self.find.open => self.step_find(shift),
             KeyCode::Char('n') if shift => self.on_plain(Msg::NewFolder),
             // The open note in a window of its own; not a deleted one read.
             KeyCode::Char('o') if shift && !alt && self.peek.is_none() => self.open_in_window(self.store.notes[self.current].id),
@@ -4488,10 +4516,8 @@ impl Carnet {
             KeyCode::Char('\\') => self.on_settings(Msg::ToggleSidebar),
             KeyCode::Char('.') => self.on_plain(Msg::ToggleZen),
             KeyCode::Char('f') | KeyCode::Char('F') => {
-                // On a narrow window the search is on the list.
-                self.list_view = true;
-                self.settings_open = false;
-                self.focus(Field::Search);
+                if alt { return false; }
+                if shift { self.on_plain(Msg::FocusSearch); } else { self.start_find(); }
             }
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 self.save_current();
@@ -4506,6 +4532,7 @@ impl Carnet {
 
     fn on_field_changed(&mut self, field: Field, text: String) {
         match field {
+            Field::Find => self.change_find(text),
             Field::Link => {
                 let address = carnet_core::navigation::typed_address(&text) && self.link_notes(&text).is_empty();
                 if let Some(le) = self.link_edit.as_mut() {
@@ -4601,11 +4628,14 @@ impl Carnet {
 
     fn on_field_submit(&mut self, field: Field) {
         match field {
+            Field::Find => self.step_find(false),
             Field::Link => self.link_submit(),
             Field::Search => {
                 if let Some(&first) = self.order.first() {
-                    self.open(first);
-                    self.edit_at(page::first(self.doc()));
+                    self.open_result(first);
+                    if self.query.trim().is_empty() {
+                        self.edit_at(page::first(self.doc()));
+                    }
                 } else if !self.query.trim().is_empty() {
                     // Nothing matches: Enter makes the note searched for.
                     let title = self.query.trim().to_string();
@@ -4651,6 +4681,7 @@ impl Carnet {
     /// Esc lets go of it).
     fn on_field_cancel(&mut self, field: Field) {
         match field {
+            Field::Find => self.close_find(),
             // In a font list's search: the list closes, Settings stays.
             Field::Font => self.font_pick = None,
             Field::Search if !self.query.is_empty() => self.on_plain(Msg::ClearSearch),
@@ -5268,6 +5299,7 @@ impl Carnet {
         let focused = ui.focused();
         let field = focused.and_then(|k| self.fields.get(&k)).copied();
         self.search_active = field == Some(Field::Search);
+        self.find.focused = field == Some(Field::Find);
         if focused.is_some() && focused == self.page_key {
             self.editing = true;
         } else if field.is_some() {
@@ -5291,7 +5323,7 @@ impl Carnet {
             // One selection in the window: a field that lost the keyboard
             // stops drawing its own (kui keeps it for when it is back), and
             // the page's goes here.
-            if field.is_some() {
+            if field.is_some() && field != Some(Field::Find) {
                 self.caret = Caret::at(self.caret.head);
             }
             self.last_focus = focused;
@@ -5382,6 +5414,7 @@ impl Carnet {
                     ui.span("settings", |ui| self.settings_page(ui, &l, narrow, main_w));
                 } else {
                     ui.span("toolbar", |ui| self.strip(ui, &l, narrow));
+                    self.find_bar(ui, &l);
                     ui.span("page", |ui| self.page(ui, &l, main_w));
                     // The words scrolling up under the strip fade out
                     // rather than being cut at its edge. Paint only: a
@@ -5391,7 +5424,7 @@ impl Carnet {
                     let edge = if self.side_w(narrow) > 0.0 { chrome::EDGE_W } else { 0.0 };
                     ui.leaf(
                         NodeSpec::row()
-                            .float(FloatConfig::parent().offset(edge, STRIP_H))
+                            .float(FloatConfig::parent().offset(edge, STRIP_H + if self.find.open { search_view::BAR_H } else { 0.0 }))
                             .size(main_w - 12.0 - edge, 22.0)
                             .gradient(kui_native::Gradient::to(kui_native::Side::Bottom, [l.t.bg, l.t.bg.with_alpha(0.0)]))
                             .role(Role::None),
@@ -5423,6 +5456,7 @@ impl Carnet {
         let (Some(msg), event) = ev.split::<Msg>() else { return };
         match (msg, event) {
             (Msg::Edited { field }, Event::EditChange(c)) => self.on_field_changed(field, c.text),
+            (Msg::Submitted { field: Field::Find }, _) => self.step_find(core.modifiers().shift),
             (Msg::Submitted { field }, _) => self.on_field_submit(field),
             (Msg::Cancelled { field }, _) => self.on_field_cancel(field),
             // An arrow, Backspace or Delete that met the end of a field's

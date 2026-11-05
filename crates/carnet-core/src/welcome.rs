@@ -83,7 +83,7 @@ impl Shortcut {
             Shortcut::Paste => "mod+v",
             Shortcut::NewNote => "mod+n",
             Shortcut::NewFolder => "mod+shift+n",
-            Shortcut::Search => "mod+f",
+            Shortcut::Search => "mod+shift+f",
             Shortcut::Settings => "mod+,",
         }
     }

@@ -108,6 +108,7 @@ fn hash(s: &str) -> u64 {
 
 impl Carnet {
     pub(super) fn page(&mut self, ui: &mut Ui<'_>, l: &Look, main_w: f32) {
+        self.refresh_find();
         let t = l.t;
         let created = self.settings.dates_created.then(|| self.date_created());
         let note = &self.store.notes[self.current];
@@ -470,26 +471,41 @@ impl Carnet {
         let title = self.store.notes[self.current].title.clone();
         let style = l.page_type(Type::TITLE).family(l.serif);
         let row = step_back(NodeSpec::row().grow_width().pad_xy(8.0, 0.0), self.focus_on(), dim);
+        let title_hits: Vec<_> = if self.find.open {
+            self.find.hits.iter().enumerate().filter_map(|(i, h)| match h {
+                search_view::Hit::Title(a, b) => Some((*a, *b, self.find.active == Some(i))),
+                _ => None,
+            }).collect()
+        } else { Vec::new() };
         if let Some(p) = &self.peek {
             let shown = if p.title.trim().is_empty() { "Untitled" } else { p.title.as_str() };
             ui.with(row, |ui| {
-                ui.text_in(NodeSpec::row().grow_width().selectable().label("Title"), shown, style.color(t.fg));
+                let k = ui.with_keyed("reading-title", NodeSpec::row().grow_width().selectable().label("Title"), |ui| {
+                    ui.rich_text(&search_view::spans(shown, &title_hits, l), style.color(t.fg));
+                });
+                if self.find.title_range.take().is_some() { ui.reveal(k); }
             });
             return;
         }
         if let Some(v) = &self.versions {
             let shown = if v.title.trim().is_empty() { "Untitled" } else { v.title.as_str() };
             ui.with(row, |ui| {
-                ui.text_in(NodeSpec::row().grow_width().selectable().label("Title"), shown, style.color(t.fg));
+                let k = ui.with_keyed("reading-title", NodeSpec::row().grow_width().selectable().label("Title"), |ui| {
+                    ui.rich_text(&search_view::spans(shown, &title_hits, l), style.color(t.fg));
+                });
+                if self.find.title_range.take().is_some() { ui.reveal(k); }
             });
             return;
         }
         ui.with(row, |ui| {
+            let title_key = ui.child_key("title");
+            let overlay = !title_hits.is_empty() && ui.focused() != Some(title_key) && self.focus_req != Some(Field::Title);
             let k = ui.text_edit_value(
                 "title",
                 &title,
                 &EditOptions {
-                    style: style.color(t.fg),
+                    style: style.color(if overlay { Color::TRANSPARENT } else { t.fg }),
+                    accent: self.find.open.then_some(l.c.search_match),
                     wrap: true,
                     placeholder: Some("Untitled".into()),
                     // Its Tab is the app's, so Ctrl+Tab reaches the root's
@@ -498,10 +514,20 @@ impl Carnet {
                     keep_tab: true,
                     ..Default::default()
                 },
-                Field::Title.on(NodeSpec::row().grow_width().label("Title")),
+                Field::Title.on(NodeSpec::row().grow_width().on_layout(Value::Null).label("Title")),
             );
+            if overlay {
+                let width = ui.layout_of(k).map_or(self.text_w + 6.0, |r| r.w);
+                ui.with_keyed("title-matches", NodeSpec::row().width(width).float(FloatConfig::parent().offset(8.0, 0.0)).role(Role::None), |ui| {
+                    ui.rich_text(&search_view::spans(&title, &title_hits, l), style.color(t.fg));
+                });
+            }
             self.fields.insert(k, Field::Title);
             self.apply_focus(ui, k, Field::Title);
+            if let Some((a, b)) = self.find.title_range.take() {
+                ui.core().edit.set_selection(k, (0, a), (0, b));
+                ui.reveal(k);
+            }
             // Come up to from the note: the caret at the end, then, for ↑,
             // along the last line to the column it left.
             if let Some(column) = self.title_to.take() {
@@ -1993,7 +2019,7 @@ impl Carnet {
                 .map(|(f, to)| (f.max(lo), to.min(hi)))
                 .filter(|(f, to)| f < to)
         };
-        if here {
+        if here || (self.find.open && self.caret.head.slot == slot) {
             self.caret_fresh = fresh;
         }
         let blink = ui.caret_visible();
@@ -2004,6 +2030,12 @@ impl Carnet {
             .then(|| inline::initial_letter(text))
             .flatten()
             .filter(|&(f, _)| !(preedit.is_some() && byte <= f));
+        let find_ranges: Vec<(usize, usize, bool)> = if self.find.open {
+            self.find.hits.iter().enumerate().filter_map(|(i, h)| match h {
+                search_view::Hit::Body(c) if c.head.slot == slot => Some((c.anchor.byte, c.head.byte, self.find.active == Some(i))),
+                _ => None,
+            }).collect()
+        } else { Vec::new() };
         let (dark, page_bg) = (l.c.dark, t.bg);
         let (cap_lines, cap_accent, text_w) = (self.settings.initial_lines, self.settings.initial_accent, self.text_w);
         let mut text_key = None;
@@ -2024,6 +2056,7 @@ impl Carnet {
                 // the composition.
                 let mut cuts = vec![lo, hi];
                 cuts.extend(runs.iter().map(|r| r.0));
+                cuts.extend(find_ranges.iter().flat_map(|&(a, b, _)| [a, b]));
                 cuts.extend(hidden.iter().flat_map(|&(f, to)| [f, to]));
                 cuts.extend(dashes.iter().flat_map(|&(f, to)| [f, to]));
                 if let Some((f, to)) = part {
@@ -2129,6 +2162,10 @@ impl Carnet {
                         // A little air past its first and last letters (kui
                         // pads only the run's two ends, and moves nothing).
                         sp = sp.bg(wash.map_or(t.selection, |w| over(t.selection, w))).bg_radius(4.0).bg_pad(SPAN_AIR);
+                    }
+                    if let Some((_, _, active)) = find_ranges.iter().find(|&&(f, to, _)| f <= a && b <= to) {
+                        sp = search_view::mark(sp, l, *active);
+                        if *active && cap.is_some_and(|(f, to)| a >= f && b <= to) { letter_own = true; }
                     }
                     spans.push(sp);
                     broken = text[a..b].ends_with('\n');
@@ -2792,6 +2829,10 @@ impl Carnet {
     pub(super) fn page_key_press(&mut self, k: KeyPress, core: &Core) {
         let m = k.mods;
         let chord = m.ctrl || m.super_key;
+        if k.code == KeyCode::Escape && self.find.open {
+            self.close_find();
+            return;
+        }
         // Reading a version or a deleted note: Esc goes back to the note.
         if k.code == KeyCode::Escape && self.reading() {
             self.close_history();

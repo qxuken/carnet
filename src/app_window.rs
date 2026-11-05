@@ -141,7 +141,7 @@ impl Carnet {
             KeyCode::Char('n') if k.mods.shift => Msg::NewFolder,
             KeyCode::Char('n') => Msg::NewNote,
             KeyCode::Char(',') => Msg::ShowSettings,
-            KeyCode::Char('f') => Msg::FocusSearch,
+            KeyCode::Char('f') if k.mods.shift => Msg::FocusSearch,
             KeyCode::Char('w') => {
                 self.close_window(note);
                 return true;
@@ -209,12 +209,13 @@ impl Carnet {
         ui.window_events(WindowEvents::default().on_focus(Msg::WindowFocus));
         self.follow_file_drag(ui);
         self.strip(ui, l, false);
+        self.find_bar(ui, l);
         self.page(ui, l, vw);
         // The words scrolling up under the strip fade, as in the main
         // window.
         ui.leaf(
             NodeSpec::row()
-                .float(FloatConfig::parent().offset(0.0, STRIP_H))
+                .float(FloatConfig::parent().offset(0.0, STRIP_H + if self.find.open { search_view::BAR_H } else { 0.0 }))
                 .size(vw - 12.0, 22.0)
                 .gradient(kui_native::Gradient::to(kui_native::Side::Bottom, [l.t.bg, l.t.bg.with_alpha(0.0)]))
                 .role(Role::None),
