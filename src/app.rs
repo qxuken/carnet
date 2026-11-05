@@ -161,6 +161,8 @@ pub enum Msg {
     SetPairing { to: u64 },
     /// 0 narrow, 1 medium, 2 wide.
     SetWidth { to: u64 },
+    /// 0 page, 1 window, 2 independent horizontal scroll.
+    SetTableWidth { to: u64 },
     /// 0 last edited, 1 title, 2 created.
     SetSort { to: u64 },
     /// The date a note shows: 0 when last edited, 1 when made.
@@ -4149,6 +4151,7 @@ impl Carnet {
             | Msg::SetDensity { .. }
             | Msg::SetPairing { .. }
             | Msg::SetWidth { .. }
+            | Msg::SetTableWidth { .. }
             | Msg::SetSort { .. }
             | Msg::SetDates { .. }
             | Msg::ResetLook

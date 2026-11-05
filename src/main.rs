@@ -14,6 +14,7 @@ mod keys;
 mod look;
 mod oscursor;
 mod settings;
+mod table_layout;
 mod shots;
 mod signup;
 mod slash;

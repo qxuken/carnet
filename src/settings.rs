@@ -34,6 +34,30 @@ impl Width {
     }
 }
 
+/// How much room a table may use, independently of the prose measure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableWidth {
+    Page,
+    Window,
+    Scroll,
+}
+
+impl TableWidth {
+    pub const ALL: [Self; 3] = [Self::Page, Self::Window, Self::Scroll];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Page => "page",
+            Self::Window => "window",
+            Self::Scroll => "scroll",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|w| w.key() == key)
+    }
+}
+
 /// The library's order, after the pinned notes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sort {
@@ -197,6 +221,7 @@ pub struct Settings {
     /// The body's size in px; headings and tables scale with it.
     pub size: u32,
     pub width: Width,
+    pub table_width: TableWidth,
     pub sort: Sort,
     /// A note's date, on the page and in the library: when it was made;
     /// or when last edited.
@@ -270,6 +295,7 @@ impl Default for Settings {
             code_font: String::new(),
             size: 16,
             width: Width::Medium,
+            table_width: TableWidth::Page,
             sort: Sort::Edited,
             dates_created: false,
             divider: Divider::Dots,
@@ -346,6 +372,7 @@ impl Settings {
                         _ => Width::Medium,
                     }
                 }
+                "table_width" => s.table_width = TableWidth::from_key(v).unwrap_or(TableWidth::Page),
                 "sort" => {
                     s.sort = match v {
                         "title" => Sort::Title,
@@ -394,13 +421,14 @@ impl Settings {
     pub fn to_text(&self) -> String {
         // The reader's own divider after the rest: its words, and its
         // picture's name in this folder (or where it was picked); then the
-        // wheel.
+        // wheel and table width.
         let picture = self.divider_picture.as_deref().map(Path::display).map(|p| p.to_string()).unwrap_or_default();
         format!(
-            "{}divider_text = {}\ndivider_picture = {picture}\nwheel = {}\n",
+            "{}divider_text = {}\ndivider_picture = {picture}\nwheel = {}\ntable_width = {}\n",
             self.keys_text(),
             self.divider_text,
-            self.wheel.key()
+            self.wheel.key(),
+            self.table_width.key()
         )
     }
 
@@ -524,6 +552,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn table_width_is_a_local_appearance_preference() {
+        for width in TableWidth::ALL {
+            let mut s = Settings { table_width: width, ..Settings::default() };
+            assert_eq!(Settings::parse(&s.to_text()).table_width, width);
+            s.reset_look();
+            assert_eq!(s.table_width, TableWidth::Page);
+        }
+        assert_eq!(Settings::parse("table_width = unknown").table_width, TableWidth::Page);
+        assert_eq!(Settings::parse("width = wide").table_width, TableWidth::Page);
+    }
+
+    #[test]
     fn settings_survive_a_round_trip_and_bad_lines() {
         let s = Settings {
             theme: ThemePref::Dark,
@@ -534,6 +574,7 @@ mod tests {
             code_font: "JetBrains Mono".into(),
             size: 18,
             width: Width::Wide,
+            table_width: TableWidth::Scroll,
             sort: Sort::Title,
             dates_created: true,
             divider: Divider::Text,

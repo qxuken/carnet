@@ -4052,11 +4052,10 @@ fn a_table_after_a_picture_at_the_edge_starts_below_it_at_full_width() {
     assert!(heading.x > pic.x + pic.w - 1.0 && heading.y < pic.y + pic.h, "beside: {pic:?} {heading:?}");
     assert!(table.y >= pic.y + pic.h - 1.0, "below the picture: {pic:?} {table:?}");
     assert!((table.x - words.x).abs() < 1.0 && (table.w - words.w).abs() < 1.0, "the text's width: {words:?} {table:?}");
-    // Its columns share it alike, a third each.
+    // The route descriptions get more room than days and mile counts.
     let cell = |s: &str| d.core.nodes().iter().find(|n| n.text.as_deref() == Some(s)).map(|n| n.rect).unwrap();
     let (day, place, miles) = (cell("Day"), cell("Where"), cell("Miles"));
-    let third = (table.w - 16.0) / 3.0;
-    assert!(((place.x - day.x) - third).abs() < 3.0 && ((miles.x - place.x) - third).abs() < 3.0, "{table:?} {day:?} {place:?} {miles:?}");
+    assert!(miles.x - place.x > place.x - day.x, "{table:?} {day:?} {place:?} {miles:?}");
     let w = d.warnings();
     assert!(w.is_empty(), "{w:?}");
     let _ = std::fs::remove_dir_all(dir);
@@ -13063,5 +13062,49 @@ fn section_navigation_requests_one_scroll_destination() {
     let g = d.core.scroll_geometry(key).unwrap();
     let caret = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).unwrap();
     assert!((caret.y + caret.h / 2.0 - (g.rect.y + g.rect.h / 2.0)).abs() < 3.0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Wide reference tables can leave the prose measure without moving the
+/// prose, and navigation reveals cells inside the table's horizontal scroll.
+#[test]
+fn table_width_modes_keep_prose_narrow_and_reveal_the_last_column() {
+    use crate::settings::TableWidth;
+    let (mut app, mut d, dir) = body("table-width-modes");
+    let table = Table::from_cells(vec![
+        (0..10).map(|c| format!("Column {c}")).collect(),
+        (0..10).map(|c| format!("A longer book title in column {c}")).collect(),
+    ]);
+    app.store.notes[app.current].doc = Doc::new(vec![Block::text("Before the reference table"), Block::new(Kind::Table(table)), Block::text("After the reference table")]);
+    let prose_id = blocks(&app)[0].id;
+    let table_id = blocks(&app)[1].id;
+    let rect = |app: &Carnet, id| app.row_rects.iter().find(|(b, _)| *b == id).unwrap().1;
+    for _ in 0..4 { d.frame(&mut app); }
+    let prose = rect(&app, prose_id);
+    let page = rect(&app, table_id);
+    assert!((prose.w - page.w).abs() < 1.0);
+    let scroll_key = app.row_seen[&table_id].0.str("table-scroll");
+    assert!(d.core.scroll_geometry(scroll_key).unwrap().max_offset.x > 100.0, "Page keeps readable columns in a local scroll");
+    app.on_settings(Msg::SetTableWidth { to: 1 });
+    for _ in 0..4 { d.frame(&mut app); }
+    let window = rect(&app, table_id);
+    assert!(window.w > page.w + 40.0, "{page:?} {window:?}");
+    assert!((rect(&app, prose_id).w - prose.w).abs() < 1.0);
+    app.on_settings(Msg::SetTableWidth { to: 2 });
+    for _ in 0..4 { d.frame(&mut app); }
+    assert_eq!(app.settings.table_width, TableWidth::Scroll);
+    let scroll_key = app.row_seen[&table_id].0.str("table-scroll");
+    assert!(d.core.scroll_geometry(scroll_key).unwrap().max_offset.x > 100.0);
+    let Kind::Table(t) = &blocks(&app)[1].kind else { panic!() };
+    let slot = Slot { block: table_id, cell: Some((t.rows[1].id, t.cols[9])) };
+    app.caret = Caret::at(Pos { slot, byte: 0 });
+    app.reveal = true;
+    for _ in 0..5 { d.frame(&mut app); }
+    assert!(d.core.scroll_geometry(scroll_key).unwrap().offset.x > 100.0);
+    assert!((rect(&app, prose_id).w - prose.w).abs() < 1.0);
+    let last = app.cell_rects[&slot];
+    assert_eq!(app.cell_at(last.x + 20.0, last.y + 20.0), Some(slot));
+    assert!(app.cell_at(window.x - 20.0, last.y + 20.0).is_none());
+    assert!(d.warnings().is_empty(), "{:?}", d.warnings());
     let _ = std::fs::remove_dir_all(dir);
 }
