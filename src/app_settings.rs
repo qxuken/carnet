@@ -11,7 +11,7 @@ use super::*;
 use carnet_sync::compat::feature;
 use crate::design;
 use crate::look;
-use crate::settings::{Divider, Wheel};
+use crate::settings::{Divider, TableWidth, Wheel};
 
 /// Settings → Sync's field maker: a field by its key, its text, its hint,
 /// and what it holds.
@@ -72,6 +72,7 @@ impl Carnet {
                     _ => Width::Medium,
                 }
             }
+            Msg::SetTableWidth { to } => s.table_width = TableWidth::ALL[(to as usize).min(2)],
             Msg::SetWindow { to } => s.translucent = to == 1,
             Msg::SetToolbar { to } => s.fade_tools = to == 1,
             Msg::SetFocus { to } => s.focus = to == 1,
@@ -459,6 +460,11 @@ impl Carnet {
                     Width::Wide => 2,
                 };
                 segmented(ui, l, "width", &["Narrow", "Medium", "Wide"], cur, |to| Msg::SetWidth { to });
+            });
+            rule(ui, l);
+            setting(ui, l, "Table width", Some("Page follows the text; Window uses the note pane; Scroll keeps columns wide"), |ui| {
+                let cur = TableWidth::ALL.iter().position(|w| *w == s.table_width).unwrap_or(0);
+                segmented(ui, l, "table-width", &["Page", "Window", "Scroll"], cur, |to| Msg::SetTableWidth { to });
             });
             rule(ui, l);
             setting(ui, l, "Density", Some("Space between blocks and notes"), |ui| {

@@ -19,7 +19,7 @@ use crate::keys;
 use carnet_core::inline;
 use carnet_core::doc::Float;
 use crate::page::Coverage;
-use crate::settings::Divider;
+use crate::settings::{Divider, TableWidth};
 use crate::slash;
 
 /// How far apart pictures side by side are, their blocks' insets included:
@@ -196,84 +196,88 @@ impl Carnet {
                 ui.with(
                     NodeSpec::column()
                         .grow_width()
-                        .max_width(l.page_w)
+                        .max_width(if self.settings.table_width == TableWidth::Page { l.page_w } else { main_w })
+                        .cross_align(Align::Center)
                         .padding(Edges { l: pad, r: pad, t: 30.0, b: 0.0 }),
                     |ui| {
                         // Title and meta sit 8px in, level with the text of
                         // the blocks inside their wash-ready rows.
                         // Selectable: the words, the error and the notice
                         // copy like any text.
-                        let line = NodeSpec::row()
-                            .grow_width()
-                            .pad_xy(8.0, 0.0)
-                            .gap(10.0)
-                            .cross_align(Align::Center)
-                            .selectable()
-                            .clip();
-                        // A version's line wraps: which version, then what
-                        // can be done with it, each going down a line
-                        // whole when the page has no room for both.
-                        let line = if history.is_some() { line.wrap().cross_gap(4.0) } else { line };
-                        let mut notice_keys = Vec::new();
-                        ui.with(
-                            step_back(line, self.focus_on(), dim_head),
-                            |ui| {
-                                if let Some((what, armed, is_folder)) = &peek {
-                                    self.peek_line(ui, l, what, *armed, *is_folder);
-                                    return;
-                                }
-                                if let Some((what, can_restore, against_now)) = &history {
-                                    self.history_line(ui, l, what, *can_restore, *against_now);
-                                    return;
-                                }
-                                ui.text(&meta, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
-                                if let Some(e) = &error {
-                                    // Read out the moment it appears.
-                                    ui.text_in(
-                                        NodeSpec::row().live(kui_native::Live::Assertive),
-                                        e,
-                                        TextStyle::new(Type::SMALL.size).color(t.danger).nowrap(),
-                                    );
-                                } else if let Some((text, can_undo, cut)) = &notice {
-                                    // Pointed at, it stays (see `view`).
-                                    let spec = NodeSpec::row()
-                                        .enter(kui_native::Enter::from(-6.0, 0.0).opacity(0.0))
-                                        .transition(220.0)
-                                        .hoverable();
-                                    let spec = if cut.is_some() { spec.role(Role::StaticText).label(text.as_str()).tooltip(text) } else { spec };
-                                    notice_keys.push(ui.text_in_keyed(
-                                        "notice",
-                                        spec,
-                                        cut.as_deref().unwrap_or(text),
-                                        TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
-                                    ));
-                                    if *can_undo {
-                                        notice_keys.push(ui.text_in_keyed(
-                                            "undo",
-                                            NodeSpec::row()
-                                                .pad_xy(8.0, 2.0)
-                                                .radius(6.0)
-                                                .hover_bg(t.accent_soft)
-                                                .on_click(Msg::Undo)
-                                                .label("Undo")
-                                                .tooltip(&keys::hint("Undo", keys::UNDO)),
-                                            "Undo",
-                                            TextStyle::new(Type::SMALL.size).color(t.focus_ring).nowrap(),
-                                        ));
+                        ui.with(NodeSpec::column().grow_width().max_width(self.text_w + 22.0), |ui| {
+                            let line = NodeSpec::row()
+                                .grow_width()
+                                .pad_xy(8.0, 0.0)
+                                .gap(10.0)
+                                .cross_align(Align::Center)
+                                .selectable()
+                                .clip();
+                            // A version's line wraps: which version, then what
+                            // can be done with it, each going down a line
+                            // whole when the page has no room for both.
+                            let line = if history.is_some() { line.wrap().cross_gap(4.0) } else { line };
+                            let mut notice_keys = Vec::new();
+                            ui.with(
+                                step_back(line, self.focus_on(), dim_head),
+                                |ui| {
+                                    if let Some((what, armed, is_folder)) = &peek {
+                                        self.peek_line(ui, l, what, *armed, *is_folder);
+                                        return;
                                     }
-                                }
-                            },
-                        );
-                        self.notice_keys = notice_keys;
-                        ui.leaf(NodeSpec::row().height(l.px(6.0)));
-                        self.title(ui, l, dim_head);
-                        ui.leaf(NodeSpec::row().height(l.px(18.0)));
+                                    if let Some((what, can_restore, against_now)) = &history {
+                                        self.history_line(ui, l, what, *can_restore, *against_now);
+                                        return;
+                                    }
+                                    ui.text(&meta, TextStyle::new(Type::SMALL.size).color(t.muted).nowrap());
+                                    if let Some(e) = &error {
+                                        // Read out the moment it appears.
+                                        ui.text_in(
+                                            NodeSpec::row().live(kui_native::Live::Assertive),
+                                            e,
+                                            TextStyle::new(Type::SMALL.size).color(t.danger).nowrap(),
+                                        );
+                                    } else if let Some((text, can_undo, cut)) = &notice {
+                                        // Pointed at, it stays (see `view`).
+                                        let spec = NodeSpec::row()
+                                            .enter(kui_native::Enter::from(-6.0, 0.0).opacity(0.0))
+                                            .transition(220.0)
+                                            .hoverable();
+                                        let spec = if cut.is_some() { spec.role(Role::StaticText).label(text.as_str()).tooltip(text) } else { spec };
+                                        notice_keys.push(ui.text_in_keyed(
+                                            "notice",
+                                            spec,
+                                            cut.as_deref().unwrap_or(text),
+                                            TextStyle::new(Type::SMALL.size).color(t.fg).nowrap(),
+                                        ));
+                                        if *can_undo {
+                                            notice_keys.push(ui.text_in_keyed(
+                                                "undo",
+                                                NodeSpec::row()
+                                                    .pad_xy(8.0, 2.0)
+                                                    .radius(6.0)
+                                                    .hover_bg(t.accent_soft)
+                                                    .on_click(Msg::Undo)
+                                                    .label("Undo")
+                                                    .tooltip(&keys::hint("Undo", keys::UNDO)),
+                                                "Undo",
+                                                TextStyle::new(Type::SMALL.size).color(t.focus_ring).nowrap(),
+                                            ));
+                                        }
+                                    }
+                                },
+                            );
+                            self.notice_keys = notice_keys;
+                            ui.leaf(NodeSpec::row().height(l.px(6.0)));
+                            self.title(ui, l, dim_head);
+                            ui.leaf(NodeSpec::row().height(l.px(18.0)));
+                        });
                         // The body is one editor: its keys, its text. Its own
                         // container too: blocks are keyed by id, and an id
                         // must not meet a sibling's auto key (its index).
                         self.page_key = Some(ui.child_key("body"));
                         let body = NodeSpec::column()
                             .grow_width()
+                            .cross_align(Align::Center)
                             .on_key(Msg::Page)
                             // A press in the text is the editor's own,
                             // as kui sends it; the scroller above takes
@@ -340,6 +344,22 @@ impl Carnet {
             }
             return;
         };
+        // Reveal the caret horizontally inside its own table, leaving the
+        // surrounding prose and the page's vertical reading position alone.
+        if slot.cell.is_some()
+            && let Some((row_key, _)) = self.row_seen.get(&slot.block)
+            && let Some(table) = ui.scroll_geometry(row_key.str("table-scroll"))
+        {
+            let dx = if r.x < table.rect.x + 8.0 {
+                r.x - table.rect.x - 8.0
+            } else if r.x + r.w > table.rect.x + table.rect.w - 8.0 {
+                r.x + r.w - (table.rect.x + table.rect.w) + 8.0
+            } else { 0.0 };
+            let x = (table.offset.x + dx).clamp(0.0, table.max_offset.x.max(0.0));
+            if (x - table.offset.x).abs() > 0.5 {
+                ui.set_scroll(row_key.str("table-scroll"), Vec2::new(x, table.offset.y));
+            }
+        }
         let (top, h, off) = (g.rect.y, g.rect.h, g.offset.y);
         let (bottom, line) = (r.y + r.h, r.y + r.h / 2.0);
         let target = if std::mem::take(&mut self.center_reveal) {
@@ -654,7 +674,7 @@ impl Carnet {
         // measured, so they never crowd each other however the page's
         // margins come out.
         self.float_room = ui.layout_of(ui.child_key(&key)).map_or(self.text_w + 16.0, |r| r.w);
-        ui.with_keyed(&key, NodeSpec::row().grow_width().gap(4.0).cross_align(Align::Start).on_layout(Value::Null), |ui| {
+        ui.with_keyed(&key, NodeSpec::row().grow_width().max_width(self.text_w + 22.0).gap(4.0).cross_align(Align::Start).on_layout(Value::Null), |ui| {
             for side in [!right, right] {
                 if side {
                     ui.with_keyed("pictures", NodeSpec::row().gap(PICTURE_GAP - 16.0), |ui| {
@@ -717,6 +737,12 @@ impl Carnet {
             .pad_xy(8.0, 0.0)
             .radius(radius::TIGHT)
             .on_layout(Value::Null);
+        // text_w excludes the block inset (16) and scrollbar allowance (6).
+        let wrap = if matches!(b.kind, Kind::Table(_)) && self.settings.table_width != TableWidth::Page {
+            wrap
+        } else {
+            wrap.max_width(self.text_w + 22.0)
+        };
         let wrap = step_back(wrap, self.focus_on(), cx.focus.is_some_and(|f| f != id));
         ui.with_indexed(id, wrap, |ui| match &b.kind {
             Kind::Text(text) if carnet_core::doc::anchor_range(text).is_some() => {
@@ -1378,7 +1404,13 @@ impl Carnet {
     /// accent round it, on a wash of it, as the drop line is drawn
     /// between blocks. It takes no room.
     pub(super) fn cell_ring(&self, ui: &mut Ui<'_>, l: &Look, slot: Slot) {
-        let Some(r) = self.cell_rects.get(&slot) else { return };
+        let Some(mut r) = self.cell_rects.get(&slot).copied() else { return };
+        if let Some((_, row)) = self.row_rects.iter().find(|(id, _)| *id == slot.block) {
+            let right = (r.x + r.w).min(row.x + row.w - 8.0);
+            r.x = r.x.max(row.x + 8.0);
+            r.w = right - r.x;
+            if r.w <= 2.0 { return; }
+        }
         let t = l.t;
         // Keyed: the page's blocks are keyed by their ids, which a
         // counted key could meet.
@@ -1435,10 +1467,8 @@ impl Carnet {
             }
         }
     }
-    /// A kui table: rows whose cells line up in columns, the grid drawn as
-    /// hairline rules. Every cell grows by the same weight from no floor,
-    /// so a column's width is a share of the table, not of its text —
-    /// typing can wrap a cell but never move the grid.
+    /// Content-sized columns, with a separate scroller when asked. Link
+    /// labels determine width, never their invisible Markdown addresses.
     fn table(&mut self, ui: &mut Ui<'_>, l: &Look, id: u64, table: &Table, body: TextStyle, cov: &Coverage) {
         let t = l.t;
         // The header, if it has one, is small and quiet: a label for its
@@ -1448,20 +1478,19 @@ impl Carnet {
             true => table.rows[0].cells.iter().map(|c| c.trim().to_string()).collect(),
             false => Vec::new(),
         };
-        // A cell's share of the table's width, its padding left out: as
-        // wide as a picture among its words is drawn at most. From the
-        // table's own row, as the last frame laid it out (its inset and
-        // frame left out), which no cell's words move.
         let pad = l.px(14.0);
-        let table_w = self.row_rects.iter().rev().find(|(b, _)| *b == id).map_or(self.text_w, |(_, r)| r.w - 16.0) - 4.0;
-        let room = (table_w / table.width().max(1) as f32 - 2.0 * pad).floor().max(page::PICTURE_MIN);
-        ui.with(NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0)), |ui| {
+        let available = self.row_rects.iter().rev().find(|(b, _)| *b == id).map_or(self.text_w, |(_, r)| r.w - 16.0) - 4.0;
+        let widths = crate::table_layout::columns(table, available, pad, l.k, self.settings.table_width == TableWidth::Scroll, |text, header| {
+            ui.measure_text(text, &if header { head } else { body }, None).width
+        });
+        let table_w = widths.iter().sum::<f32>() + 4.0;
+        ui.with_keyed("table-scroll", NodeSpec::column().grow_width().scroll_x().scrollbar_width(5.0).pad_xy(0.0, l.air(14.0)), |ui| {
             ui.with(
                 // One warm hairline for the frame and the rules, and the
                 // rows inset by it, so the header's wash never paints over
                 // the frame.
                 NodeSpec::table()
-                    .grow_width()
+                    .width(table_w)
                     .pad(1.0)
                     .rules(t.border)
                     .border(1.0, t.border)
@@ -1507,14 +1536,13 @@ impl Carnet {
                                 ui.with_indexed(
                                     col,
                                     NodeSpec::column()
-                                        .width(Sizing::Grow(1.0))
-                                        .min_width(48.0)
+                                        .width(widths[c])
                                         .pad_xy(pad, l.px(if is_head { 9.0 } else { 8.0 }))
                                         .on_layout(Value::Null)
                                         .label(name),
                                     |ui| {
                                         let style = if is_head { head } else { body };
-                                        self.cell_line(ui, l, slot, &row.cells[c], style, cov, room);
+                                        self.cell_line(ui, l, slot, &row.cells[c], style, cov, (widths[c] - 2.0 * pad).max(page::PICTURE_MIN));
                                     },
                                 );
                             }
@@ -2267,13 +2295,20 @@ impl Carnet {
 
     /// The table cell under a point, by the last layout.
     pub(super) fn cell_at(&self, x: f32, y: f32) -> Option<Slot> {
-        self.cell_rects.iter().find(|(_, r)| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h).map(|(s, _)| *s)
+        self.cell_rects.iter().find(|(slot, r)| {
+            // Cells outside their local scroller cannot be clicked through
+            // the page margin or the library.
+            let visible = self.row_rects.iter().find(|(id, _)| *id == slot.block)
+                .is_some_and(|(_, row)| x >= row.x + 8.0 && x <= row.x + row.w - 8.0);
+            visible && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+        }).map(|(s, _)| *s)
     }
 
     /// The picture among a cell's words under a point, by the last
     /// layout: its cell and where it is in the cell's text.
     fn cell_picture_under(&self, core: &Core, x: f32, y: f32) -> Option<(Slot, usize, usize)> {
-        self.cell_pieces.iter().find_map(|(slot, pieces)| {
+        let under = self.cell_at(x, y)?;
+        self.cell_pieces.iter().filter(|(slot, _)| **slot == under).find_map(|(slot, pieces)| {
             pieces.iter().filter(|p| p.picture && !p.file).find_map(|p| {
                 let r = core.layout_of(p.key)?;
                 (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h).then_some((*slot, p.from, p.to))
