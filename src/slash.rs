@@ -22,4 +22,6 @@ pub const GLYPHS: [Glyph; COMMANDS.len()] = [
     Glyph::Code,
     Glyph::Picture,
     Glyph::Attach,
+    Glyph::Link,
+    Glyph::Link,
 ];

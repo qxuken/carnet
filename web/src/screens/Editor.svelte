@@ -14,13 +14,14 @@
   import { theme } from '../lib/editor/theme';
   import { STYLES } from '../lib/editor/styles';
   import Icon from '../lib/Icon.svelte';
+  import LinkDialog from '../lib/LinkDialog.svelte';
   import { overflow } from '../lib/words';
   import { focusNow } from '../lib/focus';
   import { ON_THE_WEB } from '../lib/pictures';
   import { HUES, inkOf, inkCss, washCss } from '../lib/colors';
   import { PageEditor, picture_sizes } from '../wasm/carnet_web.js';
   import { drawnPicture, picked as pictureHere, textWidth, type Picked } from '../lib/editor/picture';
-  import { linkOpening } from '../lib/editor/links';
+  import { followFragment, linkOpening } from '../lib/editor/links';
   import { opener } from '../lib/open.svelte';
   import { isMarkdownName } from '../lib/files';
   import { commands, follow as followSlash, hintOf, iconOf, slashHere, slashKeys, type Slash } from '../lib/editor/slash';
@@ -39,7 +40,7 @@
   // Which note, as it was opened: an editor is for one note (the reader
   // makes a new one for another), and its props may be gone by the time
   // it closes.
-  let key = '';
+  let key = $state('');
   let fresh = false;
   let host: HTMLElement;
   let view: EditorView | undefined;
@@ -70,7 +71,6 @@
   let pic = $state<Picked | null>(null);
   /// The colours' tab: the words' own, or a highlighter.
   let inkTab = $state(true);
-  let url = $state('');
   let linked = $state<string | null>(null);
   /// Where Open takes it: none for a link a page mustn't follow
   /// (`javascript:` and the like), which is still there to change.
@@ -100,7 +100,7 @@
   let writing: HTMLElement;
   let chooser: HTMLInputElement | undefined = $state();
   let anyFile: HTMLInputElement | undefined = $state();
-  let folderOf = '';
+  let folderOf = $state('');
 
   /// Pictures chosen (or taken with the camera): kept, sent, and put in
   /// the note below the caret.
@@ -146,6 +146,7 @@
     act((pe) => pe.run_slash(i));
     if (what === 'picture') chooser?.click();
     else if (what === 'file') pick();
+    else if (what === 'link') openLink();
   }
 
   /// The `/` menu as the page has it now. `/file` only where the web
@@ -234,15 +235,15 @@
 
   function openLink() {
     if (!pe || !view) return;
+    send();
     linked = pe.link_here() ?? null;
     opens = pe.link_to_open() ?? null;
-    url = linked ?? '';
     sheet = 'link';
   }
 
-  function applyLink(to: string | null) {
+  function applyLink(to: string | null, title?: string) {
     if (!pe || !view || !run) return;
-    run(() => pe!.set_link(to ?? undefined))(view);
+    run(() => title && to ? pe!.set_note_link(to, title) : pe!.set_link(to ?? undefined))(view);
     sheet = null;
     view.focus();
     moved();
@@ -628,21 +629,12 @@
         <p class="recent">Or drag the handles on the picture.</p>
       </div>
     {:else if sheet === 'link'}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div role="dialog" aria-label="Link" tabindex="-1" onpointerdown={(e) => e.stopPropagation()}>
-      <form class="sheet link" onsubmit={(e) => { e.preventDefault(); applyLink(url.trim() || null); }}>
-        <input bind:value={url} placeholder="example.com" inputmode="url" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Address" use:focusNow />
-        <div class="row">
-          {#if opens}
-            <a class="pill" href={opens} target="_blank" rel="noopener noreferrer">Open</a>
-          {/if}
-          {#if linked}
-            <button type="button" class="pill" onclick={() => applyLink(null)}>Remove link</button>
-          {/if}
-          <button type="button" class="pill" onclick={() => { sheet = null; view?.focus(); }}>Cancel</button>
-          <button class="pill primary" disabled={!url.trim()}>{linked ? 'Change' : 'Link'}</button>
-        </div>
-      </form>
+      <div class="sheet link-picker">
+        <LinkDialog source={key} folder={folderOf} initial={linked} revision={sync.version}
+          notes={(q) => sync.linkNotes(q)} sections={(id) => sync.linkSections(id)} resolve={(href) => sync.linkedNote(folderOf, href)}
+          choose={applyLink} remove={() => applyLink(null)} cancel={() => { sheet = null; view?.focus(); }}
+          open={opens ? () => { if (pe && view && followFragment(pe, view, opens!)) return; if (!opener.link(folderOf, opens!)) window.open(opens!, '_blank', 'noopener,noreferrer'); } : undefined}
+        />
       </div>
     {/if}
     <div class="strip">
@@ -698,7 +690,7 @@
 
 <style>
   /* A container, for the pictures' widths (theme.ts `cqi`): the text's. */
-  .editor { min-height: 60vh; container-type: inline-size; }
+  .editor { padding-bottom: 50svh; min-height: 60vh; container-type: inline-size; }
   /* The `/` menu, as the desktop's: a card under its line, each row a
      command's icon, name and what to type for it next time, the one
      Enter takes on the accent's wash. */
@@ -717,7 +709,7 @@
   .slash .name { flex: 1; min-width: 0; text-align: left; font: 600 14px var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .slash .hint { font: 12.5px var(--mono); color: var(--muted); white-space: nowrap; }
   .chooser { display: none; }
-  .editor.barred { padding-bottom: 64px; }
+  .editor.barred { padding-bottom: calc(50svh + 64px); }
   .bar { z-index: 5; display: flex; flex-direction: column; }
   /* A wide screen: under the note's header, as the desktop's strip. */
   .bar:not(.fixed) {
@@ -775,13 +767,8 @@
     width: auto; height: 32px; padding: 0 12px; gap: 6px; border-radius: 999px; background: var(--sunken); font-size: 14px;
     text-decoration: none; color: var(--ink);
   }
-  .pill.primary { background: var(--primary); color: var(--on-accent); }
   .pill.on { background: var(--accent-soft); color: var(--accent-ink); font-weight: 600; }
   .pill:disabled { opacity: 0.45; }
   .dot { width: 12px; height: 12px; border-radius: 3px; background: var(--highlight); }
-  .link input {
-    font: 16px var(--sans); padding: 9px 12px; border-radius: var(--radius); border: 1px solid var(--border-strong);
-    background: var(--card); color: var(--ink); width: 100%;
-  }
-  .link .row { justify-content: flex-end; }
+
 </style>

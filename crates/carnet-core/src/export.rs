@@ -57,6 +57,7 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
     let spans = |t: &str| spans(t, viewer, None);
     let mut task = 0;
     let mut out = String::new();
+    let mut heading_ids = blocks.iter().filter_map(|b| match &b.kind { Kind::Text(t) => crate::doc::anchor_id(t), _ => None }).collect();
     // The open lists, outermost first: their tag, and their indent.
     let mut lists: Vec<(&str, u8)> = Vec::new();
     let close_to = |out: &mut String, lists: &mut Vec<(&str, u8)>, depth: usize| {
@@ -109,6 +110,11 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
         }
         close_to(&mut out, &mut lists, 0);
         match &b.kind {
+            Kind::Text(t) if crate::doc::anchor_range(t).is_some() => {
+                let id = escape(&crate::doc::anchor_id(t).unwrap_or_default());
+                if viewer { out.push_str(&format!("<a class=\"anchor\" id=\"{id}\">#{id}</a>")); }
+                else { out.push_str(&format!("<a id=\"{id}\"></a>")); }
+            }
             // The empty line the editor keeps at the end draws nothing.
             Kind::Text(t) if viewer && t.trim().is_empty() => {}
             // The viewer's: a line of files alone, a tile for each, as the
@@ -140,7 +146,8 @@ fn render(blocks: &[Block], image: impl Fn(&str, bool) -> Picture, viewer: bool)
             }
             Kind::Heading { level, text } => {
                 let n = (*level).clamp(1, 6);
-                out.push_str(&format!("<h{n}>{}</h{n}>", spans(text)));
+                let id = crate::doc::heading_id(text, &mut heading_ids);
+                out.push_str(&format!("<h{n} id=\"{}\">{}</h{n}>", escape(&id), spans(text)));
             }
             Kind::Table(t) => {
                 // The viewer's in a box of its own (styles.css `.table`):
@@ -364,6 +371,29 @@ fn escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_anchors_are_targets_instead_of_visible_html() {
+        let md = "[section 1](#section-1)\n<a id=\"section-1\"></a>\n## Section about something number 1";
+        for h in [html(md, |s, _| s.to_string()), viewer(md, |s, _| Picture::Url(s.to_string()))] {
+            assert!(h.contains("id=\"section-1\""), "{h}");
+            assert!(h.contains("href=\"#section-1\""), "{h}");
+            assert!(!h.contains("&lt;a"), "{h}");
+        }
+        assert!(html("<a name='legacy'></a>", |s, _| s.to_string()).contains("<a id=\"legacy\"></a>"));
+        assert!(html("`<a id=\"code\"></a>`", |s, _| s.to_string()).contains("&lt;a"));
+        assert!(viewer(md, |s, _| Picture::Url(s.to_string())).contains("<a class=\"anchor\" id=\"section-1\">#section-1</a>"));
+    }
+
+    #[test]
+    fn heading_links_have_matching_unique_targets() {
+        let md = "[first](#a-decision-1) [second](#a-decision-2)\n\n## A **decision**!\n\n## A decision!\n\n<a id=\"a-decision\"></a>";
+        let h = viewer(md, |s, _| Picture::Url(s.to_string()));
+        for id in ["a-decision-1", "a-decision-2"] {
+            assert!(h.contains(&format!("href=\"#{id}\"")), "{h}");
+            assert!(h.contains(&format!("<h2 id=\"{id}\">")), "{h}");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -497,7 +527,7 @@ mod tests {
         let md = "# T\n\n![|left|330](a.png)\n\n## Plan\n\n| Day | Miles |\n|---|---|\n| Fri | 30 |\n\n---\n\n> A quote.\n";
         let v = viewer(md, |s, _| Picture::Url(s.into()));
         assert!(
-            v.contains("<div class=\"pictures left\" style=\"--n:1\"><img src=\"a.png\" alt=\"\" width=\"330\"></div><h2>Plan</h2><div class=\"table\"><table><tr><th>Day</th><th>Miles</th></tr><tr><td>Fri</td><td>30</td></tr></table></div><hr><blockquote>"),
+            v.contains("<div class=\"pictures left\" style=\"--n:1\"><img src=\"a.png\" alt=\"\" width=\"330\"></div><h2 id=\"plan\">Plan</h2><div class=\"table\"><table><tr><th>Day</th><th>Miles</th></tr><tr><td>Fri</td><td>30</td></tr></table></div><hr><blockquote>"),
             "{v}"
         );
         let h = html(md, |s, _| s.to_string());
@@ -586,7 +616,7 @@ mod tests {
     fn two_dashes_come_out_as_an_em_dash() {
         let h = |md: &str| html(md, |s, _| s.to_string());
         assert_eq!(h("a -- b"), "<p>a \u{2014} b</p>");
-        assert_eq!(h("## Then -- now"), "<h2>Then \u{2014} now</h2>");
+        assert_eq!(h("## Then -- now"), "<h2 id=\"then----now\">Then \u{2014} now</h2>");
         assert_eq!(h("- one -- two"), "<ul><li>one \u{2014} two</li></ul>");
         assert_eq!(h("> said -- so"), "<blockquote><p>said \u{2014} so</p></blockquote>");
         assert!(h("| a -- b |\n|---|\n| c--d |").contains("<th>a \u{2014} b</th></tr><tr><td>c\u{2014}d</td>"), "{}", h("| a -- b |\n|---|\n| c--d |"));

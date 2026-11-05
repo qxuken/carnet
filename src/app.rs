@@ -100,6 +100,7 @@ pub enum Msg {
     /// turn the debug information on or off.
     SettingsTitle,
     OpenNote { note: u64 },
+    FollowNote { note: u64, fragment: Option<String> },
     NewNote,
     PinNote,
     DeleteNote,
@@ -298,6 +299,7 @@ pub enum Msg {
     TintMenu { ink: u64 },
     /// The link editor's buttons: 0 done, 1 open, 2 remove the link.
     LinkAct { what: u64 },
+    LinkChoose { row: u64 },
     CloseLink,
     /// A link to a file that could run, asked about: opened anyway, or
     /// not (Cancel, Esc, a press outside the question).
@@ -645,6 +647,7 @@ pub struct Carnet {
     /// Each slot's text node, as last drawn: what the caret is measured
     /// against.
     pub slot_keys: HashMap<Slot, Key>,
+    section_rows: HashMap<Slot, (Key, f32)>,
     /// Lines drawn with their marks hidden: the source's length and the
     /// byte ranges still drawn.
     shown: HashMap<Slot, carnet_core::inline::Visible>,
@@ -692,6 +695,7 @@ pub struct Carnet {
     preedit: Option<String>,
     /// Scroll the caret into view on the next frame.
     reveal: bool,
+    center_reveal: bool,
     /// A paste asked for and not answered yet.
     paste_pending: bool,
     /// Column the last sort used, and whether it was descending.
@@ -1087,6 +1091,7 @@ editor! {
     page_key: Option<Key>,
     focus_page: bool,
     slot_keys: HashMap<Slot, Key>,
+    section_rows: HashMap<Slot, (Key, f32)>,
     shown: HashMap<Slot, carnet_core::inline::Visible>,
     tint_open: Option<(bool, Vec2)>,
     tint_anchor: [Option<Vec2>; 2],
@@ -1104,6 +1109,7 @@ editor! {
     row_rects: Vec<(u64, Rect)>,
     preedit: Option<String>,
     reveal: bool,
+    center_reveal: bool,
     paste_pending: bool,
     last_sort: Option<(u64, bool)>,
     words: (u64, u64, usize) = (u64::MAX, 0, 0),
@@ -1211,10 +1217,18 @@ pub enum FolderRow {
 pub struct LinkEdit {
     /// The selection it was opened on: the field takes the keyboard.
     pub caret: Caret,
+    pub before: Doc,
     pub url: String,
     pub existing: bool,
+    pub notes: bool,
+    pub query: String,
+    pub target: Option<u64>,
+    pub section: Option<String>,
+    pub pick: usize,
     /// Under the caret, found when it is first drawn.
     pub at: Option<Vec2>,
+    /// Reset the field contents without moving the popup.
+    pub field_fresh: bool,
 }
 
 /// A picture being carried on the page: which, from where, where the
@@ -1322,6 +1336,7 @@ impl Carnet {
             page_key: None,
             focus_page: false,
             slot_keys: HashMap::new(),
+            section_rows: HashMap::new(),
             shown: HashMap::new(),
             tint_open: None,
             tint_anchor: [None, None],
@@ -1339,6 +1354,7 @@ impl Carnet {
             row_rects: Vec::new(),
             preedit: None,
             reveal: false,
+            center_reveal: false,
             paste_pending: false,
             last_sort: None,
             last_edit: Instant::now(),
@@ -1906,6 +1922,33 @@ impl Carnet {
 
     // ------------------------------------------------------------ notes
 
+    fn link_state(&self) -> (carnet_core::navigation::Paths, u64, Doc) {
+        (self.store.note_paths(), self.store.notes[self.current].id, self.doc().clone())
+    }
+
+    /// Retarget undo states too, so undoing prose cannot restore an old
+    /// destination path after a note has moved.
+    fn links_moved(&mut self, (before, open, old_doc): (carnet_core::navigation::Paths, u64, Doc)) {
+        use carnet_core::navigation as nav;
+        let after = self.store.note_paths();
+        let moved = nav::moves(&before, &after);
+        if moved.is_empty() { return; }
+        for n in &self.store.notes {
+            let id = n.key.map_or_else(|| format!("local:{}", n.id), |k| k.to_string());
+            let Some(to) = after.get(&id) else { continue };
+            let from = before.get(&id).unwrap_or(to);
+            if let Some(history) = self.histories.get_mut(&n.id) {
+                history.rewrite(|b| {
+                    let mut doc = Doc::new(vec![b.clone()]);
+                    nav::rewrite_doc(&mut doc, from, to, &moved).then(|| (*doc.blocks()[0]).clone())
+                });
+            }
+        }
+        if self.store.notes.get(self.current).is_some_and(|n| n.id == open) {
+            self.caret = carnet_core::compare::carry(&old_doc, self.doc(), self.caret);
+        }
+    }
+
     fn save_current(&mut self) {
         let i = self.current;
         let note = &mut self.store.notes[i];
@@ -1916,8 +1959,11 @@ impl Carnet {
         }
         // Not renamed while the title is being typed.
         let rename = !self.title_focused;
+        let links = self.link_state();
         self.marks.push("note saved");
-        match self.store.save(i, rename) {
+        let saved = self.store.save(i, rename);
+        self.links_moved(links);
+        match saved {
             Ok(Saved::Merged) => {
                 self.error = None;
                 self.notify("Changed in another app too: merged", None);
@@ -1970,6 +2016,7 @@ impl Carnet {
         // Each note as it is before: one reread from disk comes back
         // with its `rev` moved on.
         let revs: HashMap<u64, _> = self.store.notes.iter().map(|n| (n.id, n.rev)).collect();
+        let links = self.link_state();
         let changed = self.store.rescan();
         self.gather_pictures();
         // A picture put beside a note meanwhile goes to the vault soon.
@@ -2008,12 +2055,14 @@ impl Carnet {
                 self.current = self.order.first().copied().unwrap_or(0);
             }
         }
+        self.links_moved(links);
         self.caret = page::fix(self.doc(), self.caret);
     }
 
     /// Leaves the current note: saves it, or forgets it when it was a new
     /// note nobody wrote anything in.
     fn leave_current(&mut self) {
+        self.center_reveal = false;
         let i = self.current;
         let n = &self.store.notes[i];
         // One open in a window of its own is that window's still.
@@ -2904,7 +2953,10 @@ impl Carnet {
             self.error = Some(format!("Couldn't save \u{201c}{name}\u{201d}, so it stays where it is: {e}"));
             return;
         }
-        match self.store.move_note(i, to) {
+        let links = self.link_state();
+        let moved = self.store.move_note(i, to);
+        self.links_moved(links);
+        match moved {
             Ok(()) => {
                 // Its picture links were rewritten for the new folder: an
                 // undo from before the move would put back ones that no
@@ -2965,7 +3017,10 @@ impl Carnet {
         if !self.save_inside(folder, "keeps its name") {
             return None;
         }
-        match self.store.rename_folder(folder, name) {
+        let links = self.link_state();
+        let renamed = self.store.rename_folder(folder, name);
+        self.links_moved(links);
+        match renamed {
             Ok(to) => {
                 self.folder_went(folder, &to);
                 Some(to)
@@ -2986,7 +3041,10 @@ impl Carnet {
         if !self.save_inside(folder, "stays where it is") {
             return None;
         }
-        match self.store.move_folder(folder, to) {
+        let links = self.link_state();
+        let moved = self.store.move_folder(folder, to);
+        self.links_moved(links);
+        match moved {
             Ok((new, relinked)) => {
                 // Their picture links were rewritten from their new
                 // place: an undo from before would put back ones that no
@@ -3645,6 +3703,7 @@ impl Carnet {
         match msg {
             Msg::RootKey | Msg::Page | Msg::PageDrag | Msg::SettingsTitle => {}
             Msg::OpenNote { note } => self.open(note as usize),
+            Msg::FollowNote { note, fragment } => self.follow_note(note, fragment.as_deref()),
             Msg::NewNote => self.new_note(),
             Msg::AddWelcome => self.add_welcome(),
             Msg::ToggleZen => {
@@ -4021,6 +4080,7 @@ impl Carnet {
                 };
             }
             Msg::LinkAct { what } => self.link_act(what),
+            Msg::LinkChoose { row } => self.link_choose(row as usize),
             Msg::CloseLink => {
                 self.link_edit = None;
                 self.focus_page = true;
@@ -4444,8 +4504,10 @@ impl Carnet {
     fn on_field_changed(&mut self, field: Field, text: String) {
         match field {
             Field::Link => {
+                let address = carnet_core::navigation::typed_address(&text) && self.link_notes(&text).is_empty();
                 if let Some(le) = self.link_edit.as_mut() {
-                    le.url = text;
+                    if le.notes && le.target.is_none() && address { le.notes = false; le.url = text; le.query.clear(); }
+                    else if le.notes { le.query = text; le.pick = 0; } else { le.url = text; }
                 }
             }
             Field::Search => {
@@ -4536,7 +4598,7 @@ impl Carnet {
 
     fn on_field_submit(&mut self, field: Field) {
         match field {
-            Field::Link => self.link_act(0),
+            Field::Link => self.link_submit(),
             Field::Search => {
                 if let Some(&first) = self.order.first() {
                     self.open(first);
@@ -4758,6 +4820,10 @@ impl Carnet {
     /// text would; → at its end: to the note's start. ↑ and ← from there
     /// come back up.
     fn on_field_boundary(&mut self, field: Field, key: Key, b: Boundary, core: &mut Core) {
+        if field == Field::Link && matches!(b.key, EditKey::Up | EditKey::Down) {
+            self.link_move(b.key == EditKey::Down);
+            return;
+        }
         if field != Field::Title || b.edge != TextEdge::End {
             return;
         }

@@ -1784,10 +1784,11 @@ fn the_case_changes_by_shift_f3_and_the_menu() {
     assert_eq!(texts(&app)[0], "Hello **brave** world");
     key_with(&mut app, &mut d, "z", CTRL);
     assert_eq!(texts(&app)[0], "HELLO **BRAVE** WORLD", "one undo");
-    // In the page's menu, under Format → Change case.
+    // Change case is directly in the page's menu.
     let menu = app.page_menu();
     let format = menu.iter().find(|i| i.label == "Format").expect("Format");
-    let sub = format.submenu.iter().find(|i| i.label == "Change case").expect("Change case");
+    assert!(!format.submenu.iter().any(|i| i.label == "Change case"));
+    let sub = menu.iter().find(|i| i.label == "Change case").expect("Change case");
     let names: Vec<&str> = sub.submenu.iter().map(|i| i.label.as_str()).collect();
     assert_eq!(names, ["lowercase", "UPPERCASE", "Capitalize Each Word", "Sentence case"]);
     let _ = std::fs::remove_dir_all(dir);
@@ -2957,6 +2958,54 @@ fn a_space_typed_in_bold_never_breaks_the_run() {
 }
 
 #[test]
+fn undo_keeps_links_pointing_to_a_renamed_note() {
+    let (mut app, mut d, dir) = body("link-undo-rename");
+    let mut target = Note::new("Target", Doc::new(vec![Block::text("Details")]));
+    target.touch(); app.store.notes.push(target);
+    let target = app.store.notes.len() - 1;
+    app.store.save(target, true).unwrap();
+    type_in(&mut app, &mut d, "[Read](Target.md) first");
+    app.save_current();
+    app.history().seal();
+    type_in(&mut app, &mut d, " more");
+    let links = app.link_state();
+    app.store.notes[target].title = "Renamed".into();
+    app.store.notes[target].renamable = true;
+    app.store.notes[target].touch();
+    app.store.save(target, true).unwrap();
+    app.links_moved(links);
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert!(texts(&app)[0].contains("[Read](Renamed.md)"));
+    assert!(!texts(&app)[0].contains(" more"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn notes_are_picked_by_title_and_section_with_the_keyboard() {
+    let (mut app, mut d, dir) = body("note-picker");
+    for folder in ["Home", "Work"] {
+        app.store.create_folder("", folder).unwrap();
+        let (_, doc) = carnet_core::doc::from_markdown("## Decision\n\nDetails");
+        let mut n = Note::new("Plan", doc);
+        n.folder = folder.into(); n.touch();
+        app.store.notes.push(n);
+        app.store.save(app.store.notes.len() - 1, true).unwrap();
+    }
+    type_in(&mut app, &mut d, "Read ");
+    key_with(&mut app, &mut d, "k", CTRL);
+    d.frame(&mut app);
+    type_in(&mut app, &mut d, "Plan Work");
+    assert_eq!(app.link_notes("Plan Work").len(), 1);
+    key(&mut app, &mut d, "enter");
+    assert!(app.link_edit.as_ref().unwrap().target.is_some());
+    type_in(&mut app, &mut d, "Decision");
+    key(&mut app, &mut d, "enter");
+    assert!(app.link_edit.is_none());
+    assert_eq!(texts(&app)[0], "Read [Plan](Work/Plan.md#decision)");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_link_is_made_and_edited_in_its_editor() {
     let (mut app, mut d, dir) = body("link");
     d.core.set_inspect(true);
@@ -3089,6 +3138,51 @@ fn a_ctrl_click_opens_only_a_link_a_note_may_follow() {
     click_drawn(&mut app, &mut d, slots[3], 2);
     app.page_action("open-link");
     assert_eq!(opened(), ["https://x.test/a"], "and a web one opens from the menu");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_fragment_link_reveals_its_anchor_in_the_note() {
+    let (mut app, mut d, dir) = body("anchor-link");
+    let (_, doc) = carnet_core::doc::from_markdown("[section 1](#section-1)\n<a id=\"section-1\"></a>\n## Section about something number 1");
+    app.store.notes[app.current].doc = doc;
+    app.caret = Caret::at(page::first(app.doc()));
+    d.frame(&mut app);
+    let expected = page::fragment_target(app.doc(), "#section-1").unwrap();
+    app.open_url("#section-1");
+    assert_eq!(app.caret.head, expected);
+    assert!(app.reveal);
+    assert_eq!(app.error, None);
+    assert!(store::OPENED.with_borrow_mut(std::mem::take).is_empty());
+    d.frame(&mut app);
+    app.open_url("#missing");
+    assert!(app.error.as_deref().is_some_and(|e| e.contains("Couldn't find the section")));
+    assert_eq!(app.caret.head, expected);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_markdown_link_opens_its_note_and_optional_section() {
+    let (mut store, dir) = temp_store("note-navigation");
+    std::fs::create_dir_all(dir.join("docs/adr")).unwrap();
+    std::fs::write(dir.join("Index.md"), "# Index\n\n[ADR 0007](docs/adr/0007-merge-stable-record-assignments.md#decision)").unwrap();
+    std::fs::write(dir.join("docs/adr/0007-merge-stable-record-assignments.md"), "# A different display title\n\n<a id=\"decision\"></a>\n## Merge stable record assignments\n\nDetails").unwrap();
+    store.rescan();
+    let mut app = Carnet::new(store);
+    let index = app.store.notes.iter().position(|n| n.title == "Index").unwrap();
+    app.open(index);
+    app.open_url("docs/adr/0007-merge-stable-record-assignments.md#decision");
+    assert_eq!(app.store.notes[app.current].title, "A different display title");
+    assert_eq!(app.caret.head, page::fragment_target(app.doc(), "#decision").unwrap());
+    app.open_url("#merge-stable-record-assignments");
+    assert!(matches!(app.doc().get(app.caret.head.slot.block).map(|b| &b.kind), Some(Kind::Heading { .. })));
+    app.open_url("../../Index.md");
+    assert_eq!(app.store.notes[app.current].title, "Index");
+    let before = app.current;
+    app.open_url("docs/missing.md");
+    assert_eq!(app.current, before);
+    assert!(app.error.as_deref().is_some_and(|s| s.contains("Couldn't find the note")));
+    assert!(store::OPENED.with_borrow_mut(std::mem::take).is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
 /// Links open as Settings says: ⌘-click (Ctrl elsewhere, the default),
@@ -12797,5 +12891,172 @@ fn trashing_its_note_closes_the_window() {
     let trash = d.key_of("t-trash").unwrap();
     d.click_key(&mut app, trash);
     assert!(app.windows.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn link_picker_stays_under_the_selection_between_steps() {
+    let (mut app, mut d, dir) = body("link-picker-position");
+    type_in(&mut app, &mut d, "Read here");
+    app.page_action("link");
+    d.frame(&mut app);
+    let at = app.link_edit.as_ref().unwrap().at.unwrap();
+    assert!(at.x > 0.0 && at.y > 0.0);
+    app.link_choose(0);
+    assert_eq!(app.link_edit.as_ref().unwrap().at, Some(at));
+    d.frame(&mut app);
+    assert_eq!(app.link_edit.as_ref().unwrap().at, Some(at));
+    app.link_act(5);
+    app.link_act(4);
+    d.frame(&mut app);
+    assert_eq!(app.link_edit.as_ref().unwrap().at, Some(at));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn section_navigation_centers_the_destination() {
+    for anchor_at in [35, 69] {
+        let (mut app, mut d, dir) = body(&format!("center-section-{anchor_at}"));
+        let md = (0..70).map(|i| if i == anchor_at { "<a id=\"middle\"></a>".to_string() } else { format!("Paragraph {i}\n") }).collect::<Vec<_>>().join("\n");
+        app.store.notes[app.current].doc = carnet_core::doc::from_markdown(&md).1;
+        app.caret = Caret::at(page::first(app.doc()));
+        d.frame(&mut app);
+        app.open_url("#middle");
+        for _ in 0..8 { d.advance(0.5); d.frame(&mut app); }
+        let g = d.core.scroll_geometry(app.scroll_key.unwrap()).unwrap();
+        let caret = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).unwrap();
+        assert!((caret.y + caret.h / 2.0 - (g.rect.y + g.rect.h / 2.0)).abs() < 3.0, "caret {caret:?}, viewport {:?}", g.rect);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn a_link_has_edit_in_its_primary_context_menu() {
+    let (mut app, mut d, dir) = body("link-edit-menu");
+    type_in(&mut app, &mut d, "[Read](https://example.com)");
+    app.caret = Caret::at(Pos { slot: app.caret.head.slot, byte: 2 });
+    let menu = app.page_menu();
+    assert!(menu.iter().any(|item| item.label == "Edit link\u{2026}"));
+    app.page_action("link");
+    d.frame(&mut app);
+    assert!(app.link_edit.as_ref().is_some_and(|link| link.existing && link.url == "https://example.com"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn this_note_picker_inserts_only_a_fragment_and_keeps_the_label() {
+    for (suffix, destination, expected) in [
+        ("anchor", "<a id=\"details\"></a>\n\nDetails", "#details"),
+        ("heading", "## Decision\n\nDetails", "#decision"),
+    ] {
+        let (mut app, mut d, dir) = body(&format!("this-note-{suffix}"));
+        app.store.notes[app.current].doc = carnet_core::doc::from_markdown(&format!("Read here\n\n{destination}")).1;
+        let first = page::first(app.doc());
+        app.caret = Caret { anchor: first, head: Pos { byte: 9, ..first } };
+        d.core.set_inspect(true);
+        d.frame(&mut app);
+        app.page_action("link");
+        d.frame(&mut app);
+        assert_eq!(app.link_notes("")[0].id, app.store.notes[app.current].id.to_string());
+        assert!(d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|t| t.starts_with("This note · "))));
+        key(&mut app, &mut d, "enter");
+        d.frame(&mut app);
+        assert_eq!(app.link_edit.as_ref().unwrap().target, Some(app.store.notes[app.current].id));
+        key(&mut app, &mut d, "enter");
+        assert!(app.link_edit.is_none());
+        assert_eq!(texts(&app)[0], format!("[Read here]({expected})"));
+        app.page_action("link");
+        d.frame(&mut app);
+        assert!(app.link_edit.as_ref().is_some_and(|le| le.existing && le.url == expected));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn link_picker_on_an_empty_line_opens_beside_that_line() {
+    for slash in [false, true] {
+        let (mut app, mut d, dir) = body(&format!("link-empty-origin-{slash}"));
+        if slash {
+            type_in(&mut app, &mut d, "/link");
+            key(&mut app, &mut d, "enter");
+        } else {
+            app.page_action("link");
+            d.frame(&mut app);
+        }
+        let at = app.link_edit.as_ref().unwrap().at.unwrap();
+        let row = app.row_rects.iter().find(|(id, _)| *id == app.caret.head.slot.block).unwrap().1;
+        assert!(at.x >= row.x - 16.0 && at.y >= row.y && at.y < row.y + row.h + 30.0, "slash={slash}: popup {at:?}, line {row:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn picked_heading_keeps_its_fragment_beside_an_explicit_anchor() {
+    let (mut app, mut d, dir) = body("exact-heading-fragment");
+    app.store.notes[app.current].doc = carnet_core::doc::from_markdown("Read here\n\n<a id=\"next-steps-section\"></a>\n## Next steps\n\nDetails").1;
+    let first = page::first(app.doc());
+    app.caret = Caret { anchor: first, head: Pos { byte: 9, ..first } };
+    d.frame(&mut app);
+    app.page_action("link");
+    d.frame(&mut app);
+    app.link_choose(0);
+    d.frame(&mut app);
+    app.link_choose(1);
+    app.link_act(0);
+    assert_eq!(texts(&app)[0], "[Read here](#next-steps)");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn clicking_a_section_link_centers_it_after_the_mouse_is_released() {
+    for how in [page::LinkOpen::ModClick, page::LinkOpen::Click, page::LinkOpen::DoubleClick] {
+        let (mut app, mut d, dir) = body(&format!("click-center-section-{how:?}"));
+        app.settings.link_open = how;
+        let md = format!("[Next steps](#next-steps)\n\n{}\n\n<a id=\"next-steps\"></a>\n\nDetails", (0..70).map(|i| format!("Paragraph {i}\n")).collect::<Vec<_>>().join("\n"));
+        app.store.notes[app.current].doc = carnet_core::doc::from_markdown(&md).1;
+        let first = page::first(app.doc());
+        app.caret = Caret::at(first);
+        d.frame(&mut app);
+        d.frame(&mut app);
+        if how == page::LinkOpen::DoubleClick {
+            let k = app.slot_keys[&first.slot];
+            let r = d.core.caret_rect(k, 2).unwrap();
+            d.double_click(&mut app, r.x + 1.0, r.y + r.h / 2.0);
+        } else {
+            let mods = if how == page::LinkOpen::ModClick { CTRL } else { KeyMods::NONE };
+            d.input(&mut app, InputEvent::Modifiers(mods));
+            click_drawn(&mut app, &mut d, first.slot, 2);
+            d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+        }
+        for _ in 0..8 { d.advance(0.5); d.frame(&mut app); }
+        let g = d.core.scroll_geometry(app.scroll_key.unwrap()).unwrap();
+        let caret = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).unwrap();
+        assert!((caret.y + caret.h / 2.0 - (g.rect.y + g.rect.h / 2.0)).abs() < 3.0, "caret {caret:?}, viewport {:?}", g.rect);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn section_navigation_requests_one_scroll_destination() {
+    let (mut app, mut d, dir) = body("one-section-scroll");
+    let md = format!("[Next steps](#next-steps)\n\n{}\n\n## Next steps\n\nDetails", (0..70).map(|i| format!("Paragraph {i}\n")).collect::<Vec<_>>().join("\n"));
+    app.store.notes[app.current].doc = carnet_core::doc::from_markdown(&md).1;
+    app.caret = Caret::at(page::first(app.doc()));
+    d.frame(&mut app);
+    d.frame(&mut app);
+    let key = app.scroll_key.unwrap();
+    let mut last = d.core.scroll_offset(key).y;
+    let mut destinations = Vec::new();
+    app.open_url("#next-steps");
+    for _ in 0..45 {
+        d.advance(1.0 / 60.0);
+        d.frame(&mut app);
+        let target = d.core.scroll_offset(key).y;
+        if (target - last).abs() > 0.5 { destinations.push(target); last = target; }
+    }
+    assert_eq!(destinations.len(), 1, "one continuous scroll, destinations: {destinations:?}");
+    let g = d.core.scroll_geometry(key).unwrap();
+    let caret = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).unwrap();
+    assert!((caret.y + caret.h / 2.0 - (g.rect.y + g.rect.h / 2.0)).abs() < 3.0);
     let _ = std::fs::remove_dir_all(dir);
 }

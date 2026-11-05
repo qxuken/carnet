@@ -33,10 +33,27 @@
     done: () => void;
     deleted: () => void;
   };
-  let { key, back, history, editing, fresh, edit, done, deleted }: Props = $props();
+  let { key, back, history, editing, fresh, edit, done, deleted, section = null }: Props & { section?: string | null } = $props();
   let box: HTMLElement | undefined = $state();
   const note = $derived(sync.notes.find((n) => n.key === key));
   const html = $derived((sync.version, sync.html(key)));
+  function followSection(fragment: string) {
+    let id = fragment;
+    try { id = decodeURIComponent(id); } catch { /* A literal malformed escape. */ }
+    const target = Array.from(box?.querySelectorAll<HTMLElement>('[id]') ?? []).find((a) => a.id === id);
+    if (target) target.scrollIntoView({ block: 'center' });
+    else sync.say(`Couldn’t find the section: #${id}`);
+  }
+
+  $effect(() => {
+    // The HTML is replaced when a different version arrives. Wait for
+    // that DOM update before finding the section, including after Back.
+    if (box && !editing && section && html) {
+      const to = section;
+      const frame = requestAnimationFrame(() => followSection(to));
+      return () => cancelAnimationFrame(frame);
+    }
+  });
   const meta = $derived(
     note
       ? [note.folder, note.todos ? `${note.done} of ${note.todos} done` : '', note.trashed ? 'in Deleted' : '']
@@ -113,6 +130,18 @@
     // first, one that could run), not followed to an address this site
     // hasn't got.
     const href = t.closest('a[href]')?.getAttribute('href');
+    if (href?.startsWith('#') && e.button === 0) {
+      e.preventDefault();
+      followSection(href.slice(1));
+      return;
+    }
+    if (href && e.button === 0 && sync.linkedNote(note?.folder ?? '', href) === key) {
+      e.preventDefault();
+      const at = href.indexOf('#');
+      if (at >= 0 && href.slice(at + 1)) followSection(href.slice(at + 1));
+      else box?.scrollIntoView({ block: 'start' });
+      return;
+    }
     if (href && e.button === 0 && opener.link(note?.folder ?? '', href)) e.preventDefault();
   }
 </script>
@@ -189,7 +218,7 @@
   /* The text as wide as the desktop's at its usual page width (settings
      `width = medium`: 608), so the lines break alike and pictures, a
      share of it (carnet_core::page::picture_width), come out the same. */
-  .note { max-width: 648px; margin: 0 auto; padding: 8px 20px calc(48px + env(safe-area-inset-bottom)); }
+  .note { max-width: 648px; margin: 0 auto; padding: 8px 20px calc(50svh + env(safe-area-inset-bottom)); }
   /* What pictures at an edge are sized by (styles.css `.pictures`). */
   .reading { container-type: inline-size; }
 </style>

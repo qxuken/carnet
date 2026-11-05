@@ -488,6 +488,18 @@ class Sync {
     return this.vault?.linked_file(folder, href);
   }
 
+  linkedNote(folder: string, href: string): string | undefined {
+    return this.vault?.linked_note(folder, href);
+  }
+
+  linkNotes(query: string): { id: string; title: string; path: string }[] {
+    return JSON.parse(this.vault?.link_notes(query) ?? '[]');
+  }
+
+  linkSections(key: string): { name: string; fragment: string }[] {
+    return JSON.parse(this.vault?.link_sections(key) ?? '[]');
+  }
+
   /// The file at `path` (from the notes folder), whole: kept here for
   /// offline, or fetched, as a picture is.
   async file(path: string): Promise<Blob> {

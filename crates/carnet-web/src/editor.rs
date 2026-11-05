@@ -979,6 +979,12 @@ impl Editor {
         page::link_at(&self.doc, self.caret).map(|(.., url)| inline::without_bidi(&url))
     }
 
+    /// CodeMirror's line containing a same-note anchor target.
+    pub fn fragment_line(&self, url: &str) -> Option<usize> {
+        let pos = page::fragment_target(&self.doc, url)?;
+        self.lines.iter().position(|l| l.slot == Some(pos.slot))
+    }
+
     /// The address the link the caret is in opens, if it's one a page
     /// may follow ([`carnet_core::export::safe_href`]): a `javascript:`
     /// link is edited and taken off like any, but not opened.
@@ -1012,6 +1018,15 @@ impl Editor {
         match url.map(str::trim).filter(|u| !u.is_empty()) {
             Some(u) => self.edit(Step::Other, |d, c| page::make_link(d, c, u)),
             None => false,
+        }
+    }
+
+    pub fn set_note_link(&mut self, url: &str, title: &str) -> bool {
+        if !matches!(self.focus, Focus::Body) { return false; }
+        if let Some((slot, at, _)) = page::link_at(&self.doc, self.caret) {
+            self.edit(Step::Other, |d, _| page::set_link(d, slot, at, Some(url)))
+        } else {
+            self.edit(Step::Other, |d, c| page::make_named_link(d, c, url, title))
         }
     }
 
@@ -1084,7 +1099,7 @@ impl Editor {
         let mut look = Look { first: l.first, ..Look::default() };
         match &b.kind {
             Kind::Text(t) => {
-                look.kind = "text";
+                look.kind = if doc::anchor_range(t).is_some() { "anchor" } else { "text" };
                 // A dropped first letter, on the paragraph's first line, as
                 // the desktop drops it; its own colour, if it has one, kept.
                 if b.initial && l.start == 0
@@ -1327,6 +1342,31 @@ fn next_word(s: &str, b: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn picked_note_links_use_titles_and_preserve_existing_words() {
+        let mut e = Editor::open("# Index\n\n");
+        e.select(1, 0, 1, 0);
+        assert!(e.set_note_link("../Work/Plan.md#decision-anchor", "Plan"));
+        assert!(e.markdown().contains("[Plan](../Work/Plan.md#decision-anchor)"));
+        e.select(1, 1, 1, 1);
+        assert!(e.set_note_link("../Home/Other.md", "Other"));
+        assert!(e.markdown().contains("[Plan](../Home/Other.md)"));
+    }
+
+    #[test]
+    fn explicit_anchor_targets_show_their_name_and_are_reachable() {
+        let mut e = Editor::open("# T\n\n[section](#section-1)\n<a id=\"section-1\"></a>\n## Section about something number 1");
+        let line = e.fragment_line("#section-1").unwrap();
+        assert_eq!(e.lines()[line].text, "section-1");
+        assert_eq!(e.look(line).kind, "anchor");
+        assert_eq!(e.lines()[line + 1].text, "Section about something number 1");
+        assert!(e.markdown().contains("<a id=\"section-1\"></a>"));
+        assert_eq!(e.fragment_line("#absent"), None);
+        e.select(line + 1, 0, line + 1, 0);
+        e.input("Updated ");
+        assert!(e.markdown().contains("<a id=\"section-1\"></a>"));
+    }
+
     use super::*;
 
     /// Types `s` at line `l`, column `c`.

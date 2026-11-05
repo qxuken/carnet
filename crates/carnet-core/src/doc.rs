@@ -1725,6 +1725,81 @@ fn html_image(line: &str) -> Option<Kind> {
     Some(Kind::Image { src, alt, width, float: Float::None, wiki: false })
 }
 
+/// A standalone, empty HTML anchor. Only its target is interpreted; no
+/// attributes from the file are passed through to the rendered page.
+pub fn anchor_range(text: &str) -> Option<(usize, usize)> {
+    let inner = text.trim().strip_prefix("<a")?.strip_suffix("</a>")?.trim_end().strip_suffix('>')?;
+    if !inner.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let (name, value) = inner.trim().split_once('=')?;
+    if !matches!(name.trim(), "id" | "name") {
+        return None;
+    }
+    let value = value.trim();
+    let q = value.chars().next()?;
+    let value = match q {
+        '\'' | '"' => value.strip_prefix(q)?.strip_suffix(q)?,
+        _ => value,
+    };
+    if value.contains(['<', '>', '\'', '"']) || value.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let from = value.as_ptr() as usize - text.as_ptr() as usize;
+    Some((from, from + value.len()))
+}
+
+/// An anchor's target, with HTML entities read as the browser reads them.
+pub fn anchor_id(text: &str) -> Option<String> {
+    let (from, to) = anchor_range(text)?;
+    let value = &text[from..to];
+    if value.is_empty() { return None; }
+    Some(value.replace("&quot;", "\"").replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+}
+
+/// A relative Markdown link, resolved inside the notes folder. The
+/// fragment stays encoded until it is looked up in the destination.
+pub fn note_link(folder: &str, href: &str) -> Option<(String, Option<String>)> {
+    let href = href.trim();
+    let (path, fragment) = href.split_once('#').map_or((href, None), |(p, f)| (p, Some(format!("#{f}"))));
+    let path = percent_decoded(path);
+    let lower = path.to_ascii_lowercase();
+    if !(lower.ends_with(".md") || lower.ends_with(".markdown")) || path.contains([':', '?']) || path.starts_with(['/', '\\']) {
+        return None;
+    }
+    Some((join_path(folder, &path)?, fragment))
+}
+
+/// Whether this is a relative link to a Markdown file, even when its
+/// path cannot be resolved (so a missing note never opens as a website).
+pub fn is_note_link(href: &str) -> bool {
+    let path = percent_decoded(href.trim().split('#').next().unwrap_or(""));
+    let lower = path.to_ascii_lowercase();
+    !path.contains(':') && !(path.contains('@') && !path.contains('/')) && (lower.ends_with(".md") || lower.ends_with(".markdown"))
+}
+
+/// Heading fragments use their words, lowercase, with spaces as dashes.
+/// A document gives repeated slugs the suffixes `-1`, `-2`, and so on.
+pub fn heading_slug(text: &str) -> String {
+    inline::plain(text).to_lowercase().chars().filter_map(|c| {
+        if c.is_whitespace() { Some('-') }
+        else if c.is_alphanumeric() || matches!(c, '-' | '_') { Some(c) }
+        else { None }
+    }).collect()
+}
+
+/// One heading's unique fragment, in document order.
+pub fn heading_id(text: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let slug = heading_slug(text);
+    let mut id = slug.clone();
+    let mut n = 0;
+    while !used.insert(id.clone()) {
+        n += 1;
+        id = format!("{slug}-{n}");
+    }
+    id
+}
+
 /// A cell as its row writes it: its `|`s escaped, but for a picture's,
 /// which are written as they are (`![|left|260](a.png)`), as other
 /// editors write them and [`split_row`] reads them.
@@ -1908,6 +1983,13 @@ fn parse(src: &str, whole_note: bool) -> (Option<String>, Vec<Block>) {
                     text: text.to_string(),
                 }));
             }
+            i += 1;
+            continue;
+        }
+        if anchor_range(line).is_some() {
+            flush(&mut para, &mut blocks);
+            list.clear();
+            blocks.push(Block::text(line));
             i += 1;
             continue;
         }
@@ -2134,6 +2216,52 @@ fn split_row(line: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn markdown_links_resolve_relative_to_the_source_folder() {
+        assert_eq!(note_link("", "docs/adr/0007-merge-stable-record-assignments.md#decision"), Some(("docs/adr/0007-merge-stable-record-assignments.md".into(), Some("#decision".into()))));
+        assert_eq!(note_link("docs/adr", "../A%20plan.MD#some%20section"), Some(("docs/A plan.MD".into(), Some("#some%20section".into()))));
+        assert_eq!(note_link("docs", "./other.markdown"), Some(("docs/other.markdown".into(), None)));
+        for link in ["../../outside.md", "/absolute.md", "https://example.com/a.md", "file:///a.md", "#section", "attachments/a.pdf"] {
+            assert_eq!(note_link("docs", link), None, "{link}");
+        }
+        assert!(is_note_link("../missing.md#decision"));
+        assert!(!is_note_link("https://example.com/a.md"));
+        assert_eq!(inline::with_scheme("docs/adr/0007.md#decision"), "docs/adr/0007.md#decision");
+        assert_eq!(inline::with_scheme("me@example.md"), "mailto:me@example.md");
+    }
+
+    #[test]
+    fn heading_fragments_are_unique_and_explicit_anchors_take_precedence() {
+        let (_, d) = from_markdown("## A **decision**!\n\n## A decision!\n\n## A decision-1\n\n<a id=\"a-decision\"></a>");
+        let target = |url| crate::page::fragment_target(&d, url).map(|p| p.slot.block);
+        assert_eq!(target("#a-decision"), Some(d.blocks()[3].id));
+        assert_eq!(target("#a-decision-1"), Some(d.blocks()[0].id));
+        assert_eq!(target("#a-decision-2"), Some(d.blocks()[1].id));
+        assert_eq!(target("#a-decision-1-1"), Some(d.blocks()[2].id));
+    }
+
+    #[test]
+    fn standalone_anchors_survive_saves_and_resolve_fragment_links() {
+        let src = "[section 1](#section-1)\n<a id=\"section-1\"></a>\n## Section about something number 1\n\n<a name='old&amp;new'></a>";
+        let (title, doc) = from_markdown(src);
+        let target = crate::page::fragment_target(&doc, "#section-1").unwrap();
+        assert_eq!(crate::page::text(&doc, target.slot), "<a id=\"section-1\"></a>");
+        assert_eq!(inline::plain(crate::page::text(&doc, target.slot)), "section-1");
+        assert!(crate::page::fragment_target(&doc, "#old%26new").is_some());
+        assert!(crate::page::fragment_target(&doc, "#missing").is_none());
+        let saved = to_markdown(title.as_deref(), &doc);
+        assert!(saved.contains("<a id=\"section-1\"></a>"), "{saved}");
+        assert!(saved.contains("<a name='old&amp;new'></a>"), "{saved}");
+        let (_, again) = from_markdown(&saved);
+        assert!(crate::page::fragment_target(&again, "#section-1").is_some());
+        for text in ["`<a id=\"section-1\"></a>`", "\\<a id=\"section-1\"></a>", "```html\n<a id=\"section-1\"></a>\n```"] {
+            assert!(crate::page::fragment_target(&from_markdown(text).1, "#section-1").is_none(), "{text}");
+        }
+        for text in ["<abbr id='x'></abbr>", "<a href='https://x'></a>", "<a id='x' onclick='run()'></a>", "<a id='x'>words</a>", "<a id=''></a>"] {
+            assert_eq!(anchor_id(text), None, "{text}");
+        }
+    }
+
     #[test]
     fn a_tap_ticks_one_checkbox_and_touches_nothing_else() {
         let md = "# Shop\n\n- [ ] milk\n* [X] bread\n  + [ ] rye\n\n```\n- [ ] not a box\n```\n\n> - [ ] quoted\n\n- [ ]\n";

@@ -14,7 +14,7 @@ import { apple } from './links';
 /// What a command does past its line: `turn` it into a heading, a list
 /// or a quote; put in a `table`, a `divider` or `code`; or ask for a
 /// `picture` or a `file`, which go in on the line it leaves empty.
-export type Act = 'turn' | 'table' | 'divider' | 'code' | 'picture' | 'file';
+export type Act = 'turn' | 'table' | 'divider' | 'code' | 'picture' | 'file' | 'anchor' | 'link';
 export type Command = { name: string; hint: string; act: Act };
 
 /// The menu showing: CodeMirror's line it hangs from, the word typed, and
@@ -26,7 +26,7 @@ let all: Command[] | null = null;
 export const commands = (): Command[] => (all ??= JSON.parse(slash_commands()));
 
 /// Each command's icon (web/src/icons), in the menu's order.
-const ICONS = ['h1', 'h2', 'h3', 'bullets', 'numbers', 'todo', 'quote', 'table', 'divider', 'code', 'picture', 'attach'];
+const ICONS = ['h1', 'h2', 'h3', 'bullets', 'numbers', 'todo', 'quote', 'table', 'divider', 'code', 'picture', 'attach', 'link', 'link'];
 export const iconOf = (i: number) => ICONS[i] ?? 'plus';
 
 /// What to type instead, next time, as a row says it: a picture comes by

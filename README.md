@@ -41,6 +41,7 @@ And what it leaves out, on purpose:
 
 - **Plain Markdown on disk.** One file per note in `~/Documents/Carnet` (or a folder you choose); folders in it are folders in the app. Pictures go in `attachments/` as ordinary Markdown images.
 - **A page that reads as one text.** The caret, selection, copy and undo move across paragraphs, lists and table cells as they would through one document. Markdown's marks are never shown: you see the words, styled, and the file keeps the Markdown.
+- **Links within and between notes.** Use the link button, ⌘K / Ctrl+K, or `/link` to search notes by title and choose a section. Carnet writes ordinary Markdown links and updates them when notes move or get renamed. Section links keep the fragment you choose. Anchors appear as compact gray `#name` blocks; type `/anchor` to create one and name it.
 - **Lists and checklists** that indent and outdent with Tab, continue on Enter and step out on an empty item, with checklist progress ("3 of 7 done") in the line above the title.
 - **Tables** with steady columns, Tab and Enter navigation, rows and columns added, removed and moved, and sorting by a column.
 - **Edits made in other apps are merged.** A note changed in Obsidian, VS Code or a sync client while it has edits here keeps both sets of edits.

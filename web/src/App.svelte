@@ -19,23 +19,14 @@
   import { carriesFiles, isMarkdownName } from './lib/files';
   import { stepKey, stepNote } from './lib/order';
   import { apple } from './lib/editor/links';
+  import { readRoute, type Route } from './lib/routes';
 
-  type Route =
-    | { kind: 'list' }
-    | { kind: 'note'; key: string; editing: boolean; fresh: boolean }
-    | { kind: 'history'; key: string }
-    | { kind: 'settings' };
   let route = $state<Route>({ kind: 'list' });
   let wide = $state(true);
   const current = $derived(route.kind === 'note' || route.kind === 'history' ? route.key : null);
 
   function read(): Route {
-    const h = location.hash;
-    if (h === '#settings') return { kind: 'settings' };
-    const m = /^#note\/([0-9a-f]+)(?:\/(history|edit|new))?$/.exec(h);
-    if (m?.[2] === 'history') return { kind: 'history', key: m[1] };
-    if (m) return { kind: 'note', key: m[1], editing: m[2] === 'edit' || m[2] === 'new', fresh: m[2] === 'new' };
-    return { kind: 'list' };
+    return readRoute(location.hash);
   }
 
   onMount(() => {
@@ -323,6 +314,7 @@
             history={() => go(`note/${key}/history`)}
             editing={route.editing}
             fresh={route.fresh}
+            section={route.section}
             edit={() => swap(`note/${key}/edit`)}
             done={() => finished(key)}
             deleted={() => (wide ? swap('') : back())}

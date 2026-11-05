@@ -386,6 +386,18 @@ impl Vault {
         self.notes.listed(key).as_ref().map(listed_json)
     }
 
+    pub fn linked_note(&self, folder: &str, href: &str) -> Option<String> {
+        self.notes.linked_note(folder, href)
+    }
+
+    pub fn link_notes(&self, query: &str) -> String {
+        format!("[{}]", self.notes.link_notes(query).iter().map(|n| format!(r#"{{"id":{},"title":{},"path":{}}}"#, json(&n.id), json(&n.title), json(&n.path))).collect::<Vec<_>>().join(","))
+    }
+
+    pub fn link_sections(&self, key: &str) -> String {
+        format!("[{}]", self.notes.link_sections(key).iter().map(|s| format!(r#"{{"name":{},"fragment":{}}}"#, json(&s.name), json(&s.fragment))).collect::<Vec<_>>().join(","))
+    }
+
     pub fn folders(&self) -> Vec<String> {
         self.notes.folders()
     }
@@ -1023,6 +1035,11 @@ impl PageEditor {
         self.e.link_here()
     }
 
+    /// CodeMirror's zero-based line containing a same-note anchor.
+    pub fn fragment_line(&self, url: &str) -> Option<u32> {
+        self.e.fragment_line(url).map(|n| n as u32)
+    }
+
     /// Where the link the caret is in opens: none for one a page mustn't
     /// follow (`javascript:` and the like).
     pub fn link_to_open(&self) -> Option<String> {
@@ -1178,6 +1195,10 @@ impl PageEditor {
         self.e.set_link(url.as_deref())
     }
 
+    pub fn set_note_link(&mut self, url: &str, title: &str) -> bool {
+        self.e.set_note_link(url, title)
+    }
+
     /// The words' colour and the highlighter at the caret (0xRRGGBBAA, 0
     /// none, 1 the plain highlighter): `[ink, mark]`.
     pub fn tint_here(&self) -> Vec<u32> {
@@ -1325,6 +1346,8 @@ pub fn slash_commands() -> String {
                 Action::Code => "code",
                 Action::Picture => "picture",
                 Action::File => "file",
+                Action::Anchor => "anchor",
+                Action::Link => "link",
             };
             format!(r#"{{"name":{},"hint":{},"act":"{act}"}}"#, json(c.name), json(c.hint))
         })
@@ -1393,6 +1416,19 @@ pub fn link_ignores(how: &str, clicks: u32, opened: bool) -> bool {
 pub fn link_hand(how: &str, cmd: bool, shift: bool) -> bool {
     page::LinkOpen::from_key(how).unwrap_or_default().hand(cmd, shift)
 }
+
+#[wasm_bindgen]
+pub fn is_note_link(href: &str) -> bool {
+    carnet_core::doc::is_note_link(href)
+}
+
+#[wasm_bindgen]
+pub fn note_href(folder: &str, target: &str, fragment: Option<String>) -> String {
+    carnet_core::navigation::href(format!("{folder}/source.md").trim_start_matches('/'), target, fragment.as_deref())
+}
+
+#[wasm_bindgen]
+pub fn typed_link_address(text: &str) -> bool { carnet_core::navigation::typed_address(text) }
 
 /// The widths a picture is given from a menu, as JSON: `[[name, percent
 /// of the text's width]]`.

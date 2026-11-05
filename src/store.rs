@@ -396,6 +396,42 @@ pub struct Trashed {
 }
 
 impl Store {
+    pub(crate) fn note_paths(&self) -> carnet_core::navigation::Paths {
+        self.notes.iter().filter_map(|n| Some((n.key.map_or_else(|| format!("local:{}", n.id), |k| k.to_string()), n.rel_path()?))).collect()
+    }
+
+    /// Repair by stable note identity, including both sides of a folder
+    /// move. The Markdown stays readable by every other editor.
+    fn repair_note_links(&mut self, before: &carnet_core::navigation::Paths) -> io::Result<bool> {
+        use carnet_core::navigation as nav;
+        let after = self.note_paths();
+        let moved = nav::moves(before, &after);
+        if moved.is_empty() { return Ok(false); }
+        let mut changed = false;
+        for i in 0..self.notes.len() {
+            let n = &self.notes[i];
+            let id = n.key.map_or_else(|| format!("local:{}", n.id), |k| k.to_string());
+            let (Some(path), Some(to)) = (n.path.clone(), after.get(&id)) else { continue };
+            let from = before.get(&id).unwrap_or(to);
+            let text = if n.dirty { n.markdown() } else { fs::read_to_string(&path)? };
+            if nav::rewrite(&text, from, to, &moved).is_none() { continue; }
+            // Merge anything another editor wrote before changing URLs.
+            if self.notes[i].dirty { self.save(i, false)?; }
+            self.refresh(i);
+            let text = fs::read_to_string(&path)?;
+            let Some(new) = nav::rewrite(&text, from, to, &moved) else { continue };
+            write_atomic(&path, &new)?;
+            let n = &mut self.notes[i];
+            nav::rewrite_doc(&mut n.doc, from, to, &moved);
+            n.touch();
+            n.dirty = false;
+            n.disk = stamp(&path);
+            self.track(i, &new, Origin::Save);
+            changed = true;
+        }
+        Ok(changed)
+    }
+
     pub fn open(dir: PathBuf) -> io::Result<Self> {
         let replica = replica_dir(&dir);
         Self::open_with(dir, replica)
@@ -411,6 +447,7 @@ impl Store {
             Some(Err(e)) => (None, Newer::of(&e).map(Newer::to_string)),
             None => (None, None),
         };
+        let paths_before = replica.as_ref().map(|r| r.keys().into_iter().filter_map(|k| r.entry(k).map(|e| (k.to_string(), e.path.clone()))).collect()).unwrap_or_default();
         let mut store = Self {
             dir,
             notes: Vec::new(),
@@ -446,6 +483,7 @@ impl Store {
             store.notes.push(welcome());
             store.save(0, true)?;
         }
+        store.repair_note_links(&paths_before)?;
         Ok(store)
     }
 
@@ -655,6 +693,7 @@ impl Store {
     /// `folder` to `to` on disk, and everything that names it here: its
     /// subfolders, its notes' folders and files, the pins.
     fn relocate_folder(&mut self, folder: &str, to: &str) -> io::Result<()> {
+        let before = self.note_paths();
         let (from_dir, to_dir) = (self.inside(self.folder_dir(folder))?, self.inside(self.folder_dir(to))?);
         rename_retrying(&from_dir, &to_dir)?;
         let moved = |f: &str| vault::relocated(f, folder, to);
@@ -671,7 +710,9 @@ impl Store {
                 n.path = Some(to_dir.join(rest));
             }
         }
-        self.save_pins()
+        self.save_pins()?;
+        self.repair_note_links(&before)?;
+        Ok(())
     }
 
     /// Whether a folder has a file in it or under it, a note or not: a
@@ -779,6 +820,7 @@ impl Store {
         if self.notes[i].folder == folder {
             return Ok(());
         }
+        let before = self.note_paths();
         let old = self.place_note(i, folder)?;
         let (from_dir, to_dir) = (self.folder_dir(&old), self.folder_dir(folder));
         let mut relinked = false;
@@ -829,7 +871,9 @@ impl Store {
             self.notes[i].touch();
             self.save(i, false)?;
         }
-        self.save_pins()
+        self.save_pins()?;
+        self.repair_note_links(&before)?;
+        Ok(())
     }
 
     /// Note `i`'s file moved into `folder`, under its own name or the
@@ -1128,6 +1172,7 @@ impl Store {
     /// file comes in. Returns whether anything changed. What the app runs
     /// when its window comes back to the front.
     pub fn rescan(&mut self) -> bool {
+        let paths_before = self.note_paths();
         // Notes whose files went: one may be back under another name,
         // changed on the way (a rename and an edit from another machine).
         let mut vanished: Vec<(Key, String)> = Vec::new();
@@ -1190,6 +1235,7 @@ impl Store {
                 }
             }
         }
+        changed |= self.repair_note_links(&paths_before).unwrap_or(false);
         changed || self.folders != folders_before
     }
 
@@ -1223,6 +1269,7 @@ impl Store {
             .as_ref()
             .is_some_and(|p| same_stem(&stem_of(p), &wanted) || numbered_as(p, &wanted));
         let move_it = current.is_some() && rename && note.renamable && !named_right;
+        let paths_before = move_it.then(|| self.note_paths());
         if !note.dirty && !move_it {
             return Ok(Saved::Clean);
         }
@@ -1259,6 +1306,7 @@ impl Store {
         if pins {
             self.save_pins()?;
         }
+        if let Some(before) = paths_before { self.repair_note_links(&before)?; }
         Ok(Saved::Written)
     }
 
@@ -1856,6 +1904,7 @@ impl Store {
     /// place. Two notes in each other's places (a swap) can't both wait:
     /// one steps aside to a spare number, and the other moves in.
     fn settle_names(&mut self) -> io::Result<bool> {
+        let before = self.note_paths();
         let mut changed = false;
         for _ in 0..4 {
             if !self.settle_names_once()? {
@@ -1863,6 +1912,7 @@ impl Store {
             }
             changed = true;
         }
+        if changed { self.repair_note_links(&before)?; }
         Ok(changed)
     }
 
@@ -3453,6 +3503,50 @@ mod tests {
         let hour = now.strftime("%Y-%m-%d-%H").to_string();
         let hour_before = now.checked_sub(jiff::Span::new().minutes(1)).unwrap().strftime("%Y-%m-%d-%H").to_string();
         assert!(src.contains(&format!("pasted-{hour}")) || src.contains(&format!("pasted-{hour_before}")), "{src} at {now}");
+    }
+
+    #[test]
+    fn note_links_follow_renames_moves_and_folder_changes() {
+        let dir = temp_dir("note-links-moves");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Index.md"), "# Index\n\n[My label](Target.md#decision)\n\n`[example](Target.md)`\n").unwrap();
+        fs::write(dir.join("Target.md"), "# Target\n\n## Decision\n").unwrap();
+        let mut s = Store::open(dir.clone()).unwrap();
+        let target = s.notes.iter().position(|n| n.title == "Target").unwrap();
+        s.notes[target].title = "Renamed".into();
+        s.notes[target].renamable = true;
+        s.notes[target].touch();
+        s.save(target, true).unwrap();
+        assert!(fs::read_to_string(dir.join("Index.md")).unwrap().contains("[My label](Renamed.md#decision)"));
+        assert!(fs::read_to_string(dir.join("Index.md")).unwrap().contains("`[example](Target.md)`"));
+        let work = s.create_folder("", "Work").unwrap();
+        s.move_note(target, &work).unwrap();
+        assert!(fs::read_to_string(dir.join("Index.md")).unwrap().contains("Work/Renamed.md#decision"));
+        let index = s.notes.iter().position(|n| n.title == "Index").unwrap();
+        s.move_note(index, &work).unwrap();
+        assert!(fs::read_to_string(dir.join("Work/Index.md")).unwrap().contains("[My label](Renamed.md#decision)"));
+        s.rename_folder("Work", "Projects").unwrap();
+        assert!(fs::read_to_string(dir.join("Projects/Index.md")).unwrap().contains("[My label](Renamed.md#decision)"));
+        s.move_note(index, "").unwrap();
+        assert!(fs::read_to_string(dir.join("Index.md")).unwrap().contains("Projects/Renamed.md#decision"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn note_links_follow_external_renames_while_open_and_closed() {
+        let dir = temp_dir("note-links-external");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("Index.md"), "# Index\n\n[Target](Target.md#decision)\n").unwrap();
+        fs::write(dir.join("Target.md"), "# Target\n\n## Decision\n").unwrap();
+        let mut s = Store::open(dir.clone()).unwrap();
+        fs::rename(dir.join("Target.md"), dir.join("Elsewhere.md")).unwrap();
+        s.rescan();
+        assert!(fs::read_to_string(dir.join("Index.md")).unwrap().contains("Elsewhere.md#decision"));
+        drop(s);
+        fs::rename(dir.join("Elsewhere.md"), dir.join("Again.md")).unwrap();
+        let _s = Store::open(dir.clone()).unwrap();
+        assert!(fs::read_to_string(dir.join("Index.md")).unwrap().contains("Again.md#decision"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     fn temp_dir(name: &str) -> PathBuf {

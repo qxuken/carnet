@@ -265,6 +265,11 @@ enum Count {
 fn read_counting(text: &str, count: Count) -> Read {
     let b = text.as_bytes();
     let mut st = vec![Style::default(); b.len()];
+    if let Some((from, to)) = doc::anchor_range(text) {
+        st.fill(Style { marker: true, ..Style::default() });
+        st[from..to].fill(Style::default());
+        return Read { styles: st, tints: Vec::new(), pairs: Vec::new(), pictures: Vec::new(), files: Vec::new(), breaks: Vec::new(), dashes: Vec::new() };
+    }
     let mut pairs: Vec<Pair> = Vec::new();
     // Bytes a later pass leaves alone: code, and a link's address.
     let mut quiet = vec![false; b.len()];
@@ -2179,7 +2184,7 @@ pub fn with_scheme(url: &str) -> String {
             && cs.all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
             && !rest.starts_with(|c: char| c.is_ascii_digit())
     });
-    if url.is_empty() || scheme.is_some() || url.starts_with(['/', '.', '#', '~', '\\']) {
+    if url.is_empty() || scheme.is_some() || url.starts_with(['/', '.', '#', '~', '\\']) || doc::is_note_link(url) {
         url.to_string()
     } else if url.contains('@') && !url.contains('/') {
         format!("mailto:{url}")

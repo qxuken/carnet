@@ -16,6 +16,7 @@ pub mod export;
 pub mod history;
 pub mod inline;
 pub mod name;
+pub mod navigation;
 pub mod page;
 pub mod slash;
 pub mod welcome;
