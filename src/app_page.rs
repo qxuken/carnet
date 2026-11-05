@@ -1029,6 +1029,14 @@ impl Carnet {
                 let (drawn, _) = page::picture_width(nw, width, self.text_w, max_w, floated);
                 let dw = resizing.map_or(drawn, |r| r.w.clamp(page::PICTURE_MIN.min(nw), max_w));
                 let dh = dw * nh / nw;
+                // A previously missing picture can acquire its real size
+                // while this frame is built. The float grouping read the
+                // old placeholder's box; measure this one, then regroup.
+                if floated && self.row_seen.get(&id).and_then(|(_, r)| *r).is_some_and(|r| {
+                    (r.h - (dh + 2.0 * l.air(14.0))).abs() > 0.5 || (r.w - (dw + 16.0)).abs() > 0.5
+                }) {
+                    ui.request_frame_for("float picture size");
+                }
                 // Drawn, its own width, the room, and how wide it is
                 // with no width given: what a resize let go writes by.
                 let none = page::picture_width(nw, None, self.text_w, max_w, floated).0;

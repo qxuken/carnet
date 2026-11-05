@@ -12633,6 +12633,11 @@ fn the_blocks_beside_a_picture_are_beside_it_from_the_first_frame_back() {
              - the login\n\n```\nme\n```\n\n- the password\n\n```\nsecret\n```\n\n## After\n\n- one\n- two"
         );
         let (mut app, mut d, dir) = library(&format!("beside-back-{edge}-{fresh}"), &[("Vault", &note), ("Other", "words")]);
+        // File timestamps can make Vault the initially opened note. Prime
+        // that same layout deterministically before its picture exists.
+        let vault = app.store.notes.iter().position(|n| n.title == "Vault").unwrap();
+        app.open(vault);
+        d_frame_twice(&mut app, &mut d);
         let rgba: Vec<u8> = (0..400 * 300).flat_map(|_| [94u8, 124, 164, 255]).collect();
         let png = crate::images::encode_png(400, 300, &rgba).unwrap();
         std::fs::create_dir_all(dir.join("attachments")).unwrap();
