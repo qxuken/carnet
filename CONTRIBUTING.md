@@ -176,10 +176,10 @@ Metal's built-in CPU-to-display counter starts later and is reported
 separately. Metal recording itself adds overhead; preserve an uninstrumented
 native run too.
 
-For a single native capture and its summary, the helper runs the steps above:
+For a single native capture and its summary, run the Nushell helper:
 
 ```bash
-scripts/record-native-perf.sh /path/to/note.md /tmp/native-window window 10
+nu scripts/record-native-perf.nu /path/to/note.md /tmp/native-window window 10
 python3 scripts/analyze-native-perf.py /tmp/native-window --single-case --max-latency-ms 20 --max-missed-refreshes 0
 ```
 
