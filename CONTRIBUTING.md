@@ -94,6 +94,125 @@ Frame cost on a note with 2,000 lines:
 cargo test --release big_note -- --nocapture
 ```
 
+Replay a real table-heavy note headlessly (the file is only read):
+
+```bash
+env CARNET_PERF_NOTE=/path/to/note.md cargo test -p carnet --release supplied_note_frame_cost -- --ignored --nocapture
+```
+
+`CARNET_PERF_TABLE_WIDTH=page|window|scroll` picks the table mode;
+`CARNET_PERF_FRAMES` changes the 60-frame samples. Steady frames, wheel
+scrolling through the note, and typing in its largest table must each
+average under 8 ms, with their 95th percentiles under 8 ms too.
+`CARNET_PERF_CAPTURE=/tmp/table.png` captures the first table afterwards.
+To inspect the phases instead, set
+`CARNET_PERF_TRACE=/tmp/note.kuitrace`; recording adds overhead, so that
+run reports timing without enforcing the budget.
+
+Measure the actual native window and renderer over a disposable copy of the
+same note (the original file and user settings are untouched):
+
+```bash
+cargo build --release -p carnet
+target/release/carnet --native-perf /path/to/note.md /tmp/native-perf window 10
+```
+
+The last arguments select `page|window|scroll` and seconds per workload.
+After warming up, it scrolls through the note, then continuously commits and
+backspaces text in its largest table, checking that every operation changed
+the cell. It writes `metadata.json` and `frames.csv`. Inputs go through core
+dispatch and the real app handlers; they bypass OS event delivery. The driver
+uses `Launcher::run`, including the production display-link pacer, and injects
+input in `App::before_frame`, while the previous event tree is still intact.
+`PumpRunner` disables that pacer and must not stand in for this measurement.
+Focus counts are saved for each phase. Keep the window visible on
+the display being measured and avoid other benchmark/build work during a run.
+
+To check that scrolling actually stops rendering, set
+`CARNET_PERF_IDLE_CHECK=1` with the same command. It enables the latency HUD,
+scrolls for the requested duration, then leaves the window idle for five
+seconds without requesting animation frames. `metadata.json` records
+`idle_steady_frames` over the middle 3.5 seconds; more than 12 fails the run.
+A visible caret may blink; an offscreen caret should produce no frames.
+Check the per-phase focus counts before trusting a native idle result.
+
+These CSV timings measure CPU input, view, layout, encoding/submission and
+surface acquisition, and post-submit text-cache maintenance (`maintenance_ms`).
+Maintenance can overlap GPU execution, so adding CPU and GPU work is a
+conservative work sum, not wall-clock duration. **They do not measure GPU completion or presentation.**
+Acquisition can wait for vsync; it is not additional CPU work. The `elapsed_ms` column is read at the next frame's entry;
+`frame_started_ms` records input sampling for the labelled frame. Neither
+column alone establishes physical display cadence. For actual GPU execution and displayed frame
+intervals on macOS, record a Metal System Trace:
+
+```bash
+xcrun xctrace record --template 'Metal System Trace' --output /tmp/native.trace --time-limit 30s --launch -- "$PWD/target/release/carnet" --native-perf /path/to/note.md /tmp/native-perf window 10
+xcrun xctrace export --input /tmp/native.trace --toc --output /tmp/native-perf/metal-toc.xml
+xcrun xctrace export --input /tmp/native.trace --xpath '/trace-toc/run[@number="1"]/data/table[@schema="metal-gpu-intervals" or @schema="displayed-surfaces-interval" or @schema="display-vsyncs-interval"]' --output /tmp/native-perf/metal-data.xml
+```
+
+`scripts/analyze-native-perf.py ROOT` compares `ROOT/validated-{page,window,scroll}`
+CSV runs with `ROOT/gpu-{page,window,scroll}` Metal exports and writes
+`ROOT/summary.json`. It filters the target process, reports physical surface
+coverage before trusting cadence, counts gaps between physical presentations
+(including gaps with no owned surface), unions overlapping GPU intervals, and keeps
+GPU work, displayed intervals and latency separate. GPU passes are grouped by
+native window/frame label, including labelled passes without a hardware GPU
+frame counter. Native GPU passes carry
+window/frame labels. The analyzer follows those texture writes through
+WindowServer's texture reads and scanout-buffer writes, retaining the version
+the compositor sampled even when the client's drawable is later reused.
+Rotating compositor buffers containing the same app frame do not count as
+new app updates. WindowServer versions are resolved per command buffer. A
+retained scanout buffer can be rewritten in place: actual hardware VSYNC
+pulses sample its resource history, and only a new resolved app frame counts
+as an update. Direct client-label changes exclude those in-place updates. Narrative `Frame` numbers and GPU frame counters are separate
+namespaces and must not be joined by number. Its `frame_start_to_display_ms` includes app input,
+build, layout, GPU and compositor latency; it bypasses OS input delivery.
+`frame_start_to_gpu_completion_ms` includes drawable acquisition and GPU queue
+waits. The CPU/GPU work sum excludes those waits and is not an end-to-end frame
+latency or proof that each refresh was met.
+Metal's built-in CPU-to-display counter starts later and is reported
+separately. Metal recording itself adds overhead; preserve an uninstrumented
+native run too.
+
+For a single native capture and its summary, run the Nushell helper:
+
+```bash
+nu scripts/record-native-perf.nu /path/to/note.md /tmp/native-window window 10
+python3 scripts/analyze-native-perf.py /tmp/native-window --single-case --max-latency-ms 20 --max-missed-refreshes 0
+```
+
+The second command fails if physical display coverage is insufficient,
+120 Hz hardware timing cannot be verified, source frames regress, or either
+sustained workload exceeds either limit.
+Each missed presentation includes nearby CPU/acquire/GPU timings and hardware
+VSYNC pulses inside the gap, when available. Independent direct client-label
+cadence is retained as a diagnostic when compositor resource attribution is
+ambiguous; it cannot establish app frame-start latency.
+Add `--max-frame-latency-ms`
+to enforce the correlated frame-start latency too; this also requires at
+least 95% frame correlation. Metal's built-in latency gate also requires at
+least 95% counter coverage. `CARNET_GPU_DISPLAY_ONLY=1` records GPU and Display
+without API tracing; verify that frame labels and scanout coverage are retained.
+`CARNET_PRESENTATION_ONLY=1` records only Display (no GPU timing or frame
+correlation); sparse client labels make its coverage insufficient on some
+composited windows. `CARNET_METAL_TEMPLATE` selects another trace template.
+Use identical instruments for before/after comparisons. `KUI_FRAME_LATENCY=1|2` and
+`KUI_FRAME_PACING=0|HZ` are forwarded explicitly by the capture helper for A/B
+comparisons. On macOS, native-runloop windows acquire Metal drawables on a
+worker by default, leaving AppKit free to deliver input; `KUI_ACQUIRE_THREAD=0`
+selects ordinary synchronous acquisition for a control. The display link
+requests the current monitor’s reported cadence, updating when it changes;
+this is a preference, not proof of scanout rate. `KUI_WINDOW_AT=X,Y` pins the window to the intended display;
+`KUI_SPECIALIZE=0` disables Kui's Metal quad specialization for a renderer
+control. Capture folders and traces must be new; earlier evidence is kept.
+`CARNET_PERF_WINDOW=solid|translucent` selects the benchmark window backdrop
+(default translucent), using the app's existing setting in its disposable store.
+The helper saves display configuration and power state with each capture.
+The stock Metal System Trace template can produce many gigabytes of temporary
+kernel data; budget disk space for recording and saving, not just the final trace.
+
 **Where a frame's time goes.** kui records a running app as a timeline: each frame's phases and why it ran, and Carnet's own spans (`library`, `toolbar`, `page`, `settings`, `sync`, `folder watch`, `autosave`, the pictures let go and handed over), a picture's decode timed on its reader thread (`decode picture`), what the pictures held come to, the moments a note opened or was saved or the folder was read again, which thread woke the window (`wake: sync`, `wake: pictures`, `wake: folder watch`, …) and what asked for a frame (`request: caret reveal`, …). Nothing is timed while nobody records. In a debug build, F12 opens the devtools, whose Perf tab shows it live and records on its button; or write a session to a file and open it in Perfetto or Chrome's tracing:
 
 ```bash

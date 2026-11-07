@@ -1009,6 +1009,92 @@ fn big_note_frame_cost() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Replay a supplied note through the real page builder without a window.
+/// `CARNET_PERF_NOTE=/path/to/note.md cargo test -p carnet --release supplied_note_frame_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "requires CARNET_PERF_NOTE"]
+fn supplied_note_frame_cost() {
+    let source = std::fs::read_to_string(std::env::var("CARNET_PERF_NOTE").expect("CARNET_PERF_NOTE")).unwrap();
+    let (mut app, mut d, dir) = body("supplied-perf");
+    if let Ok(width) = std::env::var("CARNET_PERF_TABLE_WIDTH") {
+        app.settings.table_width = crate::settings::TableWidth::from_key(&width).expect("page, window or scroll");
+    }
+    app.note().doc = carnet_core::doc::from_markdown(&source).1;
+    app.edited();
+    app.caret = Caret::at(page::first(app.doc()));
+    let tables = app.doc().blocks().iter().filter(|b| matches!(b.kind, Kind::Table(_))).count();
+    let cells: usize = app.doc().blocks().iter().map(|b| match &b.kind { Kind::Table(t) => t.rows.len() * t.width(), _ => 0 }).sum();
+    // Let initial text shaping, column settling and disposal of the
+    // first full tree finish before measuring interactive frames.
+    for _ in 0..4 { d.frame(&mut app); }
+    let recording = std::env::var_os("CARNET_PERF_TRACE");
+    if recording.is_some() { d.core.set_perf_recording(true); }
+    let start = Instant::now();
+    let frames = std::env::var("CARNET_PERF_FRAMES").ok().map(|n| n.parse::<u32>().unwrap()).unwrap_or(60).max(1);
+    let mut steady_samples = Vec::new();
+    for _ in 0..frames { let start = Instant::now(); d.frame(&mut app); steady_samples.push(start.elapsed()); }
+    let steady = start.elapsed() / frames;
+    println!("supplied note ({}): {tables} tables, {cells} cells, steady frame {steady:?}", app.settings.table_width.key());
+    let travel = d.core.scroll_geometry(app.scroll_key.unwrap()).unwrap().max_offset.y;
+    let pane = app.page_rect.unwrap();
+    let start = Instant::now();
+    let mut scroll_samples = Vec::new();
+    for _ in 0..frames {
+        let start = Instant::now();
+        d.advance(1.0 / 120.0);
+        d.wheel(&mut app, pane.x + 4.0, pane.y + pane.h / 2.0, 0.0, -travel / frames.max(1) as f32);
+        scroll_samples.push(start.elapsed());
+    }
+    let scrolling = start.elapsed() / frames;
+    let largest = app.doc().blocks().iter().filter_map(|b| match &b.kind {
+        Kind::Table(t) => Some((t.rows.len(), Slot { block: b.id, cell: Some((t.rows[t.body().min(t.rows.len() - 1)].id, t.cols[0])) })),
+        _ => None,
+    }).max_by_key(|(rows, _)| *rows).map(|(_, slot)| slot);
+    let mut typing = Duration::ZERO;
+    let mut typing_samples = Vec::new();
+    if let Some(slot) = largest {
+        app.caret = Caret::at(Pos { slot, byte: 0 });
+        app.reveal = true;
+        for _ in 0..5 { d.advance(0.2); d.frame(&mut app); }
+        let start = Instant::now();
+        for _ in 0..frames { let start = Instant::now(); d.commit(&mut app, "x"); typing_samples.push(start.elapsed()); }
+        typing = start.elapsed() / frames;
+    }
+    println!("wheel scrolling {scrolling:?}, typing in the largest table {typing:?}");
+    let p95 = |samples: &mut Vec<Duration>| {
+        samples.sort_unstable();
+        samples.get((samples.len() * 95).div_ceil(100).saturating_sub(1)).copied().unwrap_or_default()
+    };
+    let tail = [p95(&mut steady_samples), p95(&mut scroll_samples), p95(&mut typing_samples)];
+    println!("p95: steady {:?}, scrolling {:?}, typing {:?}", tail[0], tail[1], tail[2]);
+    let profiled = recording.is_some();
+    if let Some(path) = recording {
+        d.core.set_perf_recording(false);
+        std::fs::write(path, d.core.perf_trace()).unwrap();
+    }
+    if let Ok(path) = std::env::var("CARNET_PERF_CAPTURE") {
+        let id = app.doc().blocks().iter().find(|b| matches!(b.kind, Kind::Table(_))).unwrap().id;
+        let row = d.core.layout_of(app.row_seen[&id].0).unwrap();
+        let scroll = app.scroll_key.unwrap();
+        let g = d.core.scroll_geometry(scroll).unwrap();
+        app.caret = Caret::at(page::first(app.doc()));
+        app.reveal = false;
+        d.core.set_scroll(scroll, Vec2::new(0.0, (g.offset.y + row.y - g.rect.y - 100.0).max(0.0)));
+        d.move_to(&mut app, d.viewport.w - 2.0, d.viewport.h - 2.0);
+        d.frame(&mut app);
+        for _ in 0..3 { d.advance(0.2); d.frame(&mut app); }
+        let frame = kui_native::capture(&d.core).unwrap();
+        std::fs::write(path, crate::images::encode_png(frame.width, frame.height, &frame.rgba).unwrap()).unwrap();
+    }
+    if !profiled {
+        assert!(steady < Duration::from_millis(8), "table-heavy steady frames exceed the 120 Hz budget: {steady:?}");
+        assert!(scrolling < Duration::from_millis(8), "scrolling exceeds the 120 Hz budget: {scrolling:?}");
+        assert!(typing < Duration::from_millis(8), "typing exceeds the 120 Hz budget: {typing:?}");
+        assert!(tail.iter().all(|time| *time < Duration::from_millis(8)), "p95 exceeds the 120 Hz budget: {tail:?}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A little picture file: 4×3 pixels of the accent.
 fn png_file(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let rgba: Vec<u8> = (0..12).flat_map(|_| [194u8, 124, 104, 255]).collect();
@@ -11668,7 +11754,8 @@ fn a_chosen_cell_picture_shows_its_ring_and_no_caret() {
     }
     let pieces = app.cell_pieces.get(&slot).expect("a cell of pieces").clone();
     let r = d.core.layout_of(pieces.iter().find(|p| p.picture).unwrap().key).expect("the picture's box");
-    assert!((r.w - 200.0).abs() <= 1.0, "its own width, not the note's 60: {r:?}");
+    let room = app.cell_rects[&slot].w - 28.0;
+    assert!((r.w - 200.0_f32.min(room)).abs() <= 1.0 && r.w > 60.0, "its natural width within the cell, not the note's 60: {r:?}");
     // The caret's bar in the cell (beside it, or after `x` above it), and
     // its ring 4px out.
     let cell = *app.cell_rects.get(&slot).unwrap();
@@ -13130,12 +13217,13 @@ fn table_width_modes_keep_prose_narrow_and_reveal_the_last_column() {
     let page = rect(&app, table_id);
     assert!((prose.w - page.w).abs() < 1.0);
     let scroll_key = app.row_seen[&table_id].0.str("table-scroll");
-    assert!(d.core.scroll_geometry(scroll_key).unwrap().max_offset.x > 100.0, "Page keeps readable columns in a local scroll");
+    assert!(d.core.scroll_geometry(scroll_key).is_none_or(|g| g.max_offset.x < 1.0), "Page squeezes every column into the text width");
     app.on_settings(Msg::SetTableWidth { to: 1 });
     for _ in 0..4 { d.frame(&mut app); }
     let window = rect(&app, table_id);
     assert!(window.w > page.w + 40.0, "{page:?} {window:?}");
     assert!((rect(&app, prose_id).w - prose.w).abs() < 1.0);
+    assert!(d.core.scroll_geometry(scroll_key).is_none_or(|g| g.max_offset.x < 1.0), "Window squeezes every column into the pane");
     app.on_settings(Msg::SetTableWidth { to: 2 });
     for _ in 0..4 { d.frame(&mut app); }
     assert_eq!(app.settings.table_width, TableWidth::Scroll);
@@ -13152,6 +13240,220 @@ fn table_width_modes_keep_prose_narrow_and_reveal_the_last_column() {
     assert_eq!(app.cell_at(last.x + 20.0, last.y + 20.0), Some(slot));
     assert!(app.cell_at(window.x - 20.0, last.y + 20.0).is_none());
     assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn replayed_tables_keep_hit_testing_and_editing_after_scrolling() {
+    let (mut app, mut d, dir) = body("table-replay-edit");
+    let table = Table::from_cells(vec![vec!["Title".into(), "Author".into()], vec!["**Old** -- title".into(), "An author".into()]]);
+    let table_block = Block::new(Kind::Table(table));
+    let table_id = table_block.id;
+    let mut content: Vec<_> = (0..30).map(|i| Block::text(format!("Paragraph {i}"))).collect();
+    content.push(table_block);
+    content.push(Block::text("After"));
+    app.note().doc = Doc::new(content);
+    app.edited();
+    app.caret = Caret::at(page::first(app.doc()));
+    for _ in 0..4 { d.frame(&mut app); }
+    let Kind::Table(table) = &app.doc().get(table_id).unwrap().kind else { panic!() };
+    let slot = Slot { block: table_id, cell: Some((table.rows[1].id, table.cols[0])) };
+    // Bring the table into view before reading its cell hit boxes.
+    let scroll = app.scroll_key.unwrap();
+    let outer = app.row_rects.iter().find(|(id, _)| *id == table_id).unwrap().1;
+    d.core.set_scroll(scroll, Vec2::new(0.0, (outer.y - 450.0).max(0.0)));
+    for _ in 0..3 { d.advance(0.2); d.frame(&mut app); }
+    let cached = Rc::clone(&app.inline_layouts[&slot]);
+    let before = app.cell_rects[&slot];
+    let offset = d.core.scroll_geometry(scroll).unwrap().offset.y;
+    d.core.set_scroll(scroll, Vec2::new(0.0, offset + before.y - 250.0));
+    for _ in 0..4 { d.advance(0.2); d.frame(&mut app); }
+    let cell = app.cell_rects[&slot];
+    assert!(cell.y < before.y - 100.0);
+    assert_eq!(app.cell_at(cell.x + 20.0, cell.y + cell.h / 2.0), Some(slot));
+    assert!(Rc::ptr_eq(&cached, &app.inline_layouts[&slot]), "scrolling reuses parsed Markdown");
+    assert_eq!(app.shown[&slot].text(page::text(app.doc(), slot)), "Old — title");
+    d.click(&mut app, cell.x + 20.0, cell.y + cell.h / 2.0);
+    d.frame(&mut app);
+    assert_eq!(app.caret.head.slot, slot);
+    type_in(&mut app, &mut d, "New ");
+    assert!(page::text(app.doc(), slot).contains("New "));
+    assert!(!Rc::ptr_eq(&cached, &app.inline_layouts[&slot]), "editing refreshes parsed Markdown");
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert_eq!(page::text(app.doc(), slot), "**Old** -- title");
+    app.caret = Caret::at(page::first(app.doc()));
+    for _ in 0..3 { d.frame(&mut app); }
+    assert_eq!(app.shown[&slot].text(page::text(app.doc(), slot)), "Old — title");
+    // Another note drops the drawing cache. An edit received while away
+    // must not replay the old table when its note is opened again.
+    let note_id = app.store.notes[app.current].id;
+    app.new_note();
+    for _ in 0..2 { d.frame(&mut app); }
+    let original = app.store.notes.iter().position(|n| n.id == note_id).unwrap();
+    let Kind::Table(table) = &mut app.store.notes[original].doc.get_mut(table_id).unwrap().kind else { panic!() };
+    table.rows[1].cells[0] = "**Updated** -- title".into();
+    app.store.notes[original].touch();
+    app.open(original);
+    for _ in 0..3 { d.frame(&mut app); }
+    assert!(app.slot_keys.contains_key(&slot));
+    assert_eq!(app.shown[&slot].text(page::text(app.doc(), slot)), "Updated — title");
+    assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bounded_tables_squeeze_long_words_and_pictures_inside_the_pane() {
+    use crate::settings::TableWidth;
+    let (mut app, mut d, dir) = body("table-squeeze-pictures");
+    d.viewport = kui_native::Size::new(360.0, 500.0);
+    std::fs::create_dir_all(dir.join("attachments")).unwrap();
+    let rgba = vec![160; 100 * 50 * 4];
+    let path = dir.join("attachments/wide.png");
+    std::fs::write(&path, crate::images::encode_png(100, 50, &rgba).unwrap()).unwrap();
+    app.images.preload(&path, crate::images::Decoded { w: 100, h: 50, rgba, shown: None });
+    let mut cells: Vec<String> = (0..24).map(|_| "AnUnbrokenWordThatMustWrapInItsColumn".into()).collect();
+    cells[0] = "![](attachments/wide.png)".into();
+    cells[1] = "![](attachments/missing.png)".into();
+    let table = Table::from_cells(vec![(0..24).map(|i| format!("Column {i}")).collect(), cells]);
+    let table_block = Block::new(Kind::Table(table));
+    let table_id = table_block.id;
+    app.note().doc = Doc::new(vec![Block::text("Before"), table_block, Block::text("After")]);
+    app.edited();
+    app.caret = Caret::at(page::first(app.doc()));
+    for mode in [TableWidth::Page, TableWidth::Window] {
+        app.settings.table_width = mode;
+        for _ in 0..4 { d.frame(&mut app); }
+        let frame = app.row_seen[&table_id].0.str("table-scroll");
+        assert!(d.core.scroll_geometry(frame).is_none());
+        let viewport = d.core.layout_of(app.row_seen[&table_id].0).unwrap();
+        for (slot, cell) in &app.cell_rects {
+            assert!(cell.x >= viewport.x && cell.x + cell.w <= viewport.x + viewport.w + 1.0, "{cell:?} in {viewport:?}");
+            if let Some(pieces) = app.cell_pieces.get(slot) {
+                assert!(cell.w < page::PICTURE_MIN, "exercise a cell below the normal picture minimum");
+                let picture = d.core.layout_of(pieces[0].key).unwrap();
+                assert!(picture.w <= cell.w && picture.x + picture.w <= cell.x + cell.w + 1.0, "{picture:?} in {cell:?}");
+            }
+        }
+        let slots: Vec<_> = app.cell_pieces.keys().copied().collect();
+        assert_eq!(slots.len(), 2);
+        for slot in slots {
+            for byte in [0, page::text(app.doc(), slot).len()] {
+                app.caret = Caret::at(Pos { slot, byte });
+                app.focus_page = true;
+                d_frame_twice(&mut app, &mut d);
+                let cell = app.cell_rects[&slot];
+                let key = d.key_of("caret").unwrap();
+                let caret = d.rect_of(key).unwrap();
+                assert!(caret.x >= cell.x - 0.1 && caret.x + caret.w <= cell.x + cell.w + 0.1,
+                    "caret {caret:?} must fit inside clipped cell {cell:?}");
+            }
+        }
+        assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn neighboring_table_cells_stay_editable_after_replay_and_resize() {
+    let (mut app, mut d, dir) = body("table-cell-replay-resize");
+    app.settings.table_width = crate::settings::TableWidth::Window;
+    d.viewport.w = 1400.0;
+    let table = Table::from_cells(vec![
+        vec!["First column".into(), "Second column".into()],
+        vec!["Editable".into(), format!("**Styled** -- {}", "wide words ".repeat(20))],
+    ]);
+    let row = table.rows[1].id;
+    let columns = table.cols.clone();
+    let block = Block::new(Kind::Table(table));
+    let first = Slot { block: block.id, cell: Some((row, columns[0])) };
+    let second = Slot { block: block.id, cell: Some((row, columns[1])) };
+    app.note().doc = Doc::new(vec![block]);
+    app.edited();
+    app.caret = Caret::at(Pos { slot: first, byte: 0 });
+    app.editing = true;
+    app.focus_page = true;
+    for _ in 0..4 { d.frame(&mut app); }
+    let before = app.cell_rects[&second];
+    for _ in 0..4 { type_in(&mut app, &mut d, "x"); }
+    assert_eq!(page::text(app.doc(), first), "xxxxEditable");
+    assert_eq!(app.shown[&second].text(page::text(app.doc(), second)),
+        format!("Styled — {}", "wide words ".repeat(20)));
+    d.viewport.w = 360.0;
+    for _ in 0..4 { d.advance(0.2); d.frame(&mut app); }
+    let cell = app.cell_rects[&second];
+    assert!(cell.w < before.w, "the cached neighboring cell adopts its new column width: {before:?} -> {cell:?}");
+    d.click(&mut app, cell.x + 20.0, cell.y + 15.0);
+    d.frame(&mut app);
+    assert_eq!(app.caret.head.slot, second);
+    type_in(&mut app, &mut d, "Changed ");
+    assert!(page::text(app.doc(), second).contains("Changed "));
+    key_with(&mut app, &mut d, "z", CTRL);
+    assert!(page::text(app.doc(), second).starts_with("**Styled** -- "));
+    assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn offscreen_tables_keep_their_space_and_materialize_before_a_scroll_jump() {
+    for rows in [12, 82] {
+        let (mut app, mut d, dir) = body("table-window");
+        let table = Table::from_cells((0..rows).map(|r| (0..10).map(|c| {
+            if r > 0 && r % 7 == 0 { String::new() } else {
+                format!("**Row {r}** -- column {c}: `code` [источник](https://example.com/book/{r}/{c}){}", if r % 11 == 0 { "\n" } else { "" })
+            }
+        }).collect()).collect());
+        let slot = Slot { block: 0, cell: Some((table.rows[1].id, table.cols[0])) };
+        let last = table.rows.last().unwrap().id;
+        let col = table.cols[0];
+        let block = Block::new(Kind::Table(table));
+        let slot = Slot { block: block.id, ..slot };
+        let mut content: Vec<_> = (0..60).map(|i| Block::text(format!("Paragraph {i}"))).collect();
+        content.extend([block, Block::text("After")]);
+        app.note().doc = Doc::new(content);
+        app.edited();
+        app.caret = Caret::at(page::first(app.doc()));
+        for _ in 0..4 { d.frame(&mut app); }
+        assert!(!app.slot_keys.contains_key(&slot), "a distant table does not replay hundreds of text nodes");
+        let scroll = app.scroll_key.unwrap();
+        let content_height = d.core.scroll_geometry(scroll).unwrap().content.h;
+        let row = app.row_rects.iter().find(|(id, _)| *id == slot.block).unwrap().1;
+        assert!(row.h > 1000.0, "the measured table keeps its space");
+        d.core.set_scroll(scroll, Vec2::new(0.0, row.y - 150.0));
+        d.advance(1.0);
+        d.frame(&mut app);
+        assert!(app.slot_keys.contains_key(&slot), "even a large jump materializes the destination on the first frame");
+        assert!(!app.slot_keys.contains_key(&Slot { block: slot.block, cell: Some((last, col)) }),
+            "a table with {rows} rows still omits distant cells, including short tables with many columns");
+        d.advance(0.2);
+        d.frame(&mut app);
+        assert!((d.core.scroll_geometry(scroll).unwrap().content.h - content_height).abs() < 1.0);
+        assert!(app.cell_rects.contains_key(&slot), "row {:?}, page {:?}, text key {:?}, text rect {:?}",
+            d.core.layout_of(app.row_seen[&slot.block].0), d.core.scroll_geometry(scroll), app.slot_keys.get(&slot),
+            app.slot_keys.get(&slot).and_then(|key| d.core.caret_rect(*key, 0)));
+        assert!(d.warnings().is_empty(), "{:?}", d.warnings());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn small_tables_keep_natural_width_in_every_mode() {
+    use crate::settings::TableWidth;
+    let (mut app, mut d, dir) = body("table-natural-width");
+    let table = Table::from_cells(vec![vec!["Day".into(), "Count".into()], vec!["Monday".into(), "12".into()]]);
+    let block = Block::new(Kind::Table(table));
+    let id = block.id;
+    app.note().doc = Doc::new(vec![Block::text("Before"), block, Block::text("After")]);
+    app.edited();
+    app.caret = Caret::at(page::first(app.doc()));
+    for mode in TableWidth::ALL {
+        app.settings.table_width = mode;
+        for _ in 0..4 { d.frame(&mut app); }
+        let table = d.core.nodes().iter().find(|n| n.table).unwrap().rect;
+        let pane = d.core.layout_of(app.row_seen[&id].0).unwrap();
+        assert!(table.w < pane.w / 2.0, "{mode:?}: a small table keeps its natural width: {table:?} in {pane:?}");
+        assert!((table.center().x - pane.center().x).abs() < 1.0, "a small table is centered within its room");
+        assert!(d.core.scroll_geometry(app.row_seen[&id].0.str("table-scroll")).is_none_or(|g| g.max_offset.x < 1.0));
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -13418,13 +13720,16 @@ fn search_reveals_matches_in_horizontally_scrolled_tables() {
             if global { key(&mut app, &mut d, "enter"); }
             for _ in 0..8 { d.advance(0.2); d.frame(&mut app); }
             let key = app.row_seen[&table_id].0.str("table-scroll");
-            let geometry = d.core.scroll_geometry(key).unwrap();
-            if geometry.max_offset.x > 0.5 {
+            let viewport = d.core.scroll_geometry(key).map_or_else(|| d.core.layout_of(app.row_seen[&table_id].0).unwrap(), |g| g.rect);
+            if width == TableWidth::Scroll {
+                let geometry = d.core.scroll_geometry(key).unwrap();
                 assert!(geometry.offset.x > 0.5, "{mode}, global={global}: the matching column scrolls into view");
+            } else {
+                assert!(d.core.scroll_geometry(key).is_none(), "{mode}: bounded tables do not scroll horizontally");
             }
             let r = app.rect_at(&d.core, app.caret.head.slot, app.caret.head.byte).unwrap();
-            assert!(r.x >= geometry.rect.x && r.x + r.w <= geometry.rect.x + geometry.rect.w,
-                "{mode}, global={global}: match {r:?} is inside {:?}", geometry.rect);
+            assert!(r.x >= viewport.x && r.x + r.w <= viewport.x + viewport.w,
+                "{mode}, global={global}: match {r:?} is inside {viewport:?}");
             assert_eq!(carnet_core::doc::to_markdown(None, app.doc()), before);
             if !global {
                 assert_eq!(app.fields.get(&d.core.focus().unwrap()), Some(&Field::Find));
@@ -13432,4 +13737,192 @@ fn search_reveals_matches_in_horizontally_scrolled_tables() {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+#[test]
+fn native_perf_refuses_to_overwrite_capture_files() {
+    let (_, _, dir) = fresh("native-perf-output-collision");
+    let original = "| Original note |\n| --- |\n| Keep these words |\n";
+    let path = dir.join("frames.csv");
+    std::fs::write(&path, original).unwrap();
+    let error = native_perf::run(&path, &dir, "window", 1.0).unwrap_err();
+    assert!(error.to_string().contains("capture output already exists"), "{error}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn assistive_reader_gets_every_table_row_when_the_note_scrolls() {
+    let (mut app, mut d, dir) = body("accessible-table-scroll");
+    d.core.env.system.assistive = kui_native::Assistive::Listening;
+    let table = Table::from_cells((0..40).map(|i| vec![format!("Cell number {i}")]).collect());
+    app.store.notes[app.current].doc = Doc::new(vec![Block::text("Before the table"), Block::new(Kind::Table(table)), Block::text("After the table")]);
+    app.caret = Caret::at(page::first(app.doc()));
+    d_frame_twice(&mut app, &mut d);
+    let read_note = |app: &Carnet, d: &mut Drive| {
+        d.core.access_tree().nodes.iter().find(|node| Some(node.key) == app.page_key)
+            .and_then(|node| node.value.clone()).expect("accessible note text")
+    };
+    let before = read_note(&app, &mut d);
+    assert!(before.contains("Cell number 1") && before.contains("Cell number 39"), "{before}");
+    let pane = app.page_rect.unwrap();
+    d.wheel(&mut app, pane.x + pane.w / 2.0, pane.y + pane.h / 2.0, 0.0, -1800.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(read_note(&app, &mut d), before);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn regression_settings_button_keyboard_focus_hides_the_note_caret() {
+    let (mut app, mut d, dir) = body("settings-button-caret");
+    type_in(&mut app, &mut d, "A caret belongs to the focused editor");
+    d.core.set_inspect(true);
+    d.frame(&mut app);
+    assert!(d.key_of("caret").is_some(), "the note initially draws its caret");
+    let button = d.key_of("open-settings").expect("Settings button");
+    d.focus(&mut app, button);
+    // Drive frames the focus gesture: the first displayed frame must
+    // already stop drawing the note's caret.
+    assert!(d.key_of("caret").is_none(), "button focus hides the caret immediately");
+    assert_eq!(d.core.focus(), Some(button));
+    assert!(d.key_of("caret").is_none(), "the note must not draw a caret beneath button focus");
+    assert!(!d.core.has_caret(), "the driver must not arm a blink timer");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn regression_link_cursor_tracks_input_before_the_next_frame() {
+    let (mut app, mut d, dir) = body("link-pointer-immediate");
+    type_in(&mut app, &mut d, "Read [documentation](https://example.test/docs) here");
+    d.frame(&mut app);
+    let text = *app.slot_keys.get(&app.caret.head.slot).unwrap();
+    let r = d.core.caret_rect(text, 7).unwrap();
+    let p = Vec2::new(r.x + 1.0, r.y + r.h / 2.0);
+    d.input(&mut app, InputEvent::CursorMoved(p));
+    assert_ne!(d.core.cursor_shape(), kui_native::CursorShape::Pointer);
+    d.input(&mut app, InputEvent::Modifiers(KeyMods { super_key: true, ..KeyMods::NONE }));
+    assert_eq!(d.core.cursor_shape(), kui_native::CursorShape::Pointer, "Cmd hover must not wait for rendering");
+    d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+    assert_ne!(d.core.cursor_shape(), kui_native::CursorShape::Pointer, "Cmd release must not wait for rendering");
+    d.input(&mut app, InputEvent::Modifiers(KeyMods { super_key: true, ..KeyMods::NONE }));
+    d.input(&mut app, InputEvent::CursorMoved(Vec2::new(p.x + 250.0, p.y)));
+    assert_ne!(d.core.cursor_shape(), kui_native::CursorShape::Pointer, "leaving the link must not wait for rendering");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn regression_cmd_link_pointer_clears_without_another_pointer_move() {
+    for blur in [false, true] {
+        let (mut app, mut d, dir) = body(&format!("link-pointer-release-{blur}"));
+        type_in(&mut app, &mut d, "Read [documentation](https://example.test/docs) here");
+        let slot = app.caret.head.slot;
+        d.frame(&mut app);
+        let text = *app.slot_keys.get(&slot).unwrap();
+        let r = d.core.caret_rect(text, 7).unwrap();
+        let p = Vec2::new(r.x + 1.0, r.y + r.h / 2.0);
+        let cmd = KeyMods { super_key: true, ..KeyMods::NONE };
+        d.input(&mut app, InputEvent::Modifiers(cmd));
+        d.move_to(&mut app, p.x, p.y);
+        d.frame(&mut app);
+        assert_eq!(d.core.cursor_shape(), kui_native::CursorShape::Pointer);
+        d.input(&mut app, InputEvent::MouseDown { button: kui_native::MouseButton::Primary, clicks: 1 });
+        d.frame(&mut app);
+        assert_eq!(store::OPENED.with_borrow_mut(std::mem::take), ["https://example.test/docs"]);
+        if blur {
+            // The browser takes focus; Command is released there. The
+            // application gets no physical modifier-up or pointer move.
+            d.core.set_focused(false);
+            app.after_input(&mut d.core);
+            assert_ne!(d.core.cursor_shape(), kui_native::CursorShape::Pointer, "blur clears the hand before rendering");
+            d.frame(&mut app);
+            d.core.set_focused(true);
+        } else {
+            d.input(&mut app, InputEvent::MouseUp { button: kui_native::MouseButton::Primary });
+            d.input(&mut app, InputEvent::Modifiers(KeyMods::NONE));
+            assert_ne!(d.core.cursor_shape(), kui_native::CursorShape::Pointer, "modifier release clears the hand before rendering");
+        }
+        d.frame(&mut app);
+        assert_eq!(d.core.modifiers(), KeyMods::NONE);
+        assert_ne!(d.core.cursor_shape(), kui_native::CursorShape::Pointer,
+            "blur={blur}: opening a link must not leave a stale hand cursor");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn regression_large_table_stops_requesting_frames_after_a_long_scroll() {
+    // 17 rows is the smallest virtualized table; keep the larger scene
+    // from the report too. The caret remains in the first offscreen row.
+    for (rows, cols) in [(17, 1), (200, 10)] {
+        let mut markdown = format!("| {} |\n| {} |\n",
+            (0..cols).map(|c| format!("Column {c}")).collect::<Vec<_>>().join(" | "),
+            vec!["---"; cols].join(" | "));
+        for row in 0..rows {
+            markdown.push('|');
+            for col in 0..cols {
+                markdown.push_str(&format!(" Row {row}, column {col}, some wrapping words |"));
+            }
+            markdown.push('\n');
+        }
+        let (mut app, mut d, dir) = library(&format!("table-scroll-idle-{rows}-{cols}"), &[("Table", &markdown)]);
+        app.settings.table_width = crate::settings::TableWidth::Window;
+        app.caret = Caret::at(page::first(app.doc()));
+        app.focus_page = true;
+        d.frame(&mut app);
+        d.frame(&mut app);
+        d.core.set_perf_recording(true);
+        let pane = app.page_rect.unwrap();
+        for _ in 0..256 {
+            d.advance(1.0 / 120.0);
+            d.wheel(&mut app, pane.x + pane.w / 2.0, pane.y + pane.h / 2.0, 0.0, -80.0);
+        }
+        d.move_to(&mut app, 8.0, 8.0);
+        for _ in 0..240 {
+            if !d.core.owed().any() { break; }
+            d.advance(1.0 / 120.0);
+            d.frame(&mut app);
+        }
+        assert!(!d.core.owed().any(), "{rows}×{cols}: scrolling stopped but frames remain owed: {:?}; causes: {:?}", d.core.owed(), d.core.owed_by());
+        assert!(!d.core.has_caret(), "the offscreen caret must not schedule blink frames");
+        // Bringing the caret back must still paint it promptly.
+        let page = app.scroll_key.unwrap();
+        d.core.set_scroll(page, Vec2::ZERO);
+        for _ in 0..120 {
+            d.advance(1.0 / 120.0);
+            d.frame(&mut app);
+            if !d.core.owed().any() { break; }
+        }
+        assert!(d.core.scroll_offset(page).y < 1.0, "the smooth scroll returned to the top");
+        assert!(d.key_of("caret").is_some(), "the visible caret returns");
+        assert!(d.core.has_caret(), "visible caret blinking resumes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+fn regression_culled_table_stops_requesting_geometry_while_idle() {
+    // A single small table is enough once it is wholly above the viewport.
+    let markdown = format!("Intro\n\n| A |\n|---|\n| one |\n\n{}",
+        (0..40).map(|n| format!("Paragraph {n}\n\n")).collect::<String>());
+    let (mut app, mut d, dir) = library("culled-table-idle", &[("Table", &markdown)]);
+    app.caret = Caret::at(page::first(app.doc()));
+    app.focus_page = true;
+    d.frame(&mut app);
+    d.core.set_perf_recording(true);
+    let pane = app.page_rect.unwrap();
+    for _ in 0..40 {
+        d.advance(1.0 / 120.0);
+        d.wheel(&mut app, pane.x + pane.w / 2.0, pane.y + pane.h / 2.0, 0.0, -100.0);
+    }
+    d.move_to(&mut app, 8.0, 8.0);
+    for _ in 0..240 {
+        if !d.core.owed().any() { break; }
+        d.advance(1.0 / 120.0);
+        d.frame(&mut app);
+    }
+    let table = app.doc().blocks().iter().find(|b| matches!(b.kind, Kind::Table(_))).unwrap().id;
+    let rect = app.row_rects.iter().find(|(id, _)| *id == table).unwrap().1;
+    assert!(rect.y + rect.h < app.page_rect.unwrap().y, "the table really is above the viewport");
+    assert!(!d.core.owed().any(), "an unchanged offscreen table must not ask for geometry: {:?}", d.core.owed_by());
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -26,11 +26,22 @@ mod watch;
 #[cfg(test)]
 mod sync_tests;
 
+// One queued frame removes a refresh of latency on the measured Metal path.
+const NATIVE_FRAME_LATENCY: u32 = if cfg!(target_os = "macos") { 1 } else { 2 };
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `carnet --tokens docs/tokens.json`: the design system's tokens, as
     // JSON, for the design reference. (A file, not stdout: a windowed app
     // on Windows has no console to print to.)
     let args: Vec<String> = std::env::args().collect();
+    // A visible native window over an isolated copy of a supplied note.
+    if let Some(i) = args.iter().position(|a| a == "--native-perf") {
+        let note = args.get(i + 1).ok_or("--native-perf needs NOTE OUTPUT [page|window|scroll] [seconds]")?;
+        let output = args.get(i + 2).ok_or("--native-perf needs an output directory")?;
+        let mode = args.get(i + 3).map_or("page", String::as_str);
+        let seconds = args.get(i + 4).map(|s| s.parse::<f64>()).transpose()?.unwrap_or(10.0);
+        return app::native_perf::run(note.as_ref(), output.as_ref(), mode, seconds);
+    }
     if let Some(i) = args.iter().position(|a| a == "--tokens") {
         let path = args.get(i + 1).map_or("tokens.json", String::as_str);
         std::fs::write(path, design::tokens_json())?;
@@ -79,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.error = Some(format!("Couldn't open {} ({e}); showing Documents/Carnet", dir.display()));
     }
     kui_native::app("Carnet")
+        .frame_latency(NATIVE_FRAME_LATENCY)
         // The app draws its own titlebar: the page runs to the top edge.
         // A toolbar's height, so on a Mac the traffic lights sit level with
         // the strip's tools and the library's name, not above them.

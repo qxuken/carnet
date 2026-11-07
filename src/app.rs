@@ -54,6 +54,8 @@ use pick_view::Pick;
 use chrome::ago;
 #[path = "app_search.rs"]
 mod search_view;
+#[path = "app_native_perf.rs"]
+pub(crate) mod native_perf;
 
 use crate::design::{Type, radius, size};
 
@@ -682,6 +684,11 @@ pub struct Carnet {
     /// Each table cell's box as the last frame laid it out: what a click is
     /// matched against.
     cell_rects: HashMap<Slot, Rect>,
+    table_columns: crate::table_layout::Cache,
+    inline_layouts: HashMap<Slot, Rc<page_view::InlineLayout>>,
+    table_views: HashMap<u64, page_view::TableView>,
+    table_revision: i64,
+    table_window: Option<(f32, f32)>,
     /// A table cell with pictures among its words, as last drawn: its
     /// stretches of words and its pictures, one under another, what the
     /// caret is measured against there in place of one text node.
@@ -1110,6 +1117,11 @@ editor! {
     open_ask: Option<std::path::PathBuf>,
     menu_at: Vec2 = Vec2::new(0.0, 0.0),
     cell_rects: HashMap<Slot, Rect>,
+    table_columns: crate::table_layout::Cache,
+    inline_layouts: HashMap<Slot, Rc<page_view::InlineLayout>>,
+    table_views: HashMap<u64, page_view::TableView>,
+    table_revision: i64,
+    table_window: Option<(f32, f32)>,
     cell_pieces: HashMap<Slot, Vec<Piece>>,
     drawn: HashMap<Slot, u64>,
     goal_x: Option<f32>,
@@ -1356,6 +1368,11 @@ impl Carnet {
             open_ask: None,
             menu_at: Vec2::new(0.0, 0.0),
             cell_rects: HashMap::new(),
+            table_columns: crate::table_layout::Cache::default(),
+            inline_layouts: HashMap::new(),
+            table_views: HashMap::new(),
+            table_revision: 0,
+            table_window: None,
             cell_pieces: HashMap::new(),
             drawn: HashMap::new(),
             goal_x: None,
@@ -5054,6 +5071,19 @@ impl App for Carnet {
         let name = ui.window_name();
         if let Some(i) = self.windows.iter().position(|w| *w.name() == *name) {
             self.in_window(i, |app| app.window_view(ui));
+        }
+    }
+
+    // Pointer and modifier changes must reach the OS cursor before the
+    // next rendered frame, using this window's last text geometry.
+    fn after_input(&mut self, core: &mut Core) {
+        if core.env.window.id == kui_native::WindowId::MAIN {
+            self.update_link_cursor(core);
+        } else {
+            let name = core.window_name();
+            if let Some(i) = self.windows.iter().position(|w| *w.name() == *name) {
+                self.in_window(i, |app| app.update_link_cursor(core));
+            }
         }
     }
 
