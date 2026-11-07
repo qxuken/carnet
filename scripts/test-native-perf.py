@@ -14,6 +14,12 @@ cadence = analyzer["presentation_cadence"]
 
 
 class PhysicalCadence(unittest.TestCase):
+    def test_pulses_only_at_the_edges_do_not_verify_hardware_rate(self):
+        times = [i / 120 for i in range(1201)]
+        shown = [dict(at=t, display="panel") for t in times]
+        result = cadence(shown, {"panel": times[:3] + times[-3:]})
+        self.assertIsNone(result["hardware_refresh_hz"])
+
     def test_sixty_hz_hardware_pulses_do_not_count_as_misses(self):
         times = [i / 60 for i in range(61)]
         shown = [dict(at=t, display="panel") for t in times]

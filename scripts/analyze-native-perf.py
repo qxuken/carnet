@@ -139,7 +139,9 @@ def presentation_cadence(shown, vsyncs=None, reported_hz=None):
         matched = pulses[first:last]
         if len(matched) >= 4:
             period = statistics.median(b - a for a, b in zip(matched, matched[1:]))
-            if period > 0 and matched[0] <= shown[0]["at"] + 2 * period and matched[-1] >= shown[-1]["at"] - 2 * period:
+            expected_span = period * (len(matched) - 1)
+            if (period > 0 and expected_span >= .95 * (shown[-1]["at"] - shown[0]["at"])
+                    and matched[0] <= shown[0]["at"] + 2 * period and matched[-1] >= shown[-1]["at"] - 2 * period):
                 hardware_hz = 1 / period
     refresh_hz = hardware_hz or reported_hz or 120
     # Visible interval lengths alone hide gaps with no owned surface.
