@@ -13305,6 +13305,7 @@ fn replayed_tables_keep_hit_testing_and_editing_after_scrolling() {
 fn bounded_tables_squeeze_long_words_and_pictures_inside_the_pane() {
     use crate::settings::TableWidth;
     let (mut app, mut d, dir) = body("table-squeeze-pictures");
+    d.viewport = kui_native::Size::new(360.0, 500.0);
     std::fs::create_dir_all(dir.join("attachments")).unwrap();
     let rgba = vec![160; 100 * 50 * 4];
     let path = dir.join("attachments/wide.png");
@@ -13331,6 +13332,20 @@ fn bounded_tables_squeeze_long_words_and_pictures_inside_the_pane() {
                 assert!(cell.w < page::PICTURE_MIN, "exercise a cell below the normal picture minimum");
                 let picture = d.core.layout_of(pieces[0].key).unwrap();
                 assert!(picture.w <= cell.w && picture.x + picture.w <= cell.x + cell.w + 1.0, "{picture:?} in {cell:?}");
+            }
+        }
+        let slots: Vec<_> = app.cell_pieces.keys().copied().collect();
+        assert_eq!(slots.len(), 2);
+        for slot in slots {
+            for byte in [0, page::text(app.doc(), slot).len()] {
+                app.caret = Caret::at(Pos { slot, byte });
+                app.focus_page = true;
+                d_frame_twice(&mut app, &mut d);
+                let cell = app.cell_rects[&slot];
+                let key = d.key_of("caret").unwrap();
+                let caret = d.rect_of(key).unwrap();
+                assert!(caret.x >= cell.x - 0.1 && caret.x + caret.w <= cell.x + cell.w + 0.1,
+                    "caret {caret:?} must fit inside clipped cell {cell:?}");
             }
         }
         assert!(d.warnings().is_empty(), "{:?}", d.warnings());
@@ -13722,6 +13737,39 @@ fn search_reveals_matches_in_horizontally_scrolled_tables() {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+#[test]
+fn native_perf_refuses_to_overwrite_capture_files() {
+    let (_, _, dir) = fresh("native-perf-output-collision");
+    let original = "| Original note |\n| --- |\n| Keep these words |\n";
+    let path = dir.join("frames.csv");
+    std::fs::write(&path, original).unwrap();
+    let error = native_perf::run(&path, &dir, "window", 1.0).unwrap_err();
+    assert!(error.to_string().contains("capture output already exists"), "{error}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn assistive_reader_gets_every_table_row_when_the_note_scrolls() {
+    let (mut app, mut d, dir) = body("accessible-table-scroll");
+    d.core.env.system.assistive = kui_native::Assistive::Listening;
+    let table = Table::from_cells((0..40).map(|i| vec![format!("Cell number {i}")]).collect());
+    app.store.notes[app.current].doc = Doc::new(vec![Block::text("Before the table"), Block::new(Kind::Table(table)), Block::text("After the table")]);
+    app.caret = Caret::at(page::first(app.doc()));
+    d_frame_twice(&mut app, &mut d);
+    let read_note = |app: &Carnet, d: &mut Drive| {
+        d.core.access_tree().nodes.iter().find(|node| Some(node.key) == app.page_key)
+            .and_then(|node| node.value.clone()).expect("accessible note text")
+    };
+    let before = read_note(&app, &mut d);
+    assert!(before.contains("Cell number 1") && before.contains("Cell number 39"), "{before}");
+    let pane = app.page_rect.unwrap();
+    d.wheel(&mut app, pane.x + pane.w / 2.0, pane.y + pane.h / 2.0, 0.0, -1800.0);
+    d_frame_twice(&mut app, &mut d);
+    assert_eq!(read_note(&app, &mut d), before);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]

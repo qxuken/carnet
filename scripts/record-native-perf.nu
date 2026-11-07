@@ -13,17 +13,18 @@ def main [
     seconds: number = 10 # Per workload
     binary: path = $DEFAULT_BINARY
 ] {
-    mkdir $output
-    let output = ($output | path expand --strict)
+    let output = ($output | path expand --no-symlink)
     let trace = $"($output).trace"
     let metadata = ($output | path join metadata.json)
-    if ($trace | path exists) or ($metadata | path exists) {
+    if ($trace | path exists) or ($output | path exists) {
         print --stderr $"Output already exists: ($output)"
         exit 2
     }
 
     let note = ($note | path expand --strict)
     let binary = ($binary | path expand --strict)
+    mkdir ($output | path dirname)
+    ^mkdir -- $output
     let limit = $"(2 * $seconds + 10)s"
     mut options = if $env.CARNET_GPU_DISPLAY_ONLY? == "1" {
         [record --instrument GPU --instrument Display]
@@ -44,7 +45,7 @@ def main [
         binary_sha256: (open --raw $binary | hash sha256)
         source_sha256: (open --raw $note | hash sha256)
         xctrace_options: $options
-    } | to json --indent 2 | save --force ($output | path join recording.json)
+    } | to json --indent 2 | save ($output | path join recording.json)
 
     ^system_profiler SPDisplaysDataType out> ($output | path join displays.txt)
     ^pmset -g batt out> ($output | path join power.txt)

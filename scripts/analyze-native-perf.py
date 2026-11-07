@@ -16,6 +16,7 @@ import datetime
 import json
 import math
 import re
+import statistics
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from pathlib import Path
@@ -128,14 +129,29 @@ def union_ms(intervals):
     return total / 1e6
 
 
-def presentation_cadence(shown, vsyncs=None):
+def presentation_cadence(shown, vsyncs=None, reported_hz=None):
     shown = sorted(shown, key=lambda s: s["at"])
+    hardware_hz = None
+    if shown and vsyncs is not None and len({s.get("display") for s in shown}) == 1:
+        pulses = vsyncs.get(shown[0].get("display"), [])
+        first = bisect.bisect_left(pulses, shown[0]["at"] - .00025)
+        last = bisect.bisect_right(pulses, shown[-1]["at"] + .00025)
+        matched = pulses[first:last]
+        if len(matched) >= 4:
+            period = statistics.median(b - a for a, b in zip(matched, matched[1:]))
+            if period > 0 and matched[0] <= shown[0]["at"] + 2 * period and matched[-1] >= shown[-1]["at"] - 2 * period:
+                hardware_hz = 1 / period
+    refresh_hz = hardware_hz or reported_hz or 120
     # Visible interval lengths alone hide gaps with no owned surface.
     intervals = [1000 * (b["at"] - a["at"]) for a, b in zip(shown, shown[1:])]
-    misses = sum(max(0, round(t / BUDGET_MS) - 1) for t in intervals)
+    # Round from a common origin so a consistently slow cadence cannot
+    # discard fractional missed slots separately in each interval.
+    slots = [round((s["at"] - shown[0]["at"]) * refresh_hz) for s in shown]
+    missed = [max(0, b - a - 1) for a, b in zip(slots, slots[1:])]
+    misses = sum(missed)
     events = []
-    for a, b, t in zip(shown, shown[1:], intervals):
-        if round(t / BUDGET_MS) <= 1:
+    for a, b, t, count in zip(shown, shown[1:], intervals, missed):
+        if count == 0:
             continue
         pulses = vsyncs.get(b.get("display")) if vsyncs is not None else None
         # Exclude the pulses at either presentation boundary, allowing for
@@ -144,11 +160,13 @@ def presentation_cadence(shown, vsyncs=None):
                           bisect.bisect_left(pulses, b["at"] - .00025)]
                    if pulses is not None and a.get("display") == b.get("display") else None)
         events.append(dict(at_seconds=b["at"], interval_ms=t,
-                           missed_slots=max(0, round(t / BUDGET_MS) - 1),
+                           missed_slots=count,
                            previous_surface_frame=a.get("frame", a.get("native_frame")),
                            surface_frame=b.get("frame", b.get("native_frame")),
                            intervening_hardware_vsync_seconds=between))
-    return dict(displayed_fps=len(intervals) / (sum(intervals) / 1000) if intervals else None,
+    return dict(displayed_fps=len(intervals) / (sum(intervals) / 1000) if intervals and sum(intervals) > 0 else None,
+                cadence_refresh_hz=refresh_hz,
+                hardware_refresh_hz=hardware_hz,
                 displayed_frame_interval_ms=distribution(intervals),
                 missed_presentations=events,
                 missed_refresh_slots=misses,
@@ -271,13 +289,15 @@ def metal_case(folder):
         version_key = "native_frame" if resource_attribution else "frame"
         shown = [s for i, s in enumerate(visible) if i == 0
                  or s[version_key] != visible[i - 1][version_key]]
-        cadence = presentation_cadence(shown, vsyncs)
+        reported_hz = cpu["metadata"].get("display_reported_hz")
+        cadence = presentation_cadence(shown, vsyncs, reported_hz)
         spans, busy = [], []
         for intervals in gpu.values():
             if low <= min(a for a, _ in intervals) / 1e9 <= high:
                 spans.append((max(b for _, b in intervals) - min(a for a, _ in intervals)) / 1e6)
                 busy.append(union_ms(intervals))
         coverage = sum(durations) / 1000 / (high - low)
+        presentation_span = (shown[-1]["at"] - shown[0]["at"]) / (high - low) if shown else 0
         native_of = lambda s: s.get("native_frame") if resource_attribution else None
         frame_latency = [1000 * (s["at"] - offset - starts[native_of(s)])
                          for s in shown if native_of(s) in starts]
@@ -317,13 +337,14 @@ def metal_case(folder):
             event["nearby_frames"] = nearby
         phases[phase] = dict(
             observed_surface_coverage=coverage,
+            presentation_span_coverage=presentation_span,
             cadence_is_representative=.95 < coverage < 1.05,
             surface_attribution="GPU texture writes and compositor reads" if resource_attribution else "direct client labels; GPU/frame correlation unavailable",
             direct_client_label_observation=dict(
                 measurement_scope="client-labelled surface changes; excludes content updates inside retained intervals",
                 observed_surface_coverage=direct_coverage,
                 cadence_is_representative=.95 < direct_coverage < 1.05,
-                **presentation_cadence(direct, vsyncs)),
+                **presentation_cadence(direct, vsyncs, reported_hz)),
             compositor_ambiguous_source_groups=ambiguous,
             scanout_sampling="surface intervals subdivided at recorded hardware VSYNC pulses",
             repeated_app_scanouts=len(visible) - len(shown),
@@ -384,6 +405,12 @@ def main():
             if args.max_latency_ms is not None:
                 passed &= latency is not None and latency["p95"] <= args.max_latency_ms and result["metal_latency_coverage"] >= .95
             if args.max_missed_refreshes is not None:
+                observed_hz = result["hardware_refresh_hz"]
+                verified = (observed_hz is not None and abs(observed_hz - 120) < .5
+                            and result["presentation_span_coverage"] >= .95)
+                if not verified:
+                    print("  refresh gate requires measured 120 Hz hardware timing across the sustained workload")
+                passed &= verified
                 passed &= result["missed_refresh_slots"] <= args.max_missed_refreshes
                 passed &= result["source_frame_regressions"] == 0
             if args.max_frame_latency_ms is not None:

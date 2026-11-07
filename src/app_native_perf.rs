@@ -6,6 +6,7 @@ use kui_native::{InputEvent, KeyMods, KeyPress};
 use serde_json::json;
 use std::cell::RefCell;
 use std::fmt::Write;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 struct Sample {
@@ -183,8 +184,9 @@ impl NativePerf {
             let t = s.timing;
             writeln!(&mut csv, "{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}", s.phase, s.frame, s.at_ms, s.started_ms, t.input_ms, t.view_ms, t.layout_ms, t.render_ms, t.maintenance_ms, t.wait_ms, t.work(), t.total())?;
         }
-        std::fs::write(self.output.join("frames.csv"), csv)?;
-        std::fs::write(self.output.join("metadata.json"), serde_json::to_vec_pretty(&metadata)?)?;
+        std::fs::File::create_new(self.output.join("frames.csv"))?.write_all(csv.as_bytes())?;
+        std::fs::File::create_new(self.output.join("metadata.json"))?
+            .write_all(&serde_json::to_vec_pretty(&metadata)?)?;
         if idle_frames.is_some_and(|count| count > 12) {
             return Err(format!("scrolling stopped but {} frames rendered during 3.5 seconds of idle", idle_frames.unwrap()).into());
         }
@@ -214,9 +216,17 @@ impl App for NativePerf {
 pub fn run(note: &Path, output: &Path, mode: &str, seconds: f64) -> Result<(), Box<dyn std::error::Error>> {
     if !seconds.is_finite() || !(1.0..=120.0).contains(&seconds) { return Err("seconds must be between 1 and 120".into()); }
     let table_width = crate::settings::TableWidth::from_key(mode).ok_or("table mode must be page, window or scroll")?;
-    std::fs::create_dir_all(output)?;
     let source = std::fs::read_to_string(note)?;
-    let store = Store::open(output.join(format!("library-{}", std::process::id())))?;
+    std::fs::create_dir_all(output)?;
+    for name in ["frames.csv", "metadata.json"] {
+        let path = output.join(name);
+        if path.symlink_metadata().is_ok() {
+            return Err(format!("capture output already exists: {}", path.display()).into());
+        }
+    }
+    let library = output.join(format!("library-{}", std::process::id()));
+    std::fs::create_dir(&library)?;
+    let store = Store::open(library)?;
     let translucent = match std::env::var("CARNET_PERF_WINDOW").as_deref() {
         Ok("solid") => false,
         Ok("translucent") | Err(_) => true,

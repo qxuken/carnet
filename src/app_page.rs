@@ -1639,10 +1639,13 @@ impl Carnet {
             view.revision = self.table_revision;
         }
         view.interactive = interactive;
+        // An assistive client reads the complete note from its line nodes.
+        // Keep those nodes available when it is listening, even off screen.
+        let assistive = ui.env().system.assistive.is_listening();
         let mut y = self.row_rects.iter().rev().find(|(block, _)| *block == id).map(|(_, r)| r.y + l.air(14.0) + 2.0);
         let visible: Vec<bool> = table.rows.iter().enumerate().map(|(r, row)| {
             let Some(&height) = view.heights.get(r) else { return true };
-            let show = match (y, self.table_window) {
+            let show = assistive || match (y, self.table_window) {
                 (Some(at), Some((top, bottom))) => at + height >= top && at <= bottom,
                 _ => true,
             } || (self.caret.head.slot.block == id && self.caret.head.slot.cell.is_some_and(|(r, _)| r == row.id));
@@ -1659,7 +1662,7 @@ impl Carnet {
         let frame = NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0))
             .cross_align(if table_w < available { Align::Center } else { Align::Start });
         let frame = if self.settings.table_width == TableWidth::Scroll { frame.scroll_x().scrollbar_width(5.0) } else { frame };
-        if !changed && !view.pictures && self.caret.head.slot.block != id
+        if !assistive && !changed && !view.pictures && self.caret.head.slot.block != id
             && let Some((top, bottom)) = self.table_window
             && let Some((_, rect)) = self.row_rects.iter().rev().find(|(block, _)| *block == id)
             && (rect.y + rect.h < top || rect.y > bottom)
@@ -1756,7 +1759,7 @@ impl Carnet {
                                                 Value::Int(view.layouts[r][c].drawn as i64),
                                                 Value::Int(if live { view.revision } else { 0 })]);
                                             ui.memo("content", &stamp, |ui| {
-                                                self.cell_line(ui, l, slot, &row.cells[c], style, cov, (widths[c] - 2.0 * cell_pad).max(1.0));
+                                                self.cell_line(ui, l, slot, &row.cells[c], style, cov, (widths[c] - 2.0 * cell_pad).max(1.0), cell_pad);
                                                 text_key = self.slot_keys.get(&slot).copied();
                                             });
                                         },
@@ -1800,7 +1803,7 @@ impl Carnet {
     /// caret, which stands beside it where no words are; chosen, it wears
     /// the accent's ring, and the caret isn't shown.
     #[allow(clippy::too_many_arguments)]
-    fn cell_line(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, style: TextStyle, cov: &Coverage, room: f32) {
+    fn cell_line(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, style: TextStyle, cov: &Coverage, room: f32, padding: f32) {
         let pictures = self.inline_layout(slot, text).pictures.clone();
         if pictures.is_empty() {
             self.cell_pieces.remove(&slot);
@@ -1845,7 +1848,7 @@ impl Carnet {
                     }
                     Some(p) => {
                         let side = at_caret.then_some(byte >= b);
-                        let key = self.cell_picture(ui, l, p, room, chosen(a, b), side);
+                        let key = self.cell_picture(ui, l, p, room, padding.min(5.0), chosen(a, b), side);
                         pieces.push(Piece { from: a, to: b, key, picture: true, file: false });
                     }
                 });
@@ -1867,7 +1870,8 @@ impl Carnet {
     /// on its own line has. `chosen`, the accent's ring round it; the
     /// caret beside it on the left or the right (`side`, `true` the
     /// right), drawn while nothing is selected. Returns its box's node.
-    fn cell_picture(&mut self, ui: &mut Ui<'_>, l: &Look, p: &carnet_core::doc::CellPicture, room: f32, chosen: bool, side: Option<bool>) -> Key {
+    #[allow(clippy::too_many_arguments)]
+    fn cell_picture(&mut self, ui: &mut Ui<'_>, l: &Look, p: &carnet_core::doc::CellPicture, room: f32, caret_gap: f32, chosen: bool, side: Option<bool>) -> Key {
         let t = l.t;
         let folder = self.page_folder();
         let file = self.store.picture_file(&folder, &p.src, p.wiki);
@@ -1890,7 +1894,7 @@ impl Carnet {
                 .radius(1.0)
                 .bg(t.accent)
                 .opacity(if blink { 1.0 } else { 0.0 })
-                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { 5.0 } else { -5.0 }, 0.0))
+                .float(FloatConfig::parent().inside(if right { Align::End } else { Align::Start }, Align::Center).offset(if right { caret_gap } else { -caret_gap }, 0.0))
                 .role(Role::None)
         };
         let Some((nw, nh)) = natural else {

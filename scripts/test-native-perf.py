@@ -14,6 +14,19 @@ cadence = analyzer["presentation_cadence"]
 
 
 class PhysicalCadence(unittest.TestCase):
+    def test_sixty_hz_hardware_pulses_do_not_count_as_misses(self):
+        times = [i / 60 for i in range(61)]
+        shown = [dict(at=t, display="panel") for t in times]
+        result = cadence(shown, {"panel": times})
+        self.assertAlmostEqual(result["hardware_refresh_hz"], 60)
+        self.assertEqual(result["missed_refresh_slots"], 0)
+
+    def test_slower_presentations_accumulate_missed_slots(self):
+        for fps in (90, 100):
+            with self.subTest(fps=fps):
+                result = cadence([dict(at=i / fps) for i in range(fps + 1)])
+                self.assertEqual(result["missed_refresh_slots"], 120 - fps)
+
     def test_every_refresh(self):
         result = cadence([dict(at=n / 120) for n in range(31)])
         self.assertAlmostEqual(result["displayed_fps"], 120)

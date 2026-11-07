@@ -184,7 +184,8 @@ python3 scripts/analyze-native-perf.py /tmp/native-window --single-case --max-la
 ```
 
 The second command fails if physical display coverage is insufficient,
-source frames regress, or either sustained workload exceeds either limit.
+120 Hz hardware timing cannot be verified, source frames regress, or either
+sustained workload exceeds either limit.
 Each missed presentation includes nearby CPU/acquire/GPU timings and hardware
 VSYNC pulses inside the gap, when available. Independent direct client-label
 cadence is retained as a diagnostic when compositor resource attribution is
