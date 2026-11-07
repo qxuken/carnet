@@ -106,7 +106,88 @@ fn hash(s: &str) -> u64 {
     h.finish()
 }
 
+/// A slot's Markdown does not change when the caret blinks or the page
+/// scrolls. Keep the compact drawing data, rather than parsing it again
+/// for pictures, styles and source-to-screen positions on every frame.
+pub(super) struct InlineLayout {
+    source: String,
+    runs: Vec<(usize, usize, inline::Style)>,
+    hidden: Vec<(usize, usize)>,
+    dashes: Vec<(usize, usize)>,
+    pictures: Vec<carnet_core::doc::CellPicture>,
+    visible: Option<inline::Visible>,
+    drawn: u64,
+}
+
+#[derive(Default)]
+pub(super) struct TableView {
+    source: Option<(Table, Look, Vec<f32>)>,
+    revision: i64,
+    paint_revision: i64,
+    pictures: bool,
+    interactive: bool,
+    culled: bool,
+    cells: Vec<CellNode>,
+    layouts: Vec<Vec<Rc<InlineLayout>>>,
+    heights: Vec<f32>,
+    visible: Vec<bool>,
+}
+
+struct CellNode {
+    slot: Slot,
+    row: Key,
+    cell: Key,
+    text: Key,
+    layout: Rc<InlineLayout>,
+}
+
+impl InlineLayout {
+    fn new(text: &str, cell: bool) -> Self {
+        let _cell = inline::cell_text(cell);
+        let runs = inline::runs(text);
+        let hidden: Vec<_> = runs.iter().filter(|r| r.2.marker).map(|r| (r.0, r.1)).collect();
+        let dashes = inline::dashes(text);
+        let pictures = if text.contains("![") { inline::cell_pictures(text) } else { Vec::new() };
+        let visible = (!hidden.is_empty() || !dashes.is_empty()).then(|| inline::Visible::page(text));
+        let drawn = hash(&format!("{hidden:?}{text}"));
+        Self { source: text.into(), runs, hidden, dashes, pictures, visible, drawn }
+    }
+
+    /// Shape the same visible runs as `line_part`. Paint-only selection,
+    /// link and highlight colors do not affect a row's measured height.
+    fn height(&self, ui: &mut Ui<'_>, l: &Look, style: TextStyle, width: f32) -> f32 {
+        let mut cuts = vec![0, self.source.len()];
+        cuts.extend(self.runs.iter().map(|r| r.0));
+        cuts.extend(self.dashes.iter().flat_map(|&(a, b)| [a, b]));
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut spans = Vec::new();
+        let mut broken = false;
+        for pair in cuts.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let s = self.runs.iter().find(|r| r.0 <= a && a < r.1).map(|r| r.2).unwrap_or_default();
+            if s.marker { continue; }
+            let dash = self.dashes.iter().any(|&(f, to)| f <= a && b <= to);
+            let text = if dash { inline::EM_DASH } else { &self.source[a..b] };
+            let mut span = Span::new(text);
+            if s.bold { span = span.bold(); }
+            if s.italic { span = span.italic(); }
+            if s.code { span = span.family(l.code).size((style.size * 0.875).round()); }
+            spans.push(span);
+            broken = text.ends_with('\n');
+        }
+        if spans.is_empty() || broken { spans.push(Span::new("\u{200B}")); }
+        ui.measure_rich_text(&spans, &style, Some(width.max(1.0))).height
+    }
+}
+
 impl Carnet {
+    // Toolbar commands retain the editor context while their buttons have
+    // focus. Painting a caret requires the page's actual keyboard focus.
+    fn page_keyboard(&self, ui: &Ui<'_>) -> bool {
+        self.focus_page || (self.page_key.is_some() && ui.focused() == self.page_key)
+    }
+
     pub(super) fn page(&mut self, ui: &mut Ui<'_>, l: &Look, main_w: f32) {
         self.refresh_find();
         let t = l.t;
@@ -167,6 +248,11 @@ impl Carnet {
         let dim_head = self.focus_on() && self.in_flow();
         let scroll_key = ui.child_key_indexed(note_id);
         self.page_rect = ui.layout_of(scroll_key);
+        // The origin and block rects came from the same layout. Compare
+        // them with the offset the coming frame will draw, including a
+        // wheel jump or an eased reveal, rather than lagging a frame.
+        self.table_window = ui.scroll_geometry(scroll_key).zip(ui.layout_of(scroll_key.str("origin")))
+            .map(|(g, origin)| (origin.y + g.offset.y - 0.25 * g.rect.h, origin.y + g.offset.y + 1.25 * g.rect.h));
         let tail = match self.page_rect {
             Some(r) if self.typewriter_on() => (r.h * (1.0 - TYPEWRITER_AT)).max(240.0),
             Some(r) => (r.h * 0.5).max(240.0),
@@ -194,6 +280,7 @@ impl Carnet {
                 // that scroll it.
                 .on_layout(Value::Null),
             |ui| {
+                ui.leaf_keyed("origin", NodeSpec::column().size(0.0, 0.0).on_layout(Value::Null).role(Role::None));
                 ui.with(
                     NodeSpec::column()
                         .grow_width()
@@ -289,7 +376,7 @@ impl Carnet {
                             .role(Role::MultilineTextInput)
                             .label("Note");
                         // Over a link a press would open, a hand.
-                        let body = if self.link_hand(ui) { body.cursor(kui_native::CursorShape::Pointer) } else { body };
+                        let body = if self.link_hand(ui.core()) { body.cursor(kui_native::CursorShape::Pointer) } else { body };
                         ui.with_keyed("body", body, |ui| self.blocks(ui, l));
                         // Room below the last block lets section navigation
                         // center even the final line. A
@@ -570,6 +657,8 @@ impl Carnet {
         self.shown.clear();
         // Pointers, not text: the blocks stay shared with the note.
         let blocks: Vec<Rc<Block>> = self.doc().blocks().to_vec();
+        self.table_columns.retain(|id| blocks.iter().any(|b| b.id == id && matches!(b.kind, Kind::Table(_))));
+        self.table_views.retain(|id, _| blocks.iter().any(|b| b.id == *id && matches!(b.kind, Kind::Table(_))));
         // The rows as the last frame laid them out, each read by the key
         // it had there: how tall the blocks beside a picture are. Not
         // `row_rects`, which says it a frame later, and nothing for a
@@ -633,6 +722,7 @@ impl Carnet {
             drop_line(ui, l);
         }
         self.picture_ghost(ui, l);
+        self.inline_layouts.retain(|slot, _| self.slot_keys.contains_key(slot));
         // Files carried over a table's cell go into it: the cell ringed.
         if self.pic_drag.is_none()
             && let Some(slot) = self.file_drag.as_ref().and_then(|d| d.at).and_then(|p| self.cell_at(p.x, p.y))
@@ -742,7 +832,7 @@ impl Carnet {
         let whole = cov.whole.contains(&id);
         // The caret alone on an empty line: it says what can go there —
         // once the writing pauses, not on every line Enter makes.
-        let mut empty_here = self.editing
+        let mut empty_here = self.editing && self.page_keyboard(ui)
             && self.caret.is_empty()
             && self.caret.head.slot == Slot::block(id)
             && b.text_ref().is_some_and(str::is_empty);
@@ -885,7 +975,7 @@ impl Carnet {
                 // ornament in the accent on the selection's wash, as wide
                 // as the text and a band round the ornament, not its whole
                 // tall row; so Backspace or Delete is seen to have a target.
-                let here = self.editing && self.caret.head.slot == Slot::block(id);
+                let here = self.editing && self.page_keyboard(ui) && self.caret.head.slot == Slot::block(id);
                 let chosen = whole || here;
                 let ink = if chosen { t.accent } else { t.faint };
                 let band = l.px(8.0).min(l.air(20.0));
@@ -999,7 +1089,7 @@ impl Carnet {
     #[allow(clippy::too_many_arguments)]
     fn picture(&mut self, ui: &mut Ui<'_>, l: &Look, id: u64, src: &str, wiki: bool, alt: &str, width: Option<u32>, float: Float, whole: bool) {
         let t = l.t;
-        let here = self.editing && self.caret.head.slot == Slot::block(id);
+        let here = self.editing && self.page_keyboard(ui) && self.caret.head.slot == Slot::block(id);
         let selected = here || whole;
         let folder = self.page_folder();
         let file = self.store.picture_file(&folder, src, wiki);
@@ -1500,83 +1590,207 @@ impl Carnet {
         // The header, if it has one, is small and quiet: a label for its
         // column.
         let head = l.page_type(Type::LABEL).family(l.body).color(t.muted);
-        let names: Vec<String> = match table.header {
-            true => table.rows[0].cells.iter().map(|c| c.trim().to_string()).collect(),
-            false => Vec::new(),
-        };
         let pad = l.px(14.0);
         let available = self.row_rects.iter().rev().find(|(b, _)| *b == id).map_or(self.text_w, |(_, r)| r.w - 16.0) - 4.0;
-        let widths = crate::table_layout::columns(table, available, pad, l.k, self.settings.table_width == TableWidth::Scroll, |text, header| {
+        let widths = self.table_columns.columns(id, table, available, pad, l.k, self.settings.table_width == TableWidth::Scroll, [body, head], |text, header| {
             ui.measure_text(text, &if header { head } else { body }, None).width
         });
         let table_w = widths.iter().sum::<f32>() + 4.0;
-        ui.with_keyed("table-scroll", NodeSpec::column().grow_width().scroll_x().scrollbar_width(5.0).pad_xy(0.0, l.air(14.0)), |ui| {
-            ui.with(
-                // One warm hairline for the frame and the rules, and the
-                // rows inset by it, so the header's wash never paints over
-                // the frame.
-                NodeSpec::table()
-                    .width(table_w)
-                    .pad(1.0)
-                    .rules(t.border)
-                    .border(1.0, t.border)
-                    .radius(radius::CONTROL)
-                    .clip()
-                    .role(Role::Group)
-                    .label(format!("Table, {} rows, {} columns", table.rows.len(), table.width())),
-                |ui| {
-                    for (r, row) in table.rows.iter().enumerate() {
-                        let is_head = table.is_header(r);
-                        // Counted from 1 among the plain rows.
-                        let n = r + 1 - table.body();
-                        let mut spec = NodeSpec::row().grow_width().on_layout(Value::Null);
-                        if is_head {
-                            spec = spec.bg(t.sunken);
-                        }
-                        // The row's height is its tallest cell's: each
-                        // cell is matched against all of it, so the room
-                        // under short words beside a picture is theirs.
-                        let row_rect = ui.layout_of(ui.child_key_indexed(row.id));
-                        ui.with_indexed(row.id, spec, |ui| {
-                            for (c, &col) in table.cols.iter().enumerate() {
-                                let slot = Slot {
-                                    block: id,
-                                    cell: Some((row.id, col)),
-                                };
-                                // A cell is named for its column, so a reader
-                                // hears "Price, row 3", not coordinates.
-                                let name = match names.get(c) {
-                                    _ if is_head => format!("Column {} header", c + 1),
-                                    Some(h) if !h.is_empty() => format!("{h}, row {n}"),
-                                    _ => format!("Column {}, row {n}", c + 1),
-                                };
-                                // Where the cell was laid out: what a click
-                                // is matched against, by x as well as y.
-                                let ck = ui.child_key_indexed(col);
-                                if let Some(mut rect) = ui.layout_of(ck) {
-                                    if let Some(rr) = row_rect {
-                                        (rect.y, rect.h) = (rr.y, rr.h);
-                                    }
-                                    self.cell_rects.insert(slot, rect);
-                                }
-                                ui.with_indexed(
-                                    col,
-                                    NodeSpec::column()
-                                        .width(widths[c])
-                                        .pad_xy(pad, l.px(if is_head { 9.0 } else { 8.0 }))
-                                        .on_layout(Value::Null)
-                                        .label(name),
-                                    |ui| {
-                                        let style = if is_head { head } else { body };
-                                        self.cell_line(ui, l, slot, &row.cells[c], style, cov, (widths[c] - 2.0 * pad).max(page::PICTURE_MIN));
-                                    },
-                                );
+        let mut view = self.table_views.remove(&id).unwrap_or_default();
+        let changed = view.source.as_ref().is_none_or(|(old, look, ws)| old != table || look != l || ws != &widths);
+        if changed {
+            if view.source.as_ref().is_none_or(|(old, look, ws)| look != l || ws != &widths || old.header != table.header) {
+                self.table_revision += 1;
+                view.paint_revision = self.table_revision;
+            }
+            view.layouts = table.rows.iter().enumerate().map(|(r, row)| row.cells.iter().enumerate().map(|(c, text)| {
+                view.layouts.get(r).and_then(|row| row.get(c)).filter(|layout| layout.source == *text)
+                    .cloned().unwrap_or_else(|| Rc::new(InlineLayout::new(text, true)))
+            }).collect()).collect();
+            view.pictures = view.layouts.iter().flatten().any(|cell| !cell.pictures.is_empty());
+            if (table.rows.len() > 16 || table.rows.len() * table.width() > 64) && !view.pictures {
+                view.heights = table.rows.iter().enumerate().map(|(r, row)| {
+                    if let Some((old, look, ws)) = &view.source
+                        && look == l && ws == &widths && old.is_header(r) == table.is_header(r)
+                        && old.rows.get(r) == Some(row)
+                        && let Some(&height) = view.heights.get(r)
+                    { return height; }
+                    let header = table.is_header(r);
+                    let style = if header { head } else { body };
+                    view.layouts[r].iter().enumerate().map(|(c, cell)| {
+                        let cell_pad = pad.min((widths[c] - l.px(16.0)).max(0.0) / 2.0);
+                        cell.height(ui, l, style, widths[c] - 2.0 * cell_pad)
+                    }).fold(0.0_f32, f32::max) + 2.0 * l.px(if header { 9.0 } else { 8.0 })
+                }).collect();
+            } else {
+                view.heights.clear();
+            }
+            view.source = Some((table.clone(), *l, widths.clone()));
+            self.table_revision += 1;
+            view.revision = self.table_revision;
+        }
+        // Text-only tables away from the caret and selection replay their
+        // nodes. Keep geometry reads outside the memo: scrolling must
+        // update hit testing without rebuilding thousands of cells.
+        let interactive = view.pictures || self.caret.head.slot.block == id || cov.whole.contains(&id)
+            || cov.parts.keys().any(|slot| slot.block == id) || self.find.open;
+        if interactive || view.interactive {
+            self.table_revision += 1;
+            view.revision = self.table_revision;
+        }
+        view.interactive = interactive;
+        let mut y = self.row_rects.iter().rev().find(|(block, _)| *block == id).map(|(_, r)| r.y + l.air(14.0) + 2.0);
+        let visible: Vec<bool> = table.rows.iter().enumerate().map(|(r, row)| {
+            let Some(&height) = view.heights.get(r) else { return true };
+            let show = match (y, self.table_window) {
+                (Some(at), Some((top, bottom))) => at + height >= top && at <= bottom,
+                _ => true,
+            } || (self.caret.head.slot.block == id && self.caret.head.slot.cell.is_some_and(|(r, _)| r == row.id));
+            y = y.map(|at| at + height);
+            show
+        }).collect();
+        let needs_geometry = changed || view.culled
+            || visible.iter().enumerate().any(|(r, &show)| show && !view.visible.get(r).copied().unwrap_or(false));
+        if view.visible != visible {
+            view.visible = visible;
+            self.table_revision += 1;
+            view.revision = self.table_revision;
+        }
+        let frame = NodeSpec::column().grow_width().pad_xy(0.0, l.air(14.0))
+            .cross_align(if table_w < available { Align::Center } else { Align::Start });
+        let frame = if self.settings.table_width == TableWidth::Scroll { frame.scroll_x().scrollbar_width(5.0) } else { frame };
+        if !changed && !view.pictures && self.caret.head.slot.block != id
+            && let Some((top, bottom)) = self.table_window
+            && let Some((_, rect)) = self.row_rects.iter().rev().find(|(block, _)| *block == id)
+            && (rect.y + rect.h < top || rect.y > bottom)
+        {
+            // A measured spacer keeps the document's exact height and the
+            // table's horizontal scroll range, without replaying or laying
+            // out its cells. The parsed cells stay in `view` for its return.
+            ui.with_keyed("table-scroll", frame.height(rect.h), |ui| {
+                ui.leaf(NodeSpec::column().width(table_w).height((rect.h - 2.0 * l.air(14.0)).max(0.0)));
+            });
+            view.culled = true;
+            self.table_views.insert(id, view);
+            return;
+        }
+        // A table that stays culled needs no readback. Ask only after the
+        // spacer return above: requesting here on every culled frame was
+        // keeping the whole window rendering while the reader was idle.
+        if needs_geometry { ui.request_frame_for("table geometry"); }
+        view.culled = false;
+        ui.with_keyed("table-scroll", frame, |ui| {
+            ui.memo("cells", &Value::Int(view.revision), |ui| {
+                let names: Vec<String> = match table.header {
+                    true => table.rows[0].cells.iter().map(|c| c.trim().to_string()).collect(),
+                    false => Vec::new(),
+                };
+                let old_cells = std::mem::take(&mut view.cells);
+                view.pictures = false;
+                ui.with(
+                    // One warm hairline for the frame and the rules, and the
+                    // rows inset by it, so the header's wash never paints over
+                    // the frame.
+                    NodeSpec::table()
+                        .width(table_w)
+                        .pad(1.0)
+                        .rules(t.border)
+                        .border(1.0, t.border)
+                        .radius(radius::CONTROL)
+                        .clip()
+                        .role(Role::Group)
+                        .label(format!("Table, {} rows, {} columns", table.rows.len(), table.width())),
+                    |ui| {
+                        for (r, row) in table.rows.iter().enumerate() {
+                            if !view.visible[r] {
+                                ui.leaf_indexed(row.id, NodeSpec::row().grow_width().height(view.heights[r]).on_layout(Value::Null));
+                                continue;
                             }
-                        });
-                    }
-                },
-            );
+                            let is_head = table.is_header(r);
+                            // Counted from 1 among the plain rows.
+                            let n = r + 1 - table.body();
+                            let mut spec = NodeSpec::row().grow_width().on_layout(Value::Null);
+                            if is_head {
+                                spec = spec.bg(t.sunken);
+                            }
+                            // The row's height is its tallest cell's: each
+                            // cell is matched against all of it, so the room
+                            // under short words beside a picture is theirs.
+                            let row_key = ui.child_key_indexed(row.id);
+                            ui.with_indexed(row.id, spec, |ui| {
+                                for (c, &col) in table.cols.iter().enumerate() {
+                                    let cell_pad = pad.min((widths[c] - l.px(16.0)).max(0.0) / 2.0);
+                                    let slot = Slot {
+                                        block: id,
+                                        cell: Some((row.id, col)),
+                                    };
+                                    self.inline_layouts.insert(slot, Rc::clone(&view.layouts[r][c]));
+                                    // A cell is named for its column, so a reader
+                                    // hears "Price, row 3", not coordinates.
+                                    let name = match names.get(c) {
+                                        _ if is_head => format!("Column {} header", c + 1),
+                                        Some(h) if !h.is_empty() => format!("{h}, row {n}"),
+                                        _ => format!("Column {}, row {n}", c + 1),
+                                    };
+                                    // Where the cell was laid out: what a click
+                                    // is matched against, by x as well as y.
+                                    let ck = ui.child_key_indexed(col);
+                                    let mut text_key = old_cells.iter().find(|cell| cell.slot == slot).map(|cell| cell.text);
+                                    ui.with_indexed(
+                                        col,
+                                        NodeSpec::column()
+                                            .width(widths[c])
+                                            .pad_xy(cell_pad, l.px(if is_head { 9.0 } else { 8.0 }))
+                                            .clip()
+                                            .on_layout(Value::Null)
+                                            .label(name),
+                                        |ui| {
+                                            let style = if is_head { head } else { body };
+                                            // Editing a cell keeps that cell live; its unchanged
+                                            // neighbors need not rebuild their text and handlers.
+                                            // Geometry is read back below even when the text replays.
+                                            let live = !view.layouts[r][c].pictures.is_empty() || self.find.open
+                                                || self.caret.head.slot == slot || cov.whole.contains(&id)
+                                                || cov.parts.contains_key(&slot) || self.initial.contains(&slot);
+                                            let stamp = Value::List(vec![Value::Int(view.paint_revision),
+                                                Value::Int(view.layouts[r][c].drawn as i64),
+                                                Value::Int(if live { view.revision } else { 0 })]);
+                                            ui.memo("content", &stamp, |ui| {
+                                                self.cell_line(ui, l, slot, &row.cells[c], style, cov, (widths[c] - 2.0 * cell_pad).max(1.0));
+                                                text_key = self.slot_keys.get(&slot).copied();
+                                            });
+                                        },
+                                    );
+                                    let layout = Rc::clone(&view.layouts[r][c]);
+                                    view.pictures |= !layout.pictures.is_empty();
+                                    view.cells.push(CellNode { slot, row: row_key, cell: ck, text: text_key.expect("built or replayed cell text"), layout });
+                                }
+                            });
+                        }
+                    },
+                );
+            });
         });
+        let mut row_key = None;
+        let mut row_rect = None;
+        for cell in &view.cells {
+            if row_key != Some(cell.row) {
+                row_key = Some(cell.row);
+                row_rect = ui.layout_of(cell.row);
+            }
+            if let Some(mut rect) = ui.layout_of(cell.cell) {
+                if let Some(row) = row_rect {
+                    (rect.y, rect.h) = (row.y, row.h);
+                }
+                self.cell_rects.insert(cell.slot, rect);
+            }
+            self.slot_keys.insert(cell.slot, cell.text);
+            self.drawn.insert(cell.slot, cell.layout.drawn);
+            if let Some(visible) = &cell.layout.visible {
+                self.shown.insert(cell.slot, visible.clone());
+            }
+        }
+        self.table_views.insert(id, view);
     }
 
     /// A table cell's text: as any slot's, but where pictures stand among
@@ -1587,7 +1801,7 @@ impl Carnet {
     /// the accent's ring, and the caret isn't shown.
     #[allow(clippy::too_many_arguments)]
     fn cell_line(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, style: TextStyle, cov: &Coverage, room: f32) {
-        let pictures = carnet_core::inline::cell_pictures(text);
+        let pictures = self.inline_layout(slot, text).pictures.clone();
         if pictures.is_empty() {
             self.cell_pieces.remove(&slot);
             self.slot_line(ui, l, slot, text, style, None, false, cov);
@@ -1607,7 +1821,7 @@ impl Carnet {
             parts.push((last, text.len(), None));
         }
         // The caret: in the words that hold it, else beside its picture.
-        let here = self.editing && self.caret.head.slot == slot;
+        let here = self.editing && self.page_keyboard(ui) && self.caret.head.slot == slot;
         let byte = self.caret.head.byte.min(text.len());
         let caret_in = here
             .then(|| {
@@ -1684,12 +1898,12 @@ impl Carnet {
             let path = store::decode_src(&p.src);
             let name = path.rsplit('/').next().unwrap_or(&path).to_string();
             let w = room;
-            let words_w = (w - 54.0).max(40.0);
+            let words_w = (w - 54.0).max(1.0);
             ui.with_keyed(
                 "picture",
                 NodeSpec::row()
-                    .width(Sizing::Fit)
-                    .max_width(w.max(page::PICTURE_MIN))
+                    .width(w)
+                    .clip()
                     .cross_align(Align::Center)
                     .pad_xy(10.0, 8.0)
                     .gap(8.0)
@@ -1715,7 +1929,7 @@ impl Carnet {
             }
             return key;
         };
-        let (dw, _) = page::picture_width(nw, None, room, room, false);
+        let dw = nw.min(room);
         let dh = dw * nh / nw;
         ui.with_keyed("picture", NodeSpec::row().size(dw, dh).on_layout(Value::Null).role(Role::Image).label(label), |ui| {
             match &entry {
@@ -1770,7 +1984,7 @@ impl Carnet {
     /// The tiles are the slot's pieces (`cell_pieces`): what the caret and
     /// a press are measured against.
     fn tile_line(&mut self, ui: &mut Ui<'_>, l: &Look, slot: Slot, text: &str, tiles: &[carnet_core::doc::FileLink], cov: &Coverage) {
-        let here = self.editing && self.caret.head.slot == slot;
+        let here = self.editing && self.page_keyboard(ui) && self.caret.head.slot == slot;
         let byte = self.caret.head.byte.min(text.len());
         // The tile the caret is beside, and on which side (`true` its right).
         let beside = here.then(|| {
@@ -1928,8 +2142,16 @@ impl Carnet {
         strike: bool,
         cov: &Coverage,
     ) {
-        let here = self.editing && self.caret.head.slot == slot;
+        let here = self.editing && self.page_keyboard(ui) && self.caret.head.slot == slot;
         self.line_part(ui, l, slot, text, (0, text.len()), style, hint, strike, cov, here);
+    }
+
+    fn inline_layout(&mut self, slot: Slot, text: &str) -> Rc<InlineLayout> {
+        let cached = self.inline_layouts.entry(slot).or_insert_with(|| Rc::new(InlineLayout::new(text, slot.cell.is_some())));
+        if cached.source != text {
+            *cached = Rc::new(InlineLayout::new(text, slot.cell.is_some()));
+        }
+        Rc::clone(cached)
     }
 
     /// The words of `slot` from `lo` to `hi` as [`slot_line`](Self::slot_line)
@@ -1960,26 +2182,18 @@ impl Carnet {
         let byte = if code_block { byte.clamp(lo, hi) } else { byte };
         // A cell's text as a cell's: its pictures among its words.
         let _cell = page::reading(self.doc(), slot);
-        let runs = if code_block {
-            vec![(0, text.len(), inline::Style::default())]
-        } else {
-            inline::runs(text)
-        };
-        // Markdown's marks are never drawn: the words are, styled. Code
-        // keeps every byte.
-        let hidden: Vec<(usize, usize)> = if code_block {
-            Vec::new()
-        } else {
-            runs.iter().filter(|r| r.2.marker).map(|r| (r.0, r.1)).collect()
-        };
-        // A `--` is drawn as an em dash, one letter for its two bytes; the
-        // file keeps them (`inline::dashes`). Never in code.
-        let dashes = if code_block { Vec::new() } else { inline::dashes(text) };
+        let cell = (!code_block).then(|| self.inline_layout(slot, text));
+        let plain = [(0, text.len(), inline::Style::default())];
+        let runs = cell.as_ref().map_or(plain.as_slice(), |parsed| parsed.runs.as_slice());
+        // Code keeps every byte; rich text reuses its parsed marker and dash
+        // ranges. Borrow these vectors: painting does not mutate them.
+        let hidden: &[(usize, usize)] = cell.as_ref().map_or(&[], |parsed| parsed.hidden.as_slice());
+        let dashes: &[(usize, usize)] = cell.as_ref().map_or(&[], |parsed| parsed.dashes.as_slice());
         if code_block {
             self.shown.insert(slot, page::drawn(self.doc(), slot));
         } else if (!hidden.is_empty() || !dashes.is_empty()) && !text.is_empty() {
             // What is drawn: what a press's byte is read back through.
-            self.shown.insert(slot, inline::Visible::page(text));
+            self.shown.insert(slot, cell.as_ref().and_then(|cell| cell.visible.clone()).unwrap_or_else(|| inline::Visible::page(text)));
         }
         // Bytes of the drawn text from where this part starts.
         let d0 = self.drawn_byte(slot, lo);
@@ -1997,7 +2211,7 @@ impl Carnet {
         }
         // A stretch of a cell's words: its cell says what was drawn, once
         // all of it is (`cell_line`).
-        let drawn = hash(&format!("{hidden:?}{text}"));
+        let drawn = cell.as_ref().map_or_else(|| hash(&format!("{hidden:?}{text}")), |cell| cell.drawn);
         let fresh = self.drawn.get(&slot) == Some(&drawn);
         if (lo, hi) == (0, text.len()) || code_block {
             self.drawn.insert(slot, drawn);
@@ -2022,7 +2236,7 @@ impl Carnet {
         if here || (self.find.open && self.caret.head.slot == slot) {
             self.caret_fresh = fresh;
         }
-        let blink = ui.caret_visible();
+        let blink = here && ui.caret_visible();
         // The dropped first letter: where it is in the source, with any
         // opening quote before it. Not while a composition stands in
         // front of it, which would be dropped in its place.
@@ -2256,7 +2470,12 @@ impl Carnet {
                 }
                 _ => {
                     ui.leaf_keyed("caret", bar(style.line_height, (0.0, 0.0), false));
-                    ui.request_frame_for("caret not laid out");
+                    // Changed text needs one readback frame. Unchanged
+                    // text can have no glyph geometry while clipped: a
+                    // retry cannot make an offscreen caret measurable.
+                    // Scrolling newly visible table rows requests its
+                    // own geometry readback frame.
+                    if !fresh { ui.request_frame_for("caret not laid out"); }
                 }
             }
         });
@@ -2333,11 +2552,11 @@ impl Carnet {
     /// The table cell under a point, by the last layout.
     pub(super) fn cell_at(&self, x: f32, y: f32) -> Option<Slot> {
         self.cell_rects.iter().find(|(slot, r)| {
+            if x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h { return false; }
             // Cells outside their local scroller cannot be clicked through
             // the page margin or the library.
-            let visible = self.row_rects.iter().find(|(id, _)| *id == slot.block)
-                .is_some_and(|(_, row)| x >= row.x + 8.0 && x <= row.x + row.w - 8.0);
-            visible && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+            self.row_rects.iter().find(|(id, _)| *id == slot.block)
+                .is_some_and(|(_, row)| x >= row.x + 8.0 && x <= row.x + row.w - 8.0)
         }).map(|(s, _)| *s)
     }
 
@@ -4009,8 +4228,7 @@ impl Carnet {
 
     /// Whether the pointer is over a link that a press there, with the keys
     /// held now, would open (the settings' way links open): it's a hand.
-    pub(super) fn link_hand(&self, ui: &mut Ui<'_>) -> bool {
-        let core = ui.core();
+    pub(super) fn link_hand(&self, core: &Core) -> bool {
         let (Some(p), m) = (core.cursor(), core.modifiers()) else { return false };
         let how = self.settings.link_open;
         if self.drag.is_some() || self.resizing.is_some() || !how.hand(m.ctrl || m.super_key, m.shift) {
@@ -4024,6 +4242,13 @@ impl Carnet {
             .filter(|_| !self.in_margin(p.x, p.y))
             .and_then(|pos| page::link_under(self.doc(), pos, how))
             .is_some()
+    }
+
+    pub(super) fn update_link_cursor(&self, core: &mut Core) {
+        if let Some(key) = self.page_key {
+            let shape = self.link_hand(core).then_some(kui_native::CursorShape::Pointer);
+            core.set_cursor(key, shape);
+        }
     }
 
     /// Whether a point is in the page's margin: beside the blocks' rows,

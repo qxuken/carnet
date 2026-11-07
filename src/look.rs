@@ -12,7 +12,7 @@ use crate::settings::{Settings, ThemePref};
 
 /// Everything a view paints with: the palette's colours (and kui's roles
 /// over them), the faces, and the reader's scale and density.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Look {
     pub t: Theme,
     /// Every colour token, by what it is for.
