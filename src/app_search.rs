@@ -210,6 +210,10 @@ impl Carnet {
     pub(super) fn close_find(&mut self) {
         self.find.open = false;
         self.find.title_range = None;
+        if self.note_window.is_none() && !self.query.is_empty() {
+            self.query.clear();
+            self.reorder();
+        }
         self.focus_req = None;
         self.focus_page = true;
     }
