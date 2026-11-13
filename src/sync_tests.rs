@@ -833,8 +833,8 @@ fn a_picture_beside_its_note_stays_until_moved_into_carnet() {
     for _ in 0..4 {
         two.pump();
     }
-    for side in 0..2 {
-        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().files();
+    for (side, s) in two.sides.iter().enumerate() {
+        let vault = s.store.replica.as_ref().unwrap().vault().files();
         assert!(vault.is_empty(), "not in {side}'s vault: {vault:?}");
     }
     assert!(!two.sides[1].dir.join("Home/hill.jpg").exists());
@@ -849,8 +849,8 @@ fn a_picture_beside_its_note_stays_until_moved_into_carnet() {
         two.pump();
     }
     let id = crate::files::hex(&two.sides[0].session.blob_id(&hill));
-    for side in 0..2 {
-        let vault = two.sides[side].store.replica.as_ref().unwrap().vault().files();
+    for (side, s) in two.sides.iter().enumerate() {
+        let vault = s.store.replica.as_ref().unwrap().vault().files();
         assert_eq!(vault.get("attachments/hill.jpg"), Some(&id), "in {side}'s vault");
     }
     assert_eq!(std::fs::read(two.sides[1].dir.join("attachments/hill.jpg")).ok(), Some(hill.clone()));
@@ -870,8 +870,8 @@ fn a_picture_beside_its_note_stays_until_moved_into_carnet() {
     for _ in 0..4 {
         two.pump();
     }
-    for side in 0..2 {
-        let r = two.sides[side].store.replica.as_ref().unwrap();
+    for (side, s) in two.sides.iter().enumerate() {
+        let r = s.store.replica.as_ref().unwrap();
         assert!(!r.vault().files().contains_key("Home/old.jpg"), "let go in {side}'s vault");
         assert!(r.vault().files().contains_key("attachments/hill.jpg"));
     }
@@ -902,8 +902,8 @@ fn a_picture_no_note_shows_is_swept_everywhere_and_comes_back_when_shown() {
     }
     assert!(!two.sides[0].dir.join(&src).exists() && two.sides[0].dir.join(".trash").join(&src).exists());
     assert!(!two.sides[1].dir.join(&src).exists(), "the other device let go of it");
-    for side in 0..2 {
-        assert!(two.sides[side].store.replica.as_ref().unwrap().vault().dropped_files().contains(&src));
+    for s in &two.sides {
+        assert!(s.store.replica.as_ref().unwrap().vault().dropped_files().contains(&src));
     }
 
     // Shown again: back, and named again.
@@ -966,8 +966,8 @@ fn pictures_go_to_a_new_account_too() {
         let id = second.sides[0].session.blob_id(bytes);
         assert_ne!(id, old, "ids are the account's");
         assert!(second.worker.blobs.get(ACCOUNT, &id).is_some(), "{path} on the new account's server");
-        for side in 0..2 {
-            let vault = second.sides[side].store.replica.as_ref().unwrap().vault().files();
+        for (side, s) in second.sides.iter().enumerate() {
+            let vault = s.store.replica.as_ref().unwrap().vault().files();
             assert_eq!(vault.get(path), Some(&crate::files::hex(&id)), "{path} named by its new id in {side}'s vault");
         }
         assert_eq!(std::fs::read(second.sides[1].dir.join(path)).ok().as_ref(), Some(bytes), "{path} on the new device");
@@ -1080,8 +1080,7 @@ fn a_picture_under_two_names_stays_while_one_is_shown() {
     for _ in 0..4 {
         two.pump();
     }
-    for side in 0..2 {
-        let s = &two.sides[side];
+    for (side, s) in two.sides.iter().enumerate() {
         let vault = s.store.replica.as_ref().unwrap().vault();
         assert!(vault.dropped_files().contains(&first), "{side}");
         assert_eq!(vault.files().get(&second), Some(&id), "{side}");
@@ -1237,8 +1236,8 @@ fn a_note_without_a_heading_is_called_the_same_on_both() {
         two.pump();
     }
     assert_eq!(two.shape(0), two.shape(1));
-    for side in 0..2 {
-        let titles: Vec<&str> = two.sides[side].store.notes.iter().map(|n| n.display_title()).collect();
+    for (side, s) in two.sides.iter().enumerate() {
+        let titles: Vec<&str> = s.store.notes.iter().map(|n| n.display_title()).collect();
         assert!(titles.contains(&"Missing"), "on {side}: {titles:?}");
         assert!(!titles.contains(&"Untitled"), "on {side}: {titles:?}");
     }
@@ -1517,8 +1516,8 @@ fn an_invites_code_is_known_on_every_device_until_done_with() {
     assert!(s.store.forget_invite(&one.hash()));
     two.pump();
     assert!(list(&mut two, 0).is_empty());
-    for side in 0..2 {
-        assert_eq!(two.sides[side].store.invite_code(&one.hash()), None, "gone from {side}'s vault");
+    for (side, s) in two.sides.iter().enumerate() {
+        assert_eq!(s.store.invite_code(&one.hash()), None, "gone from {side}'s vault");
     }
 
     // Used: the server lists it no more. Kept a while, for a list from
@@ -1530,21 +1529,21 @@ fn an_invites_code_is_known_on_every_device_until_done_with() {
     assert_eq!(two.sides[0].store.invite_code(&two_.hash()), Some(two_.text()));
     two.now += carnet_sync::vault::INVITE_GRACE;
     assert!(list(&mut two, 1).is_empty());
-    for side in 0..2 {
-        assert_eq!(two.sides[side].store.invite_code(&two_.hash()), Some(two_.text()), "kept in {side}'s vault");
+    for (side, s) in two.sides.iter().enumerate() {
+        assert_eq!(s.store.invite_code(&two_.hash()), Some(two_.text()), "kept in {side}'s vault");
     }
     // A list naming another: the used one forgotten, on both.
     let three = make(&mut two);
     assert_eq!(list(&mut two, 1), [three.hash()]);
-    for side in 0..2 {
-        assert_eq!(two.sides[side].store.invite_code(&two_.hash()), None, "gone from {side}'s vault");
-        assert_eq!(two.sides[side].store.invite_code(&three.hash()), Some(three.text()));
+    for (side, s) in two.sides.iter().enumerate() {
+        assert_eq!(s.store.invite_code(&two_.hash()), None, "gone from {side}'s vault");
+        assert_eq!(s.store.invite_code(&three.hash()), Some(three.text()));
     }
     // Run out: forgotten, whatever the server says.
     two.now += carnet_sync::vault::INVITE_LIFE;
     list(&mut two, 0);
-    for side in 0..2 {
-        assert_eq!(two.sides[side].store.invite_code(&three.hash()), None, "gone from {side}'s vault");
+    for (side, s) in two.sides.iter().enumerate() {
+        assert_eq!(s.store.invite_code(&three.hash()), None, "gone from {side}'s vault");
     }
 }
 

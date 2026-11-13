@@ -13512,7 +13512,9 @@ fn global_search_opens_at_the_match_by_enter_and_by_card() {
     let id = app.store.notes[app.current].id;
     app.new_note();
     app.note().title = "Other".into();
+    app.note().folder = "Work".into();
     app.edited();
+    let other = app.current;
     app.folder = Some("Work".into());
     app.reorder();
     d_frame_twice(&mut app, &mut d);
@@ -13532,6 +13534,17 @@ fn global_search_opens_at_the_match_by_enter_and_by_card() {
     d.click_key(&mut app, card);
     settle(&mut app, &mut d);
     assert_eq!(app.caret.anchor.byte, 4, "clicking even the open note jumps to the match");
+    assert!(page_focused(&app, &d));
+    let caret = app.caret;
+    let done = d.key_of("Close find").unwrap();
+    d.click_key(&mut app, done);
+    settle(&mut app, &mut d);
+    assert!(!app.find.open);
+    assert!(app.query.is_empty(), "Done finishes the global search too");
+    assert!(!app.search_active);
+    assert_eq!(app.order, [other], "the library returns to its folder");
+    assert_eq!(app.store.notes[app.current].id, id, "the result stays open");
+    assert_eq!(app.caret, caret);
     assert!(page_focused(&app, &d));
     let _ = std::fs::remove_dir_all(dir);
 }
