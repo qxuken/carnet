@@ -16,7 +16,9 @@ fn temp_store(name: &str) -> (Store, std::path::PathBuf) {
 fn fresh(name: &str) -> (Carnet, Drive, std::path::PathBuf) {
     let (store, dir) = temp_store(name);
     let mut app = Carnet::new(store);
-    let mut d = Drive::new(Core::new(), 1100.0, 760.0).framing();
+    let mut core = Core::new();
+    core.set_platform(kui_native::Platform::current());
+    let mut d = Drive::new(core, 1100.0, 760.0).framing();
     d.frame(&mut app);
     app.new_note();
     d.frame(&mut app);
