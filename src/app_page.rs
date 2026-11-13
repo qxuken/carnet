@@ -246,6 +246,11 @@ impl Carnet {
         self.text_w = (main_w.min(l.page_w) - 2.0 * pad - 16.0 - 6.0).max(80.0);
         // Focus: the title and the meta line step back with the blocks.
         let dim_head = self.focus_on() && self.in_flow();
+        // Keep the note's location on the page when the library is hidden.
+        // Include every parent: two folders can have the same last name.
+        let location = (main_w == ui.viewport().w).then(|| self.page_folder())
+            .filter(|folder| !folder.is_empty())
+            .map(|folder| folder.replace('/', " / "));
         let scroll_key = ui.child_key_indexed(note_id);
         self.page_rect = ui.layout_of(scroll_key);
         // The origin and block rects came from the same layout. Compare
@@ -288,11 +293,30 @@ impl Carnet {
                         .cross_align(Align::Center)
                         .padding(Edges { l: pad, r: pad, t: 30.0, b: 0.0 }),
                     |ui| {
-                        // Title and meta sit 8px in, level with the text of
+                        // Location, title and meta sit 8px in, level with the text of
                         // the blocks inside their wash-ready rows.
                         // Selectable: the words, the error and the notice
                         // copy like any text.
                         ui.with(NodeSpec::column().grow_width().max_width(self.text_w + 22.0), |ui| {
+                            if let Some(location) = &location {
+                                ui.with_keyed(
+                                    "note-location",
+                                    step_back(
+                                        NodeSpec::row().grow_width().min_width(0.0).pad_xy(8.0, 0.0)
+                                            .gap(6.0).cross_align(Align::Center).selectable(),
+                                        self.focus_on(), dim_head,
+                                    ),
+                                    |ui| {
+                                        icons::icon(ui, crate::app::chrome::Icon::Folder, t.muted, 14.0, false);
+                                        ui.text_in(
+                                            NodeSpec::row().grow_width().min_width(0.0),
+                                            location,
+                                            TextStyle::new(Type::SMALL.size).color(t.muted).ellipsis(),
+                                        );
+                                    },
+                                );
+                                ui.leaf(NodeSpec::row().height(l.px(6.0)));
+                            }
                             let line = NodeSpec::row()
                                 .grow_width()
                                 .pad_xy(8.0, 0.0)
