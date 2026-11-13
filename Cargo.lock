@@ -1174,30 +1174,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cosmic-text"
-version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be17b688510d934ce13f48a2beba700e11583e281e0fda99c22bb256a14eda73"
-dependencies = [
- "bitflags 2.13.2",
- "fontdb",
- "harfrust",
- "linebender_resource_handle",
- "log",
- "rangemap",
- "rustc-hash 2.1.3",
- "self_cell",
- "skrifa",
- "smol_str 0.3.6",
- "swash",
- "sys-locale",
- "unicode-bidi",
- "unicode-linebreak",
- "unicode-script",
- "unicode-segmentation",
-]
-
-[[package]]
 name = "cpal"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1927,6 +1903,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "font-types"
+version = "0.12.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "835ae9d781464a79026cde387f9cbc650c9a4909d7cf7e658b127e3c35d2f35d"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "fontconfig-parser"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2252,14 +2237,13 @@ dependencies = [
 
 [[package]]
 name = "harfrust"
-version = "0.5.2"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9da2e5ae821f6e96664977bf974d6d6a2d6682f9ccee23e62ec1d134246845f9"
+checksum = "c03d949a14aa089bbb282f7dd76a498a7f684428e4257202efc119ec010376f9"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
- "core_maths",
- "read-fonts",
+ "read-fonts 0.41.0",
  "smallvec",
 ]
 
@@ -2964,9 +2948,9 @@ dependencies = [
 
 [[package]]
 name = "kui-access"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "010089bb92b17c9209faf5ecad0aefd95730fd094ba4536b2b647e1ec8dcb85f"
+checksum = "5b0e46fc7cdb19993f46499ef67f32262f2ec30d52236261cc2787761835d430"
 dependencies = [
  "accesskit",
  "kui-core",
@@ -2974,9 +2958,9 @@ dependencies = [
 
 [[package]]
 name = "kui-channel"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "921d37275abfdca05c757888fa6c099f5929cf1f95e8c6feb3588dfbbb1c65ad"
+checksum = "b187f988ab4e5508258e33943659733b1c67895098f4dcede9f8c5a1a5f265a0"
 dependencies = [
  "kui-value",
  "rustc-hash 2.1.3",
@@ -2984,23 +2968,31 @@ dependencies = [
 
 [[package]]
 name = "kui-core"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bb08b48d53be3b0a66c734a7c826dfda7c3f10d091ad9e3c96f1a44ca08ab1f"
+checksum = "00d3efd7d9485f983d9bc7d296f0c31402ea2cf477cf53360959c2f36575c80e"
 dependencies = [
+ "bitflags 2.13.2",
  "bytemuck",
- "cosmic-text",
+ "fontdb",
+ "harfrust",
  "kui-channel",
  "kui-derive",
  "kui-trace",
  "kui-value",
- "libc",
+ "linebender_resource_handle",
+ "log",
  "naga",
+ "rangemap",
  "resvg",
  "rustc-hash 2.1.3",
+ "self_cell",
+ "skrifa 0.44.0",
  "slotmap",
  "smallvec",
+ "smol_str 0.3.6",
  "swash",
+ "unicode-bidi",
  "unicode-linebreak",
  "unicode-script",
  "unicode-segmentation",
@@ -3009,9 +3001,9 @@ dependencies = [
 
 [[package]]
 name = "kui-derive"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c6a76b66718ec44787656a15877cdf6cb375588775b29d8a5ace9810f50ba29"
+checksum = "af7cb5a615a0fd22bcaf519bda64e13db687aab39d2ebc27cdead5d7cb1702fb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3020,19 +3012,22 @@ dependencies = [
 
 [[package]]
 name = "kui-native"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4b036d2413951d246af35d01ddc6fed5c57013f6064009e6d384c6ad702d661"
+checksum = "24443483dfb54842fcc9c48f94cf4a6c03da4395243c038eb9ef499cedd6b87e"
 dependencies = [
  "accesskit_winit",
  "arboard",
  "block2 0.6.2",
+ "fontdb",
  "gif",
  "image",
  "kira",
  "kui-access",
  "kui-core",
  "kui-wgpu",
+ "libc",
+ "memmap2",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-graphics",
@@ -3041,6 +3036,8 @@ dependencies = [
  "png 0.18.1",
  "pollster 1.0.1",
  "rfd",
+ "sys-locale",
+ "tempfile",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
@@ -3052,21 +3049,21 @@ dependencies = [
 
 [[package]]
 name = "kui-trace"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce0f71efbf62a44f01d0c127c04047390f83457bdd9d3b30633a3895a9ec069"
+checksum = "b08ae8e0e8bef538c80f45b9321eedaff6d9d9a348a26190d1978caee2323401"
 
 [[package]]
 name = "kui-value"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "264674adb83aa6a19dd3d644c684f0aa2c64d22f581bb853a401c7be47cb1b57"
+checksum = "a98682cb39ea5584436bb194cfccf346227fbc41b4899ef9c9e953f1e8b8d023"
 
 [[package]]
 name = "kui-wgpu"
-version = "0.1.0-alpha.78"
+version = "0.1.0-alpha.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c4a22b9b383686656321181e65b3e58638bc564c51ba070f90eaf6f094bc1fb"
+checksum = "43bba1453e99f8b2651d81ce5d3cbca28bb55d8af51dfccdc3e0ccad6e46e59d"
 dependencies = [
  "bytemuck",
  "kui-core",
@@ -3074,6 +3071,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "pollster 1.0.1",
+ "web-time",
  "wgpu",
  "windows",
 ]
@@ -4808,8 +4806,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b634fabf032fab15307ffd272149b622260f55974d9fad689292a5d33df02e5"
 dependencies = [
  "bytemuck",
- "core_maths",
- "font-types",
+ "font-types 0.11.3",
+]
+
+[[package]]
+name = "read-fonts"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
+dependencies = [
+ "bytemuck",
+ "font-types 0.12.7",
+ "once_cell",
 ]
 
 [[package]]
@@ -5474,7 +5482,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fbdfe3d2475fbd7ddd1f3e5cf8288a30eb3e5f95832829570cd88115a7434ac"
 dependencies = [
  "bytemuck",
- "read-fonts",
+ "read-fonts 0.37.0",
+]
+
+[[package]]
+name = "skrifa"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
+dependencies = [
+ "bytemuck",
+ "read-fonts 0.41.0",
 ]
 
 [[package]]
@@ -5676,7 +5694,7 @@ version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c2499c2d826531388872b2268718aed907a39bd785ab0dcfe57fab26283f92e"
 dependencies = [
- "skrifa",
+ "skrifa 0.40.0",
  "yazi",
  "zeno",
 ]
