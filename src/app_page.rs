@@ -303,8 +303,7 @@ impl Carnet {
                                     "note-location",
                                     step_back(
                                         NodeSpec::row().grow_width().min_width(0.0).pad_xy(8.0, 0.0)
-                                            .gap(6.0).cross_align(Align::Center).selectable()
-                                            .tooltip(location),
+                                            .gap(6.0).cross_align(Align::Center).selectable(),
                                         self.focus_on(), dim_head,
                                     ),
                                     |ui| {
