@@ -93,6 +93,86 @@ fn page_focused(app: &Carnet, d: &Drive) -> bool {
 use std::rc::Rc;
 use carnet_core::doc::Float;
 
+/// Run against an existing macOS cloud placeholder without reading or
+/// changing its contents. The only writes are in the isolated test folder.
+/// Keep an outer process timeout: the regression itself blocks in read(2).
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs CARNET_TEST_DATALESS_FILE naming an offloaded file"]
+fn offloaded_file_does_not_block_focus_or_teardown() {
+    use std::os::macos::fs::MetadataExt;
+    use std::os::unix::fs::symlink;
+    let source = std::path::PathBuf::from(std::env::var_os("CARNET_TEST_DATALESS_FILE").expect("offloaded fixture"));
+    assert_ne!(std::fs::metadata(&source).unwrap().st_flags() & 0x40000000, 0, "fixture must still be offloaded");
+    let _local_io = crate::disk::protect_ui_thread().unwrap();
+    let (store, dir) = temp_store("offloaded-focus");
+    let mut app = Carnet::new(store);
+    let mut core = Core::new();
+    // A note already in memory, evicted while Carnet was idle.
+    let active = dir.join("Active.md");
+    std::fs::write(&active, "# Active\n\nAlready read\n").unwrap();
+    app.store.rescan();
+    let i = app.store.notes.iter().position(|n| n.path.as_ref() == Some(&active)).unwrap();
+    let id = app.store.notes[i].id;
+    std::fs::remove_file(&active).unwrap();
+    symlink(&source, &active).unwrap();
+    std::fs::create_dir_all(dir.join(".trash")).unwrap();
+    let gone = dir.join(".trash/Cloud.md");
+    symlink(&source, &gone).unwrap();
+    app.window_focus(true, &mut core);
+    assert!(app.trash.iter().any(|t| t.path == gone), "offloaded notes stay in Deleted");
+    let i = app.store.notes.iter().position(|n| n.id == id).expect("loaded note kept");
+    assert!(app.store.notes[i].markdown().contains("Already read"));
+    assert!(app.store.unavailable.contains(&active));
+    assert!(app.store.skipped.is_empty(), "a placeholder isn't invalid text");
+    let deleted = app.trash.iter().position(|t| t.path == gone).unwrap();
+    app.open_deleted(deleted);
+    assert!(app.peek.is_none());
+    assert!(app.error.as_deref().unwrap().contains("download"));
+    // Pin and origin indexes may be offloaded too. A failed read must
+    // not replace them with empty or partial indexes.
+    let pins = dir.join(".pinned");
+    let origins = dir.join(".trash/.origins");
+    symlink(&source, &pins).unwrap();
+    symlink(&source, &origins).unwrap();
+    assert!(app.store.save_pins().is_err());
+    assert!(std::fs::symlink_metadata(&pins).unwrap().is_symlink());
+    std::fs::remove_file(&pins).unwrap();
+    let other = app.store.notes.iter().position(|n| n.id != id).unwrap();
+    app.store.trash(other).unwrap();
+    assert!(std::fs::symlink_metadata(&origins).unwrap().is_symlink());
+    // Closing must not wait for a merge read. The original stays intact
+    // and the normal last-chance save keeps the unsaved edit separately.
+    let i = app.store.notes.iter().position(|n| n.id == id).unwrap();
+    app.current = i;
+    app.store.notes[i].doc.push(Block::text("Unsaved while offline"));
+    app.store.notes[i].touch();
+    app.teardown();
+    assert!(std::fs::symlink_metadata(&active).unwrap().is_symlink());
+    assert!(std::fs::read_to_string(dir.join("Active (unsaved).md")).unwrap().contains("Unsaved while offline"));
+    drop(app);
+    // A library whose only note is offloaded must not get a new welcome
+    // file or blacklist the note. It is picked up after downloading.
+    let startup = dir.join("startup");
+    std::fs::create_dir_all(&startup).unwrap();
+    let cloud = startup.join("Cloud.md");
+    symlink(&source, &cloud).unwrap();
+    let mut store = Store::open_with(startup.clone(), None).unwrap();
+    assert!(store.notes.is_empty());
+    assert_eq!(store.unavailable, vec![cloud.clone()]);
+    assert!(store.skipped.is_empty());
+    assert!(!startup.join("Welcome to Carnet.md").exists());
+    std::fs::remove_file(&cloud).unwrap();
+    std::fs::write(&cloud, "# Downloaded\n\nAvailable now\n").unwrap();
+    assert!(store.rescan());
+    assert!(store.unavailable.is_empty());
+    assert_eq!(store.notes[0].title, "Downloaded");
+    drop(store);
+    assert_ne!(std::fs::metadata(&source).unwrap().st_flags() & 0x40000000, 0, "the UI must not download the fixture");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir.with_extension("replica"));
+}
+
 #[test]
 fn first_frame_is_clean_and_the_title_has_the_caret() {
     let (mut app, mut d, dir) = fresh("clean");

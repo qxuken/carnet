@@ -468,6 +468,9 @@ impl Store {
     /// vault. Returns their paths. Without a replica nothing goes: there
     /// is no history to ask.
     pub fn sweep_files(&mut self, busy: &BTreeSet<String>, now: SystemTime) -> io::Result<Vec<String>> {
+        if !self.unavailable.is_empty() {
+            return Ok(Vec::new());
+        }
         let Some(record) = self.replica_dir().map(|d| d.join(UNSHOWN)) else { return Ok(Vec::new()) };
         let seen: HashMap<String, u64> = fs::read_to_string(&record)
             .unwrap_or_default()
@@ -492,10 +495,13 @@ impl Store {
             // there by hand, or before): any text there that names it.
             let mut texts = String::new();
             for f in files_under(&self.dir.join(TRASH), 0) {
-                if f.extension().is_some_and(|x| x.eq_ignore_ascii_case("md"))
-                    && let Ok(t) = fs::read_to_string(&f)
-                {
-                    texts.push_str(&decode_src(&t).to_lowercase());
+                if f.extension().is_some_and(|x| x.eq_ignore_ascii_case("md")) {
+                    match fs::read_to_string(&f) {
+                        Ok(t) => texts.push_str(&decode_src(&t).to_lowercase()),
+                        // Without its contents we cannot prove any file
+                        // is unused, including a note unknown to history.
+                        Err(_) => return Ok(Vec::new()),
+                    }
                 }
             }
             unshown.retain(|(rel, _)| !texts.contains(&low(rel.rsplit('/').next().unwrap_or(rel))));
@@ -570,6 +576,28 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_deleted_notes_suspend_attachment_cleanup() {
+        let dir = temp_dir("unreadable-trash");
+        let mut s = Store::open(dir.clone()).unwrap();
+        fs::create_dir_all(dir.join(ATTACHMENTS)).unwrap();
+        fs::create_dir_all(dir.join(TRASH)).unwrap();
+        let file = dir.join("attachments/kept.pdf");
+        fs::write(&file, b"attachment").unwrap();
+        let now = SystemTime::now();
+        let busy = BTreeSet::new();
+        assert!(s.sweep_files(&busy, now).unwrap().is_empty());
+        let unreadable = dir.join(".trash/Unknown.md");
+        fs::write(&unreadable, [0xff, 0xfe]).unwrap();
+        assert!(s.sweep_files(&busy, now + SWEEP_GRACE * 2).unwrap().is_empty());
+        assert!(file.exists(), "unknown contents might reference this attachment");
+        fs::remove_file(unreadable).unwrap();
+        assert_eq!(s.sweep_files(&busy, now + SWEEP_GRACE * 2).unwrap(), vec!["attachments/kept.pdf"]);
+        drop(s);
+        let _ = fs::remove_dir_all(dir.with_extension("replica"));
+        let _ = fs::remove_dir_all(dir);
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("carnet-owned-{name}-{}", std::process::id()));

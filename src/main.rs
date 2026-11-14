@@ -6,6 +6,7 @@ use carnet_core::{history, page};
 mod clip;
 mod connect;
 mod design;
+mod disk;
 mod icons;
 mod images;
 #[cfg(target_os = "macos")]
@@ -30,6 +31,9 @@ mod sync_tests;
 const NATIVE_FRAME_LATENCY: u32 = if cfg!(target_os = "macos") { 1 } else { 2 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before settings or the notes folder are opened, through app drop:
+    // no cloud download may hold startup, an event, or saving on close.
+    let _local_io = disk::protect_ui_thread()?;
     // `carnet --tokens docs/tokens.json`: the design system's tokens, as
     // JSON, for the design reference. (A file, not stdout: a windowed app
     // on Windows has no console to print to.)
