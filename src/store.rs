@@ -215,6 +215,9 @@ pub struct Store {
     /// `.md` files that could not be read (not UTF-8), by name: left alone,
     /// and said so.
     pub skipped: Vec<String>,
+    /// Files temporarily unreadable (including cloud placeholders).
+    /// Retried on rescan; never treated as empty notes or as invalid UTF-8.
+    pub unavailable: Vec<PathBuf>,
     /// Every folder under the notes folder, as relative paths, sorted:
     /// subfolders are folders too, and an empty one is still one.
     pub folders: Vec<String>,
@@ -452,6 +455,7 @@ impl Store {
             dir,
             notes: Vec::new(),
             skipped: Vec::new(),
+            unavailable: Vec::new(),
             folders: Vec::new(),
             picture_folders: Vec::new(),
             files: doc::Files::default(),
@@ -476,10 +480,11 @@ impl Store {
                     // Changed while the app was closed: another app's edit.
                     store.track_in(store.notes.len() - 1, &text, Origin::OtherApp, &mut taken);
                 }
-                Err(_) => store.skipped.push(file_name(&path)),
+                Err(e) if e.kind() == io::ErrorKind::InvalidData => store.skipped.push(file_name(&path)),
+                Err(_) => store.unavailable.push(path),
             }
         }
-        if store.notes.is_empty() && store.skipped.is_empty() {
+        if store.notes.is_empty() && store.skipped.is_empty() && store.unavailable.is_empty() {
             store.notes.push(welcome());
             store.save(0, true)?;
         }
@@ -1172,6 +1177,7 @@ impl Store {
     /// file comes in. Returns whether anything changed. What the app runs
     /// when its window comes back to the front.
     pub fn rescan(&mut self) -> bool {
+        self.unavailable.clear();
         let paths_before = self.note_paths();
         // Notes whose files went: one may be back under another name,
         // changed on the way (a rename and an edit from another machine).
@@ -1182,6 +1188,12 @@ impl Store {
             let Some(path) = note.path.as_deref().filter(|_| !note.dirty) else { return true };
             match stamp(path) {
                 None => {
+                    // A folder may itself be offloaded. Failure to stat
+                    // it is not evidence that its notes were deleted.
+                    if path.try_exists().unwrap_or(true) {
+                        self.unavailable.push(path.to_path_buf());
+                        return true;
+                    }
                     if let Some(key) = note.key {
                         vanished.push((key, note.markdown()));
                     }
@@ -1204,11 +1216,14 @@ impl Store {
             if !stale.contains(&note.id) {
                 continue;
             }
-            if let Ok((fresh, text)) = note.reread(path) {
-                self.notes[i] = fresh;
-                self.bring_back(&self.notes[i].folder, &text);
-                self.track_in(i, &text, Origin::OtherApp, &mut taken);
-                changed = true;
+            match note.reread(path) {
+                Ok((fresh, text)) => {
+                    self.notes[i] = fresh;
+                    self.bring_back(&self.notes[i].folder, &text);
+                    self.track_in(i, &text, Origin::OtherApp, &mut taken);
+                    changed = true;
+                }
+                Err(_) => self.unavailable.push(path.to_path_buf()),
             }
         }
         let pins = self.read_pins();
@@ -1221,17 +1236,20 @@ impl Store {
                 if !known.insert(path_key(&path)) || self.skipped.contains(&file_name(&path)) {
                     continue;
                 }
-                if let Ok((mut note, text)) = Note::load_text(&path) {
-                    note.pinned = pins.contains(&pin_key(&folder, &path));
-                    note.folder = folder;
-                    self.notes.push(note);
-                    let i = self.notes.len() - 1;
-                    if self.known_in(i, &text, &taken).is_none() {
-                        self.notes[i].key = take_similar(&mut vanished, &text);
+                match Note::load_text(&path) {
+                    Ok((mut note, text)) => {
+                        note.pinned = pins.contains(&pin_key(&folder, &path));
+                        note.folder = folder;
+                        self.notes.push(note);
+                        let i = self.notes.len() - 1;
+                        if self.known_in(i, &text, &taken).is_none() {
+                            self.notes[i].key = take_similar(&mut vanished, &text);
+                        }
+                        self.bring_back(&self.notes[i].folder, &text);
+                        self.track_in(i, &text, Origin::OtherApp, &mut taken);
+                        changed = true;
                     }
-                    self.bring_back(&self.notes[i].folder, &text);
-                    self.track_in(i, &text, Origin::OtherApp, &mut taken);
-                    changed = true;
+                    Err(_) => self.unavailable.push(path),
                 }
             }
         }
@@ -1317,8 +1335,11 @@ impl Store {
     /// are kept as before.
     fn merge_disk(&mut self, i: usize, path: &Path) -> io::Result<Saved> {
         let ours = self.notes[i].markdown();
-        let merged = match (self.notes[i].key, self.replica.as_mut(), fs::read_to_string(path)) {
-            (Some(key), Some(replica), Ok(theirs)) => replica.merge(key, &theirs, &ours).ok().flatten(),
+        // An unreadable file is not a missing merge base. Leave the edit
+        // dirty for retry (or rescue on close), and the disk file alone.
+        let theirs = fs::read_to_string(path)?;
+        let merged = match (self.notes[i].key, self.replica.as_mut()) {
+            (Some(key), Some(replica)) => replica.merge(key, &theirs, &ours).ok().flatten(),
             _ => None,
         };
         let Some(merged) = merged else { return self.keep_both(i) };
@@ -1559,12 +1580,23 @@ impl Store {
     /// The files the notes show or link to, as paths from the notes folder: every
     /// note's, those in the trash too (put back, they show them again).
     pub fn files_in_use(&self) -> BTreeSet<String> {
+        // Unknown contents may name any attachment. Keep them all until
+        // the notes are readable, rather than interpreting failure as
+        // an empty note and sweeping or deleting somebody's files.
+        let all = || self.attachments().into_iter().map(|(rel, _)| rel).collect();
+        if !self.unavailable.is_empty() {
+            return all();
+        }
         let mut used = BTreeSet::new();
         for n in &self.notes {
             used.extend(doc::file_paths(&n.folder, &n.markdown(), &self.files));
         }
         for (_, rel, folder) in self.in_trash() {
-            let Ok(text) = fs::read_to_string(self.dir.join(&rel)) else { continue };
+            let text = match fs::read_to_string(self.dir.join(&rel)) {
+                Ok(text) => text,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return all(),
+            };
             used.extend(doc::file_paths(&folder, &text, &self.files));
         }
         used
@@ -2164,7 +2196,11 @@ impl Store {
             return Ok(Remote::Created(i));
         };
         let Some(path) = self.notes[i].path.clone() else { return Ok(Remote::Same) };
-        let before = fs::read_to_string(&path).unwrap_or_default();
+        let before = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
         if self.notes[i].dirty {
             let editor = self.notes[i].markdown();
             let merged = self.replica.as_mut().map(|r| r.absorb(key, &editor)).transpose()?.flatten().unwrap_or(text);
@@ -2538,8 +2574,16 @@ impl Store {
     /// folder, the name, when it went, and whether it was pinned (a fifth
     /// column an older trash lacks: not).
     fn origins(&self) -> HashMap<String, (String, String, u64, bool)> {
-        fs::read_to_string(self.dir.join(TRASH).join(ORIGINS))
-            .unwrap_or_default()
+        self.read_origins().unwrap_or_default()
+    }
+
+    fn read_origins(&self) -> io::Result<HashMap<String, (String, String, u64, bool)>> {
+        let text = match fs::read_to_string(self.dir.join(TRASH).join(ORIGINS)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        Ok(text
             .lines()
             .filter_map(|l| {
                 let mut f = l.split('\t');
@@ -2547,7 +2591,7 @@ impl Store {
                 let pinned = f.next() == Some("pinned");
                 Some((gone.to_string(), (folder.to_string(), name.to_string(), when.parse().ok()?, pinned)))
             })
-            .collect()
+            .collect())
     }
 
     /// Says where `gone` (a path in the trash) came from, or forgets it
@@ -2555,7 +2599,9 @@ impl Store {
     /// say where a thing came from puts it back at the top level.
     fn note_origin(&self, gone: &Path, from: Option<(&str, &str, bool)>) {
         let key = file_name(gone);
-        let mut all = self.origins();
+        // A cloud-only index is not an empty index. Keep it intact if
+        // it cannot be read, rather than erasing other notes' origins.
+        let Ok(mut all) = self.read_origins() else { return };
         match from {
             Some((folder, name, pinned)) => {
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
@@ -2613,6 +2659,7 @@ impl Store {
             } else {
                 match Note::load(&path) {
                     Ok(note) => (note.display_title().to_string(), note.doc.snippet()),
+                    Err(e) if crate::disk::is_offloaded(&e) => (stem_of(Path::new(&name)), "Not downloaded · Download in Finder to read".to_string()),
                     Err(_) => continue,
                 }
             };
@@ -2641,13 +2688,22 @@ impl Store {
     }
 
     pub fn save_pins(&self) -> io::Result<()> {
-        let names: Vec<String> = self
+        // Do not replace a temporarily unavailable pin list with only
+        // the subset of notes this device could read.
+        let previous = match fs::read_to_string(self.dir.join(PINS)) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
+        let mut names: BTreeSet<String> = self
             .notes
             .iter()
             .filter(|n| n.pinned)
             .filter_map(|n| n.path.as_deref().map(|p| pin_key(&n.folder, p)))
             .collect();
-        write_atomic(&self.dir.join(PINS), &names.join("\n"))
+        let unavailable: HashSet<String> = self.unavailable.iter().filter_map(|p| p.strip_prefix(&self.dir).ok()).map(|p| p.to_string_lossy().replace('\\', "/").to_lowercase()).collect();
+        names.extend(previous.lines().map(str::trim).filter(|p| unavailable.contains(&p.to_lowercase())).map(str::to_string));
+        write_atomic(&self.dir.join(PINS), &names.into_iter().collect::<Vec<_>>().join("\n"))
     }
 
     /// `name.md`, or `name 2.md`, ... in `folder` — the first not taken by
@@ -3315,6 +3371,9 @@ pub fn open_file(path: &Path) -> io::Result<()> {
 /// A file system's error in plain words: what went wrong, without the
 /// system's number for it.
 pub fn plain_error(e: &io::Error) -> String {
+    if crate::disk::is_offloaded(e) {
+        return "it isn't downloaded; download it in Finder and try again".to_string();
+    }
     match e.kind() {
         io::ErrorKind::NotFound => "it isn't there any more".to_string(),
         io::ErrorKind::PermissionDenied => "Carnet isn't allowed to change it".to_string(),
@@ -3483,6 +3542,46 @@ fn welcome_until_0_1_3() -> Note {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn temporarily_unreadable_notes_are_retried_instead_of_blacklisted() {
+        let dir = temp_dir("unavailable-retry");
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("later.txt");
+        let path = dir.join("Cloud.md");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let mut s = Store::open_with(dir.clone(), None).unwrap();
+        assert!(s.notes.is_empty());
+        assert!(s.skipped.is_empty());
+        assert_eq!(s.unavailable, vec![path]);
+        assert!(!dir.join("Welcome to Carnet.md").exists());
+        fs::write(&target, "# Available now\n\nWords\n").unwrap();
+        assert!(s.rescan());
+        assert!(s.unavailable.is_empty());
+        assert_eq!(s.notes[0].title, "Available now");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_unreadable_merge_keeps_the_file_and_unsaved_edit() {
+        let dir = temp_dir("unavailable-merge");
+        let mut s = Store::open_with(dir.clone(), None).unwrap();
+        let path = s.notes[0].path.clone().unwrap();
+        s.notes[0].doc.push(Block::text("Unsaved edit"));
+        s.notes[0].touch();
+        // The same error path as a refused cloud read, without needing
+        // a real cloud provider in the normal test suite.
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+        assert_eq!(s.save(0, false).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(s.notes[0].dirty);
+        assert!(s.notes[0].markdown().contains("Unsaved edit"));
+        assert_eq!(fs::read(&path).unwrap(), vec![0xff, 0xfe]);
+        assert_eq!(s.notes.len(), 1);
+        let rescue = s.rescue(0).unwrap();
+        assert!(fs::read_to_string(rescue).unwrap().contains("Unsaved edit"));
+        let _ = fs::remove_dir_all(dir);
+    }
 
     /// A pasted picture's name is the local time it was pasted at: 11:36
     /// UTC is 14:36 three hours east, and the day turns at local midnight.
@@ -3822,7 +3921,7 @@ mod tests {
             let s = if replica {
                 Store::open(dir.clone()).unwrap()
             } else {
-                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default(), before_remote: HashMap::new(), vault_read: None };
+                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), unavailable: Vec::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default(), before_remote: HashMap::new(), vault_read: None };
                 for (path, _) in s.note_files().unwrap() {
                     s.notes.push(Note::load(&path).unwrap());
                 }

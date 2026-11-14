@@ -66,6 +66,7 @@ Uninstalling removes the program only: your notes and settings stay where they a
 ### Where things are kept
 
 - **Notes:** `~/Documents/Carnet`, one Markdown file per note, unless **Settings → Notes folder** chooses another. Folders whose names start with `.` are left alone. Deleted notes and folders go to `.trash/` inside the notes folder, and `.trash/.origins` remembers where each came from.
+- **Offloaded files on macOS:** Carnet never waits for a cloud download on its UI thread, including when closing. Notes already open stay in memory; unreadable notes are retried when you return to the app. Deleted notes whose contents are offloaded stay listed as **Not downloaded**. Choose **Download Now** in Finder, then return to Carnet to read them.
 - **Settings:** plain `key = value` lines in `settings.txt`, in `%APPDATA%\Carnet` on Windows, `~/Library/Application Support/Carnet` on a Mac and `~/.config/carnet` elsewhere.
 - **Each note's history** (what lets Carnet merge edits and show past versions): in the app's data folder, under `replica/` (`%APPDATA%\Carnet`, `~/Library/Application Support/Carnet`, or `~/.local/share/carnet`), never in the notes folder.
 

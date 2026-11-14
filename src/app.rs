@@ -1521,6 +1521,7 @@ impl Carnet {
             let what = if n == 1 { "1 file that isn't".to_string() } else { format!("{n} files that aren't") };
             app.notify_wide(format!("Left out {what} plain text: {}", app.store.skipped.join(", ")));
         }
+        app.say_unavailable();
         app.trash = app.store.trashed();
         app.reorder();
         app.current = app.order.first().copied().unwrap_or(0);
@@ -2445,7 +2446,7 @@ impl Carnet {
             match Note::load_file(&t.path) {
                 Ok(n) => (n.title.clone(), n.doc),
                 Err(e) => {
-                    self.error = Some(format!("Couldn't read it: {e}"));
+                    self.error = Some(format!("Couldn't read it: {}", store::plain_error(&e)));
                     return;
                 }
             }
@@ -4852,6 +4853,7 @@ impl Carnet {
             self.typing = false;
             self.rescan();
             self.refresh_trash();
+            self.say_unavailable();
             // A picture that could not be read (locked, half-synced) gets
             // another try.
             self.images.retry_failed();
@@ -4863,6 +4865,12 @@ impl Carnet {
         } else {
             core.close_menu();
             self.refocus = self.editing && core.focus().is_some() && core.focus() == self.page_key;
+        }
+    }
+
+    fn say_unavailable(&mut self) {
+        if !self.store.unavailable.is_empty() {
+            self.notify_wide("Some notes couldn't be read. Make sure their files are downloaded and accessible, then return to Carnet.");
         }
     }
 
