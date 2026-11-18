@@ -408,6 +408,7 @@ impl FileSync {
     /// One round: new files here hashed and offered, sent ones put in
     /// the vault, missing ones asked for. True if the vault changed.
     pub fn tick(&mut self, store: &mut Store, session: &mut Session) -> bool {
+        if !store.unavailable.is_empty() { return false; }
         self.under(session);
         let Some(replica) = store.replica.as_ref() else { return false };
         let vault = replica.vault().files();
@@ -530,6 +531,11 @@ impl FileSync {
 
     /// What the session said of a file. True if the vault changed.
     pub fn event(&mut self, e: &Event, store: &mut Store, session: &mut Session, rng: &mut impl Random) -> io::Result<bool> {
+        if !store.unavailable.is_empty() && matches!(e, Event::BlobGot(..)) {
+            // Leave the request pending; normal retry fetches it again once
+            // the local folder is readable. Never recreate an absent vault.
+            return Err(io::Error::other("Waiting for the notes folder to be available"));
+        }
         self.under(session);
         match e {
             Event::BlobWanted(id) => {

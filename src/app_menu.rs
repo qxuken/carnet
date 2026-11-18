@@ -192,9 +192,10 @@ impl Carnet {
             "welcome" if self.note_window.is_some() => self.to_main = Some(Msg::AddWelcome),
             "history" if self.note_window.is_some() => {}
             "history" if self.versions.is_some() => self.close_history(),
+            "history" if self.unavailable_target().is_some() => {},
             "history" => self.show_history(),
             "reveal-note" => {
-                if let Some(p) = self.store.notes[self.current].path.clone()
+                if let Some(p) = self.unavailable_target().or_else(|| self.store.notes[self.current].path.clone())
                     && let Err(e) = store::reveal(&p)
                 {
                     self.error = Some(format!("Couldn't open the folder: {e}"));

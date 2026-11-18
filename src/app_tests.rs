@@ -8,6 +8,7 @@ use kui_native::{InputEvent, KeyMods};
 fn temp_store(name: &str) -> (Store, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("carnet-ui-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(dir.with_extension("replica"));
     (Store::open(dir.clone()).unwrap(), dir)
 }
 
@@ -93,6 +94,44 @@ fn page_focused(app: &Carnet, d: &Drive) -> bool {
 use std::rc::Rc;
 use carnet_core::doc::Float;
 
+#[cfg(unix)]
+#[test]
+fn unavailable_notes_have_a_read_only_page_and_retry_opens_the_real_note() {
+    let dir = std::env::temp_dir().join(format!("carnet-ui-cloud-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("waiting.txt");
+    let path = dir.join("Cloud.md");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let store = Store::open_with(dir.clone(), None).unwrap();
+    let mut app = Carnet::new(store);
+    let mut d = Drive::new(Core::new(), 1100.0, 740.0).framing();
+    d.frame(&mut app);
+    d.frame(&mut app);
+    assert!(drawn(&mut d, &mut app, "Not available locally"));
+    assert!(drawn(&mut d, &mut app, "Download"));
+    assert!(d.key_of("recover-synced-copy").is_none(), "offline recovery is not advertised as a server copy");
+    app.on_plain(Msg::RecoverSyncedCopy);
+    assert_eq!(app.unavailable_target(), Some(path.clone()));
+    assert!(!drawn(&mut d, &mut app, "Nothing here yet."));
+    assert!(app.reading());
+    assert!(app.order.is_empty(), "no editable placeholder in the library");
+    let before = carnet_core::doc::to_markdown(None, app.doc());
+    app.on_plain(Msg::DeleteNote);
+    app.on_plain(Msg::InsertTable);
+    assert_eq!(carnet_core::doc::to_markdown(None, app.doc()), before);
+    assert!(app.page_key.is_none());
+    std::fs::write(&target, "# Downloaded note\n\nReal contents\n").unwrap();
+    app.on_plain(Msg::RetryAvailability);
+    d.frame(&mut app);
+    assert!(app.unavailable_target().is_none());
+    assert!(!app.reading());
+    assert_eq!(app.store.notes[app.current].title, "Downloaded note");
+    assert_eq!(app.store.notes.len(), 1, "the sentinel is removed");
+    assert!(!dir.join("Welcome to Carnet.md").exists());
+    drop(app);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Run against an existing macOS cloud placeholder without reading or
 /// changing its contents. The only writes are in the isolated test folder.
 /// Keep an outer process timeout: the regression itself blocks in read(2).
@@ -128,7 +167,7 @@ fn offloaded_file_does_not_block_focus_or_teardown() {
     let deleted = app.trash.iter().position(|t| t.path == gone).unwrap();
     app.open_deleted(deleted);
     assert!(app.peek.is_none());
-    assert!(app.error.as_deref().unwrap().contains("download"));
+    assert_eq!(app.unavailable_target(), Some(gone.clone()));
     // Pin and origin indexes may be offloaded too. A failed read must
     // not replace them with empty or partial indexes.
     let pins = dir.join(".pinned");
@@ -182,6 +221,66 @@ fn first_frame_is_clean_and_the_title_has_the_caret() {
     let focused = d.core.focus().and_then(|k| app.fields.get(&k)).copied();
     assert_eq!(focused, Some(Field::Title));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Opt-in real-provider check. The caller creates and uploads an isolated
+/// fixture, runs `prime`, evicts it with NSFileManager, then runs `file`
+/// or `vault`. Replica data must stay outside iCloud. Never use a real vault.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires an isolated uploaded iCloud fixture and explicit phase"]
+fn live_icloud_download_cycle() {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+    let root = PathBuf::from(std::env::var_os("CARNET_TEST_ICLOUD_VAULT").expect("temporary fixture"));
+    let local = PathBuf::from(std::env::var_os("CARNET_TEST_ICLOUD_LOCAL").expect("local replica directory"));
+    let phase = std::env::var("CARNET_TEST_ICLOUD_PHASE").unwrap();
+    assert!(root.file_name().unwrap().to_str().unwrap().starts_with("Carnet-Offload-Test-"));
+    assert_eq!(root.parent().unwrap().file_name().unwrap(), "com~apple~CloudDocs");
+    assert!(local.file_name().unwrap().to_str().unwrap().starts_with("carnet-live-icloud-"));
+    assert!(!local.starts_with(root.parent().unwrap()));
+    assert!(["prime", "file", "vault"].contains(&phase.as_str()));
+    let _policy = crate::disk::protect_ui_thread().unwrap();
+    let store = Store::open_with(root.clone(), Some(local.join("replica"))).unwrap();
+    if phase == "prime" {
+        assert_eq!(store.notes.len(), 2);
+        assert!(store.unavailable.is_empty());
+        return;
+    }
+    assert!(!store.unavailable.is_empty(), "macOS must really evict the fixture first");
+    assert!(store.unavailable_entries().iter().any(|(_, title)| title == "Cloud cycle"));
+    let mut app = Carnet::new(store);
+    let mut core = Core::new();
+    core.set_platform(kui_native::Platform::current());
+    let mut d = Drive::new(core, 1100.0, 760.0).framing();
+    d.frame(&mut app);
+    if phase == "file" {
+        app.open_unavailable(root.join("Cloud.md"));
+        d.frame(&mut app);
+    }
+    assert!(crate::disk::needs_download(&root.join("Cloud.md")), "opening the UI must not hydrate a note");
+    if phase == "vault" {
+        for rel in ["Nested/Deep.md", "attachments/probe.bin"] {
+            assert!(crate::disk::needs_download(&root.join(rel)), "{rel} must really be offloaded too");
+        }
+    }
+    let button = d.key_named(if phase == "file" { "Download" } else { "Download all" }).expect("download button");
+    let started = Instant::now();
+    d.click_key(&mut app, button);
+    assert!(app.download.busy(), "click starts the production worker");
+    while app.download.busy() && started.elapsed() < Duration::from_secs(120) {
+        std::thread::sleep(Duration::from_millis(20));
+        d.frame(&mut app);
+    }
+    assert!(!app.download.busy(), "download timed out");
+    assert!(app.download.error.is_none(), "{:?}", app.download.error);
+    assert!(app.store.unavailable.is_empty(), "{:?}", app.store.unavailable);
+    assert_eq!(app.store.notes.len(), 2);
+    assert_eq!(std::fs::read_to_string(root.join("Cloud.md")).unwrap(), "# Cloud cycle\n\nTemporary Carnet iCloud test.\n");
+    assert_eq!(std::fs::read_to_string(root.join("Nested/Deep.md")).unwrap(), "# Nested cycle\n\nOnly this temporary vault may be offloaded.\n");
+    assert_eq!(std::fs::read(root.join("attachments/probe.bin")).unwrap(), (0..256).cycle().take(256 * 1024).map(|n| n as u8).collect::<Vec<_>>());
+    println!("Real iCloud {phase} download completed in {:?}", started.elapsed());
+    app.teardown();
 }
 
 #[test]
@@ -8259,6 +8358,65 @@ fn two_apps_sync_through_a_server() {
     let _ = rt.block_on(served);
     remove_test_dir(dir_a);
     remove_test_dir(dir_b);
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+#[cfg(unix)]
+#[test]
+fn connected_server_offers_a_dated_copy_without_replacing_the_placeholder() {
+    use carnet_server::server::{self, Config};
+    use std::time::{Duration, Instant};
+    let data = std::env::temp_dir().join(format!("carnet-app-recover-server-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    let invite = server::new_invite(&mut carnet_server::Sharded::open(&data).unwrap()).unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = rt.spawn(server::serve(Config { data: data.clone(), origin: origin.clone(), compact_after: 200, web: None, trusted: Vec::new(), client_header: Default::default(), tls: None }, listener, async {
+        let _ = stopped.await;
+    }));
+    let (mut a, mut d, dir) = fresh("server-copy");
+    a.store.notes[a.current].title = "Travel plans".into();
+    a.store.notes[a.current].doc.push(Block::text("The synced itinerary"));
+    a.store.notes[a.current].touch();
+    a.store.save(a.current, true).unwrap();
+    let original = a.store.notes[a.current].path.clone().unwrap();
+    let original_key = a.store.notes[a.current].key;
+    a.sync_server = origin;
+    a.sync_code = invite.text();
+    a.on_plain(Msg::SyncStart);
+    let started = Instant::now();
+    while a.sync.status != crate::sync::Status::Online || !a.sync.caught_up() || a.sync.waiting() != 0 {
+        assert!(started.elapsed() < Duration::from_secs(15), "server did not catch up");
+        d.frame(&mut a);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::fs::remove_file(&original).unwrap();
+    std::os::unix::fs::symlink(dir.join("not-local"), &original).unwrap();
+    a.rescan();
+    a.open_unavailable(original.clone());
+    d.frame(&mut a);
+    assert!(d.core.nodes().iter().any(|n| n.text.as_deref().is_some_and(|s| s.starts_with("Synced copy available · modified "))));
+    let button = d.key_of("recover-synced-copy").expect("connected recovery action");
+    d.click_key(&mut a, button);
+    assert!(a.unavailable_target().is_none());
+    assert_eq!(a.store.notes[a.current].title, "Travel plans (recovered)");
+    assert!(a.store.notes[a.current].markdown().contains("The synced itinerary"));
+    assert_ne!(a.store.notes[a.current].key, original_key);
+    assert!(std::fs::symlink_metadata(&original).unwrap().is_symlink());
+    a.open_unavailable(original.clone());
+    a.sync.status = crate::sync::Status::Offline("test disconnect".into());
+    let count = a.store.notes.len();
+    a.on_plain(Msg::RecoverSyncedCopy);
+    assert_eq!(a.store.notes.len(), count, "a stale click after disconnect does not recover");
+    if let Ok(path) = std::env::var("CARNET_RECOVERY_CAPTURE") {
+        a.sync.status = crate::sync::Status::Online;
+        crate::shots::capture_preview(a, std::path::Path::new(&path));
+    } else { drop(a); }
+    let _ = stop.send(());
+    let _ = rt.block_on(served);
+    remove_test_dir(dir);
     let _ = std::fs::remove_dir_all(&data);
 }
 
