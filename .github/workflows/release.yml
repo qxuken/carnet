@@ -23,14 +23,12 @@
 #     Developer ID Application certificate and its key, exported as .p12
 #   * MACOS_SIGN_IDENTITY: "Developer ID Application: … (TEAMID)"
 #   * APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD: for notarytool
-# Manual runs and the signing verification branch build only the Mac artifact,
-# including tests, signing, notarization and validation; they never publish.
+# Manual runs test, sign, notarize and upload the Mac artifact to Actions.
 name: release
 
 on:
   push:
     tags: ['v*']
-    branches: ['codex/verify-macos-signing']
   workflow_dispatch:
 
 permissions:
@@ -47,7 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: The tag names Cargo.toml's version
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
         run: |
           set -eu
           v=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
@@ -63,7 +61,7 @@ jobs:
         run: cargo test --locked
 
   linux-windows:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: check
     runs-on: ubuntu-24.04
     container:
@@ -161,7 +159,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: [linux-windows, mac]
     runs-on: ubuntu-24.04
     permissions:

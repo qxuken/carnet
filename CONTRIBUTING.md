@@ -323,7 +323,7 @@ Every workflow is GitHub Actions', in `.github/workflows/`, on GitHub's Ubuntu r
 | `ci.yml` | every push to main and every pull request | the tests and clippy; `carnet-core` and `carnet-sync` for wasm; `carnet-server` with Postgres and S3 built in, against a real Postgres and bucket (service containers); the web app's wasm, type check, tests and build |
 | `edge.yml` | every push to main | the server's image as main stands, for amd64, pushed to `ghcr.io/qxuken/carnet-server:main` (and `:<commit>`) |
 | `fuzz.yml` | nightly, and by hand | every fuzz target for a few minutes each |
-| `release.yml` | a `v*` tag; manual or `codex/verify-macos-signing` push for a Mac signing check | the installers on a draft release; checks only upload a Mac artifact |
+| `release.yml` | a `v*` tag push or a manual Mac signing check | the installers on a draft release for a tag push, or a Mac artifact in Actions for a manual run |
 | `image.yml` | a `v*` tag | the server's image for amd64 and arm64, on ghcr.io and Docker Hub |
 
 ## Packaging
@@ -367,7 +367,7 @@ git push --atomic origin main v0.1.0
 
 The tag runs two workflows:
 
-- `release.yml` checks that the tag matches `Cargo.toml`'s version and runs the tests, then builds the Linux tarballs (x64 and arm64) and the Windows installer and `.zip` in `packaging/build-env.sh`'s environment, and the `.dmg` on a macOS runner. It puts them, with `SHA256SUMS`, on a draft release, which is published by hand. Release builds require all six signing secrets listed in the workflow. The `.app` and `.dmg` are Developer ID signed; the `.dmg` must pass notarization, staple validation, and Gatekeeper assessment. Manual runs and pushes to `codex/verify-macos-signing` run tests and the same Mac build without publishing a release.
+- `release.yml` checks that the tag matches `Cargo.toml`'s version and runs the tests, then builds the Linux tarballs (x64 and arm64) and the Windows installer and `.zip` in `packaging/build-env.sh`'s environment, and the `.dmg` on a macOS runner. It puts them, with `SHA256SUMS`, on a draft release, which is published by hand. Release builds require all six signing secrets listed in the workflow. The `.app` and `.dmg` are signed with Developer ID. The `.dmg` must pass notarization, staple validation, and Gatekeeper assessment. To verify Mac signing from Actions, run the workflow manually and download the Mac artifact from the run.
 - `image.yml` builds the server's image for amd64 and arm64 and pushes it to `ghcr.io/qxuken/carnet-server` and, with its secrets, to Docker Hub as `qxuken/carnet-server`, tagged with the version, `<major>.<minor>` and `latest` (a prerelease gets only its own tag).
 
 ## Licence
