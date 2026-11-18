@@ -987,6 +987,12 @@ impl Sync {
         self.files.as_ref().and_then(FileSync::held_why)
     }
 
+    pub fn has_synced_note(&self, key: carnet_sync::Key) -> bool {
+        let room = key.to_string();
+        matches!(&self.phase, Phase::On { session, .. } if self.status == Status::Online
+            && session.has_caught_up() && session.has_joined(&room) && !session.waiting_rooms().any(|r| r == room))
+    }
+
     /// Logged in, and all the server holds of every note has come: the
     /// account's notes are here, not just the first of them.
     pub fn caught_up(&self) -> bool {

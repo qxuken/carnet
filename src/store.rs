@@ -455,7 +455,9 @@ impl Store {
     pub fn open_with(dir: PathBuf, replica: Option<PathBuf>) -> io::Result<Self> {
         // A previously opened vault that went away must not be silently
         // recreated. A first-time vault may of course be made here.
-        let known = replica.as_ref().is_some_and(|d| d.join("catalog.json").exists());
+        // Older installations already have a replica directory, even
+        // though they have never written a title catalog.
+        let known = replica.as_ref().is_some_and(|d| d.is_dir());
         if !known && !crate::disk::needs_download(&dir) && let Err(e) = fs::create_dir_all(&dir)
             && !crate::disk::is_offloaded(&e) && e.kind() != io::ErrorKind::PermissionDenied {
             return Err(e);
@@ -487,7 +489,7 @@ impl Store {
             before_remote: HashMap::new(),
             vault_read: None,
         };
-        store.read_catalog();
+        store.read_catalog(&paths_before);
         if let Some(path) = store.replica_dir().map(|d| d.join("cloud-pending.txt")) {
             store.deferred = fs::read_to_string(path).unwrap_or_default().lines().filter_map(Key::parse).collect();
         }
@@ -544,6 +546,7 @@ impl Store {
             found.incomplete.extend(deleted.incomplete);
             found.incomplete.extend(deleted.files.into_iter().filter(|(p, _)| crate::disk::needs_download(p)).map(|(p, _)| p));
         }
+        found.incomplete.extend(found.others.iter().map(|rel| self.dir.join(rel)).filter(|path| crate::disk::needs_download(path)));
         self.incomplete = found.incomplete;
         self.unavailable.extend(self.incomplete.iter().cloned());
         self.unavailable.extend(found.files.iter().filter(|(p, _)| crate::disk::needs_download(p)).map(|(p, _)| p.clone()));
@@ -600,10 +603,11 @@ impl Store {
         entries
     }
 
-    fn read_catalog(&mut self) {
+    fn read_catalog(&mut self, known_paths: &carnet_core::navigation::Paths) {
         let Some(path) = self.replica_dir().map(|d| d.join("catalog.json")) else { return };
-        let Ok(text) = fs::read_to_string(path) else { return };
-        let Ok(entries) = serde_json::from_str::<HashMap<String, String>>(&text) else { return };
+        let entries = fs::read_to_string(path).ok()
+            .and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok())
+            .unwrap_or_else(|| known_paths.values().map(|rel| (rel.clone(), stem_of(Path::new(rel)))).collect());
         self.catalog = entries.into_iter().filter_map(|(rel, title)| {
             let path = Path::new(&rel);
             if path.components().any(|c| !matches!(c, std::path::Component::Normal(_))) { return None; }
@@ -2296,13 +2300,17 @@ impl Store {
 
     /// A replica copy of an unavailable note. The caller must wait for sync
     /// to catch up before presenting it as the connected server's copy.
-    pub fn recovery_copy(&mut self, path: &Path) -> Option<(String, i64)> {
+    pub fn recovery_key(&self, path: &Path) -> Option<Key> {
         if !self.is_unavailable(path) { return None; }
         let rel = path.strip_prefix(&self.dir).ok()?;
         if rel.starts_with(TRASH) { return None; }
-        let rel = rel.to_str()?.replace('\\', "/");
+        let rel = rel.components().map(|c| c.as_os_str().to_str()).collect::<Option<Vec<_>>>()?.join("/");
+        self.replica.as_ref()?.key_at_path(&rel)
+    }
+
+    pub fn recovery_copy(&mut self, path: &Path) -> Option<(String, i64)> {
+        let key = self.recovery_key(path)?;
         let replica = self.replica.as_mut()?;
-        let key = replica.keys().into_iter().find(|k| replica.entry(*k).is_some_and(|e| e.path == rel))?;
         let text = replica.text(key);
         if text.is_empty() { return None; }
         Some((text, replica.modified(key)))
@@ -2836,9 +2844,10 @@ impl Store {
     }
 
     fn read_origins(&self) -> io::Result<HashMap<String, (String, String, u64, bool)>> {
-        let text = match fs::read_to_string(self.dir.join(TRASH).join(ORIGINS)) {
+        let path = self.dir.join(TRASH).join(ORIGINS);
+        let text = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !crate::disk::has_cloud_placeholder(&path) => String::new(),
             Err(e) => return Err(e),
         };
         Ok(text
@@ -2948,9 +2957,10 @@ impl Store {
     pub fn save_pins(&self) -> io::Result<()> {
         // Do not replace a temporarily unavailable pin list with only
         // the subset of notes this device could read.
-        let previous = match fs::read_to_string(self.dir.join(PINS)) {
+        let path = self.dir.join(PINS);
+        let previous = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !crate::disk::has_cloud_placeholder(&path) => String::new(),
             Err(e) => return Err(e),
         };
         let mut names: BTreeSet<String> = self
@@ -3926,6 +3936,30 @@ mod tests {
         drop(store);
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(dir.with_extension("replica")).unwrap();
+    }
+
+    #[test]
+    fn missing_vault_on_upgrade_uses_existing_replica_paths() {
+        let dir = temp_dir("cloud-root-upgrade");
+        fs::create_dir_all(dir.join("Nested")).unwrap();
+        let note = dir.join("Nested/Field notes.md");
+        fs::write(&note, "# Notebook\n\nOriginal text\n").unwrap();
+        drop(Store::open(dir.clone()).unwrap());
+        let replica = dir.with_extension("replica");
+        fs::remove_file(replica.join("catalog.json")).unwrap();
+        let moved = dir.with_extension("away");
+        fs::rename(&dir, &moved).unwrap();
+        let mut store = Store::open(dir.clone()).unwrap();
+        assert!(!dir.exists());
+        assert!(store.notes.is_empty());
+        assert!(store.unavailable_entries().contains(&(note, "Field notes".into())));
+        fs::rename(&moved, &dir).unwrap();
+        assert!(store.rescan());
+        assert_eq!(store.notes.len(), 1);
+        assert_eq!(store.notes[0].title, "Notebook");
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(replica).unwrap();
     }
 
     #[test]

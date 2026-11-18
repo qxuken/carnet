@@ -213,6 +213,23 @@ fn offloaded_file_does_not_block_focus_or_teardown() {
 }
 
 #[test]
+fn opening_an_unavailable_note_discards_the_blank_draft_and_keeps_navigation_valid() {
+    let (mut app, mut d, dir) = fresh("draft-to-placeholder");
+    let draft = app.store.notes[app.current].id;
+    let path = dir.join("Cloud.md");
+    app.store.unavailable.push(path.clone());
+    app.on_plain(Msg::OpenUnavailable { path: path.to_str().unwrap().into() });
+    d.frame(&mut app);
+    assert_eq!(app.unavailable_target(), Some(path));
+    assert!(!app.store.notes.iter().any(|n| n.id == draft));
+    app.on_plain(Msg::NewNote);
+    d.frame(&mut app);
+    assert!(app.unavailable_target().is_none());
+    assert!(app.store.notes[app.current].is_blank());
+    remove_test_dir(dir);
+}
+
+#[test]
 fn first_frame_is_clean_and_the_title_has_the_caret() {
     let (mut app, mut d, dir) = fresh("clean");
     d.frame(&mut app);

@@ -211,6 +211,10 @@ impl Replica {
         write_atomic(&self.dir.join(APPLIED), &self.applied.to_bytes())
     }
 
+    pub fn key_at_path(&self, path: &str) -> Option<Key> {
+        self.by_path.get(&path.to_lowercase()).copied()
+    }
+
     pub fn entry(&self, key: Key) -> Option<&Entry> {
         self.entries.get(&key)
     }

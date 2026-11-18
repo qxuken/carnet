@@ -76,10 +76,11 @@ fn materialize(path: &Path, stop: &AtomicBool, count: &AtomicUsize) -> io::Resul
     // Thread-scoped: even if inherited from a caller that opted out,
     // this explicit user request may materialize files and directories.
     let _policy = crate::disk::allow_downloads()?;
-    fn visit(path: &Path, stop: &AtomicBool, count: &AtomicUsize) -> io::Result<()> {
+    fn visit(path: &Path, stop: &AtomicBool, count: &AtomicUsize, buffer: &mut [u8]) -> io::Result<()> {
         if stop.load(Ordering::Relaxed) {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "Download cancelled"));
         }
+        if fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()) { return Ok(()); }
         crate::disk::request_download(path)?;
         let started = std::time::Instant::now();
         let meta = loop {
@@ -100,16 +101,15 @@ fn materialize(path: &Path, stop: &AtomicBool, count: &AtomicUsize) -> io::Resul
                 let entry = entry?;
                 if entry.file_name() == ".git" { continue; }
                 let path = crate::disk::cloud_original(&entry.path()).unwrap_or_else(|| entry.path());
-                visit(&path, stop, count)?;
+                visit(&path, stop, count, buffer)?;
             }
         } else if meta.is_file() {
             let mut file = fs::File::open(path)?;
-            let mut buffer = [0; 64 * 1024];
             loop {
                 if stop.load(Ordering::Relaxed) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "Download cancelled"));
                 }
-                if file.read(&mut buffer)? == 0 { break; }
+                if file.read(buffer)? == 0 { break; }
             }
             count.fetch_add(1, Ordering::Relaxed);
         }
@@ -120,7 +120,7 @@ fn materialize(path: &Path, stop: &AtomicBool, count: &AtomicUsize) -> io::Resul
     let selected = if fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()) {
         fs::canonicalize(path)?
     } else { path.to_path_buf() };
-    visit(&selected, stop, count)
+    visit(&selected, stop, count, &mut [0; 64 * 1024])
 }
 
 #[cfg(test)]

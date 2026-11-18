@@ -2147,9 +2147,7 @@ impl Carnet {
                     *j -= 1;
                 }
             }
-            if self.current > i {
-                self.current -= 1;
-            }
+            self.current = i.min(self.store.notes.len() - 1);
             return;
         }
         self.save_current();
@@ -3740,7 +3738,7 @@ impl Carnet {
     fn on_plain(&mut self, msg: Msg) {
         if self.unavailable_target().is_some() && !self.settings_open && !matches!(msg,
             Msg::OpenUnavailable { .. } | Msg::DownloadUnavailable | Msg::DownloadVault | Msg::CancelDownload
-            | Msg::RetryAvailability | Msg::RevealUnavailable | Msg::RecoverSyncedCopy | Msg::ShowDir
+            | Msg::RetryAvailability | Msg::RevealUnavailable | Msg::RecoverSyncedCopy | Msg::ShowDir | Msg::OpenDeleted { .. }
             | Msg::OpenNote { .. } | Msg::FollowNote { .. } | Msg::NewNote
             | Msg::FocusSearch | Msg::ClearSearch | Msg::ShowList | Msg::SelectFolder { .. }
             | Msg::ShowSettings | Msg::ToggleSidebar | Msg::ShowDeleted | Msg::CloseHistory

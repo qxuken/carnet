@@ -1,15 +1,17 @@
 //! Cloud placeholders have a view, never an editable document.
 use super::*;
+use crate::design::space;
 use std::path::PathBuf;
 
 impl Carnet {
-    fn synced_copy_ready(&self) -> bool {
-        matches!(self.sync.status, crate::sync::Status::Online) && self.sync.caught_up()
+    fn synced_copy_key(&self, path: &std::path::Path) -> Option<carnet_sync::Key> {
+        let key = self.store.recovery_key(path)?;
+        self.sync.has_synced_note(key).then_some(key)
     }
 
     pub(super) fn recover_synced_copy(&mut self) {
-        if !self.synced_copy_ready() { return; }
         let Some(path) = self.unavailable_target() else { return };
+        if self.synced_copy_key(&path).is_none() { return; }
         match self.store.recover_synced_copy(&path) {
             Ok(i) => {
                 let id = self.store.notes[i].id;
@@ -80,14 +82,14 @@ impl Carnet {
 
     pub(super) fn availability_banner(&self, ui: &mut Ui<'_>, l: &Look) {
         if self.store.unavailable.is_empty() && !self.download.busy() && self.download.error.is_none() { return; }
-        ui.with_keyed("availability-banner", NodeSpec::column().grow_width().pad_xy(26.0, 12.0).gap(6.0), |ui| {
+        ui.with_keyed("availability-banner", NodeSpec::column().grow_width().pad_xy(size::GUTTER, space::M).gap(space::XS), |ui| {
             let text = if self.store.incomplete.contains(&self.store.dir) {
                 "Your notes folder isn't available on this Mac."
             } else { "Some notes aren't available on this Mac." };
             ui.text(text, TextStyle::new(Type::SMALL.size).color(l.t.fg));
             let status = self.download.status();
             if !status.is_empty() { ui.text(&status, TextStyle::new(Type::SMALL.size).color(l.t.muted)); }
-            ui.with(NodeSpec::row().wrap().gap(4.0), |ui| {
+            ui.with(NodeSpec::row().wrap().gap(space::XS), |ui| {
                 if self.download.busy() {
                     Self::availability_action(ui, l, "cancel-vault-download", "Cancel download", Msg::CancelDownload);
                 } else {
@@ -105,16 +107,16 @@ impl Carnet {
         self.row_rects.clear();
         self.slot_keys.clear();
         self.editing = false;
-        let synced_copy = self.synced_copy_ready().then(|| self.store.recovery_copy(path)).flatten();
-        ui.with_keyed("unavailable-page", NodeSpec::column().grow_width().grow_height().scroll_y().pad_xy(36.0, 36.0).gap(14.0), |ui| {
-            crate::icons::icon(ui, crate::icons::Glyph::Cloud, l.t.muted, 32.0, false);
+        let synced_copy = self.synced_copy_key(path).and_then(|k| self.store.replica.as_mut().map(|r| r.modified(k)));
+        ui.with_keyed("unavailable-page", NodeSpec::column().grow_width().grow_height().scroll_y().pad_xy(space::XXL, space::XXL).gap(space::M), |ui| {
+            crate::icons::icon(ui, crate::icons::Glyph::Cloud, l.t.muted, size::CONTROL, false);
             let title = self.store.unavailable_entries().into_iter().find(|(p, _)| p == path)
                 .map(|(_, title)| title).unwrap_or_else(|| "Notes unavailable".into());
             ui.text(&title, TextStyle::new(Type::HEADING.size).family(l.serif).color(l.t.fg));
             ui.text("This file or folder isn't available to read. If it's stored in iCloud, download it to continue. Otherwise, check its location and permissions.", TextStyle::new(Type::UI.size).color(l.t.muted));
             let status = self.download.status();
             if !status.is_empty() { ui.text(&status, TextStyle::new(Type::SMALL.size).color(l.t.fg)); }
-            ui.with(NodeSpec::row().wrap().gap(4.0), |ui| {
+            ui.with(NodeSpec::row().wrap().gap(space::XS), |ui| {
                 if self.download.busy() {
                     Self::availability_action(ui, l, "cancel-download", "Cancel download", Msg::CancelDownload);
                 } else {
@@ -123,7 +125,7 @@ impl Carnet {
                 Self::availability_action(ui, l, "retry-unavailable", "Retry", Msg::RetryAvailability);
                 Self::availability_action(ui, l, "reveal-unavailable", reveal_label(), Msg::RevealUnavailable);
             });
-            if let Some((_, modified)) = &synced_copy {
+            if let Some(modified) = &synced_copy {
                 let when = if let Some(time) = u64::try_from(*modified).ok().filter(|s| *s > 0).and_then(store::epoch_time) {
                     let secs = *modified as u64;
                     let date = chrome::date_words(time);
@@ -139,7 +141,7 @@ impl Carnet {
     }
 
     fn availability_action(ui: &mut Ui<'_>, l: &Look, key: &str, label: &str, msg: Msg) {
-        ui.text_in_keyed(key, NodeSpec::row().pad_xy(8.0, 5.0).radius(6.0).hover_bg(l.t.accent_soft)
+        ui.text_in_keyed(key, NodeSpec::row().pad_xy(space::S, space::XS).radius(radius::CONTROL).hover_bg(l.t.accent_soft)
             .on_click(msg).label(label).role(Role::Button), label, TextStyle::new(Type::SMALL.size).color(l.t.focus_ring));
     }
 }
