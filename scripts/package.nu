@@ -122,8 +122,20 @@ def "main mac" [] {
         let profile = ($env.CARNET_NOTARY_PROFILE? | default "")
         if ($profile | is-not-empty) {
             step "notarize"
-            must xcrun notarytool submit $dmg --keychain-profile $profile --wait
+            let submission = (^xcrun notarytool submit $dmg --keychain-profile $profile --wait --output-format json | complete)
+            let report = ($work | path join notarization.json)
+            $submission.stdout | save --force $report
+            if $submission.exit_code != 0 {
+                error make {msg: $"notarytool failed; see ($report): ($submission.stderr)"}
+            }
+            let result = ($submission.stdout | from json)
+            if $result.status != "Accepted" {
+                error make {msg: $"notarization status: ($result.status); see ($report)"}
+            }
             must xcrun stapler staple $dmg
+            must xcrun stapler validate $dmg
+            must codesign --verify --strict $dmg
+            must spctl --assess --type open --context context:primary-signature --verbose=2 $dmg
         }
     }
     print $"\n($dmg)"
