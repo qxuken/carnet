@@ -199,6 +199,14 @@ fn launcher(dark: bool) -> kui_native::Launcher {
         })
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn capture_preview(app: Carnet, to: &Path) {
+    let mut runner = launcher(false).open_headless(Framed(app), 1100.0, 740.0, SCALE);
+    settle(&mut runner).unwrap();
+    let frame = kui_native::capture(runner.core_mut()).unwrap();
+    write(frame, to).unwrap();
+}
+
 /// Turns until the app has nothing left to do: its fonts in, its pictures
 /// read and handed over, its floats laid out, nothing animating.
 fn settle(runner: &mut HeadlessRunner<Framed>) -> Result<(), String> {
@@ -351,6 +359,27 @@ impl Drop for Library {
 mod tests {
     use super::*;
     use carnet_core::doc::{Float, Kind};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "renders the cloud availability UI to /tmp/carnet-cloud-preview"]
+    fn unavailable_vault_preview() {
+        let output = Path::new("/tmp/carnet-cloud-preview");
+        std::fs::create_dir_all(output).unwrap();
+        for (name, dark, w, h) in [("light", false, 1100.0, 740.0), ("dark", true, 1100.0, 740.0), ("narrow", false, 420.0, 740.0)] {
+            let lib = Library::new().unwrap();
+            let dir = lib.0.join("cloud");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".Travel plans.md.icloud"), "placeholder metadata").unwrap();
+            let store = Store::open_with(dir, None).unwrap();
+            let settings = Settings { theme: if dark { ThemePref::Dark } else { ThemePref::Light }, translucent: false, check_updates: false, ..Settings::default() };
+            let app = Carnet::with_settings(store, settings);
+            let mut runner = launcher(dark).open_headless(Framed(app), w, h, SCALE);
+            settle(&mut runner).unwrap();
+            let frame = kui_native::capture(runner.core_mut()).unwrap();
+            write(frame, &output.join(format!("{name}.png"))).unwrap();
+        }
+    }
 
     /// The demo library reads back as the shots show it: every note in its
     /// folder, newest first, the Weekend note's dropped letter, highlight,

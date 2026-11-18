@@ -189,6 +189,10 @@ impl Carnet {
     }
 
     pub(super) fn page(&mut self, ui: &mut Ui<'_>, l: &Look, main_w: f32) {
+        if let Some(path) = self.unavailable_target() {
+            self.unavailable_page(ui, l, &path);
+            return;
+        }
         self.refresh_find();
         let t = l.t;
         let created = self.settings.dates_created.then(|| self.date_created());

@@ -7,6 +7,7 @@ mod clip;
 mod connect;
 mod design;
 mod disk;
+mod download;
 mod icons;
 mod images;
 #[cfg(target_os = "macos")]

@@ -66,9 +66,13 @@ Uninstalling removes the program only: your notes and settings stay where they a
 ### Where things are kept
 
 - **Notes:** `~/Documents/Carnet`, one Markdown file per note, unless **Settings → Notes folder** chooses another. Folders whose names start with `.` are left alone. Deleted notes and folders go to `.trash/` inside the notes folder, and `.trash/.origins` remembers where each came from.
-- **Offloaded files on macOS:** Carnet never waits for a cloud download on its UI thread, including when closing. Notes already open stay in memory; unreadable notes are retried when you return to the app. Deleted notes whose contents are offloaded stay listed as **Not downloaded**. Choose **Download Now** in Finder, then return to Carnet to read them.
+- **Offloaded files on macOS:** Unavailable notes stay listed with a cloud icon, using their last known titles when possible. Open one and choose **Download**, or **Download all** for the folder; **Retry** checks again after reconnecting or fixing permissions. Downloads run in the background and never hold the window or closing. An unavailable folder is never treated as an empty vault, and sync writes and attachment cleanup wait until it can be read. To prevent iCloud eviction, select the notes folder in Finder and choose **Keep Downloaded** where supported.
 - **Settings:** plain `key = value` lines in `settings.txt`, in `%APPDATA%\Carnet` on Windows, `~/Library/Application Support/Carnet` on a Mac and `~/.config/carnet` elsewhere.
 - **Each note's history** (what lets Carnet merge edits and show past versions): in the app's data folder, under `replica/` (`%APPDATA%\Carnet`, `~/Library/Application Support/Carnet`, or `~/.local/share/carnet`), never in the notes folder.
+
+The same local data folder keeps a small catalog of note titles and paths, plus incoming changes waiting for unavailable files. If an offloaded folder cannot take an unsaved recovery copy when Carnet closes, the copy stays there too and returns as a separate `(unsaved)` file when the folder is available again.
+
+When connected and caught up with Carnet sync, an unavailable note can also offer **Recover synced copy**, showing that copy's modification time. Choosing it saves a separate `(recovered)` note beside the original; it never replaces the iCloud file, which may contain newer edits. The containing folder must be accessible to save the copy, and attachments may still need downloading.
 
 A few environment variables override these, which is handy for trying things out: `CARNET_DIR` names the notes folder, `CARNET_CONFIG` the settings file, and `CARNET_THEME=light` or `CARNET_THEME=dark` pins the theme.
 

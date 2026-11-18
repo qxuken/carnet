@@ -48,6 +48,8 @@ mod menu_view;
 mod pick_view;
 #[path = "app_open.rs"]
 mod open_view;
+#[path = "app_availability.rs"]
+mod availability_view;
 #[path = "app_window.rs"]
 mod window_view;
 use pick_view::Pick;
@@ -104,6 +106,13 @@ pub enum Msg {
     /// turn the debug information on or off.
     SettingsTitle,
     OpenNote { note: u64 },
+    OpenUnavailable { path: String },
+    DownloadUnavailable,
+    DownloadVault,
+    RecoverSyncedCopy,
+    CancelDownload,
+    RetryAvailability,
+    RevealUnavailable,
     FollowNote { note: u64, fragment: Option<String> },
     NewNote,
     PinNote,
@@ -615,6 +624,9 @@ enum Drag {
 
 pub struct Carnet {
     pub store: Store,
+    download: crate::download::Download,
+    unavailable_open: Option<std::path::PathBuf>,
+    unavailable_sentinel: Option<u64>,
     /// Index into `store.notes`; there is always one.
     pub current: usize,
     /// The library's order: indices into `store.notes`. Recomputed only when
@@ -1099,6 +1111,7 @@ macro_rules! editor {
 
 editor! {
     current: usize,
+    unavailable_open: Option<std::path::PathBuf>,
     find: search_view::Find,
     caret: Caret = Caret::at(page::start(Slot::block(0))),
     editing: bool,
@@ -1340,6 +1353,9 @@ impl Carnet {
     pub fn with_settings(store: Store, settings: Settings) -> Self {
         let mut app = Self {
             store,
+            download: Default::default(),
+            unavailable_open: None,
+            unavailable_sentinel: None,
             current: 0,
             order: Vec::new(),
             find: Default::default(),
@@ -1515,6 +1531,11 @@ impl Carnet {
         };
         if app.store.notes.is_empty() {
             app.store.notes.push(blank_note());
+            app.unavailable_open = app.store.unavailable.first().cloned();
+            if app.unavailable_open.is_some() {
+                app.store.notes[0].dirty = false;
+                app.unavailable_sentinel = Some(app.store.notes[0].id);
+            }
         }
         if !app.store.skipped.is_empty() {
             let n = app.store.skipped.len();
@@ -1711,11 +1732,14 @@ impl Carnet {
     /// never "not found" for being in another folder.
     fn reorder(&mut self) {
         let q = self.query.trim();
+        let unavailable: HashSet<_> = self.store.unavailable.iter().collect();
         let folder = if q.is_empty() { self.folder.as_deref() } else { None };
         let mut order: Vec<usize> = (0..self.store.notes.len())
             .filter(|&i| {
                 let n = &self.store.notes[i];
-                folder.is_none_or(|f| n.folder == f)
+                self.unavailable_sentinel != Some(n.id)
+                    && !(n.path.as_ref().is_some_and(|p| unavailable.contains(p) || self.store.incomplete.iter().any(|dir| p.starts_with(dir))) && !n.dirty)
+                    && folder.is_none_or(|f| n.folder == f)
                     && (q.is_empty() || search_view::matches(&n.title, &n.doc, q))
             })
             .collect();
@@ -2051,7 +2075,21 @@ impl Carnet {
         // with its `rev` moved on.
         let revs: HashMap<u64, _> = self.store.notes.iter().map(|n| (n.id, n.rev)).collect();
         let links = self.link_state();
-        let changed = self.store.rescan();
+        let mut changed = self.store.rescan();
+        // Remove the editor's empty sentinel once actual notes arrive.
+        if self.store.notes.iter().any(|n| n.path.is_some()) && let Some(sentinel) = self.unavailable_sentinel.take() {
+            self.store.notes.retain(|n| n.id != sentinel || !n.is_blank() || n.path.is_some());
+            changed = true;
+            self.current = open.and_then(|id| self.store.notes.iter().position(|n| n.id == id)).unwrap_or(0);
+        }
+        let restored = self.unavailable_open.as_ref().filter(|p| !self.store.is_unavailable(p))
+            .and_then(|p| self.store.notes.iter().position(|n| n.path.as_ref() == Some(p)));
+        if let Some(i) = restored {
+            self.unavailable_open = None;
+            self.current = i;
+        } else if self.unavailable_open.as_ref().is_some_and(|p| !self.store.is_unavailable(p) && !p.starts_with(self.store.dir.join(".trash"))) {
+            self.unavailable_open = None;
+        }
         self.gather_pictures();
         // A picture put beside a note meanwhile goes to the vault soon.
         self.sync.poke();
@@ -2079,7 +2117,7 @@ impl Carnet {
             .collect();
         self.histories.retain(|id, _| kept.contains(id));
         self.reorder();
-        match open.and_then(|id| self.store.notes.iter().position(|n| n.id == id)) {
+        match restored.or_else(|| open.and_then(|id| self.store.notes.iter().position(|n| n.id == id))) {
             Some(i) => self.current = i,
             None => {
                 if self.store.notes.is_empty() {
@@ -2109,9 +2147,7 @@ impl Carnet {
                     *j -= 1;
                 }
             }
-            if self.current > i {
-                self.current -= 1;
-            }
+            self.current = i.min(self.store.notes.len() - 1);
             return;
         }
         self.save_current();
@@ -2122,6 +2158,7 @@ impl Carnet {
         if self.note_window.is_some() {
             return;
         }
+        self.unavailable_open = None;
         self.marks.push("note opened");
         self.folders_clicked = false;
         // Another note (⌥⌘↓ comes from the keyboard): not being written yet.
@@ -2160,6 +2197,12 @@ impl Carnet {
 
     /// A new note, in the folder the library shows.
     fn new_note(&mut self) {
+        let dir = self.store.folder_dir(self.folder.as_deref().unwrap_or(""));
+        if self.store.incomplete.iter().any(|p| dir.starts_with(p)) {
+            self.open_unavailable(dir);
+            return;
+        }
+        self.unavailable_open = None;
         self.close_history();
         self.settings_open = false;
         self.find = Default::default();
@@ -2418,7 +2461,7 @@ impl Carnet {
 
     /// The page shows a version or a deleted note: read, not written.
     pub(super) fn reading(&self) -> bool {
-        self.versions.is_some() || self.peek.is_some()
+        self.versions.is_some() || self.peek.is_some() || self.unavailable_target().is_some()
     }
 
     /// The folder the page's pictures' paths are from.
@@ -2435,6 +2478,10 @@ impl Carnet {
         let from = if t.folder.is_empty() { "All notes".to_string() } else { folder_name(&t.folder).to_string() };
         let ago = ago(std::time::SystemTime::now(), t.when);
         let (title, doc) = if t.is_folder {
+            if crate::disk::needs_download(&t.path) {
+                self.open_unavailable(t.path);
+                return;
+            }
             let titles = self.store.trashed_titles(&t);
             let mut blocks: Vec<Block> =
                 titles.iter().map(|n| Block::new(Kind::Item { style: ListStyle::Bullet, indent: 0, done: false, num: 0, text: n.clone() })).collect();
@@ -2447,11 +2494,13 @@ impl Carnet {
                 Ok(n) => (n.title.clone(), n.doc),
                 Err(e) => {
                     self.error = Some(format!("Couldn't read it: {}", store::plain_error(&e)));
+                    self.open_unavailable(t.path.clone());
                     return;
                 }
             }
         };
         self.close_history();
+        self.unavailable_open = None;
         self.peek = Some(Peek {
             path: t.path.clone(),
             title,
@@ -3604,6 +3653,7 @@ impl Carnet {
     // ------------------------------------------------------------ events
 
     fn on_msg(&mut self, msg: Msg, event: Event, key: Key, core: &mut Core) {
+        if self.unavailable_target().is_some() && matches!(msg, Msg::Page | Msg::PageDrag) { return; }
         // Typing goes on through the page's keys; anything else ends it.
         // The colour picker stays for its own swatches and tabs (and the
         // toolbar buttons that switch them); anything else puts it away.
@@ -3686,6 +3736,14 @@ impl Carnet {
     /// A message that needs nothing but itself: a click's, or one the
     /// page's menu and shortcuts send on.
     fn on_plain(&mut self, msg: Msg) {
+        if self.unavailable_target().is_some() && !self.settings_open && !matches!(msg,
+            Msg::OpenUnavailable { .. } | Msg::DownloadUnavailable | Msg::DownloadVault | Msg::CancelDownload
+            | Msg::RetryAvailability | Msg::RevealUnavailable | Msg::RecoverSyncedCopy | Msg::ShowDir | Msg::OpenDeleted { .. }
+            | Msg::OpenNote { .. } | Msg::FollowNote { .. } | Msg::NewNote
+            | Msg::FocusSearch | Msg::ClearSearch | Msg::ShowList | Msg::SelectFolder { .. }
+            | Msg::ShowSettings | Msg::ToggleSidebar | Msg::ShowDeleted | Msg::CloseHistory
+            | Msg::LibraryDrag | Msg::FoldFolder { .. } | Msg::ToolsMenu | Msg::RootKey)
+        { return; }
         // Turn off, and Remove, ask again after anything else is done
         // (their Cancel among them).
         if !matches!(msg, Msg::SyncOff) {
@@ -3739,6 +3797,21 @@ impl Carnet {
         }
         match msg {
             Msg::RootKey | Msg::Page | Msg::PageDrag | Msg::SettingsTitle => {}
+            Msg::OpenUnavailable { path } => self.open_unavailable(path.into()),
+            Msg::DownloadUnavailable => {
+                if let Some(path) = self.unavailable_target() {
+                    self.download.start(self.store.dir.clone(), path, self.waker.as_ref().map(|w| w.named("cloud download")));
+                }
+            }
+            Msg::DownloadVault => self.download.start(self.store.dir.clone(), self.store.dir.clone(), self.waker.as_ref().map(|w| w.named("cloud download"))),
+            Msg::RecoverSyncedCopy => self.recover_synced_copy(),
+            Msg::CancelDownload => self.download.cancel(),
+            Msg::RetryAvailability => self.retry_availability(),
+            Msg::RevealUnavailable => {
+                if let Some(path) = self.unavailable_target() && let Err(e) = store::reveal(&path) {
+                    self.download.error = Some(format!("Couldn't show the file: {e}"));
+                }
+            }
             Msg::OpenNote { note } => self.open_result(note as usize),
             Msg::FollowNote { note, fragment } => self.follow_note(note, fragment.as_deref()),
             Msg::NewNote => self.new_note(),
@@ -4499,6 +4572,9 @@ impl Carnet {
     /// key was one.
     fn chord(&mut self, k: &kui_native::KeyPress) -> bool {
         let (shift, alt) = (k.mods.shift, k.mods.alt);
+        if self.unavailable_target().is_some() && !self.settings_open && !matches!(crate::keys::chord_code(k),
+            KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::Char('n' | 'N' | ',' | '\\' | 'f' | 'F'))
+        { return false; }
         if let Some(note) = self.note_window
             && self.note_window_chord(note, k)
         {
@@ -4870,7 +4946,7 @@ impl Carnet {
 
     fn say_unavailable(&mut self) {
         if !self.store.unavailable.is_empty() {
-            self.notify_wide("Some notes couldn't be read. Make sure their files are downloaded and accessible, then return to Carnet.");
+            self.say = Some("Some notes aren't available on this Mac. Download or retry to read them.".into());
         }
     }
 
@@ -5168,6 +5244,7 @@ impl Carnet {
             ui.core().perf_mark(m);
         }
         if main {
+            self.availability_tick(ui);
             timed!("folder watch", self.watch_tick());
             timed!("sync", self.sync_tick());
             timed!("server check", self.connect_tick());

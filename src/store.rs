@@ -218,6 +218,14 @@ pub struct Store {
     /// Files temporarily unreadable (including cloud placeholders).
     /// Retried on rescan; never treated as empty notes or as invalid UTF-8.
     pub unavailable: Vec<PathBuf>,
+    /// Subtrees whose enumeration failed. Absence below these paths is
+    /// unknown, never evidence of deletion.
+    pub incomplete: Vec<PathBuf>,
+    /// Last known titles, kept beside the replica outside cloud Documents.
+    catalog: HashMap<PathBuf, String>,
+    /// Incoming changes waiting for readable local files, persisted beside
+    /// the replica so an offline restart cannot lose the retry.
+    deferred: BTreeSet<Key>,
     /// Every folder under the notes folder, as relative paths, sorted:
     /// subfolders are folders too, and an empty one is still one.
     pub folders: Vec<String>,
@@ -406,6 +414,7 @@ impl Store {
     /// Repair by stable note identity, including both sides of a folder
     /// move. The Markdown stays readable by every other editor.
     fn repair_note_links(&mut self, before: &carnet_core::navigation::Paths) -> io::Result<bool> {
+        if !self.unavailable.is_empty() { return Ok(false); }
         use carnet_core::navigation as nav;
         let after = self.note_paths();
         let moved = nav::moves(before, &after);
@@ -444,7 +453,15 @@ impl Store {
     /// with `None`) rather than in the app's data folder: the screenshots'
     /// library, which leaves nothing behind there (shots.rs).
     pub fn open_with(dir: PathBuf, replica: Option<PathBuf>) -> io::Result<Self> {
-        fs::create_dir_all(&dir)?;
+        // A previously opened vault that went away must not be silently
+        // recreated. A first-time vault may of course be made here.
+        // Older installations already have a replica directory, even
+        // though they have never written a title catalog.
+        let known = replica.as_ref().is_some_and(|d| d.is_dir());
+        if !known && !crate::disk::needs_download(&dir) && let Err(e) = fs::create_dir_all(&dir)
+            && !crate::disk::is_offloaded(&e) && e.kind() != io::ErrorKind::PermissionDenied {
+            return Err(e);
+        }
         let (replica, replica_refused) = match replica.map(|d| Replica::open(&d)) {
             Some(Ok(r)) => (Some(r), None),
             Some(Err(e)) => (None, Newer::of(&e).map(Newer::to_string)),
@@ -456,6 +473,9 @@ impl Store {
             notes: Vec::new(),
             skipped: Vec::new(),
             unavailable: Vec::new(),
+            incomplete: Vec::new(),
+            catalog: HashMap::new(),
+            deferred: BTreeSet::new(),
             folders: Vec::new(),
             picture_folders: Vec::new(),
             files: doc::Files::default(),
@@ -469,9 +489,15 @@ impl Store {
             before_remote: HashMap::new(),
             vault_read: None,
         };
+        store.read_catalog(&paths_before);
+        if let Some(path) = store.replica_dir().map(|d| d.join("cloud-pending.txt")) {
+            store.deferred = fs::read_to_string(path).unwrap_or_default().lines().filter_map(Key::parse).collect();
+        }
         let pins = store.read_pins();
         let mut taken = HashSet::new();
-        for (path, folder) in store.note_files()? {
+        let mut files = store.note_files()?;
+        files.extend(store.recover_drafts());
+        for (path, folder) in files {
             match Note::load_text(&path) {
                 Ok((mut note, text)) => {
                     note.pinned = pins.contains(&pin_key(&folder, &path));
@@ -484,11 +510,15 @@ impl Store {
                 Err(_) => store.unavailable.push(path),
             }
         }
+        store.unavailable.sort();
+        store.unavailable.dedup();
         if store.notes.is_empty() && store.skipped.is_empty() && store.unavailable.is_empty() {
             store.notes.push(welcome());
             store.save(0, true)?;
         }
+        store.retry_remote();
         store.repair_note_links(&paths_before)?;
+        store.remember_catalog();
         Ok(store)
     }
 
@@ -506,12 +536,119 @@ impl Store {
     /// editor's own) are not notes.
     fn note_files(&mut self) -> io::Result<Vec<(PathBuf, String)>> {
         let mut found = Found::default();
-        walk(&self.dir, "", 0, &mut found)?;
+        if walk(&self.dir, "", 0, &mut found).is_err() {
+            found.incomplete.push(self.dir.clone());
+        }
+        let trash = self.dir.join(TRASH);
+        if trash.try_exists().unwrap_or(true) || crate::disk::has_cloud_placeholder(&trash) {
+            let mut deleted = Found::default();
+            if walk(&trash, "", 0, &mut deleted).is_err() { found.incomplete.push(trash); }
+            found.incomplete.extend(deleted.incomplete);
+            found.incomplete.extend(deleted.files.into_iter().filter(|(p, _)| crate::disk::needs_download(p)).map(|(p, _)| p));
+        }
+        found.incomplete.extend(found.others.iter().map(|rel| self.dir.join(rel)).filter(|path| crate::disk::needs_download(path)));
+        self.incomplete = found.incomplete;
+        self.unavailable.extend(self.incomplete.iter().cloned());
+        self.unavailable.extend(found.files.iter().filter(|(p, _)| crate::disk::needs_download(p)).map(|(p, _)| p.clone()));
+        if !self.incomplete.is_empty() {
+            found.folders.extend(self.folders.iter().filter(|f| self.incomplete.iter().any(|p| self.folder_dir(f).starts_with(p))).cloned());
+            let mut unavailable: HashSet<_> = self.unavailable.iter().cloned().collect();
+            for path in self.catalog.keys() {
+                let blocked = self.incomplete.iter().any(|p| path.starts_with(p));
+                if blocked && unavailable.insert(path.clone()) {
+                    self.unavailable.push(path.clone());
+                }
+                if blocked {
+                    let mut parent = path.parent();
+                    while let Some(p) = parent.filter(|p| *p != self.dir && p.starts_with(&self.dir)) {
+                        if let Ok(rel) = p.strip_prefix(&self.dir) {
+                            found.folders.push(rel.to_string_lossy().replace('\\', "/"));
+                        }
+                        parent = p.parent();
+                    }
+                }
+            }
+        }
         found.folders.sort_by_key(|f: &String| f.to_lowercase());
+        found.folders.dedup();
         self.folders = found.folders;
         self.picture_folders = found.pictures;
+        found.others.extend(self.files.paths().filter(|rel| self.incomplete.iter().any(|p| self.dir.join(rel).starts_with(p))).map(str::to_string));
         self.files = doc::Files::new(found.others);
         Ok(found.files)
+    }
+
+    pub fn is_unavailable(&self, path: &Path) -> bool {
+        self.unavailable.iter().any(|p| p == path) || self.incomplete.iter().any(|p| path.starts_with(p))
+    }
+
+    fn require_complete_folder(&self, folder: &str) -> io::Result<()> {
+        let dir = self.folder_dir(folder);
+        if self.is_unavailable(&dir) || self.unavailable.iter().any(|p| p.starts_with(&dir)) {
+            Err(io::Error::other("Download this folder before moving or deleting it"))
+        } else { Ok(()) }
+    }
+
+    /// Display-only entries: never inserted into `notes` or written as text.
+    pub fn unavailable_entries(&self) -> Vec<(PathBuf, String)> {
+        let dirty: HashSet<_> = self.notes.iter().filter(|n| n.dirty).filter_map(|n| n.path.as_ref()).collect();
+        let mut entries: Vec<_> = self.unavailable.iter()
+            .filter(|p| *p != &self.dir)
+            .filter(|p| !p.starts_with(self.dir.join(TRASH)))
+            .filter(|p| !dirty.contains(p))
+            .map(|p| (p.clone(), self.catalog.get(p).cloned().unwrap_or_else(|| stem_of(p))))
+            .collect();
+        entries.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()).then(a.0.cmp(&b.0)));
+        entries.dedup_by(|a, b| a.0 == b.0);
+        entries
+    }
+
+    fn read_catalog(&mut self, known_paths: &carnet_core::navigation::Paths) {
+        let Some(path) = self.replica_dir().map(|d| d.join("catalog.json")) else { return };
+        let entries = fs::read_to_string(path).ok()
+            .and_then(|text| serde_json::from_str::<HashMap<String, String>>(&text).ok())
+            .unwrap_or_else(|| known_paths.values().map(|rel| (rel.clone(), stem_of(Path::new(rel)))).collect());
+        self.catalog = entries.into_iter().filter_map(|(rel, title)| {
+            let path = Path::new(&rel);
+            if path.components().any(|c| !matches!(c, std::path::Component::Normal(_))) { return None; }
+            Some((self.dir.join(path), title))
+        }).collect();
+    }
+
+    fn remember_catalog(&mut self) {
+        let unavailable: HashSet<_> = self.unavailable.iter().collect();
+        let mut entries: HashMap<_, _> = self.catalog.iter()
+            .filter(|(p, _)| unavailable.contains(p) || self.incomplete.iter().any(|dir| p.starts_with(dir)))
+            .map(|(p, t)| (p.clone(), t.clone())).collect();
+        for n in &self.notes {
+            if let Some(p) = &n.path { entries.insert(p.clone(), n.display_title().to_string()); }
+        }
+        let unchanged = self.catalog == entries;
+        self.catalog = entries;
+        let Some(path) = self.replica_dir().map(|d| d.join("catalog.json")) else { return };
+        if unchanged && path.exists() { return; }
+        let relative: HashMap<_, _> = self.catalog.iter().filter_map(|(p, t)|
+            Some((p.strip_prefix(&self.dir).ok()?.to_string_lossy().into_owned(), t))).collect();
+        if let Ok(text) = serde_json::to_string(&relative) { let _ = write_atomic(&path, &text); }
+    }
+
+    fn keep_deferred(&self) -> io::Result<()> {
+        if let Some(path) = self.replica_dir().map(|d| d.join("cloud-pending.txt")) {
+            let text: String = self.deferred.iter().map(|k| format!("{k}\n")).collect();
+            write_atomic(&path, &text)?;
+        }
+        Ok(())
+    }
+
+    fn retry_remote(&mut self) -> bool {
+        if !self.unavailable.is_empty() { return false; }
+        let mut changed = false;
+        for key in self.deferred.iter().copied().collect::<Vec<_>>() {
+            if let Ok(remote) = self.remote_changed(key) {
+                changed |= !matches!(remote, Remote::Same);
+            }
+        }
+        changed
     }
 
     /// Where a folder is on disk.
@@ -538,6 +675,9 @@ impl Store {
     /// A new folder named `name` inside `parent` ("" for the top level).
     /// Returns its relative path.
     pub fn create_folder(&mut self, parent: &str, name: &str) -> io::Result<String> {
+        if self.is_unavailable(&self.folder_dir(parent)) {
+            return Err(io::Error::other("Download this folder before creating a folder in it"));
+        }
         // A folder named as the pictures' holds pictures, at any depth:
         // made here, it would not be listed. (The web's rule too.)
         let name = vault::folder_name(name).map_err(io::Error::other)?;
@@ -698,6 +838,7 @@ impl Store {
     /// `folder` to `to` on disk, and everything that names it here: its
     /// subfolders, its notes' folders and files, the pins.
     fn relocate_folder(&mut self, folder: &str, to: &str) -> io::Result<()> {
+        self.require_complete_folder(folder)?;
         let before = self.note_paths();
         let (from_dir, to_dir) = (self.inside(self.folder_dir(folder))?, self.inside(self.folder_dir(to))?);
         rename_retrying(&from_dir, &to_dir)?;
@@ -738,6 +879,7 @@ impl Store {
     /// anything in it — a note, or a file Carnet does not show — stays:
     /// that one goes to the trash instead.
     pub fn delete_folder(&mut self, folder: &str) -> io::Result<()> {
+        self.require_complete_folder(folder)?;
         if !self.folder_is_empty(folder) {
             return Err(io::Error::other("the folder still has notes in it"));
         }
@@ -769,6 +911,7 @@ impl Store {
     /// to `.trash/`, whole, and forgets its notes. Their edits must be
     /// saved first. Returns where it went.
     pub fn trash_folder(&mut self, folder: &str) -> io::Result<PathBuf> {
+        self.require_complete_folder(folder)?;
         let bin = self.dir.join(TRASH);
         fs::create_dir_all(&bin)?;
         let leaf = folder.rsplit('/').next().unwrap_or(folder);
@@ -897,7 +1040,7 @@ impl Store {
         self.refresh(i);
         fs::create_dir_all(self.inside(self.folder_dir(folder))?)?;
         if let Some(from) = self.notes[i].path.clone() {
-            let to = self.inside(self.free_path(&stem_of(&from), None, folder))?;
+            let to = self.inside(self.free_path(&stem_of(&from), None, folder)?)?;
             rename_retrying(&from, &to)?;
             self.notes[i].renamed_to(to);
         }
@@ -993,6 +1136,7 @@ impl Store {
     /// goes. A file left where it is is not looked at again.
     pub fn gather_pictures(&mut self) -> Gathered {
         let mut out = Gathered::default();
+        if !self.unavailable.is_empty() { return out; }
         // The files, by their paths from the notes folder.
         let mut files: HashMap<String, PathBuf> = HashMap::new();
         for f in &self.picture_folders {
@@ -1177,7 +1321,13 @@ impl Store {
     /// file comes in. Returns whether anything changed. What the app runs
     /// when its window comes back to the front.
     pub fn rescan(&mut self) -> bool {
+        let unavailable_before = self.unavailable.clone();
+        let folders_before = self.folders.clone();
         self.unavailable.clear();
+        // Discover incomplete subtrees before deciding whether a known
+        // file vanished. A failed directory enumeration is not deletion.
+        let mut files = self.note_files().unwrap_or_default();
+        files.extend(self.recover_drafts());
         let paths_before = self.note_paths();
         // Notes whose files went: one may be back under another name,
         // changed on the way (a rename and an edit from another machine).
@@ -1186,11 +1336,12 @@ impl Store {
         let before = self.notes.len();
         self.notes.retain(|note| {
             let Some(path) = note.path.as_deref().filter(|_| !note.dirty) else { return true };
+            if self.incomplete.iter().any(|p| path.starts_with(p)) { return true; }
             match stamp(path) {
                 None => {
                     // A folder may itself be offloaded. Failure to stat
                     // it is not evidence that its notes were deleted.
-                    if path.try_exists().unwrap_or(true) {
+                    if path.try_exists().unwrap_or(true) || crate::disk::has_cloud_placeholder(path) {
                         self.unavailable.push(path.to_path_buf());
                         return true;
                     }
@@ -1200,7 +1351,7 @@ impl Store {
                     false
                 }
                 Some(s) => {
-                    if Some(s) != note.disk {
+                    if Some(s) != note.disk || unavailable_before.contains(&path.to_path_buf()) {
                         stale.insert(note.id);
                     }
                     true
@@ -1227,8 +1378,7 @@ impl Store {
             }
         }
         let pins = self.read_pins();
-        let folders_before = self.folders.clone();
-        if let Ok(files) = self.note_files() {
+        {
             // Each note's file looked up by its path, as a file system that
             // ignores case sees it, not compared with every other one's.
             let mut known: HashSet<String> = self.notes.iter().filter_map(|n| n.path.as_deref()).map(path_key).collect();
@@ -1253,8 +1403,12 @@ impl Store {
                 }
             }
         }
+        self.unavailable.sort();
+        self.unavailable.dedup();
+        changed |= self.retry_remote();
         changed |= self.repair_note_links(&paths_before).unwrap_or(false);
-        changed || self.folders != folders_before
+        self.remember_catalog();
+        changed || self.folders != folders_before || self.unavailable != unavailable_before
     }
 
     /// Reloads note `i` from disk when it changed there and has no edits
@@ -1291,6 +1445,11 @@ impl Store {
         if !note.dirty && !move_it {
             return Ok(Saved::Clean);
         }
+        if self.incomplete.iter().any(|p| self.folder_dir(&note.folder).starts_with(p))
+            || note.path.as_ref().is_some_and(|p| crate::disk::needs_download(p))
+        {
+            return Err(io::Error::other("This file or folder isn't available. Download it before saving."));
+        }
         // Changed on disk since we read it: merge, or keep both.
         if let Some(p) = &current
             && let Some(now) = stamp(p)
@@ -1303,7 +1462,7 @@ impl Store {
             _ => {
                 let folder = note.folder.clone();
                 fs::create_dir_all(self.folder_dir(&folder))?;
-                self.free_path(&wanted, current.as_deref(), &folder)
+                self.free_path(&wanted, current.as_deref(), &folder)?
             }
         };
         let text = note.markdown();
@@ -1412,6 +1571,7 @@ impl Store {
         self.bring_back(&self.notes[i].folder, text);
         let mut taken = self.notes.iter().filter_map(|n| n.key).collect();
         self.track_in(i, text, origin, &mut taken);
+        self.remember_catalog();
     }
 
     /// [`track`](Self::track), with the keys notes already have kept by the
@@ -1428,6 +1588,9 @@ impl Store {
         };
         taken.insert(key);
         self.notes[i].key = Some(key);
+        // Replaying an incoming change must compare the local file to
+        // its previous version, not record it over the incoming doc first.
+        if self.deferred.contains(&key) { return; }
         // A replica that cannot write is behind, not wrong: the files are
         // the truth, and it catches up from them when it next opens.
         let _ = replica.record(key, &rel, text, origin);
@@ -1819,6 +1982,9 @@ impl Store {
     /// A note with edits not yet saved waits, and with it the vault's
     /// version as applied. Returns whether anything changed here.
     pub fn reconcile(&mut self, send: bool) -> io::Result<bool> {
+        // Keep incoming changes in the replica until local files can be
+        // read and compared; never infer a layout from a partial scan.
+        if !self.unavailable.is_empty() { return Ok(false); }
         let Some(vault) = self.vault_layout() else { return Ok(false) };
         let r = self.replica.as_ref().expect("checked");
         // As last applied: most often the vault as it is, not read twice.
@@ -2063,7 +2229,7 @@ impl Store {
                 && stem_of(&path) != place.name
                 && !numbered_as(&path, &place.name)
             {
-                let to = self.inside(self.free_path(&place.name, Some(&path), &place.folder))?;
+                let to = self.inside(self.free_path(&place.name, Some(&path), &place.folder)?)?;
                 if !same_path(&to, &path) {
                     rename_retrying(&path, &to)?;
                     self.notes[i].renamed_to(to);
@@ -2132,6 +2298,46 @@ impl Store {
         std::mem::take(&mut self.changed)
     }
 
+    /// A replica copy of an unavailable note. The caller must wait for sync
+    /// to catch up before presenting it as the connected server's copy.
+    pub fn recovery_key(&self, path: &Path) -> Option<Key> {
+        if !self.is_unavailable(path) { return None; }
+        let rel = path.strip_prefix(&self.dir).ok()?;
+        if rel.starts_with(TRASH) { return None; }
+        let rel = rel.components().map(|c| c.as_os_str().to_str()).collect::<Option<Vec<_>>>()?.join("/");
+        self.replica.as_ref()?.key_at_path(&rel)
+    }
+
+    pub fn recovery_copy(&mut self, path: &Path) -> Option<(String, i64)> {
+        let key = self.recovery_key(path)?;
+        let replica = self.replica.as_mut()?;
+        let text = replica.text(key);
+        if text.is_empty() { return None; }
+        Some((text, replica.modified(key)))
+    }
+
+    /// Never replace the cloud placeholder: its unread edits may differ.
+    /// Keep the copy beside it so relative attachment links still resolve.
+    pub fn recover_synced_copy(&mut self, path: &Path) -> io::Result<usize> {
+        let (text, _) = self.recovery_copy(path).ok_or_else(|| io::Error::other("No synced copy is available"))?;
+        let folder = path.parent().and_then(|p| p.strip_prefix(&self.dir).ok())
+            .and_then(Path::to_str).ok_or_else(|| io::Error::other("Unknown note folder"))?.to_string();
+        if self.is_unavailable(&self.folder_dir(&folder)) {
+            return Err(io::Error::other("Download the containing folder first so the recovered copy can be saved"));
+        }
+        let (title, doc) = doc::from_markdown(&text);
+        let title = format!("{} (recovered)", title.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("Note"));
+        let mut copy = Note::new(&title, doc);
+        copy.folder = folder;
+        let i = self.notes.len();
+        self.notes.push(copy);
+        if let Err(e) = self.save(i, true) {
+            self.notes.remove(i);
+            return Err(e);
+        }
+        Ok(i)
+    }
+
     /// Another device's changes to the note `key` came in (sync took them
     /// into its doc): its file follows. A note with no edits here is
     /// rewritten and reloaded; one with edits has them written beside
@@ -2142,6 +2348,25 @@ impl Store {
     pub fn remote_changed(&mut self, key: Key) -> io::Result<Remote> {
         let Some(replica) = self.replica.as_mut() else { return Ok(Remote::Same) };
         replica.persist(key)?;
+        self.deferred.insert(key);
+        self.keep_deferred()?;
+        if !self.unavailable.is_empty() {
+            return Err(io::Error::other("Waiting for the notes folder to be downloaded and accessible"));
+        }
+        // Tracking the successfully applied text must advance the replica's
+        // file version. Keep the on-disk retry until the write succeeds.
+        self.deferred.remove(&key);
+        let result = self.apply_remote(key);
+        if result.is_ok() {
+            self.keep_deferred()?;
+        } else {
+            self.deferred.insert(key);
+        }
+        result
+    }
+
+    fn apply_remote(&mut self, key: Key) -> io::Result<Remote> {
+        let Some(replica) = self.replica.as_mut() else { return Ok(Remote::Same) };
         let text = replica.text(key);
         let Some(i) = self.notes.iter().position(|n| n.key == Some(key)) else {
             if text.is_empty() {
@@ -2180,7 +2405,7 @@ impl Store {
                 self.folders.push(folder.clone());
                 self.folders.sort_by_key(|f| f.to_lowercase());
             }
-            let path = self.inside(self.free_path(&stem, None, &folder))?;
+            let path = self.inside(self.free_path(&stem, None, &folder)?)?;
             write_atomic(&path, &text)?;
             self.edited_when(key, &path);
             let (mut note, text) = Note::load_text(&path)?;
@@ -2286,7 +2511,7 @@ impl Store {
         let (id, pinned) = (note.id, note.pinned);
         let path = note.path.clone().unwrap_or_default();
         let folder = note.folder.clone();
-        let copy = self.free_path(&format!("{} (conflict)", stem_of(&path)), None, &folder);
+        let copy = self.free_path(&format!("{} (conflict)", stem_of(&path)), None, &folder)?;
         write_atomic(&copy, &note.markdown())?;
         let mut mine = Note::load(&copy)?;
         mine.pinned = false;
@@ -2331,14 +2556,54 @@ impl Store {
         let note = &self.notes[i];
         let stem = format!("{} (unsaved)", slug(note.display_title()));
         let folder = note.folder.clone();
-        let path = self.free_path(&stem, None, &folder);
-        fs::write(&path, note.markdown())?;
+        let text = note.markdown();
+        let beside = self.free_path(&stem, None, &folder).and_then(|path| {
+            write_atomic(&path, &text)?;
+            Ok(path)
+        });
+        if beside.is_ok() { return beside; }
+        let Some(data) = self.replica_dir() else { return beside };
+        let drafts = data.join("unsaved");
+        fs::create_dir_all(&drafts)?;
+        // Same note, same process: a repeated rescue replaces only its
+        // own draft. The time keeps a later process's note ids distinct.
+        let stamp = note.created.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let path = drafts.join(format!("{stamp}-{}.json", note.id));
+        let record = serde_json::json!({"folder": folder, "stem": stem, "text": text});
+        write_atomic(&path, &record.to_string())?;
         Ok(path)
+    }
+
+    /// A whole offloaded directory cannot take the usual rescue copy.
+    /// Bring drafts kept in app data back as separate notes once it can.
+    fn recover_drafts(&self) -> Vec<(PathBuf, String)> {
+        let mut recovered = Vec::new();
+        if !self.unavailable.is_empty() { return recovered; }
+        let Some(data) = self.replica_dir() else { return recovered };
+        let Ok(entries) = fs::read_dir(data.join("unsaved")) else { return recovered };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") { continue; }
+            let Ok(text) = fs::read_to_string(&path) else { continue };
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let (Some(folder), Some(stem), Some(text)) = (record["folder"].as_str(), record["stem"].as_str(), record["text"].as_str()) else { continue };
+            let Ok(dir) = self.inside(self.folder_dir(folder)) else { continue };
+            if fs::create_dir_all(dir).is_err() { continue; }
+            let Ok(to) = self.free_path(&slug(stem), None, folder) else { continue };
+            if write_atomic(&to, text).is_ok() {
+                recovered.push((to, folder.to_string()));
+                let _ = fs::remove_file(path);
+            }
+        }
+        recovered
     }
 
     /// Moves note `i`'s file to `.trash/`, then forgets the note. A failed
     /// move forgets nothing. Returns where the file went.
     pub fn trash(&mut self, i: usize) -> io::Result<Option<PathBuf>> {
+        if self.notes[i].path.as_ref().is_some_and(|p| self.is_unavailable(p)) {
+            return Err(io::Error::other("Download this note before moving it to Deleted"));
+        }
         let mut gone = None;
         if let Some(path) = self.notes[i].path.clone()
             && path.exists()
@@ -2407,6 +2672,7 @@ impl Store {
     /// which was let go on purpose), to sync as any note does, so the
     /// account has one. True if it was put back.
     pub fn welcome_unless_the_account_has_one(&mut self) -> io::Result<bool> {
+        if !self.unavailable.is_empty() { return Ok(false); }
         let title = welcome().title;
         let has = self.notes.iter().any(|n| n.title == title) || self.trashed().iter().any(|t| !t.is_folder && t.title == title);
         if has {
@@ -2444,7 +2710,7 @@ impl Store {
     pub fn restore(&mut self, from: &Path, name: &str, folder: &str) -> io::Result<usize> {
         let stem = name.strip_suffix(".md").unwrap_or(name);
         fs::create_dir_all(self.inside(self.folder_dir(folder))?)?;
-        let to = self.inside(self.free_path(stem, None, folder))?;
+        let to = self.inside(self.free_path(stem, None, folder)?)?;
         rename_retrying(from, &to)?;
         let pinned = self.origins().get(&file_name(from)).is_some_and(|o| o.3);
         self.note_origin(from, None);
@@ -2493,7 +2759,7 @@ impl Store {
         let to_dir = self.inside(self.folder_dir(folder))?;
         let text = self.bring_linked(&text, from.parent().unwrap_or(Path::new("")), &to_dir);
         fs::create_dir_all(&to_dir)?;
-        let to = self.inside(self.free_path(&plain(&stem_of(from)), None, folder))?;
+        let to = self.inside(self.free_path(&plain(&stem_of(from)), None, folder)?)?;
         // Born when the file was, so it sorts by Created as it was made.
         write_made(&to, &text, meta.created().or_else(|_| meta.modified()).ok())?;
         if !folder.is_empty() && !self.folders.iter().any(|f| f == folder) {
@@ -2578,9 +2844,10 @@ impl Store {
     }
 
     fn read_origins(&self) -> io::Result<HashMap<String, (String, String, u64, bool)>> {
-        let text = match fs::read_to_string(self.dir.join(TRASH).join(ORIGINS)) {
+        let path = self.dir.join(TRASH).join(ORIGINS);
+        let text = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !crate::disk::has_cloud_placeholder(&path) => String::new(),
             Err(e) => return Err(e),
         };
         Ok(text
@@ -2633,7 +2900,7 @@ impl Store {
         let Ok(entries) = fs::read_dir(&bin) else { return Vec::new() };
         let mut out = Vec::new();
         for e in entries.flatten() {
-            let path = e.path();
+            let path = crate::disk::cloud_original(&e.path()).unwrap_or_else(|| e.path());
             let key = file_name(&path);
             if key.starts_with('.') {
                 continue;
@@ -2659,7 +2926,7 @@ impl Store {
             } else {
                 match Note::load(&path) {
                     Ok(note) => (note.display_title().to_string(), note.doc.snippet()),
-                    Err(e) if crate::disk::is_offloaded(&e) => (stem_of(Path::new(&name)), "Not downloaded · Download in Finder to read".to_string()),
+                    Err(e) if crate::disk::is_offloaded(&e) || crate::disk::has_cloud_placeholder(&path) => (stem_of(Path::new(&name)), "Not downloaded · Open to download".to_string()),
                     Err(_) => continue,
                 }
             };
@@ -2690,9 +2957,10 @@ impl Store {
     pub fn save_pins(&self) -> io::Result<()> {
         // Do not replace a temporarily unavailable pin list with only
         // the subset of notes this device could read.
-        let previous = match fs::read_to_string(self.dir.join(PINS)) {
+        let path = self.dir.join(PINS);
+        let previous = match fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !crate::disk::has_cloud_placeholder(&path) => String::new(),
             Err(e) => return Err(e),
         };
         let mut names: BTreeSet<String> = self
@@ -2708,7 +2976,7 @@ impl Store {
 
     /// `name.md`, or `name 2.md`, ... in `folder` — the first not taken by
     /// another file.
-    fn free_path(&self, stem: &str, mine: Option<&Path>, folder: &str) -> PathBuf {
+    fn free_path(&self, stem: &str, mine: Option<&Path>, folder: &str) -> io::Result<PathBuf> {
         let dir = self.folder_dir(folder);
         let mut n = 1;
         loop {
@@ -2724,8 +2992,9 @@ impl Store {
                     .as_deref()
                     .is_some_and(|q| same_path(q, &p) && taken_by_other(q))
             });
-            if !used_in_memory && (!p.exists() || !taken_by_other(&p)) {
-                return p;
+            let occupied = p.try_exists()? || crate::disk::has_cloud_placeholder(&p);
+            if !used_in_memory && (!occupied || !taken_by_other(&p)) {
+                return Ok(p);
             }
             n += 1;
         }
@@ -2894,20 +3163,37 @@ fn key_under(dir: &Path, p: &Path) -> Option<String> {
 /// The files in `dir` and under it, at most a few folders deep; hidden
 /// ones (`.DS_Store`) and the ones being written left out.
 fn files_under(dir: &Path, depth: usize) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    files_under_checked(dir, depth, &mut Vec::new())
+}
+
+fn files_under_checked(dir: &Path, depth: usize, incomplete: &mut Vec<PathBuf>) -> Vec<PathBuf> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => { incomplete.push(dir.to_path_buf()); return Vec::new(); }
+    };
     let mut out = Vec::new();
-    for e in entries.flatten() {
+    for entry in entries {
+        let e = match entry {
+            Ok(e) => e,
+            Err(_) => { incomplete.push(dir.to_path_buf()); continue; }
+        };
         let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(path) = crate::disk::cloud_original(&e.path()) {
+            incomplete.push(path.clone());
+            out.push(path);
+            continue;
+        }
         if name.starts_with('.') || name.ends_with(".tmp-carnet") {
             continue;
         }
         match e.file_type() {
             Ok(t) if t.is_dir() => {
                 if depth < 4 {
-                    out.extend(files_under(&e.path(), depth + 1));
+                    out.extend(files_under_checked(&e.path(), depth + 1, incomplete));
                 }
             }
             Ok(t) if t.is_file() => out.push(e.path()),
+            Err(_) => incomplete.push(e.path()),
             _ => {}
         }
     }
@@ -3140,6 +3426,7 @@ fn pin_key(folder: &str, path: &Path) -> String {
 /// What a walk of the notes folder found.
 #[derive(Default)]
 struct Found {
+    incomplete: Vec<PathBuf>,
     /// Every note file, with the folder it is in.
     files: Vec<(PathBuf, String)>,
     /// The folders that are folders of notes.
@@ -3158,18 +3445,17 @@ struct Found {
 /// depth, unless notes are in it. Returns whether `dir` has notes in or
 /// under it, and whether it has other files.
 fn walk(dir: &Path, rel: &str, depth: usize, found: &mut Found) -> io::Result<(bool, bool)> {
-    // The notes folder itself must be readable; a subfolder that is not
-    // (permissions, a sync placeholder) is left out, not fatal.
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if depth == 0 => return Err(e),
-        Err(_) => return Ok((false, false)),
-    };
+    let entries = fs::read_dir(dir)?;
     let (mut notes, mut other) = (false, false);
     for entry in entries {
-        let Ok(entry) = entry else { continue };
+        let entry = entry?;
         let path = entry.path();
         let name = file_name(&path);
+        if let Some(original) = crate::disk::cloud_original(&path) {
+            if is_markdown(&original) { found.files.push((original, rel.to_string())); notes = true; }
+            else { found.incomplete.push(original); }
+            continue;
+        }
         if name.starts_with('.') {
             continue;
         }
@@ -3177,7 +3463,11 @@ fn walk(dir: &Path, rel: &str, depth: usize, found: &mut Found) -> io::Result<(b
         // itself (10,000 of them add up): a link's, where it leads.
         let is_dir = match entry.file_type() {
             Ok(t) if !t.is_symlink() => t.is_dir(),
-            _ => path.is_dir(),
+            _ => match fs::metadata(&path) {
+                Ok(m) => m.is_dir(),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(_) => { found.incomplete.push(path); continue; }
+            },
         };
         if is_dir {
             let pictures = name.eq_ignore_ascii_case(ATTACHMENTS);
@@ -3185,7 +3475,7 @@ fn walk(dir: &Path, rel: &str, depth: usize, found: &mut Found) -> io::Result<(b
             // differs from it in case only, where case counts, is an
             // export's, its pictures to be gathered.
             if depth == 0 && pictures {
-                for f in files_under(&path, 0) {
+                for f in files_under_checked(&path, 0, &mut found.incomplete) {
                     if let Ok(r) = f.strip_prefix(dir) {
                         found.others.push(r.to_string_lossy().replace('\\', "/"));
                     }
@@ -3206,7 +3496,13 @@ fn walk(dir: &Path, rel: &str, depth: usize, found: &mut Found) -> io::Result<(b
             };
             let at = found.folders.len();
             found.folders.push(sub.clone());
-            let (has_notes, has_other) = walk(&path, &sub, depth + 1, found)?;
+            let (has_notes, has_other) = match walk(&path, &sub, depth + 1, found) {
+                Ok(v) => v,
+                Err(_) => {
+                    found.incomplete.push(path);
+                    continue;
+                }
+            };
             if !has_notes && (has_other || pictures) {
                 // Not a folder of notes, and nor is anything in it.
                 found.folders.truncate(at);
@@ -3542,6 +3838,210 @@ fn welcome_until_0_1_3() -> Note {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_vault_keeps_unsaved_edits_outside_documents_until_recovery() {
+        let dir = temp_dir("cloud-unsaved");
+        let mut store = Store::open(dir.clone()).unwrap();
+        let original = store.notes[0].path.clone().unwrap();
+        let before = fs::read_to_string(&original).unwrap();
+        store.notes[0].doc.push(Block::text("Unsaved during offloading"));
+        store.notes[0].touch();
+        let moved = dir.with_extension("away");
+        fs::rename(&dir, &moved).unwrap();
+        store.rescan();
+        assert!(store.save_all().is_err());
+        let rescue = store.rescue(0).unwrap();
+        assert!(rescue.starts_with(dir.with_extension("replica")));
+        drop(store);
+        let mut store = Store::open(dir.clone()).unwrap();
+        assert!(rescue.exists(), "kept while the vault is still unavailable");
+        fs::rename(&moved, &dir).unwrap();
+        assert!(store.rescan());
+        assert_eq!(fs::read_to_string(original).unwrap(), before);
+        assert!(store.notes.iter().any(|n| n.markdown().contains("Unsaved during offloading")));
+        assert!(!rescue.exists());
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(dir.with_extension("replica")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn synced_recovery_keeps_the_unread_original_and_uses_a_separate_identity() {
+        let dir = temp_dir("synced-recovery");
+        let folder = dir.join("Nested");
+        fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("Cloud.md");
+        fs::write(&path, "# Cloud\n\nSynced text\n\n![Photo](attachments/photo.png)\n").unwrap();
+        let mut store = Store::open(dir.clone()).unwrap();
+        let key = store.notes[0].key.unwrap();
+        // An unreadable placeholder stands in for a file with unseen edits.
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(folder.join("not-local"), &path).unwrap();
+        store.rescan();
+        // Incoming sync can advance the replica while writing the original
+        // waits for iCloud. Recovery must use that new text, not the last file.
+        store.replica.as_mut().unwrap().absorb_as(key, "# Cloud\n\nSynced text updated remotely\n\n![Photo](attachments/photo.png)\n", Origin::OtherApp).unwrap();
+        assert!(store.remote_changed(key).is_err());
+        let expected = store.replica.as_mut().unwrap().text(key);
+        let modified = store.replica.as_mut().unwrap().modified(key);
+        assert_eq!(store.recovery_copy(&path), Some((expected, modified)));
+        let i = store.recover_synced_copy(&path).unwrap();
+        assert_eq!(store.notes[i].title, "Cloud (recovered)");
+        assert_eq!(store.notes[i].folder, "Nested");
+        assert_ne!(store.notes[i].key, Some(key));
+        assert!(store.notes[i].markdown().contains("Synced text updated remotely"));
+        assert!(store.notes[i].markdown().contains("attachments/photo.png"));
+        assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+        let first = store.notes[i].path.clone().unwrap();
+        let j = store.recover_synced_copy(&path).unwrap();
+        assert_ne!(store.notes[j].path.as_ref(), Some(&first), "repeated recovery must not overwrite an earlier copy");
+        assert!(store.recovery_copy(&first).is_none(), "available notes aren't offered recovery");
+        let before = store.notes.len();
+        store.incomplete.push(folder.clone());
+        store.unavailable.push(folder);
+        assert!(store.recover_synced_copy(&path).is_err());
+        assert_eq!(store.notes.len(), before, "failed recovery adds no phantom note");
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(dir.with_extension("replica")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_catalog_survives_restart_and_clears_after_download() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("cloud-catalog");
+        let sub = dir.join("Cloud");
+        let file = sub.join("filename.md");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(&file, "# Remember this title\n\nContents\n").unwrap();
+        let mut store = Store::open(dir.clone()).unwrap();
+        assert_eq!(store.notes.len(), 1);
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o0)).unwrap();
+        assert!(store.rescan());
+        assert_eq!(store.notes.len(), 1, "offloading doesn't delete an open note");
+        assert!(store.take_forgotten().is_empty());
+        drop(store);
+        let reopened = Store::open(dir.clone());
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = reopened.unwrap();
+        assert!(store.notes.is_empty());
+        assert!(store.unavailable_entries().contains(&(file, "Remember this title".into())));
+        assert!(store.rescan());
+        assert_eq!(store.notes.len(), 1);
+        assert!(store.unavailable_entries().is_empty());
+        assert_eq!(store.notes[0].title, "Remember this title");
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(dir.with_extension("replica")).unwrap();
+    }
+
+    #[test]
+    fn missing_vault_on_upgrade_uses_existing_replica_paths() {
+        let dir = temp_dir("cloud-root-upgrade");
+        fs::create_dir_all(dir.join("Nested")).unwrap();
+        let note = dir.join("Nested/Field notes.md");
+        fs::write(&note, "# Notebook\n\nOriginal text\n").unwrap();
+        drop(Store::open(dir.clone()).unwrap());
+        let replica = dir.with_extension("replica");
+        fs::remove_file(replica.join("catalog.json")).unwrap();
+        let moved = dir.with_extension("away");
+        fs::rename(&dir, &moved).unwrap();
+        let mut store = Store::open(dir.clone()).unwrap();
+        assert!(!dir.exists());
+        assert!(store.notes.is_empty());
+        assert!(store.unavailable_entries().contains(&(note, "Field notes".into())));
+        fs::rename(&moved, &dir).unwrap();
+        assert!(store.rescan());
+        assert_eq!(store.notes.len(), 1);
+        assert_eq!(store.notes[0].title, "Notebook");
+        drop(store);
+        fs::remove_dir_all(dir).unwrap();
+        fs::remove_dir_all(replica).unwrap();
+    }
+
+    #[test]
+    fn unavailable_known_root_is_not_recreated() {
+        let dir = temp_dir("cloud-root");
+        let store = Store::open(dir.clone()).unwrap();
+        let title = store.notes[0].title.clone();
+        drop(store);
+        let moved = dir.with_extension("away");
+        fs::rename(&dir, &moved).unwrap();
+        let mut store = Store::open(dir.clone()).unwrap();
+        assert!(!dir.exists(), "opening must not recreate a missing known vault");
+        assert!(store.incomplete.contains(&dir));
+        assert!(store.unavailable_entries().iter().any(|(_, t)| t == &title));
+        fs::rename(&moved, &dir).unwrap();
+        assert!(store.rescan());
+        assert!(store.unavailable.is_empty());
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(dir.with_extension("replica")).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unavailable_legacy_icloud_files_are_listed_without_reading_metadata() {
+        let dir = temp_dir("cloud-legacy");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".Cloud.md.icloud"), [0xff]).unwrap();
+        let mut store = Store::open_with(dir.clone(), None).unwrap();
+        assert!(store.notes.is_empty());
+        assert_eq!(store.unavailable, vec![dir.join("Cloud.md")]);
+        fs::remove_file(dir.join(".Cloud.md.icloud")).unwrap();
+        fs::write(dir.join("Cloud.md"), "# Downloaded\n").unwrap();
+        assert!(store.rescan());
+        assert_eq!(store.notes[0].title, "Downloaded");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unavailable_remote_changes_retry_after_restart_and_merge_local_edits() {
+        let dir = temp_dir("cloud-remote");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Note.md");
+        fs::write(&file, "# Note\n\nOriginal\n").unwrap();
+        let mut store = Store::open(dir.clone()).unwrap();
+        let key = store.notes[0].key.unwrap();
+        carnet_sync::session::Docs::doc(store.replica.as_mut().unwrap(), &key.to_string())
+            .record("# Note\n\nOriginal\n\nRemote addition\n", Origin::Save);
+        store.unavailable.push(file.clone());
+        assert!(store.remote_changed(key).is_err());
+        assert!(!fs::read_to_string(&file).unwrap().contains("Remote addition"));
+        drop(store);
+        fs::write(&file, "# Note\n\nLocal addition\n\nOriginal\n").unwrap();
+        let store = Store::open(dir.clone()).unwrap();
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.contains("Remote addition"), "{text}");
+        assert!(text.contains("Local addition"), "{text}");
+        assert!(store.deferred.is_empty());
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(dir.with_extension("replica")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_subfolder_is_not_an_empty_vault() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("unavailable-folder");
+        let sub = dir.join("Cloud");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("Note.md"), "# Cloud note\n").unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o0)).unwrap();
+        let opened = Store::open_with(dir.clone(), None);
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut s = opened.unwrap();
+        assert!(s.notes.is_empty(), "an incomplete listing must not create a welcome note");
+        assert!(s.unavailable.contains(&sub), "the unreadable folder must be visible");
+        assert!(s.rescan());
+        assert!(s.unavailable.is_empty());
+        assert_eq!(s.notes[0].title, "Cloud note");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3921,7 +4421,7 @@ mod tests {
             let s = if replica {
                 Store::open(dir.clone()).unwrap()
             } else {
-                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), unavailable: Vec::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default(), before_remote: HashMap::new(), vault_read: None };
+                let mut s = Store { dir: dir.clone(), notes: Vec::new(), skipped: Vec::new(), unavailable: Vec::new(), incomplete: Vec::new(), catalog: HashMap::new(), deferred: BTreeSet::new(), folders: Vec::new(), picture_folders: Vec::new(), files: doc::Files::default(), gather_seen: HashSet::new(), replica: None, replica_refused: None, changed: Vec::new(), vault_changed: false, from_remote: HashSet::new(), forgotten: Forgotten::default(), before_remote: HashMap::new(), vault_read: None };
                 for (path, _) in s.note_files().unwrap() {
                     s.notes.push(Note::load(&path).unwrap());
                 }

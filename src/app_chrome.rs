@@ -193,13 +193,16 @@ impl Carnet {
                 },
             );
             self.search(ui, l);
+            self.availability_banner(ui, l);
+            let unavailable = self.unavailable_rows();
+            let unavailable_selected = self.unavailable_target();
             let searching = !self.query.trim().is_empty();
             if searching {
                 // These rows are absent during search, including from keyboard
                 // navigation and range selection.
                 self.folder_rows.clear();
                 self.folder_rects.clear();
-                let count = self.order.len();
+                let count = self.order.len() + unavailable.len();
                 ui.with_keyed("search-summary", NodeSpec::row().grow_width().pad_xy(26.0, 10.0), |ui| {
                     ui.text(&format!("{count} {} found", if count == 1 { "note" } else { "notes" }),
                         TextStyle::new(Type::STRONG.size).color(t.fg).nowrap());
@@ -212,7 +215,7 @@ impl Carnet {
                 self.sidebar_foot(ui, l);
                 return;
             }
-            if self.order.is_empty() {
+            if self.order.is_empty() && unavailable.is_empty() {
                 ui.with(
                     NodeSpec::column()
                         .grow_width()
@@ -220,7 +223,8 @@ impl Carnet {
                         .gap(4.0),
                     |ui| {
                         if self.query.trim().is_empty() {
-                            ui.text("Nothing here yet.", TextStyle::new(Type::UI.size).color(t.muted));
+                            let text = if self.store.unavailable.is_empty() { "Nothing here yet." } else { "Notes will appear when this folder is available." };
+                            ui.text(text, TextStyle::new(Type::UI.size).color(t.muted));
                         } else {
                             ui.text(
                                 &format!("No notes match \u{201c}{}\u{201d}", self.query.trim()),
@@ -268,12 +272,28 @@ impl Carnet {
                     .scrollbar_width(4.0)
                     .role(Role::List)
                     .label("Notes"),
-                order.len(),
+                order.len() + unavailable.len(),
                 // Taller or shorter with the density: the air around a
                 // card's text, never the text.
                 crate::design::Density::library_row(l.d) + if searching { 40.0 } else { 0.0 },
                 |_| NodeSpec::column().pad_xy(0.0, 3.0),
                 |ui, i| {
+                    if i >= order.len() {
+                        let (path, title) = &unavailable[i - order.len()];
+                        ui.with_keyed(path.to_string_lossy().as_ref(), NodeSpec::column().grow_width().grow_height()
+                            .pad_xy(14.0, 4.0).gap(3.0).radius(radius::CARD).main_align(Align::Center)
+                            .bg(if unavailable_selected.as_ref() == Some(path) { t.accent_soft } else { Color::TRANSPARENT })
+                            .selected(unavailable_selected.as_ref() == Some(path)).role(Role::ListItem)
+                            .hover_bg(t.hover).on_click(Msg::OpenUnavailable { path: path.to_string_lossy().into_owned() })
+                            .label(title.as_str()).description("Not available locally"), |ui| {
+                                ui.with(NodeSpec::row().gap(8.0).cross_align(Align::Center), |ui| {
+                                    icon(ui, Icon::Cloud, t.muted, 16.0, false);
+                                    ui.text(title, TextStyle::new(Type::UI.size).color(t.fg).ellipsis());
+                                });
+                                ui.text("Not available locally", TextStyle::new(Type::SMALL.size).color(t.muted));
+                            });
+                        return;
+                    }
                     let n = order[i];
                     let note = &notes[n];
                     let selected = n == current;
@@ -666,10 +686,17 @@ impl Carnet {
         let t = l.t;
         // The folders with folders inside: those with a chevron.
         let parents: std::collections::HashSet<&str> = self.store.folders.iter().filter_map(|f| f.rsplit_once('/').map(|(p, _)| p)).collect();
+        let loaded: HashSet<_> = self.store.notes.iter().filter_map(|n| n.path.as_ref()).collect();
+        let unavailable_folders: Vec<String> = self.store.unavailable_entries().into_iter()
+            .filter(|(p, _)| store::is_markdown(p) && !loaded.contains(p))
+            .filter_map(|(p, _)| Some(p.parent()?.strip_prefix(&self.store.dir).ok()?.to_string_lossy().replace('\\', "/")))
+            .collect();
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for n in &self.store.notes {
+        for n in self.store.notes.iter().filter(|n| self.unavailable_sentinel != Some(n.id)) {
             *counts.entry(n.folder.as_str()).or_default() += 1;
         }
+        for folder in &unavailable_folders { *counts.entry(folder).or_default() += 1; }
+        let all_count = counts.values().sum();
         // A note or a folder carried over a row: it lights up to take it.
         let hover = self.row_drag.as_ref().and_then(|d| d.target.clone());
         let mut rects: Vec<(String, Rect)> = Vec::new();
@@ -768,7 +795,7 @@ impl Carnet {
                         gap(ui, FOLD_W);
                     }
                     icon(ui, Icon::Folder, if all { t.accent } else { t.muted }, 16.0, false);
-                    label(ui, "All notes", self.store.notes.len(), all);
+                    label(ui, "All notes", all_count, all);
                 });
                 rows.push((k, FolderRow::All));
                 // The name as typed so far (a rename's starts as the
@@ -1427,7 +1454,7 @@ impl Carnet {
                 );
                 // A deleted note on the page has its own ways out, in its
                 // line: these are for a note in the list.
-                if self.peek.is_none() {
+                if self.peek.is_none() && self.unavailable_target().is_none() {
                     Tool::new(
                         "t-pin",
                         Icon::Star,
